@@ -24,7 +24,7 @@ func apply(str $name, scalar $args, str $text, scalar $stash) str {
     if ($name eq "repeat")   { return Template::VMethods::str_repeat($text, arg_int($args, 0, 1)); }
     if ($name eq "replace")  { return re::replace_all($text, arg_str($args, 0, ""), arg_str($args, 1, "")); }
     if ($name eq "remove")   { return re::replace_all($text, arg_str($args, 0, ""), ""); }
-    if ($name eq "format")   { return sprintf(arg_str($args, 0, "%s"), $text); }
+    if ($name eq "format")   { return safe_format(arg_str($args, 0, "%s"), $text); }
     if ($name eq "truncate") { return filter_truncate($text, arg_int($args, 0, 32), arg_str($args, 1, "...")); }
     if ($name eq "indent")   { return filter_indent($text, $args); }
     throw(Template::Exception::make("filter", $name . ": filter not found"));
@@ -73,38 +73,116 @@ func filter_indent(str $text, scalar $args) str {
     return $out;
 }
 
-# ---- percent-encoding (uri / url) ------------------------------------------
-func is_alnum(str $c) int {
-    return (($c ge "a" && $c le "z") || ($c ge "A" && $c le "Z") || ($c ge "0" && $c le "9")) ? 1 : 0;
-}
-# url mode keeps the URI-structural punctuation in addition to the unreserved set.
-func is_safe(str $c, int $url_mode) int {
-    if (is_alnum($c) == 1) { return 1; }
-    if (index("-_.~", $c) >= 0) { return 1; }
-    if ($url_mode == 1 && index("/?=&+:@;$,", $c) >= 0) { return 1; }
+func is_safe_byte(int $b, int $url_mode) int {
+    if (($b >= 'a' && $b <= 'z') || ($b >= 'A' && $b <= 'Z') || ($b >= '0' && $b <= '9')) {
+        return 1;
+    }
+    if ($b == '-' || $b == '_' || $b == '.' || $b == '~') {
+        return 1;
+    }
+    if ($url_mode == 1) {
+        if ($b == '/' || $b == '?' || $b == '=' || $b == '&' || $b == '+' ||
+            $b == ':' || $b == '@' || $b == ';' || $b == '$' || $b == ',') {
+            return 1;
+        }
+    }
     return 0;
 }
+
 func percent_encode(str $text, int $url_mode) str {
     my str $out = "";
     my int $i = 0;
-    my int $n = length($text);
+    my int $n = core::byte_length($text);
     while ($i < $n) {
-        my str $c = substr($text, $i, 1);
-        if (is_safe($c, $url_mode) == 1) { $out = $out . $c; }
-        else { $out = $out . encode_cp(ord($c)); }
+        my int $b = core::get_byte($text, $i);
+        if (is_safe_byte($b, $url_mode) == 1) {
+            $out = $out . chr($b);
+        } else {
+            $out = $out . pct($b);
+        }
         $i = $i + 1;
     }
     return $out;
 }
-# Percent-encode a Unicode codepoint as its UTF-8 bytes (%XX each, uppercase).
-func encode_cp(int $cp) str {
-    if ($cp < 128) { return "%" . sprintf("%02X", $cp); }
-    if ($cp < 2048) {
-        return pct(192 + ($cp / 64)) . pct(128 + ($cp % 64));
-    }
-    if ($cp < 65536) {
-        return pct(224 + ($cp / 4096)) . pct(128 + (($cp / 64) % 64)) . pct(128 + ($cp % 64));
-    }
-    return pct(240 + ($cp / 262144)) . pct(128 + (($cp / 4096) % 64)) . pct(128 + (($cp / 64) % 64)) . pct(128 + ($cp % 64));
-}
+
 func pct(int $b) str { return "%" . sprintf("%02X", $b); }
+
+# Validate a user-supplied printf format string for a single scalar argument.
+func safe_format(str $fmt, str $text) str {
+    my int $len = core::byte_length($fmt);
+    my int $i = 0;
+    my int $conv_count = 0;
+    while ($i < $len) {
+        my int $b = core::get_byte($fmt, $i);
+        if ($b != '%') {
+            $i = $i + 1;
+            next;
+        }
+        $i = $i + 1;
+        if ($i >= $len) {
+            throw(Template::Exception::make("format", "unsupported format specifier"));
+        }
+        my int $next_b = core::get_byte($fmt, $i);
+        if ($next_b == '%') { # escaped '%%'
+            $i = $i + 1;
+            next;
+        }
+        $conv_count = $conv_count + 1;
+        if ($conv_count > 1) {
+            throw(Template::Exception::make("format", "too many format specifiers"));
+        }
+        # Optional flags: '-', '+', ' ', '#', '0'
+        while ($i < $len) {
+            my int $fb = core::get_byte($fmt, $i);
+            if ($fb == '-' || $fb == '+' || $fb == ' ' || $fb == '#' || $fb == '0') {
+                $i = $i + 1;
+            } else {
+                last;
+            }
+        }
+        # Optional width (digits only, capped at 4096)
+        my int $width = 0;
+        while ($i < $len) {
+            my int $wb = core::get_byte($fmt, $i);
+            if ($wb >= '0' && $wb <= '9') {
+                $width = $width * 10 + ($wb - ord("0"));
+                if ($width > 4096) {
+                    throw(Template::Exception::make("format", "format width exceeds 4096"));
+                }
+                $i = $i + 1;
+            } else {
+                last;
+            }
+        }
+        # Optional precision ('.' followed by digits, capped at 4096)
+        if ($i < $len && core::get_byte($fmt, $i) == '.') {
+            $i = $i + 1;
+            my int $prec = 0;
+            while ($i < $len) {
+                my int $pb = core::get_byte($fmt, $i);
+                if ($pb >= '0' && $pb <= '9') {
+                    $prec = $prec * 10 + ($pb - ord("0"));
+                    if ($prec > 4096) {
+                        throw(Template::Exception::make("format", "format precision exceeds 4096"));
+                    }
+                    $i = $i + 1;
+                } else {
+                    last;
+                }
+            }
+        }
+        if ($i >= $len) {
+            throw(Template::Exception::make("format", "unsupported format specifier"));
+        }
+        my int $c = core::get_byte($fmt, $i);
+        # Allowlist: s, d, i, u, o, x, X, b, B, f, F, e, E, g, G, c
+        if ($c != 's' && $c != 'd' && $c != 'i' && $c != 'u' &&
+            $c != 'o' && $c != 'x' && $c != 'X' && $c != 'b' &&
+            $c != 'B' && $c != 'f' && $c != 'F' && $c != 'e' &&
+            $c != 'E' && $c != 'g' && $c != 'G' && $c != 'c') {
+            throw(Template::Exception::make("format", "unsupported format specifier"));
+        }
+        $i = $i + 1;
+    }
+    return sprintf($fmt, $text);
+}

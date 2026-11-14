@@ -497,11 +497,7 @@ func parse_value(str $s) scalar {
                 return replace_all($content, "''", "'");
             }
         }
-        my str $content = substr($trimmed, 1, $len - 1);
-        if ($first eq "\"") {
-            return YAML::process_escapes($content);
-        }
-        return replace_all($content, "''", "'");
+        throw "YAML parse error: unterminated quoted string";
     }
 
     # Check for inline hash { ... }
@@ -582,6 +578,66 @@ func looks_like_num(str $s) int {
 }
 
 # Parse inline hash { key: value, key2: value2 }
+func verify_outer_flow_enclosure(str $s, str $open_ch, str $close_ch, str $kind) void {
+    my int $len = length($s);
+    if ($len < 2 || substr($s, 0, 1) ne $open_ch || substr($s, $len - 1, 1) ne $close_ch) {
+        throw "YAML parse error: unclosed inline " . $kind;
+    }
+    my int $bdepth = 0;
+    my int $sdepth = 0;
+    my int $in_sq = 0;
+    my int $in_dq = 0;
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "\"") { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($ch eq "'") {
+                if ($i + 1 < $len && substr($s, $i + 1, 1) eq "'") {
+                    $i = $i + 2;
+                    next;
+                }
+                $in_sq = 0;
+            }
+        } else {
+            if ($ch eq "\"") {
+                $in_dq = 1;
+            } elsif ($ch eq "'") {
+                $in_sq = 1;
+            } elsif ($ch eq "{") {
+                $bdepth = $bdepth + 1;
+            } elsif ($ch eq "}") {
+                $bdepth = $bdepth - 1;
+                if ($bdepth < 0) {
+                    throw "YAML parse error: unexpected '}' in inline " . $kind;
+                }
+            } elsif ($ch eq "[") {
+                $sdepth = $sdepth + 1;
+            } elsif ($ch eq "]") {
+                $sdepth = $sdepth - 1;
+                if ($sdepth < 0) {
+                    throw "YAML parse error: unexpected ']' in inline " . $kind;
+                }
+            }
+            if ($i < $len - 1 && $bdepth == 0 && $sdepth == 0) {
+                throw "YAML parse error: trailing content after inline " . $kind;
+            }
+        }
+        $i = $i + 1;
+    }
+    if ($in_dq == 1 || $in_sq == 1) {
+        throw "YAML parse error: unterminated quoted string in inline " . $kind;
+    }
+    if ($bdepth != 0 || $sdepth != 0) {
+        throw "YAML parse error: unclosed inline " . $kind;
+    }
+}
+
 func split_inline_items(str $s) array {
     my array @items = ();
     my str $trimmed = YAML::trim($s);
@@ -591,7 +647,8 @@ func split_inline_items(str $s) array {
     my int $len = length($s);
     my int $i = 0;
     my int $start = 0;
-    my int $depth = 0;
+    my int $brace_depth = 0;
+    my int $bracket_depth = 0;
     my int $in_sq = 0;
     my int $in_dq = 0;
 
@@ -618,31 +675,42 @@ func split_inline_items(str $s) array {
                 $in_dq = 1;
             } elsif ($ch eq "'") {
                 $in_sq = 1;
-            } elsif ($ch eq "{" || $ch eq "[") {
-                $depth = $depth + 1;
-            } elsif ($ch eq "}" || $ch eq "]") {
-                if ($depth > 0) {
-                    $depth = $depth - 1;
+            } elsif ($ch eq "{") {
+                $brace_depth = $brace_depth + 1;
+            } elsif ($ch eq "}") {
+                $brace_depth = $brace_depth - 1;
+                if ($brace_depth < 0) {
+                    throw "YAML parse error: unexpected '}' in inline collection";
                 }
-            } elsif ($ch eq "," && $depth == 0) {
+            } elsif ($ch eq "[") {
+                $bracket_depth = $bracket_depth + 1;
+            } elsif ($ch eq "]") {
+                $bracket_depth = $bracket_depth - 1;
+                if ($bracket_depth < 0) {
+                    throw "YAML parse error: unexpected ']' in inline collection";
+                }
+            } elsif ($ch eq "," && $brace_depth == 0 && $bracket_depth == 0) {
                 push(@items, substr($s, $start, $i - $start));
                 $start = $i + 1;
             }
         }
         $i = $i + 1;
     }
+    if ($in_dq == 1 || $in_sq == 1) {
+        throw "YAML parse error: unterminated quoted string in inline collection";
+    }
+    if ($brace_depth != 0 || $bracket_depth != 0) {
+        throw "YAML parse error: unclosed inline collection";
+    }
     push(@items, substr($s, $start, $len - $start));
     return @items;
 }
 
 func parse_inline_hash(str $s) scalar {
+    YAML::verify_outer_flow_enclosure($s, "{", "}", "mapping");
     my scalar $result = {};
     my int $len = length($s);
-
-    # Remove { and }
-    if (substr($s, 0, 1) eq "{" && substr($s, $len - 1, 1) eq "}") {
-        $s = substr($s, 1, $len - 2);
-    }
+    $s = substr($s, 1, $len - 2);
 
     my array @parts = YAML::split_inline_items($s);
     my int $count = size(@parts);
@@ -671,13 +739,10 @@ func parse_inline_hash(str $s) scalar {
 
 # Parse inline array [ item1, item2 ]
 func parse_inline_array(str $s) scalar {
+    YAML::verify_outer_flow_enclosure($s, "[", "]", "sequence");
     my scalar $result = [];
     my int $len = length($s);
-
-    # Remove [ and ]
-    if (substr($s, 0, 1) eq "[" && substr($s, $len - 1, 1) eq "]") {
-        $s = substr($s, 1, $len - 2);
-    }
+    $s = substr($s, 1, $len - 2);
 
     my array @parts = YAML::split_inline_items($s);
     my int $count = size(@parts);
@@ -692,6 +757,26 @@ func parse_inline_array(str $s) scalar {
     }
 
     return $result;
+}
+
+func is_doc_start(str $line) int {
+    if (YAML::get_indent($line) != 0) { return 0; }
+    my str $c = YAML::trim(YAML::strip_comment($line));
+    if ($c eq "---") { return 1; }
+    if (length($c) >= 4 && (substr($c, 0, 4) eq "--- " || substr($c, 0, 4) eq "---\t")) {
+        return 1;
+    }
+    return 0;
+}
+
+func is_doc_end(str $line) int {
+    if (YAML::get_indent($line) != 0) { return 0; }
+    my str $c = YAML::trim(YAML::strip_comment($line));
+    if ($c eq "...") { return 1; }
+    if (length($c) >= 4 && (substr($c, 0, 4) eq "... " || substr($c, 0, 4) eq "...\t")) {
+        return 1;
+    }
+    return 0;
 }
 
 # Main YAML Load function - parse YAML string into Strada data structure
@@ -709,6 +794,24 @@ func Load(str $yaml) scalar {
         "count" => $line_count,
         "pos" => 0
     };
+
+    # Skip leading empty/comment lines and consume document start marker (---)
+    while ($state->{"pos"} < $line_count && YAML::is_empty_or_comment($lines[$state->{"pos"}])) {
+        $state->{"pos"} = $state->{"pos"} + 1;
+    }
+    if ($state->{"pos"} < $line_count && YAML::is_doc_start($lines[$state->{"pos"}]) == 1) {
+        my str $doc_clean = YAML::trim(YAML::strip_comment($lines[$state->{"pos"}]));
+        $state->{"pos"} = $state->{"pos"} + 1;
+        if (length($doc_clean) > 3) {
+            my str $after_doc = YAML::trim(substr($doc_clean, 3, length($doc_clean) - 3));
+            if (length($after_doc) > 0) {
+                if (YAML::is_block_scalar_spec($after_doc) == 1) {
+                    return YAML::parse_block_scalar($state, 0 - 1, $after_doc);
+                }
+                return YAML::parse_value($after_doc);
+            }
+        }
+    }
 
     return YAML::parse_block($state, 0);
 }
@@ -748,6 +851,9 @@ func parse_block_inner(scalar $state, int $base_indent) scalar {
     }
 
     my str $first_line = $lines->[$state->{"pos"}];
+    if (YAML::is_doc_end($first_line) == 1 || YAML::is_doc_start($first_line) == 1) {
+        return undef;
+    }
     my int $indent = YAML::get_indent($first_line);
     my str $content = YAML::trim($first_line);
 
@@ -783,6 +889,10 @@ func parse_hash(scalar $state, int $base_indent) scalar {
         if (YAML::is_empty_or_comment($line)) {
             $state->{"pos"} = $state->{"pos"} + 1;
             next;
+        }
+
+        if (YAML::is_doc_end($line) == 1 || YAML::is_doc_start($line) == 1) {
+            return $result;
         }
 
         my int $indent = YAML::get_indent($line);
@@ -858,6 +968,10 @@ func parse_array(scalar $state, int $base_indent) scalar {
         if (YAML::is_empty_or_comment($line)) {
             $state->{"pos"} = $state->{"pos"} + 1;
             next;
+        }
+
+        if (YAML::is_doc_end($line) == 1 || YAML::is_doc_start($line) == 1) {
+            return $result;
         }
 
         my int $indent = YAML::get_indent($line);
@@ -1079,14 +1193,20 @@ func parse_literal_block(scalar $state, int $base_indent) str {
     return YAML::parse_block_scalar($state, $base_indent, "|");
 }
 
+func clean_block_spec(str $s) str {
+    return YAML::trim(YAML::strip_comment($s));
+}
+
 func is_block_scalar_spec(str $s) int {
-    if ($s eq "|" || $s eq "|-" || $s eq "|+" || $s eq ">" || $s eq ">-" || $s eq ">+") {
+    my str $c = YAML::clean_block_spec($s);
+    if ($c eq "|" || $c eq "|-" || $c eq "|+" || $c eq ">" || $c eq ">-" || $c eq ">+") {
         return 1;
     }
     return 0;
 }
 
 func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
+    $spec = YAML::clean_block_spec($spec);
     my int $is_folded = (substr($spec, 0, 1) eq ">") ? 1 : 0;
     my str $chomp = (length($spec) >= 2) ? substr($spec, 1, 1) : "";
     my hash %info = YAML::_read_block_scalar_raw($state, $base_indent);

@@ -649,6 +649,36 @@ func ast_new_expr_stmt(scalar $expr) scalar {
 
 # Create binary operation
 func ast_new_binary_op(str $op, scalar $left, scalar $right) scalar {
+    if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq "<=" || $op eq ">" || $op eq ">=" || $op eq "<=>") {
+        my int $l_char = 0;
+        my int $l_nonchar_lit = 0;
+        if (defined($left)) {
+            if ($left->{"type"} == NODE_STR_LITERAL() && ($left->{"has_char_code"} + 0) == 1) {
+                $l_char = 1;
+            } elsif ($left->{"type"} == NODE_NUM_LITERAL() || $left->{"type"} == NODE_STR_LITERAL()) {
+                $l_nonchar_lit = 1;
+            }
+        }
+        my int $r_char = 0;
+        my int $r_nonchar_lit = 0;
+        if (defined($right)) {
+            if ($right->{"type"} == NODE_STR_LITERAL() && ($right->{"has_char_code"} + 0) == 1) {
+                $r_char = 1;
+            } elsif ($right->{"type"} == NODE_NUM_LITERAL() || $right->{"type"} == NODE_STR_LITERAL()) {
+                $r_nonchar_lit = 1;
+            }
+        }
+        if ($l_char == 1 && $r_nonchar_lit == 0) {
+            my scalar $li = ast_new_int_literal($left->{"char_code"});
+            $li->{"from_sq_str"} = $left->{"value"};
+            $left = $li;
+        }
+        if ($r_char == 1 && $l_nonchar_lit == 0) {
+            my scalar $ri = ast_new_int_literal($right->{"char_code"});
+            $ri->{"from_sq_str"} = $right->{"value"};
+            $right = $ri;
+        }
+    }
     my scalar $node = ast_new_node(NODE_BINARY_OP());
     $node->{"op"} = $op;
     if ($op eq "&&" || $op eq "||") {
@@ -742,6 +772,10 @@ func ast_normalize_call_name(str $name) str {
         if ($rest eq "blessed") { return "blessed"; }
         if ($rest eq "stacktrace") { return "stacktrace"; }
         if ($rest eq "stacktrace_str") { return "stacktrace_str"; }
+        return $name;
+    }
+    if ($prefix eq "math") {
+        if ($rest eq "srand") { return "core::srand"; }
         return $name;
     }
     return $name;

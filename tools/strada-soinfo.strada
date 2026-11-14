@@ -103,7 +103,7 @@ func extract_var_name(str $param) str {
         # Check if word starts with $
         if (length($word) > 1) {
             my str $first = substr($word, 0, 1);
-            if (ord($first) == 36) {  # 36 = '$'
+            if (ord($first) == '$') {
                 return substr($word, 1, length($word) - 1);
             }
         }

@@ -211,7 +211,7 @@ RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
 RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
 RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 
-.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp xs2strada update-bootstrap
+.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp update-bootstrap
 
 # Default: build the self-hosting compiler, tools, and libraries. The
 # tree-walking interpreter / bytecode VM is no longer built by default —
@@ -288,8 +288,8 @@ $(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_S
 	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
 	STRADA_GC=off $(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
 
-# Build bootstrap compiler if it doesn't exist
-$(BOOTSTRAP_STRADAC):
+# Build bootstrap compiler if it doesn't exist or its sources changed
+$(BOOTSTRAP_STRADAC): $(BOOTSTRAP_DIR)/main.c $(BOOTSTRAP_DIR)/lexer.c $(BOOTSTRAP_DIR)/lexer.h $(BOOTSTRAP_DIR)/parser.c $(BOOTSTRAP_DIR)/parser.h $(BOOTSTRAP_DIR)/ast.c $(BOOTSTRAP_DIR)/ast.h $(BOOTSTRAP_DIR)/codegen.c $(BOOTSTRAP_DIR)/codegen.h
 	$(MAKE) -C $(BOOTSTRAP_DIR)
 
 # Build the stage 1 compiler executable
@@ -483,9 +483,6 @@ else
 TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/strada-proftext tools/strada-profhtml
 endif
 
-# Converter tools (built separately via make xs2strada)
-CONVERTER_BINS = tools/xs2strada
-
 tools: $(TOOL_BINS)
 	@echo ""
 	@echo "✓ Tools built in tools/"
@@ -528,10 +525,6 @@ tools/stradapp: tools/stradapp.strada stradac
 	@echo "Building stradapp (preprocessor)..."
 	@./strada tools/stradapp.strada -o tools/stradapp
 
-tools/xs2strada: tools/xs2strada.strada stradac
-	@echo "Building xs2strada (XS to Strada converter)..."
-	@./strada tools/xs2strada.strada -o tools/xs2strada
-
 tools/strada-proftext: tools/strada-proftext.strada stradac
 	@echo "Building strada-proftext (profile text report)..."
 	@./strada tools/strada-proftext.strada -o tools/strada-proftext
@@ -539,9 +532,6 @@ tools/strada-proftext: tools/strada-proftext.strada stradac
 tools/strada-profhtml: tools/strada-profhtml.strada stradac
 	@echo "Building strada-profhtml (profile HTML report)..."
 	@./strada tools/strada-profhtml.strada -o tools/strada-profhtml
-
-# Converter tools (not built by default)
-xs2strada: tools/xs2strada
 
 # =============================================================================
 # Library Targets
@@ -800,7 +790,7 @@ clean:
 	rm -rf build/*
 	rm -f stradac
 	rm -f strada-driver strada-driver.tmp.c
-	rm -f $(TOOL_BINS) $(CONVERTER_BINS)
+	rm -f $(TOOL_BINS)
 	rm -f lib/readline.so lib/readline/readline.o
 	rm -f lib/DBI.o lib/DBI.so lib/crypt.o lib/crypt.so
 	rm -f lib/ssl.o lib/ssl.so

@@ -1,0 +1,149 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+package R5LeakTie;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ();
+    my hash %d = ();
+    $s{"data"} = \%d;
+    return bless(\%s, "R5LeakTie");
+}
+func FETCH(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"data"};
+    return $d->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    my scalar $d = $self->{"data"};
+    $d->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int {
+    my scalar $d = $self->{"data"};
+    return exists($d->{$k}) ? 1 : 0;
+}
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"data"};
+    my scalar $old = $d->{$k};
+    delete($d, $k);
+    return $old;
+}
+
+package main;
+
+func leak_map_ret_fn() int {
+    my array @xs = (1, 2);
+    my int $v = scalar(map { return 42; } @xs) + 10;
+    return $v;
+}
+
+func main() int {
+    my str $tmp = "/tmp/r5_leak_ej_io.txt";
+    my scalar $wf = core::open($tmp, "w");
+    say($wf, "leak_test_line");
+    core::close($wf);
+
+    my int $i = 0;
+    while ($i < 3) {
+        # VM live filehandles (both directions), exported closures (normal + throwing), scalar refs, s///, >256-local throw
+        my scalar $fh = Strada::Interpreter::eval_string_vm('core::open("/tmp/r5_leak_ej_io.txt", "r")');
+        my str $ln = core::readline($fh);
+        if ($ln ne "leak_test_line") { die("bad fh line"); }
+        core::close($fh);
+
+        my scalar $hfh = core::open($tmp, "r");
+        my scalar $vm_rd = Strada::Interpreter::eval_string_vm('return func(scalar $f) str { return core::readline($f); };');
+        my str $hln = $vm_rd->($hfh);
+        if ($hln ne "leak_test_line") { die("bad host->vm fh line"); }
+        core::close($hfh);
+
+        # Compiled C s///r, s///r zero-match, s///ger, and map { return } leak checks
+        my str $sr_in = "foo baz";
+        my str $sr_a = ($sr_in =~ s/foo/bar/r);
+        my str $sr_b = ($sr_in =~ s/nomatch/bar/r);
+        my str $sr_e = ($sr_in =~ s/([a-z]+)/uc($1)/ger);
+        if ($sr_a ne "bar baz" || $sr_b ne "foo baz" || $sr_e ne "FOO BAZ" || $sr_in ne "foo baz") { die("bad s///r"); }
+        if (leak_map_ret_fn() != 42) { die("bad map return"); }
+
+        my scalar $cl = Strada::Interpreter::eval_string_vm('
+            my int $acc = 1;
+            return func(int $d) int {
+                if ($d < 0) { throw "neg_" . $d; }
+                $acc = $acc + $d;
+                return $acc;
+            };
+        ');
+        if ($cl->(4) != 5 || $cl->(5) != 10) { die("bad closure"); }
+        try { $cl->(-1); } catch ($ce) {}
+
+        my scalar $sr = Strada::Interpreter::eval_string_vm('my int $sv = 77; return \$sv;');
+        if (($$sr + 0) != 77) { die("bad sref"); }
+
+        my scalar $sc = Strada::Interpreter::eval_string_vm('my str $s = "x1y2"; $s =~ s/\d/Z/g');
+        if (($sc + 0) != 2) { die("bad subst count"); }
+
+        my str $too_many = "func fm" . $i . "() int { ";
+        my int $li = 0;
+        while ($li < 260) {
+            $too_many = $too_many . "my int \$a" . $li . " = 1; ";
+            $li = $li + 1;
+        }
+        $too_many = $too_many . "return 1; } fm" . $i . "()";
+        try { Strada::Interpreter::eval_string_vm($too_many); } catch ($ce2) {}
+
+        # Tree-walk eval: map/grep control flow + throw, throwing default params, chained around, tied local
+        my scalar $tw_res = Strada::Interpreter::eval_string('
+            package TP;
+            func new() scalar { my hash %s = (); return bless(\%s, "TP"); }
+            func m(scalar $self, int $x) int { return $x; }
+            around "m" func(scalar $orig, scalar $self, int $x) int { return $orig->($self, $x) + 10; }
+            package TC;
+            extends TP;
+            func new() scalar { my hash %s = (); return bless(\%s, "TC"); }
+            around "m" func(scalar $orig, scalar $self, int $x) int { return $orig->($self, $x) + 1; }
+            package TT;
+            func TIEHASH(scalar ...@a) scalar { my hash %s = (); my hash %d = (); $s{"d"} = \%d; return bless(\%s, "TT"); }
+            func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+            func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+            func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+            func DELETE(scalar $self, str $k) void { delete($self->{"d"}, $k); }
+            package main;
+            func td() int { throw "def_e"; return 0; }
+            func fdef(int $x = td()) int { return $x; }
+            try { fdef(); } catch ($de) {}
+            my array @m = map { if ($_ == 2) { next; } $_ * 2; } (1, 2, 3);
+            try { map { throw "mboom"; } (1, 2); } catch ($me) {}
+            try { grep { throw "gboom"; } (1, 2); } catch ($ge) {}
+            my hash %th = ();
+            tie(%th, "TT");
+            $th{"k"} = "v0";
+            { local $th{"k"} = "v1"; local $th{"n"} = "v2"; }
+            untie(%th);
+            my scalar $tc = TC::new();
+            $tc->m(5) + size(@m);
+        ');
+        if (($tw_res + 0) != 18) { die("bad tw_res"); }
+
+        Strada::Interpreter::reset();
+        $i = $i + 1;
+    }
+
+    core::unlink($tmp);
+
+    # Strada::JIT rollback, OOP redefinition, and >70 deep recursive capture stack
+    Strada::JIT::init();
+    try { Strada::JIT::eval('func jbad( {'); } catch ($je1) {}
+    try { Strada::JIT::eval('const int JBAD = ;'); } catch ($je2) {}
+    Strada::JIT::eval('package JPa; func a() int { return 1; }');
+    Strada::JIT::eval('package JPb; func b() int { return 2; }');
+    Strada::JIT::eval('package JCh; extends JPa; func new() scalar { my hash %s = (); return bless(\%s, "JCh"); }');
+    Strada::JIT::eval('package JCh; extends JPb; func new() scalar { my hash %s = (); return bless(\%s, "JCh"); }');
+    Strada::JIT::eval('package main; my int $tracked_v = 0;');
+    core::global_set("r5_rn", 72);
+    my scalar $jd = Strada::JIT::eval('my int $my_d = core::global_get("r5_rn") + 0; $tracked_v = $my_d; if ($my_d > 0) { core::global_set("r5_rn", $my_d - 1); repl_eval(); } $tracked_v');
+    core::global_delete("r5_rn");
+    if (($jd + 0) != 72 || (Strada::JIT::eval('$tracked_v') + 0) != 72) { die("bad jwrap"); }
+    Strada::JIT::reset();
+
+    say("R5_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

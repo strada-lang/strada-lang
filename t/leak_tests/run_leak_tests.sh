@@ -156,6 +156,9 @@ TESTS=(
     "test_audit_r2_leaks"
     "test_audit_r3_leaks"
     "test_audit_r4_leaks"
+    "test_audit_r5_leaks"
+    "test_audit_r5_eval_jit_leaks"
+    "test_audit_r5_stdlib_leaks"
 )
 
 FILTER="${1:-}"
@@ -190,6 +193,12 @@ for test in "${TESTS[@]}"; do
             ;;
         test_audit_r3_leaks)
             EXTRA_FLAGS="-lcrypt -lsqlite3"
+            ;;
+        test_audit_r5_stdlib_leaks)
+            EXTRA_FLAGS="-lsqlite3"
+            ;;
+        test_audit_r5_eval_jit_leaks)
+            EXTRA_FLAGS="-O0 --no-use-artifacts -L lib -D HAVE_VM -I interpreter interpreter/vm.c interpreter/vm_compiler.c"
             ;;
         test_import_lib_devirt)
             # Pre-build the companion shared library the host imports

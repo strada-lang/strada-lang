@@ -566,7 +566,7 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h) {
+        if (!h || length < 0) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
@@ -606,8 +606,10 @@ func bulk_read(int $handle, int $endpoint, int $max_len, int $timeout) str {
                     free(buffer);
                     result = strada_new_str("");
                 } else {
+                    if (transferred < 0) transferred = 0;
+                    if (transferred > maxlen) transferred = maxlen;
                     last_transfer_len = transferred;
-                    result = strada_new_str_len((char *)buffer, transferred);
+                    result = strada_new_str_len((char *)buffer, (size_t)transferred);
                     free(buffer);
                 }
             }
@@ -628,7 +630,7 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h) {
+        if (!h || length < 0) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
@@ -667,8 +669,10 @@ func interrupt_read(int $handle, int $endpoint, int $max_len, int $timeout) str 
                     free(buffer);
                     result = strada_new_str("");
                 } else {
+                    if (transferred < 0) transferred = 0;
+                    if (transferred > maxlen) transferred = maxlen;
                     last_transfer_len = transferred;
-                    result = strada_new_str_len((char *)buffer, transferred);
+                    result = strada_new_str_len((char *)buffer, (size_t)transferred);
                     free(buffer);
                 }
             }
@@ -728,8 +732,9 @@ func control_read(int $handle, int $request_type, int $request, int $value, int 
                     free(buffer);
                     result = strada_new_str("");
                 } else {
+                    if (ret > maxlen) ret = maxlen;
                     last_transfer_len = ret;
-                    result = strada_new_str_len((char *)buffer, ret);
+                    result = strada_new_str_len((char *)buffer, (size_t)ret);
                     free(buffer);
                 }
             }

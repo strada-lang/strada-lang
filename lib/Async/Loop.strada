@@ -53,7 +53,9 @@ func new() scalar {
     $self{"watchers"} = {};      # fd -> { mask, subs => [ {mask, cb, id} ... ] }
     $self{"timers"} = [];        # [ { at, cb, id, dead } ... ]
     $self{"timer_by_id"} = {};   # id -> timer hashref (including while in @due)
-    $self{"_coros"} = {};        # active coro handle -> 1
+    $self{"_coros"} = {};        # spawned coro handle -> 1
+    $self{"_active_coros"} = {}; # currently executing coro handle -> 1
+    $self{"_pending_free"} = {}; # coros deferred from close() while executing
     $self{"next_id"} = 1;
     $self{"running"} = 0;
     $self{"ntasks"} = 0;
@@ -68,8 +70,15 @@ func close(scalar $self) void {
     $self->{"timers"} = [];
     $self->{"timer_by_id"} = {};
     if (defined($self->{"_coros"})) {
+        my scalar $active = $self->{"_active_coros"};
         foreach my str $ck (keys(%{$self->{"_coros"}})) {
-            core::coro_free($ck + 0);
+            if (defined($active) && defined($active->{$ck})) {
+                # Defer freeing a coroutine whose stack is currently executing;
+                # advance_task() frees it as soon as coro_resume() returns.
+                $self->{"_pending_free"}->{$ck} = 1;
+            } else {
+                core::coro_free($ck + 0);
+            }
         }
         $self->{"_coros"} = {};
     }
@@ -87,6 +96,7 @@ func DESTROY(scalar $self) void {
 # Subscribe to fd readiness. $cb->($fd, $mask) per event. Returns a
 # subscription id for unwatch_sub().
 func watch(scalar $self, scalar $sock_or_fd, str $mask, scalar $cb) int {
+    if (!defined($self) || $self->{"epfd"} < 0) { return 0 - 1; }
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
     my int $id = $self->{"next_id"};
@@ -111,6 +121,7 @@ func watch(scalar $self, scalar $sock_or_fd, str $mask, scalar $cb) int {
 
 # Remove ONE subscription from an fd.
 func unwatch_sub(scalar $self, scalar $sock_or_fd, int $id) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
     my scalar $w = $watchers->{$fd};
@@ -136,6 +147,7 @@ func unwatch_sub(scalar $self, scalar $sock_or_fd, int $id) void {
 
 # Remove ALL subscriptions from an fd.
 func unwatch(scalar $self, scalar $sock_or_fd) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
     if (defined($watchers->{$fd})) {
@@ -146,6 +158,7 @@ func unwatch(scalar $self, scalar $sock_or_fd) void {
 
 # One-shot timer; returns an id usable with timer_cancel().
 func timer_after(scalar $self, int $ms, scalar $cb) int {
+    if (!defined($self) || $self->{"epfd"} < 0) { return 0 - 1; }
     my int $id = $self->{"next_id"};
     $self->{"next_id"} = $id + 1;
     my scalar $timers = $self->{"timers"};
@@ -181,6 +194,7 @@ func stop(scalar $self) void {
 # that the loop resumes it on fd readiness / timer expiry. An uncaught
 # exception in the task is contained at the task boundary and reported.
 func spawn(scalar $self, scalar $closure) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
     my int $coro = core::coro_create($closure);
     $self->{"_coros"}->{$coro} = 1;
     $self->{"ntasks"} = $self->{"ntasks"} + 1;
@@ -189,9 +203,22 @@ func spawn(scalar $self, scalar $closure) void {
 
 # Resume a task and (re)schedule its next wait. Private.
 private func advance_task(scalar $self, int $coro) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
+    $self->{"_active_coros"}->{$coro} = 1;
     my int $state = core::coro_resume($coro);
+    if (!defined($self)) { return; }
+    delete($self->{"_active_coros"}->{$coro});
+    if (defined($self->{"_pending_free"}->{$coro})) {
+        delete($self->{"_pending_free"}->{$coro});
+        core::coro_free($coro);
+        return;
+    }
+    if ($self->{"epfd"} < 0) { return; }
     if ($state == 3) {
         my scalar $err = core::coro_error($coro);
+        delete($self->{"_coros"}->{$coro});
+        core::coro_free($coro);
+        $self->{"ntasks"} = $self->{"ntasks"} - 1;
         if (defined($err)) {
             my scalar $handler = $self->{"on_task_error"};
             if (defined($handler)) {
@@ -200,9 +227,6 @@ private func advance_task(scalar $self, int $coro) void {
                 warn("[Async::Loop] task died: " . $err . "\n");
             }
         }
-        delete($self->{"_coros"}->{$coro});
-        core::coro_free($coro);
-        $self->{"ntasks"} = $self->{"ntasks"} - 1;
         return;
     }
     # Suspended: wire up its wake-up sources. Use a weakened $self reference
@@ -219,7 +243,7 @@ private func advance_task(scalar $self, int $coro) void {
         $woken->{"sub"} = watch($self, $wfd, $wmask, fn (int $fd, str $mask) {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            if (!defined($self_w)) { return; }
+            if (!defined($self_w) || $self_w->{"epfd"} < 0) { return; }
             unwatch_sub($self_w, $fd, $woken->{"sub"});
             if ($woken->{"timer"} > 0) { timer_cancel($self_w, $woken->{"timer"}); }
             advance_task($self_w, $coro);
@@ -230,7 +254,7 @@ private func advance_task(scalar $self, int $coro) void {
         $woken->{"timer"} = timer_after($self, $ms, fn () {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            if (!defined($self_w)) { return; }
+            if (!defined($self_w) || $self_w->{"epfd"} < 0) { return; }
             if ($wfd >= 0) { unwatch_sub($self_w, $wfd, $woken->{"sub"}); }
             advance_task($self_w, $coro);
         });
@@ -238,8 +262,9 @@ private func advance_task(scalar $self, int $coro) void {
 }
 
 func run(scalar $self) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
     $self->{"running"} = 1;
-    while ($self->{"running"} == 1) {
+    while ($self->{"running"} == 1 && $self->{"epfd"} >= 0) {
         my scalar $watchers = $self->{"watchers"};
         my int $nwatch = size(keys(%{$watchers}));
         my int $ntimer = live_timer_count($self);
@@ -257,6 +282,7 @@ func run(scalar $self) void {
         my scalar $evs = core::epoll_wait($self->{"epfd"}, $timeout);
 
         foreach my scalar $ev (@{$evs}) {
+            if ($self->{"epfd"} < 0) { last; }
             my int $fd = $ev->[0];
             my str $mask = $ev->[1];
             my scalar $w = $self->{"watchers"}->{$fd};
@@ -267,6 +293,7 @@ func run(scalar $self) void {
                     push(@snapshot, $sub);
                 }
                 foreach my scalar $sub (@snapshot) {
+                    if ($self->{"epfd"} < 0) { last; }
                     if (mask_match($sub->{"mask"}, $mask)) {
                         my scalar $cb = $sub->{"cb"};
                         $cb->($fd, $mask);
@@ -275,6 +302,7 @@ func run(scalar $self) void {
             }
         }
 
+        if ($self->{"epfd"} < 0) { last; }
         fire_due_timers($self);
     }
     $self->{"running"} = 0;
@@ -330,6 +358,7 @@ private func next_timeout(scalar $self) int {
 }
 
 private func fire_due_timers(scalar $self) void {
+    if (!defined($self) || $self->{"epfd"} < 0) { return; }
     my int $now = core::mono_ms();
     my scalar $timers = $self->{"timers"};
     my scalar $by_id = $self->{"timer_by_id"};
@@ -349,6 +378,7 @@ private func fire_due_timers(scalar $self) void {
     my int $ndue = size(@due);
     my int $di = 0;
     while ($di < $ndue) {
+        if ($self->{"epfd"} < 0) { last; }
         my scalar $t = $due[$di];
         delete($by_id->{$t->{"id"}});
         $di = $di + 1;
@@ -359,15 +389,17 @@ private func fire_due_timers(scalar $self) void {
         try {
             $cb->();
         } catch ($e) {
-            my int $rem = $di;
-            while ($rem < $ndue) {
-                my scalar $rt = $due[$rem];
-                if ($rt->{"dead"} == 0) {
-                    push(@{$self->{"timers"}}, $rt);
-                } else {
-                    delete($by_id->{$rt->{"id"}});
+            if ($self->{"epfd"} >= 0) {
+                my int $rem = $di;
+                while ($rem < $ndue) {
+                    my scalar $rt = $due[$rem];
+                    if ($rt->{"dead"} == 0) {
+                        push(@{$self->{"timers"}}, $rt);
+                    } else {
+                        delete($by_id->{$rt->{"id"}});
+                    }
+                    $rem = $rem + 1;
                 }
-                $rem = $rem + 1;
             }
             throw $e;
         }

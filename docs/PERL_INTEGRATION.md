@@ -419,29 +419,7 @@ Compiled Perla output typically runs 1x-3x faster than native Perl. VM mode runs
 
 ## Converting Between Strada and Perl
 
-Strada includes two additional tools for converting code between Strada and Perl:
-
-### xs2strada - Convert XS Modules
-
-Converts Perl XS modules into Strada code using `__C__` blocks:
-
-```bash
-# Build the tool (or: make xs2strada, which builds tools/xs2strada)
-./strada tools/xs2strada.strada
-
-# Convert an XS module
-./xs2strada MyModule.xs MyModule.strada
-```
-
-The converter:
-- Parses XS function definitions and maps types to Strada equivalents
-- Preserves C code in `__C__` blocks
-- Replaces XS macros with Strada runtime functions (`SvIV` → `strada_to_int`, etc.)
-- Strips Perl-specific thread context (`aTHX_`, `pTHX_`, `dXSARGS`)
-- Handles `CODE:`, `PREINIT:`, `OUTPUT:`, `CLEANUP:`, and `BOOT:` sections
-- Generates parameter extraction and cleanup code
-
-This is useful for porting C libraries that already have Perl XS bindings to Strada.
+Strada includes a tool for converting Strada code to Perl:
 
 ### strada2perl - Convert Strada to Perl
 
@@ -573,4 +551,3 @@ These features compile to native C code and require no runtime Perl interpreter.
 - `perl/Strada/README.md` - Detailed XS module documentation
 - `examples/test_perl5.strada` - Comprehensive Perl integration example
 - `tools/strada2perl.strada` - Strada to Perl converter source
-- `tools/xs2strada.strada` - XS to Strada converter source

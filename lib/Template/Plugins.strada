@@ -50,7 +50,7 @@ func method(scalar $obj, str $m, scalar $args) scalar {
 func invoke(scalar $obj, scalar $args) scalar {
     if ($obj->{"__plugin__"} eq "format") {
         if (!defined($obj->{"fmt"})) { return format_obj(pos_str($args, 0, "%s")); }   # factory -> formatter
-        return sprintf($obj->{"fmt"}, pos_str($args, 0, ""));                            # formatter -> apply
+        return Template::Filters::safe_format($obj->{"fmt"}, pos_str($args, 0, ""));     # formatter -> apply
     }
     return undef;
 }

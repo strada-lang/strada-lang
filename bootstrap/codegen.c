@@ -2174,9 +2174,18 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ")))");
             } else if (strcmp(expr->data.call.name, "ord") == 0) {
-                emit(cg, "({ char *__s = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "); StradaValue *__r = strada_new_int(strada_ord(__s)); free(__s); __r; })");
+                if (expr->data.call.arg_count == 1 &&
+                    expr->data.call.args[0]->type == NODE_STR_LITERAL &&
+                    expr->data.call.args[0]->data.str_val &&
+                    (unsigned char)expr->data.call.args[0]->data.str_val[0] > 0 &&
+                    (unsigned char)expr->data.call.args[0]->data.str_val[0] < 128 &&
+                    expr->data.call.args[0]->data.str_val[1] == '\0') {
+                    emit(cg, "strada_new_int(%d)", (int)(unsigned char)expr->data.call.args[0]->data.str_val[0]);
+                } else {
+                    emit(cg, "({ char *__s = strada_to_str(");
+                    gen_expression(cg, expr->data.call.args[0]);
+                    emit(cg, "); StradaValue *__r = strada_new_int(strada_ord(__s)); free(__s); __r; })");
+                }
             } else if (strcmp(expr->data.call.name, "chomp") == 0) {
                 emit(cg, "({ char *__s = strada_to_str(");
                 gen_expression(cg, expr->data.call.args[0]);

@@ -295,8 +295,10 @@ StradaValue* strada_usb_bulk_transfer(StradaValue *handle_sv, StradaValue *endpo
             free(buffer);
             return strada_new_str("");
         }
+        if (transferred < 0) transferred = 0;
+        if (transferred > length) transferred = length;
 
-        StradaValue *result = strada_new_str_len((char *)buffer, transferred);
+        StradaValue *result = strada_new_str_len((char *)buffer, (size_t)transferred);
         free(buffer);
         return result;
     } else {
@@ -304,6 +306,10 @@ StradaValue* strada_usb_bulk_transfer(StradaValue *handle_sv, StradaValue *endpo
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
         int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
                          ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
+        if (length < 0) {
+            free(data);
+            return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        }
 
         int ret = libusb_bulk_transfer(handle, endpoint, (unsigned char *)data,
                                         length, &transferred, timeout);
@@ -345,8 +351,10 @@ StradaValue* strada_usb_interrupt_transfer(StradaValue *handle_sv, StradaValue *
             free(buffer);
             return strada_new_str("");
         }
+        if (transferred < 0) transferred = 0;
+        if (transferred > length) transferred = length;
 
-        StradaValue *result = strada_new_str_len((char *)buffer, transferred);
+        StradaValue *result = strada_new_str_len((char *)buffer, (size_t)transferred);
         free(buffer);
         return result;
     } else {
@@ -354,6 +362,10 @@ StradaValue* strada_usb_interrupt_transfer(StradaValue *handle_sv, StradaValue *
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
         int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
                          ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
+        if (length < 0) {
+            free(data);
+            return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        }
 
         int ret = libusb_interrupt_transfer(handle, endpoint, (unsigned char *)data,
                                              length, &transferred, timeout);
@@ -843,7 +855,7 @@ int strada_usb_set_auto_detach_raw(void *handle, int enable) {
 
 /* Bulk write - returns bytes transferred or error */
 int strada_usb_bulk_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
-    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
     int transferred = 0;
     int ret = libusb_bulk_transfer((libusb_device_handle *)handle,
                                     (unsigned char)endpoint,
@@ -889,7 +901,7 @@ char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int time
 
 /* Interrupt write */
 int strada_usb_interrupt_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
-    if (!handle || length < 0) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
     int transferred = 0;
     int ret = libusb_interrupt_transfer((libusb_device_handle *)handle,
                                          (unsigned char)endpoint,

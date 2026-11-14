@@ -523,7 +523,6 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 
 ## Conversion Tools
 
-- **xs2strada** — Converts Perl XS modules to Strada `__C__` blocks.
 - **strada2perl** — Converts Strada to Perl 5. `./strada2perl input.strada output.pl`
 
 Build tools with: `make tools` or `./strada tools/<tool>.strada`

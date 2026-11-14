@@ -93,6 +93,16 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 #define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
 #define STRADA_INT_IS_BOOL(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_BOOL_FLAG) != 0))
 
+/* Atomic load/store for lazily-populated static pointer caches in generated code.
+ * TCC has no __atomic_* intrinsics, so keep a plain read/write fallback here. */
+#ifdef __TINYC__
+#define STRADA_STATIC_PTR_LOAD(pp) (*(pp))
+#define STRADA_STATIC_PTR_STORE(pp, v) (*(pp) = (v))
+#else
+#define STRADA_STATIC_PTR_LOAD(pp) __atomic_load_n((pp), __ATOMIC_ACQUIRE)
+#define STRADA_STATIC_PTR_STORE(pp, v) __atomic_store_n((pp), (v), __ATOMIC_RELEASE)
+#endif
+
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
 #define STRADA_TAGGED_INT_MIN (-(INT64_C(1) << 30))
@@ -732,6 +742,10 @@ StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
 StradaValue* strada_closure_call_method(StradaValue *closure, StradaValue *self, StradaValue *args);
+typedef StradaValue* (*StradaCustomClosureCallFn)(void *ctx, int argc, StradaValue **argv);
+typedef void (*StradaCustomClosureFreeFn)(void *ctx);
+StradaValue* strada_custom_closure_new(StradaCustomClosureCallFn call_fn, StradaCustomClosureFreeFn free_fn, void *ctx);
+void* strada_custom_closure_get_ctx(StradaValue *closure, StradaCustomClosureCallFn expected_call_fn);
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);
@@ -855,7 +869,9 @@ StradaValue* strada_utf8_encode(StradaValue *sv);
 StradaValue* strada_utf8_decode(StradaValue *sv);
 StradaValue* strada_utf8_decode_slot(StradaValue **slot);
 StradaValue* strada_utf8_downgrade(StradaValue *sv, int fail_ok);
+StradaValue* strada_utf8_downgrade_slot(StradaValue **slot, int fail_ok);
 StradaValue* strada_utf8_upgrade(StradaValue *sv);
+StradaValue* strada_utf8_upgrade_slot(StradaValue **slot);
 StradaValue* strada_utf8_unicode_to_native(StradaValue *sv);
 
 /* ============================================================
@@ -1747,6 +1763,7 @@ char* strada_chop(const char *str);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b);
 char* strada_to_str_ss(StradaValue *sv);
+StradaValue* strada_to_str_sv(StradaValue *sv);
 void strada_cstr_free(char *s);
 void strada_decref(StradaValue *sv);
 void strada_decref_impl(StradaValue *sv);

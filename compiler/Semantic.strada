@@ -1871,6 +1871,23 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
 
     # Binary operation
     if ($node_type == NODE_BINARY_OP()) {
+        my str $bop = $expr->{"op"};
+        if ($bop eq "==" || $bop eq "!=" || $bop eq "<" || $bop eq "<=" || $bop eq ">" || $bop eq ">=" || $bop eq "<=>") {
+            my scalar $bleft = $expr->{"left"};
+            my scalar $bright = $expr->{"right"};
+            if (is_valid_node($bright) == 1 && $bright->{"type"} == NODE_INT_LITERAL() && exists($bright->{"from_sq_str"})) {
+                my int $blt = stage0_expr_type($ctx, $bleft);
+                if ($blt == TYPE_STR() || $blt == TYPE_NUM() || $blt == TYPE_FLOAT32() || $blt == TYPE_FLOAT64() || $blt == TYPE_LONG_DOUBLE()) {
+                    $expr->{"right"} = ast_new_str_literal($bright->{"from_sq_str"});
+                }
+            }
+            if (is_valid_node($bleft) == 1 && $bleft->{"type"} == NODE_INT_LITERAL() && exists($bleft->{"from_sq_str"})) {
+                my int $brt = stage0_expr_type($ctx, $bright);
+                if ($brt == TYPE_STR() || $brt == TYPE_NUM() || $brt == TYPE_FLOAT32() || $brt == TYPE_FLOAT64() || $brt == TYPE_LONG_DOUBLE()) {
+                    $expr->{"left"} = ast_new_str_literal($bleft->{"from_sq_str"});
+                }
+            }
+        }
         analyze_expression($ctx, $expr->{"left"});
         analyze_expression($ctx, $expr->{"right"});
         return;

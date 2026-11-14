@@ -1,0 +1,146 @@
+use lib "lib";
+use JSON;
+use DBI;
+use Async::Loop;
+use LWP;
+use Template;
+use Markdown;
+use YAML;
+use Forma;
+
+package R5LeakTieH;
+func TIEHASH(str $cls) scalar {
+    return bless({"data" => {"a" => 1, "b" => "two"}}, $cls);
+}
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"data"}->{$k};
+}
+func EXISTS(scalar $self, str $k) int {
+    return exists($self->{"data"}, $k) ? 1 : 0;
+}
+func FIRSTKEY(scalar $self) str {
+    my scalar $ks = keys($self->{"data"});
+    $self->{"_keys"} = $ks;
+    $self->{"_idx"} = 0;
+    if (scalar(@{$ks}) == 0) { return undef; }
+    return $ks->[0];
+}
+func NEXTKEY(scalar $self, str $last) str {
+    $self->{"_idx"} = $self->{"_idx"} + 1;
+    my scalar $ks = $self->{"_keys"};
+    if ($self->{"_idx"} >= scalar(@{$ks})) { return undef; }
+    return $ks->[$self->{"_idx"}];
+}
+
+package R5LeakTieA;
+func TIEARRAY(str $cls) scalar {
+    return bless({"items" => [10, 20, "x"]}, $cls);
+}
+func FETCH(scalar $self, int $i) scalar {
+    return $self->{"items"}->[$i];
+}
+func FETCHSIZE(scalar $self) int {
+    return scalar(@{$self->{"items"}});
+}
+
+package R5LeakThrowH;
+func TIEHASH(str $cls) scalar {
+    return bless({}, $cls);
+}
+func FIRSTKEY(scalar $self) str {
+    return "boom";
+}
+func NEXTKEY(scalar $self, str $last) str {
+    return undef;
+}
+func FETCH(scalar $self, str $k) scalar {
+    throw("tied_fetch_leak_test");
+    return undef;
+}
+
+package main;
+
+func test_once() int {
+    # 1. JSON tied containers + exception unwind buffer cleanup
+    my hash %th = ();
+    tie(%th, "R5LeakTieH");
+    my array @ta = ();
+    tie(@ta, "R5LeakTieA");
+    my str $je = JSON::encode({"h" => \%th, "a" => \@ta, "f" => 3.25});
+    my scalar $jd = JSON::decode($je);
+    if (!defined($jd) || $jd->{"h"}->{"a"} != 1 || $jd->{"a"}->[2] ne "x") {
+        return 1;
+    }
+    untie(%th);
+    untie(@ta);
+
+    my hash %bad = ();
+    tie(%bad, "R5LeakThrowH");
+    try {
+        JSON::encode(\%bad);
+    } catch ($e) {
+    }
+    untie(%bad);
+
+    # 2. DBI disconnect before sth destruction + failed connect with RaiseError => 1
+    my scalar $dbh = DBI::connect("dbi:SQLite:dbname=:memory:", "", "");
+    DBI::do_sql($dbh, "CREATE TABLE t(id INTEGER, name TEXT)");
+    my scalar $sth = DBI::prepare($dbh, "INSERT INTO t VALUES (?, ?)");
+    DBI::execute($sth, [1, "café"]);
+    DBI::disconnect($dbh);
+    DBI::finish($sth);
+    try {
+        DBI::connect_attrs("dbi:SQLite:dbname=/nonexistent_r5_dir_xyz/no.db", "", "", {"RaiseError" => 1});
+    } catch ($de) {
+    }
+
+    # 3. Async::Loop close-in-callback (timer + spawn coroutine)
+    my scalar $loop = Async::Loop::new();
+    $loop->timer_after(1, func () void { $loop->close(); });
+    $loop->run();
+
+    my scalar $loop2 = Async::Loop::new();
+    $loop2->spawn(func () void { $loop2->close(); });
+    $loop2->run();
+
+    # 4. LWP::parse_url with userinfo + IPv6
+    my hash %pu = LWP::parse_url("http://user:pass\@[::1]:8080/p?q=1");
+    if ($pu{"host"} ne "::1" || $pu{"port"} != 8080) {
+        return 2;
+    }
+
+    # 5. Template percent_encode UTF-8 + format validation throw
+    my scalar $tt = Template::new({});
+    my str $tout = $tt->process_string("[% u | uri %]", {"u" => "café"});
+    if ($tout ne "caf%C3%A9") { return 3; }
+    try {
+        $tt->process_string("[% v | format('%n') %]", {"v" => "x"});
+    } catch ($te) {
+    }
+
+    # 6. Markdown, YAML (valid + throw), Forma
+    my str $md = Markdown::to_html("# H\r\n\r\nfoo_bar_baz <script>x</script>\r\n");
+    if (index($md, "<script>") >= 0) { return 4; }
+    my scalar $yd = YAML::Load("---\nk: | # comment\n  v\n...\n");
+    if ($yd->{"k"} ne "v\n") { return 5; }
+    try {
+        YAML::Load("{unclosed: 1");
+    } catch ($ye) {
+    }
+    my str $fo = Forma::render_string_safe("{{x | escape | nl2br}} {{currency a}}", {"x" => "<a\nb>", "a" => -12.5});
+    if ($fo ne "&lt;a<br>\nb&gt; -$12.50") { return 6; }
+
+    return 0;
+}
+
+func main() int {
+    for (my int $i = 0; $i < 25; $i++) {
+        my int $rc = test_once();
+        if ($rc != 0) {
+            say("FAIL: rc=" . $rc);
+            return $rc;
+        }
+    }
+    say("R5_STDLIB_LEAKS_OK");
+    return 0;
+}

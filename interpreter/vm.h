@@ -223,6 +223,8 @@ typedef enum {
     OP_MAKE_SREF_VAL,   /* pop value or VMCell — wrap in VMScalarRef */
     OP_DEREF_SCALAR,    /* pop ref/val — deref VMScalarRef if SREF */
     OP_STORE_SREF,      /* pop newv, pop ref — store newv through VMScalarRef, push newv */
+    OP_ARG_PRESENT,     /* u16 param_idx — push 1 if param_idx < frame->passed_argc else 0 */
+    OP_SQ_COERCE,       /* u8 side (0=left, 1=right), u16 str_idx — restore 'x' str when peer is float/str */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -533,6 +535,7 @@ enum {
     BUILTIN_DEREF,
     BUILTIN_IS_REF,
     BUILTIN_IS_REFTO,
+    BUILTIN_REGEX_SUBST,
 };
 
 /* Heap object type tag */
@@ -692,6 +695,9 @@ struct VMClosure {
     VMObjHeader hdr;
     int func_idx;
     int capture_count;
+    int pin_count;
+    int has_bound_arg;
+    VMValue bound_arg;
     VMValue *captures;  /* shared mutable capture slots */
 };
 
@@ -699,6 +705,7 @@ struct VMClosure {
 typedef struct {
     VMObjHeader hdr;
     void *fp;  /* FILE* */
+    struct StradaValue *owner_sv;
     int is_pipe;
     int is_popen;
     char *mem_buf;
@@ -843,6 +850,7 @@ typedef struct {
     void **dl_handles;          /* all dlopen'd import_lib handles */
     int dl_handle_count;
     int dl_handle_cap;
+    int refcount;
 } VMProgram;
 
 /* Call frame */
@@ -853,6 +861,7 @@ typedef struct {
     size_t stack_base;
     VMClosure *closure;  /* non-NULL if called as closure */
     int global_save_depth;
+    int passed_argc;
 } VMFrame;
 
 /* VM state */
@@ -905,10 +914,13 @@ typedef struct VM {
     struct VM *saved_active_vm;
     int trap_uncaught;
     int end_ran;
+    int refcount;
+    int locals_detached;
 } VM;
 
 /* Program API */
 VMProgram *vm_program_new(void);
+void vm_program_retain(VMProgram *prog);
 void vm_program_free(VMProgram *prog);
 VMChunk *vm_program_add_func(VMProgram *prog, const char *name);
 int vm_program_find_func(VMProgram *prog, const char *name);
@@ -925,6 +937,8 @@ size_t vm_chunk_add_str_const(VMChunk *chunk, const char *s);
 /* VM API */
 const char *vm_program_find_parent(VMProgram *prog, const char *class_name);
 VM *vm_new(VMProgram *prog);
+void vm_retain(VM *vm);
+void vm_suspend(VM *vm);
 void vm_free(VM *vm);
 void vm_gc_collect(VM *vm);
 void vm_gc_set_compiling_prog(VMProgram *prog, VM **saved_vm);

@@ -1130,6 +1130,76 @@ private func last_toplevel_semi(str $s) int {
     return $last_semi;
 }
 
+# End index (position of closing '}') of a leading top-level control-flow block
+# statement when non-whitespace expression tokens follow it without ';', else -1.
+private func leading_block_stmt_end(str $s) int {
+    my str $cleaned = strip_strings_and_comments($s);
+    my int $n = length($cleaned);
+    my int $i = 0;
+    while ($i < $n && jit_is_ws(substr($cleaned, $i, 1)) == 1) {
+        $i = $i + 1;
+    }
+    my str $kw = "";
+    my int $ki = $i;
+    while ($ki < $n && (substr($cleaned, $ki, 1) =~ /[a-zA-Z_]/)) {
+        $kw = $kw . substr($cleaned, $ki, 1);
+        $ki = $ki + 1;
+    }
+    if ($kw ne "if" && $kw ne "unless" && $kw ne "while" && $kw ne "until" &&
+        $kw ne "for" && $kw ne "foreach" && $kw ne "switch" && $kw ne "try") {
+        return -1;
+    }
+    if ($ki < $n && (substr($cleaned, $ki, 1) =~ /[a-zA-Z0-9_:]/)) {
+        return -1;
+    }
+    my int $pos = $ki;
+    while (1) {
+        my int $pdepth = 0;
+        my int $found_brace = 0;
+        while ($pos < $n) {
+            my str $ch = substr($cleaned, $pos, 1);
+            if ($ch eq "(" || $ch eq "[") { $pdepth = $pdepth + 1; }
+            elsif ($ch eq ")" || $ch eq "]") { $pdepth = $pdepth - 1; }
+            elsif ($ch eq "{" && $pdepth == 0) { $found_brace = 1; last; }
+            elsif ($ch eq ";" && $pdepth == 0) { return -1; }
+            $pos = $pos + 1;
+        }
+        if ($found_brace == 0) { return -1; }
+        my int $bdepth = 0;
+        my int $close_idx = -1;
+        while ($pos < $n) {
+            my str $ch = substr($cleaned, $pos, 1);
+            if ($ch eq "{") { $bdepth = $bdepth + 1; }
+            elsif ($ch eq "}") {
+                $bdepth = $bdepth - 1;
+                if ($bdepth == 0) { $close_idx = $pos; $pos = $pos + 1; last; }
+            }
+            $pos = $pos + 1;
+        }
+        if ($close_idx < 0) { return -1; }
+        my int $after = $pos;
+        while ($after < $n && jit_is_ws(substr($cleaned, $after, 1)) == 1) {
+            $after = $after + 1;
+        }
+        if ($after >= $n) {
+            return -1;
+        }
+        my str $next_kw = "";
+        my int $nki = $after;
+        while ($nki < $n && (substr($cleaned, $nki, 1) =~ /[a-zA-Z_]/)) {
+            $next_kw = $next_kw . substr($cleaned, $nki, 1);
+            $nki = $nki + 1;
+        }
+        my int $next_boundary = ($nki >= $n || !(substr($cleaned, $nki, 1) =~ /[a-zA-Z0-9_:]/)) ? 1 : 0;
+        if ($next_boundary == 1 && ($next_kw eq "elsif" || $next_kw eq "else" || $next_kw eq "catch" || $next_kw eq "finally")) {
+            $pos = $nki;
+            next;
+        }
+        return $close_idx;
+    }
+    return -1;
+}
+
 # Strip top-level (depth 0) `my [TYPE] SIGIL+name` prefixes so declarations
 # inside the wrapped helper closure assign to repl_eval()'s captured locals
 # instead of shadowing them inside the closure.
@@ -1272,7 +1342,7 @@ private func generate_source(str $input) str {
 
     # Always use repl package for variable persistence via global registry
     $src = $src . "package repl;\n\n";
-    $src = $src . "__C__ {\n    static StradaValue ***__repl_caps = NULL;\n    static StradaValue ***__repl_caps_stack[64];\n    static int __repl_caps_sp = 0;\n}\n\n";
+    $src = $src . "__C__ {\n    static StradaValue ***__repl_caps = NULL;\n    static StradaValue ****__repl_caps_stack = NULL;\n    static int __repl_caps_sp = 0;\n    static int __repl_caps_cap = 0;\n}\n\n";
 
     # Constants, enums, and OOP class declarations (must be at package level)
     foreach my str $const_decl (@g_constants) {
@@ -1349,6 +1419,18 @@ private func generate_source(str $input) str {
     if ($split_at >= 0) {
         $prefix_stmts = substr($body_input, 0, $split_at + 1);
         $tail = substr($body_input, $split_at + 1, length($body_input) - $split_at - 1);
+    }
+
+    my int $blk_end = leading_block_stmt_end($tail);
+    while ($blk_end >= 0) {
+        my str $blk_part = substr($tail, 0, $blk_end + 1);
+        if ($prefix_stmts eq "") {
+            $prefix_stmts = $blk_part;
+        } else {
+            $prefix_stmts = $prefix_stmts . "\n" . $blk_part;
+        }
+        $tail = substr($tail, $blk_end + 1, length($tail) - $blk_end - 1);
+        $blk_end = leading_block_stmt_end($tail);
     }
 
     my str $trimmed = $tail;
@@ -1475,9 +1557,22 @@ private func generate_source(str $input) str {
             $persist_caps = $persist_caps
                 . "            }\n"
                 . "            __repl_caps = (__repl_caps_sp > 0) ? __repl_caps_stack[--__repl_caps_sp] : NULL;\n"
+                . "            if (__repl_caps_sp == 0 && __repl_caps_stack != NULL) {\n"
+                . "                free(__repl_caps_stack);\n"
+                . "                __repl_caps_stack = NULL;\n"
+                . "                __repl_caps_cap = 0;\n"
+                . "            }\n"
                 . "        }\n";
             $src = $src . "    __C__ {\n"
-                . "        if (__repl_caps_sp < 64) { __repl_caps_stack[__repl_caps_sp++] = __repl_caps; }\n"
+                . "        if (__repl_caps_sp >= __repl_caps_cap) {\n"
+                . "            int ncap = (__repl_caps_cap == 0) ? 64 : (__repl_caps_cap * 2);\n"
+                . "            StradaValue ****ns = (StradaValue ****)realloc(__repl_caps_stack, (size_t)ncap * sizeof(StradaValue ***));\n"
+                . "            if (ns) {\n"
+                . "                __repl_caps_stack = ns;\n"
+                . "                __repl_caps_cap = ncap;\n"
+                . "            }\n"
+                . "        }\n"
+                . "        if (__repl_caps_sp < __repl_caps_cap) { __repl_caps_stack[__repl_caps_sp++] = __repl_caps; }\n"
                 . "        __repl_caps = NULL;\n"
                 . "    }\n";
             $src = $src . "    my scalar \$__result = undef;\n";
@@ -1734,7 +1829,7 @@ private func eval_one(str $input) scalar {
         __C__ {
             char *p = strada_to_str(mpkg);
             if (p) {
-                strada_oop_clear_modifiers(p);
+                strada_oop_reset_package(p);
                 free(p);
             }
         }
@@ -1830,11 +1925,122 @@ private func upsert_constant(str $key, str $entry) void {
     push(@g_constants, $entry);
 }
 
-func eval(str $code) scalar {
-    if ($g_initialized == 0) {
-        throw "Strada::JIT::eval: Not initialized. Call Strada::JIT::init() first.";
+private func snapshot_jit_state() scalar {
+    my hash %vt = ();
+    my array @vt_keys = keys(%g_var_types);
+    my int $vi = 0;
+    while ($vi < scalar(@vt_keys)) {
+        my str $k = $vt_keys[$vi];
+        $vt{$k} = $g_var_types{$k};
+        $vi = $vi + 1;
     }
 
+    my array @imp = ();
+    my int $ii = 0;
+    while ($ii < scalar(@g_imports)) {
+        push(@imp, $g_imports[$ii]);
+        $ii = $ii + 1;
+    }
+
+    my array @consts = ();
+    my int $ci = 0;
+    while ($ci < scalar(@g_constants)) {
+        push(@consts, $g_constants[$ci]);
+        $ci = $ci + 1;
+    }
+
+    my hash %cidx = ();
+    my array @c_keys = keys(%g_constant_idx);
+    my int $cki = 0;
+    while ($cki < scalar(@c_keys)) {
+        my str $ck = $c_keys[$cki];
+        $cidx{$ck} = $g_constant_idx{$ck};
+        $cki = $cki + 1;
+    }
+
+    my array @funcs = ();
+    my int $fi = 0;
+    while ($fi < scalar(@g_functions)) {
+        push(@funcs, $g_functions[$fi]);
+        $fi = $fi + 1;
+    }
+
+    my hash %oops = ();
+    my array @op_keys = keys(%g_oop_packages);
+    my int $oi = 0;
+    while ($oi < scalar(@op_keys)) {
+        my str $op = $op_keys[$oi];
+        $oops{$op} = $g_oop_packages{$op};
+        $oi = $oi + 1;
+    }
+
+    my hash %snap = ();
+    $snap{"var_types"} = \%vt;
+    $snap{"imports"} = \@imp;
+    $snap{"constants"} = \@consts;
+    $snap{"constant_idx"} = \%cidx;
+    $snap{"functions"} = \@funcs;
+    $snap{"oop_packages"} = \%oops;
+    $snap{"current_package"} = $g_current_package;
+    return \%snap;
+}
+
+private func restore_jit_state(scalar $snap) void {
+    my scalar $vt = $snap->{"var_types"};
+    my scalar $vt_keys = keys($vt);
+    my scalar $imp = $snap->{"imports"};
+    my scalar $consts = $snap->{"constants"};
+    my scalar $cidx = $snap->{"constant_idx"};
+    my scalar $c_keys = keys($cidx);
+    my scalar $funcs = $snap->{"functions"};
+    my scalar $oops = $snap->{"oop_packages"};
+    my scalar $op_keys = keys($oops);
+
+    # Clear global hashes/arrays before loops (avoids parser % modulo ambiguity)
+    %g_var_types = ();
+    %g_constant_idx = ();
+    %g_oop_packages = ();
+    @g_imports = ();
+    @g_constants = ();
+    @g_functions = ();
+
+    my int $vi = 0;
+    while ($vi < size($vt_keys)) {
+        my str $k = $vt_keys->[$vi];
+        $g_var_types{$k} = $vt->{$k};
+        $vi = $vi + 1;
+    }
+    my int $ii = 0;
+    while ($ii < size($imp)) {
+        push(@g_imports, $imp->[$ii]);
+        $ii = $ii + 1;
+    }
+    my int $ci = 0;
+    while ($ci < size($consts)) {
+        push(@g_constants, $consts->[$ci]);
+        $ci = $ci + 1;
+    }
+    my int $cki = 0;
+    while ($cki < size($c_keys)) {
+        my str $ck = $c_keys->[$cki];
+        $g_constant_idx{$ck} = $cidx->{$ck};
+        $cki = $cki + 1;
+    }
+    my int $fi = 0;
+    while ($fi < size($funcs)) {
+        push(@g_functions, $funcs->[$fi]);
+        $fi = $fi + 1;
+    }
+    my int $oi = 0;
+    while ($oi < size($op_keys)) {
+        my str $op = $op_keys->[$oi];
+        $g_oop_packages{$op} = $oops->{$op};
+        $oi = $oi + 1;
+    }
+    $g_current_package = $snap->{"current_package"};
+}
+
+private func eval_inner(str $code, scalar $flags) scalar {
     my str $input = $code;
     $input =~ s/^\s+//;
     $input =~ s/\s+$//;
@@ -1852,12 +2058,14 @@ func eval(str $code) scalar {
             $rem =~ s/^\s+//;
             $rem =~ s/\s+$//;
             register_import($stmt);
+            $flags->{"added_decl"} = 1;
             if ($rem ne "") {
-                return eval($rem);
+                return eval_inner($rem, $flags);
             }
             return undef;
         }
         register_import($input);
+        $flags->{"added_decl"} = 1;
         return undef;
     }
 
@@ -1878,7 +2086,7 @@ func eval(str $code) scalar {
         $pkg_name =~ s/\s+$//;
         $g_current_package = $pkg_name;
         if ($rem ne "") {
-            return eval($rem);
+            return eval_inner($rem, $flags);
         }
         return undef;
     }
@@ -1906,8 +2114,9 @@ func eval(str $code) scalar {
             $ckey = $tpkg . "::const::" . $1;
         }
         upsert_constant($ckey, $entry);
+        $flags->{"added_decl"} = 1;
         if ($rem ne "") {
-            return eval($rem);
+            return eval_inner($rem, $flags);
         }
         return undef;
     }
@@ -1929,8 +2138,9 @@ func eval(str $code) scalar {
             $ekey = $tpkg . "::enum::" . $1;
         }
         upsert_constant($ekey, $entry);
+        $flags->{"added_decl"} = 1;
         if ($eparts[1] ne "") {
-            return eval($eparts[1]);
+            return eval_inner($eparts[1], $flags);
         }
         return undef;
     }
@@ -1963,8 +2173,9 @@ func eval(str $code) scalar {
             $okey = $tpkg . "::overload";
         }
         upsert_constant($okey, $entry);
+        $flags->{"added_decl"} = 1;
         if ($rem ne "") {
-            return eval($rem);
+            return eval_inner($rem, $flags);
         }
         return undef;
     }
@@ -1975,8 +2186,9 @@ func eval(str $code) scalar {
         my str $tpkg = get_target_package();
         track_oop_package($tpkg);
         push(@g_functions, "package " . $tpkg . ";\n" . $mparts[0]);
+        $flags->{"added_decl"} = 1;
         if ($mparts[1] ne "") {
-            return eval($mparts[1]);
+            return eval_inner($mparts[1], $flags);
         }
         return undef;
     }
@@ -1985,15 +2197,47 @@ func eval(str $code) scalar {
     if (is_function_def($input)) {
         my array @parts = extract_function_def($input);
         register_function($parts[0]);
+        $flags->{"added_decl"} = 1;
 
         # If there's a remainder after the function def, evaluate it recursively
         if ($parts[1] ne "") {
-            return eval($parts[1]);
+            return eval_inner($parts[1], $flags);
         }
         return undef;
     }
 
+    $flags->{"did_compile"} = 1;
     return eval_one($input);
+}
+
+func eval(str $code) scalar {
+    if ($g_initialized == 0) {
+        throw "Strada::JIT::eval: Not initialized. Call Strada::JIT::init() first.";
+    }
+
+    my str $input = $code;
+    $input =~ s/^\s+//;
+    $input =~ s/\s+$//;
+
+    if ($input eq "") {
+        return undef;
+    }
+
+    my scalar $snap = snapshot_jit_state();
+    my hash %flags = ();
+    $flags{"did_compile"} = 0;
+    $flags{"added_decl"} = 0;
+    my scalar $res = undef;
+    try {
+        $res = eval_inner($input, \%flags);
+        if ($flags{"did_compile"} == 0 && $flags{"added_decl"} == 1) {
+            eval_one("undef");
+        }
+    } catch ($jit_err) {
+        restore_jit_state($snap);
+        throw $jit_err;
+    }
+    return $res;
 }
 
 # Compile a script file as a complete program in one shot and exec it.

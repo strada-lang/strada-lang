@@ -24,6 +24,7 @@
 ASTNode* ast_new_node(NodeType type) {
     ASTNode *node = calloc(1, sizeof(ASTNode));
     node->type = type;
+    node->char_code = -1;
     return node;
 }
 
@@ -132,6 +133,26 @@ ASTNode* ast_new_expr_stmt(ASTNode *expr) {
 }
 
 ASTNode* ast_new_binary_op(const char *op, ASTNode *left, ASTNode *right) {
+    if (op && (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+               strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 ||
+               strcmp(op, ">") == 0 || strcmp(op, ">=") == 0)) {
+        int l_char = (left && left->type == NODE_STR_LITERAL && left->char_code >= 0);
+        int r_char = (right && right->type == NODE_STR_LITERAL && right->char_code >= 0);
+        int l_nonchar_lit = (left && (left->type == NODE_NUM_LITERAL || (left->type == NODE_STR_LITERAL && !l_char)));
+        int r_nonchar_lit = (right && (right->type == NODE_NUM_LITERAL || (right->type == NODE_STR_LITERAL && !r_char)));
+        if (l_char && !r_nonchar_lit) {
+            free(left->data.str_val);
+            left->type = NODE_INT_LITERAL;
+            left->data.int_val = left->char_code;
+            left->char_code = -1;
+        }
+        if (r_char && !l_nonchar_lit) {
+            free(right->data.str_val);
+            right->type = NODE_INT_LITERAL;
+            right->data.int_val = right->char_code;
+            right->char_code = -1;
+        }
+    }
     ASTNode *node = ast_new_node(NODE_BINARY_OP);
     node->data.binary_op.op = strdup(op);
     node->data.binary_op.left = left;

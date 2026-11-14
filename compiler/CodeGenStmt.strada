@@ -157,9 +157,19 @@ func prescan_goto_labels(scalar $cg, scalar $node, int $depth, int $try_depth) v
         }
         return;
     }
-    if ($type == NODE_WHILE_STMT() || $type == NODE_DO_WHILE_STMT() || $type == NODE_FOR_STMT()) {
+    if ($type == NODE_WHILE_STMT() || $type == NODE_DO_WHILE_STMT()) {
         if ($node->{"body"}) {
             prescan_goto_labels($cg, $node->{"body"}->{"statements"}, $depth + 1, $try_depth);
+        }
+        return;
+    }
+    if ($type == NODE_FOR_STMT()) {
+        if ($node->{"body"}) {
+            my int $for_d = $depth + 1;
+            if ($node->{"init"} && $node->{"init"}->{"type"} == NODE_VAR_DECL()) {
+                $for_d = $depth + 2;
+            }
+            prescan_goto_labels($cg, $node->{"body"}->{"statements"}, $for_d, $try_depth);
         }
         return;
     }
@@ -845,22 +855,31 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($is_global_hash == 1) {
                 $hash_expr = "strada_global_get_cstr(" . c_str_lit($our_key) . ")";
             }
+            my int $lp = cleanup_push_useful($cg);
             emit_indent($cg);
             emit($cg, "{ StradaValue *__lh = " . $hash_expr . ";\n");
+            if ($lp == 1 && $is_global_hash == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_cleanup_push(__lh);\n");
+            }
             emit_indent($cg);
-            if ($key_expr->{"type"} == NODE_STR_LITERAL()) {
+            if ($key_expr->{"type"} == NODE_STR_LITERAL() && str_has_nul($key_expr->{"value"}) == 0) {
                 emit($cg, "strada_local_save_hash_elem(__lh, ");
                 gen_str_literal_c($cg, $key_expr->{"value"});
                 emit($cg, ");\n");
                 if ($stmt->{"init"}) {
+                    my int $lv_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1;
                     emit_indent($cg);
                     emit($cg, "{ StradaValue *__lv = ");
                     gen_expression($cg, $stmt->{"init"});
-                    emit($cg, "; strada_hv_store(__lh, ");
+                    emit($cg, "; ");
+                    if ($lp == 1 && $lv_cl == 1) { emit($cg, "strada_cleanup_push(__lv); "); }
+                    emit($cg, "strada_hv_store(__lh, ");
                     gen_str_literal_c($cg, $key_expr->{"value"});
                     emit($cg, ", __lv);");
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1) {
-                        emit($cg, " strada_decref(__lv);");
+                    if ($lv_cl == 1) {
+                        if ($lp == 1) { emit($cg, " strada_cleanup_pop_decref(__lv);"); }
+                        else { emit($cg, " strada_decref(__lv);"); }
                     }
                     emit($cg, " }\n");
                 }
@@ -868,25 +887,35 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 my int $k_cln = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
                 emit($cg, "{ StradaValue *__lk_sv = ");
                 gen_expression($cg, $key_expr);
-                emit($cg, "; char *__lk = strada_to_str_ss(__lk_sv); strada_local_save_hash_elem(__lh, __lk);");
+                emit($cg, "; ");
+                if ($lp == 1 && $k_cln == 1) { emit($cg, "strada_cleanup_push(__lk_sv); "); }
+                emit($cg, "strada_local_save_hash_elem_sv(__lh, __lk_sv);");
                 if ($stmt->{"init"}) {
+                    my int $lv_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1;
                     emit($cg, " { StradaValue *__lv = ");
                     gen_expression($cg, $stmt->{"init"});
-                    emit($cg, "; strada_hv_store(__lh, __lk, __lv);");
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1) {
-                        emit($cg, " strada_decref(__lv);");
+                    emit($cg, "; ");
+                    if ($lp == 1 && $lv_cl == 1) { emit($cg, "strada_cleanup_push(__lv); "); }
+                    emit($cg, "strada_hv_store_sv(__lh, __lk_sv, __lv);");
+                    if ($lv_cl == 1) {
+                        if ($lp == 1) { emit($cg, " strada_cleanup_pop_decref(__lv);"); }
+                        else { emit($cg, " strada_decref(__lv);"); }
                     }
                     emit($cg, " }");
                 }
-                emit($cg, " strada_cstr_free(__lk);");
                 if ($k_cln == 1) {
-                    emit($cg, " strada_decref(__lk_sv);");
+                    if ($lp == 1) { emit($cg, " strada_cleanup_pop_decref(__lk_sv);"); }
+                    else { emit($cg, " strada_decref(__lk_sv);"); }
                 }
                 emit($cg, " }\n");
             }
             if ($is_global_hash == 1) {
                 emit_indent($cg);
-                emit($cg, "strada_decref(__lh);\n");
+                if ($lp == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(__lh);\n");
+                } else {
+                    emit($cg, "strada_decref(__lh);\n");
+                }
             }
             emit_indent($cg);
             emit($cg, "}\n");
@@ -2255,15 +2284,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 my str $ts_our = "" . $cg->{"our_vars"}->{escape_c_keyword($ts_target->{"name"})};
                 if ($ts_sigil eq "$" && length($ts_our) == 0 && $ts_target->{"name"} ne "__program_name") {
                     my scalar $ts_value = $expr->{"value"};
+                    my int $ts_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ts_value) == 1;
+                    my int $ts_push = 0;
+                    if ($ts_cl == 1 && cleanup_push_useful($cg) == 1) { $ts_push = 1; }
                     emit($cg, "if (strada_scalar_is_tied(");
                     gen_expression($cg, $ts_target);
                     emit($cg, ")) { StradaValue *__ts_v = ");
                     gen_expression($cg, $ts_value);
-                    emit($cg, "; strada_tied_scalar_store(");
+                    emit($cg, "; ");
+                    if ($ts_push == 1) { emit($cg, "strada_cleanup_push(__ts_v); "); }
+                    emit($cg, "strada_tied_scalar_store(");
                     gen_expression($cg, $ts_target);
                     emit($cg, ", __ts_v); ");
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ts_value) == 1) {
-                        emit($cg, "strada_decref(__ts_v); ");
+                    if ($ts_cl == 1) {
+                        if ($ts_push == 1) { emit($cg, "strada_cleanup_pop_decref(__ts_v); "); }
+                        else { emit($cg, "strada_decref(__ts_v); "); }
                     }
                     emit($cg, "} else ");
                 }
@@ -2685,11 +2720,31 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "strada_cleanup_drain_to(__cleanup_mark_" . $cleanup_var_id . ");\n");
             emit_indent($cg);
             emit($cg, "StradaValue *__fin_exc_" . $cleanup_var_id . " = strada_get_exception();\n");
+            my int $fin_sd = $cg->{"scope_depth"};
+            my str $fin_saved_vars = "";
+            my int $fin_saved_cnt = 0;
+            if ($cg->{"cleanup_enabled"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_cleanup_push(__fin_exc_" . $cleanup_var_id . ");\n");
+                if ($fin_sd > 0) {
+                    $fin_saved_vars = $cg->{"scope_vars"}->[$fin_sd - 1];
+                    $fin_saved_cnt = $cg->{"scope_counts"}->[$fin_sd - 1];
+                    scope_track_var($cg, "__fin_exc_" . $cleanup_var_id);
+                }
+            }
             $cg->{"known_types"} = copy_type_map($catch_entry_kt);
             $cg->{"struct_vars"} = copy_type_map($try_saved_sv);
             $cg->{"finally_count"} = $fin_idx;
             gen_block($cg, $finally_block);
             emit($cg, "\n");
+            if ($cg->{"cleanup_enabled"} == 1) {
+                if ($fin_sd > 0) {
+                    $cg->{"scope_vars"}->[$fin_sd - 1] = $fin_saved_vars;
+                    $cg->{"scope_counts"}->[$fin_sd - 1] = $fin_saved_cnt;
+                }
+                emit_indent($cg);
+                emit($cg, "strada_cleanup_pop();\n");
+            }
             $cg->{"finally_count"} = $fin_idx + 1;
             emit_indent($cg);
             emit($cg, "strada_throw_value(__fin_exc_" . $cleanup_var_id . ");\n");

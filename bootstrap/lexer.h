@@ -136,6 +136,7 @@ typedef struct {
         double num_val;
         char *str_val;
     } value;
+    int char_code;
 } Token;
 
 typedef struct {

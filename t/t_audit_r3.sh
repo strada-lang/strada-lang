@@ -210,28 +210,6 @@ else
     aud_r3_record 1 "Stdlib fixes (C3)" "rc=$std_rc out=$std_out build=$(tail -n 10 "$aud_dir/stdlib.build.log" 2>/dev/null)"
 fi
 
-# 8. tools/xs2strada variadic XS signature -> scalar ...@xs_args + # REVIEW inside body
-if [ -x "$PROJECT_DIR/tools/xs2strada" ]; then
-    cat > "$aud_dir/var.xs" <<'EOF'
-MODULE = MyPkg  PACKAGE = MyPkg
-
-void
-my_var_fn(a, ...)
-    int a
-    CODE:
-        RETVAL = 0;
-EOF
-    if "$PROJECT_DIR/tools/xs2strada" "$aud_dir/var.xs" "$aud_dir/var_out.strada" > "$aud_dir/xs2strada.out" 2>&1 \
-        && grep -q 'scalar \.\.\.@xs_args' "$aud_dir/var_out.strada" \
-        && grep -q '# REVIEW: was variadic' "$aud_dir/var_out.strada"; then
-        aud_r3_record 0 "tools/xs2strada variadic ... maps to ...@xs_args + REVIEW inside body" ""
-    else
-        aud_r3_record 1 "tools/xs2strada variadic" "$(cat "$aud_dir/xs2strada.out" "$aud_dir/var_out.strada" 2>/dev/null)"
-    fi
-else
-    aud_r3_record 1 "tools/xs2strada binary missing (run make xs2strada)" ""
-fi
-
 # 9. Strada::JIT::run_file_argv signal exit status (SIGKILL -> 137)
 cat > "$aud_dir/sigkill_target.strada" <<'EOF'
 func main() int {

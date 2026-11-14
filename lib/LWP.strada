@@ -352,6 +352,12 @@ func parse_url(str $url) hash {
         $remaining = substr($remaining, $path_start, length($remaining) - $path_start);
     }
 
+    # Strip userinfo (user:pass@) if present before port/IPv6 parsing
+    my int $at_pos = rindex($host_part, "@");
+    if ($at_pos >= 0) {
+        $host_part = substr($host_part, $at_pos + 1, length($host_part) - $at_pos - 1);
+    }
+
     # Check for port in host (supporting bracketed IPv6 literals like [::1]:8080)
     if (length($host_part) >= 2 && substr($host_part, 0, 1) eq "[") {
         my int $close_br = index($host_part, "]");
@@ -829,6 +835,11 @@ func parse_response(str $raw) hash {
         }
     }
 
+    if (LWP::_has_conflicting_content_length($headers_text) == 1) {
+        $response{"error"} = "Invalid or conflicting Content-Length header";
+        return %response;
+    }
+
     # Parse headers
     my hash %hdrs = LWP::parse_headers($headers_text);
     $response{"headers"} = \%hdrs;
@@ -847,6 +858,92 @@ func parse_response(str $raw) hash {
     }
 
     return %response;
+}
+
+func _trim_ows(str $s) str {
+    my int $len = core::byte_length($s);
+    my int $start = 0;
+    while ($start < $len) {
+        my int $b = core::get_byte($s, $start);
+        if ($b == ' ' || $b == '\t') {
+            $start = $start + 1;
+        } else {
+            last;
+        }
+    }
+    my int $end = $len;
+    while ($end > $start) {
+        my int $b = core::get_byte($s, $end - 1);
+        if ($b == ' ' || $b == '\t') {
+            $end = $end - 1;
+        } else {
+            last;
+        }
+    }
+    return core::byte_substr($s, $start, $end - $start);
+}
+
+func _has_conflicting_content_length(str $headers_part) int {
+    my int $hlen = core::byte_length($headers_part);
+    my int $pos = 0;
+    my int $seen = 0;
+    my str $expected = "";
+    while ($pos <= $hlen) {
+        my int $nl = core::byte_index($headers_part, "\n", $pos);
+        my int $line_end = ($nl >= 0) ? $nl : $hlen;
+        my str $line = core::byte_substr($headers_part, $pos, $line_end - $pos);
+        my int $llen = core::byte_length($line);
+        if ($llen > 0 && core::get_byte($line, $llen - 1) == '\r') {
+            $line = core::byte_substr($line, 0, $llen - 1);
+            $llen = $llen - 1;
+        }
+        my int $colon = core::byte_index($line, ":");
+        if ($colon > 0) {
+            my str $hname = lc(LWP::_trim_ows(core::byte_substr($line, 0, $colon)));
+            if ($hname eq "content-length") {
+                my str $hval = LWP::_trim_ows(core::byte_substr($line, $colon + 1, $llen - $colon - 1));
+                my int $vlen = core::byte_length($hval);
+                my int $cpos = 0;
+                while ($cpos <= $vlen) {
+                    my int $comma = core::byte_index($hval, ",", $cpos);
+                    my int $cend = ($comma >= 0) ? $comma : $vlen;
+                    my str $tok = LWP::_trim_ows(core::byte_substr($hval, $cpos, $cend - $cpos));
+                    my int $tlen = core::byte_length($tok);
+                    if ($tlen == 0) {
+                        return 1;
+                    }
+                    my int $j = 0;
+                    while ($j < $tlen) {
+                        my int $b = core::get_byte($tok, $j);
+                        if ($b < '0' || $b > '9') {
+                            return 1;
+                        }
+                        $j = $j + 1;
+                    }
+                    my int $nz = 0;
+                    while ($nz + 1 < $tlen && core::get_byte($tok, $nz) == '0') {
+                        $nz = $nz + 1;
+                    }
+                    my str $norm = core::byte_substr($tok, $nz, $tlen - $nz);
+                    if ($seen == 0) {
+                        $seen = 1;
+                        $expected = $norm;
+                    } else if ($norm ne $expected) {
+                        return 1;
+                    }
+                    if ($comma < 0) {
+                        last;
+                    }
+                    $cpos = $comma + 1;
+                }
+            }
+        }
+        if ($nl < 0) {
+            last;
+        }
+        $pos = $nl + 1;
+    }
+    return 0;
 }
 
 # Internal: max_header_bytes option (default 65536; 0 = no limit)
@@ -920,6 +1017,9 @@ func _check_framing_truncation(str $raw, str $method) str {
             next;
         }
         last;
+    }
+    if (LWP::_has_conflicting_content_length($headers_part) == 1) {
+        return "Invalid or conflicting Content-Length header";
     }
     if (uc($method) eq "HEAD" || $status == 204 || $status == 304 || ($status >= 100 && $status < 200)) {
         return "";
@@ -1019,7 +1119,9 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
 
     # Build request
     my str $request = $method . " " . $path . " HTTP/1.1\r\n";
-    $request = $request . "Host: " . LWP::_format_host_header($scheme, $host, $port) . "\r\n";
+    if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "host")) {
+        $request = $request . "Host: " . LWP::_format_host_header($scheme, $host, $port) . "\r\n";
+    }
 
     # User-Agent
     my str $ua = "Strada-LWP/1.0";
@@ -1030,10 +1132,14 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
         $response{"error"} = "Invalid CR/LF in User-Agent header";
         return %response;
     }
-    $request = $request . "User-Agent: " . $ua . "\r\n";
+    if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "user-agent")) {
+        $request = $request . "User-Agent: " . $ua . "\r\n";
+    }
 
     # Connection
-    $request = $request . "Connection: close\r\n";
+    if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "connection")) {
+        $request = $request . "Connection: close\r\n";
+    }
 
     # Custom headers
     if (defined($options{"headers"})) {
@@ -1058,7 +1164,9 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
         if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "content-type")) {
             $request = $request . "Content-Type: application/x-www-form-urlencoded\r\n";
         }
-        $request = $request . "Content-Length: " . $body_len . "\r\n";
+        if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "content-length")) {
+            $request = $request . "Content-Length: " . $body_len . "\r\n";
+        }
     }
 
     $request = $request . "\r\n";
@@ -1153,7 +1261,11 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
                 }
                 %cur_opts = LWP::_redirect_options(%cur_opts, $cur_url, $next_url);
                 $cur_url = $next_url;
-                if (($st == 301 || $st == 302 || $st == 303) && uc($cur_method) eq "POST") {
+                my str $uc_method = uc($cur_method);
+                if ($st == 303 && $uc_method ne "GET" && $uc_method ne "HEAD") {
+                    $cur_method = "GET";
+                    $cur_body = "";
+                } else if (($st == 301 || $st == 302) && $uc_method eq "POST") {
                     $cur_method = "GET";
                     $cur_body = "";
                 }

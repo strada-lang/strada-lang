@@ -105,6 +105,7 @@ typedef struct ASTNode ASTNode;
 struct ASTNode {
     NodeType type;
     int line;
+    int char_code;
     
     union {
         // Program

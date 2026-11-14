@@ -1,0 +1,245 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 5 Batch 5A (Runtime/GC + Compiler/CodeGen)
+
+package LeakR5Obj;
+has ro int $x = 1;
+has ro int $y = 2;
+has ro str $label = "ok";
+
+package LeakR5ThrowStr;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "LeakR5ThrowStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("lr5_str_err");
+}
+use overload '""' => "to_str";
+
+package LeakR5ThrowDot;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "LeakR5ThrowDot");
+}
+func dot_op(scalar $self, scalar $other, int $rev) str {
+    die("lr5_dot_err");
+}
+use overload "." => "dot_op";
+
+package LeakR5MutHash;
+func new(scalar $h, str $k) scalar {
+    my hash %self = ("h" => $h, "k" => $k);
+    return bless(\%self, "LeakR5MutHash");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    delete($self->{"h"}->{$self->{"k"}});
+    return 10 + $other;
+}
+use overload "+" => "add_op";
+
+package LeakR5AfterThrow;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "LeakR5AfterThrow");
+}
+func work(scalar $self) str {
+    return "owned_" . "res";
+}
+after "work" func (scalar $self) void {
+    die("lr5_after_err");
+}
+
+package LeakR5Dyn;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "LeakR5Dyn");
+}
+func foo(scalar $self, scalar $a, str $b = "def") str {
+    return (defined($a) ? ("" . $a) : "U") . ":" . $b;
+}
+
+package LeakR5TieArr;
+func TIEARRAY(str $cls) scalar {
+    my hash %self = ("a" => ["one", "two"]);
+    return bless(\%self, $cls);
+}
+func FETCHSIZE(scalar $self) int { return size($self->{"a"}); }
+func FETCH(scalar $self, int $i) scalar { return "el_" . $i; }
+func STORE(scalar $self, int $i, scalar $v) void { die("lr5_tie_store"); }
+func STORESIZE(scalar $self, int $n) void { }
+
+package LeakR5TieHash;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("k" => 1);
+    return bless(\%self, $cls);
+}
+func FIRSTKEY(scalar $self) scalar { return "first_" . "k"; }
+func NEXTKEY(scalar $self, str $last) scalar { die("lr5_tie_nextkey"); }
+func DELETE(scalar $self, str $k) scalar { return undef; }
+
+package LeakR5ThrowTieHash;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("k" => 1);
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar {
+    if (index($k, "bad_") == 0) {
+        die("lr5_tth_fetch");
+    }
+    return "tth_" . $k;
+}
+func STORE(scalar $self, str $k, scalar $v) void { die("lr5_tth_store"); }
+func EXISTS(scalar $self, str $k) int { die("lr5_tth_exists"); return 0; }
+func DELETE(scalar $self, str $k) scalar { die("lr5_tth_delete"); return undef; }
+
+package LeakR5TieScalar;
+func TIESCALAR(str $cls) scalar {
+    my hash %self = ("v" => "abc");
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar { return "fetched_" . "s"; }
+func STORE(scalar $self, scalar $v) void { die("lr5_ts_store"); }
+
+package main;
+
+func throw_rhs() scalar {
+    die("lr5_rhs_err");
+    return 1;
+}
+
+func fin_early(int $i) int {
+    try {
+        die("fin_exc_" . $i);
+    } finally {
+        if ($i % 2 == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+func goto_for_iter(int $i) int {
+    try {
+        for (my str $s = "k_" . $i; length($s) > 0; $s = "") {
+            my str $tmp = "v_" . $i;
+            goto OUT_FOR;
+        }
+    } catch ($e) {
+        return 0;
+    }
+OUT_FOR:
+    return 1;
+}
+
+func main() int {
+    my scalar $tstr = LeakR5ThrowStr::new();
+    my scalar $tdot = LeakR5ThrowDot::new();
+    my scalar $after = LeakR5AfterThrow::new();
+    my scalar $dyn = LeakR5Dyn::new();
+    my array @ta = ();
+    tie(@ta, "LeakR5TieArr");
+    my hash %th = ();
+    tie(%th, "LeakR5TieHash");
+    my hash %tth = ();
+    tie(%tth, "LeakR5ThrowTieHash");
+    my scalar $ts = "x";
+    tie($ts, "LeakR5TieScalar");
+
+    my int $i = 0;
+    while ($i < 35) {
+        # RT5-01 & CC5-05
+        my scalar $o = LeakR5Obj::new("x" => $i, "y" => $i + 1, "label" => "s_" . $i);
+        my str $m = "foo";
+        my str $dr = $dyn->$m();
+        if ($dr ne "U:def" || $o->x() != $i) { return 1; }
+
+        # RT5-02 container reentrancy
+        my hash %mh = ();
+        $mh{"k"} = LeakR5MutHash::new(\%mh, "k");
+        $mh{"k"} += 3;
+        if ($mh{"k"} != 13) { return 2; }
+
+        # RT5-06 unwind guards
+        try { my str $w = $after->work(); } catch ($e) {}
+        try { splice(@ta, 0, 1, "x_" . $i); } catch ($e) {}
+        try { %th = (); } catch ($e) {}
+        my str $dk = "k_" . $i;
+        my str $bk = "bad_" . $i;
+        try { $tth{$dk} = "v_" . $i; } catch ($e) {}
+        try { $tth{"lit"} = "v_" . $i; } catch ($e) {}
+        try { $tth{"pfx_" . $dk} = "v_" . $i; } catch ($e) {}
+        my scalar $rtth = \%tth;
+        try { $rtth->{$dk} = "v_" . $i; } catch ($e) {}
+        try { $ta[$i + 0] = "v_" . $i; } catch ($e) {}
+        my scalar $rta = \@ta;
+        try { $rta->[$i + 0] = "v_" . $i; } catch ($e) {}
+        try { $ts = "v_" . $i; } catch ($e) {}
+        try { my scalar $tsv = ($ts = "v_" . $i); } catch ($e) {}
+        try { $ts .= "v_" . $i; } catch ($e) {}
+        my scalar $rts = \$ts;
+        try { $$rts = "v_" . $i; } catch ($e) {}
+        try { $$rts++; } catch ($e) {}
+        try { $tth{$dk}++; } catch ($e) {}
+        try { $rtth->{$dk}++; } catch ($e) {}
+        try { $tth{$dk} =~ s/tth/R/; } catch ($e) {}
+        try { substr($tth{$dk}, 0, 1) = "Z_" . $i; } catch ($e) {}
+        try { substr($tth{$bk}, 0, 1) = "Z_" . $i; } catch ($e) {}
+        try { local $tth{$dk} = "lv_" . $i; } catch ($e) {}
+        my hash %lh_plain = ("k_0" => "orig");
+        try { local $lh_plain{$dk} = throw_rhs(); } catch ($e) {}
+        my hash %avh = ();
+        $avh{"a"}->{"b"} = $dk;
+        if ($avh{"a"}->{"b"} ne $dk || $dk ne ("k_" . $i)) { return 5; }
+        try { my scalar $fv = $tth{$bk}; } catch ($e) {}
+        try { my int $ev = exists($tth{$dk}); } catch ($e) {}
+        try { my scalar $dv = delete($tth{$dk}); } catch ($e) {}
+        try { delete($tth{$dk}); } catch ($e) {}
+        try { $ts =~ tr/a-z/A-Z/; } catch ($e) {}
+
+        # RT5-07 / RT5-08 / RT5-09 / RT5-10 / RT5-13 / RT5-16
+        my str $rev_u = "a\x00café";
+        utf8::decode($rev_u);
+        my str $rev_r = reverse($rev_u);
+        my str $pk = core::pack("C/a*", "x\x00y_" . $i);
+        my str $u_lit = "café";
+        utf8::upgrade($u_lit);
+        my str $u_fail = "café";
+        utf8::decode($u_fail);
+        try { utf8::downgrade($u_fail); } catch ($e) {}
+        my hash %ch = ("Aa\x00x" => $i, "Aa\x00y" => "v_" . $i);
+        my scalar $cloned = clone(\%ch);
+        if (core::byte_length($rev_r) != 7 || core::byte_length($pk) < 6 || $cloned->{"Aa\x00x"} != $i) {
+            return 3;
+        }
+        try { die(("D" x 1400) . $i); } catch ($e) {}
+        my str $tr_s = "abc!";
+        $tr_s =~ tr/a-za-za-za-za-za-za-za-za-za-z!/a-za-za-za-za-za-za-za-za-za-z?/;
+        if ($tr_s ne "abc?") { return 4; }
+
+        # CC5-01 / CC5-03 / CC5-04
+        goto_for_iter($i);
+        try { fin_early($i); } catch ($e) {}
+        try {
+            try { die("outer_" . $i); } finally { die("fin2_" . $i); }
+        } catch ($e) {}
+
+        my int $xval = $i;
+        my scalar $xr = \$xval;
+        try { $$xr += throw_rhs(); } catch ($e) {}
+        try { $$xr /= 0; } catch ($e) {}
+        try { $$xr %= 0; } catch ($e) {}
+        my hash %h2 = ("k" => $i);
+        try { $h2{"k"} /= 0; } catch ($e) {}
+        try { $h2{"k"} += throw_rhs(); } catch ($e) {}
+        my array @a2 = ($i);
+        try { $a2[0] %= 0; } catch ($e) {}
+        try { $a2[0] += throw_rhs(); } catch ($e) {}
+        try { my str $c = ("pfx_" . $i) . $tdot; } catch ($e) {}
+        try { die("d1_" . $i, $tstr); } catch ($e) {}
+
+        $i = $i + 1;
+    }
+
+    say("R5_LEAKS_OK");
+    return 0;
+}

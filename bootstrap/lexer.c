@@ -196,6 +196,7 @@ static Token* make_token(TokenType type, const char *lexeme, int line, int colum
     tok->lexeme = lexeme ? strdup(lexeme) : NULL;
     tok->line = line;
     tok->column = column;
+    tok->char_code = -1;
     return tok;
 }
 
@@ -261,11 +262,63 @@ static Token* read_number(Lexer *lex) {
     return tok;
 }
 
+static int parse_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_sq_char_code(const char *raw, size_t rlen) {
+    if (rlen == 1) {
+        return (int)(unsigned char)raw[0];
+    }
+    if (rlen >= 2 && raw[0] == '\\') {
+        if (rlen == 2) {
+            switch (raw[1]) {
+                case 'n':  return 10;
+                case 't':  return 9;
+                case 'r':  return 13;
+                case '0':  return 0;
+                case 'a':  return 7;
+                case 'b':  return 8;
+                case 'f':  return 12;
+                case 'v':  return 11;
+                case 'e':  return 27;
+                case '\\': return 92;
+                case '\'': return 39;
+                case '\"': return 34;
+                default: break;
+            }
+        }
+        if (rlen == 4 && (raw[1] == 'x' || raw[1] == 'X')) {
+            int hi = parse_hex_digit(raw[2]);
+            int lo = parse_hex_digit(raw[3]);
+            if (hi >= 0 && lo >= 0) {
+                return (hi << 4) | lo;
+            }
+            return -1;
+        }
+        if (rlen >= 2 && rlen <= 4) {
+            int ov = 0;
+            for (size_t i = 1; i < rlen; i++) {
+                if (raw[i] < '0' || raw[i] > '7') {
+                    return -1;
+                }
+                ov = ov * 8 + (raw[i] - '0');
+            }
+            return ov <= 255 ? ov : -1;
+        }
+    }
+    return -1;
+}
+
 static Token* read_string(Lexer *lex) {
     int start_line = lex->line;
     int start_col = lex->column;
     char quote = lexer_current(lex);
     lexer_advance(lex); // Skip opening quote
+    size_t raw_start = lex->pos;
 
     char *buffer = NULL;
     size_t buf_len = 0, buf_cap = 0;
@@ -299,12 +352,18 @@ static Token* read_string(Lexer *lex) {
         buffer[0] = '\0';
     }
 
+    size_t raw_end = lex->pos;
+    int closed = 0;
     if (lexer_current(lex) == quote) {
+        closed = 1;
         lexer_advance(lex); // Skip closing quote
     }
 
     Token *tok = make_token(TOK_STR_LITERAL, buffer, start_line, start_col);
     tok->value.str_val = buffer;  // ownership transferred
+    if (quote == '\'' && closed && raw_end >= raw_start) {
+        tok->char_code = parse_sq_char_code(lex->source + raw_start, raw_end - raw_start);
+    }
     return tok;
 }
 

@@ -4,6 +4,13 @@ CC ?= gcc
 CFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-but-set-variable -Wno-unused-result -Wno-comment -O2 -std=c99 -I../runtime
 LDFLAGS = 
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+RUNTIME_LIBS = -lm -lpthread
+else
+RUNTIME_LIBS = -ldl -lm -lpthread
+endif
+
 SOURCES = main.c lexer.c parser.c ast.c codegen.c
 OBJECTS = $(SOURCES:.c=.o)
 TARGET = stradac
@@ -27,7 +34,7 @@ test: $(TARGET)
 	./$(TARGET) ../examples/test_simple.strada ../examples/test_simple.c
 	@echo ""
 	@echo "=== Compiling Generated C Code ==="
-	$(CC) -o ../examples/test_simple ../examples/test_simple.c ../runtime/strada_runtime.c -I../runtime
+	$(CC) -o ../examples/test_simple ../examples/test_simple.c ../runtime/strada_runtime.c -I../runtime $(RUNTIME_LIBS)
 	@echo ""
 	@echo "=== Running Compiled Program ==="
 	../examples/test_simple

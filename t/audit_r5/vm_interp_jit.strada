@@ -1,0 +1,171 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # --- VM5-02: Live filehandles across eval_string_vm boundary ---
+    my str $tmp = "/tmp/r5_vij_io.txt";
+    my scalar $wfh = core::open($tmp, "w");
+    say($wfh, "from_host_1");
+    say($wfh, "from_host_2");
+    core::close($wfh);
+
+    my scalar $vm_fh = Strada::Interpreter::eval_string_vm('core::open("/tmp/r5_vij_io.txt", "r")');
+    ok(defined($vm_fh), "VM5-02 eval_string_vm returns open filehandle");
+    my str $line1 = core::readline($vm_fh);
+    ok($line1 eq "from_host_1", "VM5-02 compiled host reads readline from VM filehandle");
+    core::close($vm_fh);
+
+    # Pass host filehandle into eval_string_vm and persist VM filehandle across calls
+    my scalar $host_fh = core::open($tmp, "r");
+    my scalar $vm_rd_fn = Strada::Interpreter::eval_string_vm('return func(scalar $fh) str { return core::readline($fh); };');
+    my str $line_via_vm = $vm_rd_fn->($host_fh);
+    ok($line_via_vm eq "from_host_1", "VM5-02 host filehandle passed into VM closure reads line 1");
+    my str $line2_host = core::readline($host_fh);
+    ok($line2_host eq "from_host_2", "VM5-02 host filehandle position preserved after VM read");
+    core::close($host_fh);
+
+    my scalar $m_fh = Strada::Interpreter::eval_string_vm('our scalar $g_kept_fh = core::open("/tmp/r5_vij_io.txt", "r"); core::readline($g_kept_fh)');
+    ok($m_fh eq "from_host_1", "VM5-02 eval_string_vm opens and reads line 1");
+    my scalar $m_fh2 = Strada::Interpreter::eval_string_vm('my str $l2 = core::readline($g_kept_fh); core::close($g_kept_fh); $l2');
+    ok($m_fh2 eq "from_host_2", "VM5-02 filehandle persists in VM globals across eval_string_vm calls");
+    core::unlink($tmp);
+
+    # --- VM5-03: Exported VM closure + exception + scalar ref ---
+    my scalar $cl = Strada::Interpreter::eval_string_vm('
+        my int $n = 10;
+        return func(int $x) int {
+            $n = $n + $x;
+            return $n;
+        };
+    ');
+    ok($cl->(5) == 15, "VM5-03 exported VM closure call 1 preserves capture");
+    ok($cl->(7) == 22, "VM5-03 exported VM closure call 2 mutates capture");
+
+    my scalar $cl_throw = Strada::Interpreter::eval_string_vm('
+        return func(int $k) int {
+            if ($k > 0) { throw "vm_cl_boom_" . $k; }
+            return 0;
+        };
+    ');
+    my str $caught_msg = "";
+    try {
+        $cl_throw->(9);
+    } catch ($e) {
+        $caught_msg = "" . $e;
+    }
+    ok($caught_msg eq "vm_cl_boom_9", "VM5-03 exported VM closure exception propagates to host");
+
+    my scalar $sref = Strada::Interpreter::eval_string_vm('my int $v = 99; return \$v;');
+    ok(($$sref + 0) == 99, "VM5-03 exported scalar ref derefs cleanly in host");
+
+    # --- VM5-04: eval_string_vm trailing s/// and tr/// return count ---
+    my scalar $sc = Strada::Interpreter::eval_string_vm('my str $s = "a1b2"; $s =~ s/\d/X/g');
+    ok(($sc + 0) == 2, "VM5-04 eval_string_vm trailing s/// returns substitution count");
+    my scalar $tc = Strada::Interpreter::eval_string_vm('my str $t = "abc"; $t =~ tr/a-z/A-Z/');
+    ok(($tc + 0) == 3, "VM5-04 eval_string_vm trailing tr/// returns transliteration count");
+
+    # --- VM5-06: >256 locals in one flat scope throws instead of exit(1) ---
+    my str $many_code = "func flat_260() int {\n";
+    my int $li = 0;
+    while ($li < 260) {
+        $many_code = $many_code . "    my int \$v" . $li . " = " . $li . ";\n";
+        $li = $li + 1;
+    }
+    $many_code = $many_code . "    return \$v0;\n}\nflat_260()";
+    my int $comp_threw = 0;
+    try {
+        Strada::Interpreter::eval_string_vm($many_code);
+    } catch ($ce) {
+        $comp_threw = 1;
+    }
+    ok($comp_threw == 1, "VM5-06 >256 locals throws compile exception instead of exit(1)");
+
+    my scalar $vm_cc = Strada::Interpreter::eval_string_vm("
+        my int \$c = 65;
+        my num \$f = 0.0;
+        (\$c == 'A' && '0' == 48 && '\\n' == 10 && 'a' < 'z' && \$f == '0') ? 1 : 0
+    ");
+    ok(($vm_cc + 0) == 1, "CC5-06 eval_string_vm single-char comparisons");
+
+    my scalar $ev_cc = Strada::Interpreter::eval_string("
+        my int \$c = 65;
+        my num \$f = 0.0;
+        (\$c == 'A' && '0' == 48 && '\\n' == 10 && 'a' < 'z' && \$f == '0') ? 1 : 0
+    ");
+    ok(($ev_cc + 0) == 1, "CC5-06 Strada::Interpreter::eval_string single-char comparisons");
+
+    Strada::Interpreter::reset();
+
+    # --- VM5-10 & SL5-19: Strada::JIT ---
+    Strada::JIT::init();
+
+    my int $jit_fn_err = 0;
+    try {
+        Strada::JIT::eval('func broken( {');
+    } catch ($je1) {
+        $jit_fn_err = 1;
+    }
+    ok($jit_fn_err == 1, "VM5-10 broken func throws immediately");
+    ok((Strada::JIT::eval('1 + 2') + 0) == 3, "VM5-10 JIT not poisoned after broken func");
+
+    my int $jit_const_err = 0;
+    try {
+        Strada::JIT::eval('const int BAD_R5 = ;');
+    } catch ($je2) {
+        $jit_const_err = 1;
+    }
+    ok($jit_const_err == 1, "VM5-10 broken const throws immediately");
+
+    my int $jit_use_err = 0;
+    try {
+        Strada::JIT::eval('use NonExistentR5ModuleXYZ;');
+    } catch ($je3) {
+        $jit_use_err = 1;
+    }
+    ok($jit_use_err == 1, "VM5-10 nonexistent use throws immediately");
+    ok((Strada::JIT::eval('40 + 2') + 0) == 42, "VM5-10 JIT clean after const & use rollback");
+
+    # Inheritance redefinition clears stale parents
+    Strada::JIT::eval('package ParentA; func pa() int { return 1; }');
+    Strada::JIT::eval('package ParentB; func pb() int { return 2; }');
+    Strada::JIT::eval('package R5Child; extends ParentA; func new() scalar { my hash %s = (); return bless(\%s, "R5Child"); }');
+    my scalar $isa_a1 = Strada::JIT::eval('package main; my scalar $c1 = R5Child::new(); $c1->isa("ParentA")');
+    ok(($isa_a1 + 0) == 1, "VM5-10 Child initially isa ParentA");
+    Strada::JIT::eval('package R5Child; extends ParentB; func new() scalar { my hash %s = (); return bless(\%s, "R5Child"); }');
+    my scalar $isa_after = Strada::JIT::eval('package main; my scalar $c2 = R5Child::new(); ($c2->isa("ParentA") == 0 && $c2->isa("ParentB") == 1) ? 1 : 0');
+    ok(($isa_after + 0) == 1, "VM5-10 Child redefinition clears ParentA and binds ParentB");
+
+    # SL5-19: recursive Strada::JIT::eval depth > 70 with tracked variables
+    Strada::JIT::eval('package main; my int $tracked_v = 0;');
+    core::global_set("r5_rn", 72);
+    my scalar $rec_res = Strada::JIT::eval('my int $my_d = core::global_get("r5_rn") + 0; $tracked_v = $my_d; if ($my_d > 0) { core::global_set("r5_rn", $my_d - 1); repl_eval(); } $tracked_v');
+    my scalar $tracked_after = Strada::JIT::eval('$tracked_v');
+    core::global_delete("r5_rn");
+    ok(($rec_res + 0) == 72 && ($tracked_after + 0) == 72, "SL5-19 recursive JIT repl_eval >70 deep preserves outer captures via dynamic stack");
+
+    my scalar $jit_cc = Strada::JIT::eval("
+        my int \$c = 65;
+        my num \$f = 0.0;
+        (\$c == 'A' && '0' == 48 && '\\n' == 10 && 'a' < 'z' && \$f == '0') ? 1 : 0
+    ");
+    ok(($jit_cc + 0) == 1, "CC5-06 Strada::JIT::eval single-char comparisons");
+
+    Strada::JIT::reset();
+
+    if ($g_fail > 0) {
+        say("VM_INTERP_JIT_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R5_VM_INTERP_JIT_OK");
+    return 0;
+}

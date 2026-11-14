@@ -84,6 +84,7 @@ __C__ {
 #include <stdio.h>
 #include <math.h>
 #include <errno.h>
+#include <locale.h>
 
 /* ============================================================
  * Encoder: walk StradaValue structures, build into a growable
@@ -169,6 +170,82 @@ static int json_keycmp(const void *a, const void *b) {
 
 static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth);
 
+static int json_tied_keycmp(const void *a, const void *b) {
+    StradaValue *va = *(StradaValue* const*)a;
+    StradaValue *vb = *(StradaValue* const*)b;
+    char *oa = NULL, *ob = NULL;
+    const char *sa = "";
+    const char *sb_s = "";
+    size_t la = 0, lb = 0;
+    if (va && !STRADA_IS_TAGGED_INT(va) && va->type == STRADA_STR && va->value.pv) {
+        sa = va->value.pv;
+        la = STRADA_STR_BYTELEN(va);
+    } else {
+        oa = strada_to_str(va);
+        sa = oa ? oa : "";
+        la = strlen(sa);
+    }
+    if (vb && !STRADA_IS_TAGGED_INT(vb) && vb->type == STRADA_STR && vb->value.pv) {
+        sb_s = vb->value.pv;
+        lb = STRADA_STR_BYTELEN(vb);
+    } else {
+        ob = strada_to_str(vb);
+        sb_s = ob ? ob : "";
+        lb = strlen(sb_s);
+    }
+    size_t minlen = la < lb ? la : lb;
+    int cmp = minlen ? memcmp(sa, sb_s, minlen) : 0;
+    if (oa) free(oa);
+    if (ob) free(ob);
+    if (cmp != 0) return cmp;
+    if (la < lb) return -1;
+    if (la > lb) return 1;
+    return 0;
+}
+
+static void json_enc_tied_array(JsonB *b, StradaValue *v, int canonical, int depth) {
+    jb_putc(b, '[');
+    int64_t n = strada_av_fetchsize_sv(v);
+    for (int64_t i = 0; i < n; i++) {
+        if (i > 0) jb_putc(b, ',');
+        StradaValue *el = strada_av_fetch_sv(v, i);
+        if (el) strada_cleanup_push(el);
+        json_enc(b, el, canonical, depth + 1);
+        if (el) strada_cleanup_pop_decref(el);
+    }
+    jb_putc(b, ']');
+}
+
+static void json_enc_tied_hash(JsonB *b, StradaValue *v, int canonical, int depth) {
+    jb_putc(b, '{');
+    StradaArray *keys = strada_hash_keys_sv(v);
+    if (!keys) { jb_putc(b, '}'); return; }
+    StradaValue *keys_sv = strada_new_array_from_av(keys);
+    strada_cleanup_push(keys_sv);
+    size_t n = strada_array_length(keys);
+    if (canonical && n > 1 && keys->elements) {
+        qsort(keys->elements + keys->head, n, sizeof(StradaValue*), json_tied_keycmp);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0) jb_putc(b, ',');
+        StradaValue *k = strada_array_get(keys, i);
+        if (k && !STRADA_IS_TAGGED_INT(k) && k->type == STRADA_STR && k->value.pv) {
+            jb_put_escaped(b, k->value.pv, STRADA_STR_BYTELEN(k));
+        } else {
+            char *ks = strada_to_str(k);
+            jb_put_escaped(b, ks ? ks : "", ks ? strlen(ks) : 0);
+            free(ks);
+        }
+        jb_putc(b, ':');
+        StradaValue *val = strada_hv_fetch_owned_sv(v, k);
+        if (val) strada_cleanup_push(val);
+        json_enc(b, val, canonical, depth + 1);
+        if (val) strada_cleanup_pop_decref(val);
+    }
+    strada_cleanup_pop_decref(keys_sv);
+    jb_putc(b, '}');
+}
+
 static void json_enc_hash(JsonB *b, StradaHash *hv, int canonical, int depth) {
     jb_putc(b, '{');
     int first = 1;
@@ -216,6 +293,16 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
         return;
     }
 
+    if (v->meta && v->meta->is_tied) {
+        if (v->type == STRADA_HASH) { json_enc_tied_hash(b, v, canonical, depth); return; }
+        if (v->type == STRADA_ARRAY) { json_enc_tied_array(b, v, canonical, depth); return; }
+        StradaValue *fetched = strada_tied_scalar_fetch(v);
+        if (fetched) strada_cleanup_push(fetched);
+        json_enc(b, fetched, canonical, depth + 1);
+        if (fetched) strada_cleanup_pop_decref(fetched);
+        return;
+    }
+
     if (strada_is_bool(v)) {
         if (v->value.iv) jb_put(b, "true", 4);
         else jb_put(b, "false", 5);
@@ -242,9 +329,32 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
                 jb_put(b, "null", 4);
                 return;
             }
-            char tmp[40];
+            char tmp[64];
             int n = snprintf(tmp, sizeof(tmp), "%.15g", d);
-            jb_put(b, tmp, (size_t)n);
+            if (n < 0) n = 0;
+            if ((size_t)n >= sizeof(tmp)) n = (int)(sizeof(tmp) - 1);
+            tmp[n] = '\0';
+            struct lconv *lc = localeconv();
+            const char *dp = (lc && lc->decimal_point && lc->decimal_point[0]) ? lc->decimal_point : ".";
+            size_t dplen = strlen(dp);
+            if (dplen == 1 && dp[0] != '.') {
+                for (int i = 0; i < n; i++) {
+                    if (tmp[i] == dp[0]) tmp[i] = '.';
+                }
+                jb_put(b, tmp, (size_t)n);
+            } else if (strcmp(dp, ".") != 0) {
+                const char *hit = strstr(tmp, dp);
+                if (hit) {
+                    size_t pre = (size_t)(hit - tmp);
+                    jb_put(b, tmp, pre);
+                    jb_putc(b, '.');
+                    jb_put(b, hit + dplen, (size_t)n - pre - dplen);
+                } else {
+                    jb_put(b, tmp, (size_t)n);
+                }
+            } else {
+                jb_put(b, tmp, (size_t)n);
+            }
             return;
         }
         case STRADA_STR: {
@@ -264,20 +374,25 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
                     : v->value.rv;
                 if (t) {
                     if (!STRADA_IS_TAGGED_INT(t)) {
-                        if (t->type == STRADA_HASH) { json_enc_hash(b, t->value.hv, canonical, depth); return; }
-                        if (t->type == STRADA_ARRAY) {
-                            jb_putc(b, '[');
-                            StradaArray *av = t->value.av;
-                            size_t n = av ? strada_array_length(av) : 0;
-                            for (size_t i = 0; i < n; i++) {
-                                if (i) jb_putc(b, ',');
-                                json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+                        if (t->meta && t->meta->is_tied) {
+                            if (t->type == STRADA_HASH) { json_enc_tied_hash(b, t, canonical, depth); return; }
+                            if (t->type == STRADA_ARRAY) { json_enc_tied_array(b, t, canonical, depth); return; }
+                        } else {
+                            if (t->type == STRADA_HASH) { json_enc_hash(b, t->value.hv, canonical, depth); return; }
+                            if (t->type == STRADA_ARRAY) {
+                                jb_putc(b, '[');
+                                StradaArray *av = t->value.av;
+                                size_t n = av ? strada_array_length(av) : 0;
+                                for (size_t i = 0; i < n; i++) {
+                                    if (i) jb_putc(b, ',');
+                                    json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+                                }
+                                jb_putc(b, ']');
+                                return;
                             }
-                            jb_putc(b, ']');
-                            return;
                         }
                     }
-                    /* scalar ref (including tagged int): encode the target */
+                    /* scalar ref (including tagged int or tied scalar): encode the target */
                     json_enc(b, t, canonical, depth + 1);
                     return;
                 }
@@ -608,6 +723,24 @@ static StradaValue* jp_value(JsonP *p, int depth) {
             if (errno == 0) return strada_new_int((int64_t)iv);
         }
         {
+            struct lconv *lc = localeconv();
+            const char *dp = (lc && lc->decimal_point && lc->decimal_point[0]) ? lc->decimal_point : ".";
+            size_t dplen = strlen(dp);
+            if (strcmp(dp, ".") != 0) {
+                const char *dot = memchr(p->s + start, '.', n);
+                if (dot) {
+                    char *big = malloc(n + dplen);
+                    if (!big) { p->err = 1; return NULL; }
+                    size_t pre = (size_t)(dot - (p->s + start));
+                    memcpy(big, p->s + start, pre);
+                    memcpy(big + pre, dp, dplen);
+                    memcpy(big + pre + dplen, dot + 1, n - pre - 1);
+                    big[n - 1 + dplen] = '\0';
+                    double d = strtod(big, NULL);
+                    free(big);
+                    return strada_new_num(d);
+                }
+            }
             char *big = malloc(n + 1);
             if (!big) { p->err = 1; return NULL; }
             memcpy(big, p->s + start, n); big[n] = '\0';
@@ -657,7 +790,22 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
 
 static StradaValue* strada_json_encode_c(StradaValue *v, int canonical) {
     JsonB b = {0};
-    json_enc(&b, v, canonical, 0);
+    int mark = strada_cleanup_mark();
+    jmp_buf *tb = STRADA_TRY_PUSH();
+    if (tb) {
+        if (setjmp(*tb) == 0) {
+            json_enc(&b, v, canonical, 0);
+            STRADA_TRY_POP();
+        } else {
+            STRADA_TRY_POP();
+            strada_cleanup_drain_to(mark);
+            free(b.buf);
+            strada_throw_value(strada_get_exception());
+            return strada_new_undef();
+        }
+    } else {
+        json_enc(&b, v, canonical, 0);
+    }
     if (b.oom) { free(b.buf); return strada_new_str(""); }
     StradaValue *out = jp_make_str_sv(b.buf ? b.buf : "", b.len);
     free(b.buf);

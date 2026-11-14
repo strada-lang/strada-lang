@@ -1468,8 +1468,10 @@ func interp_register_func(scalar $interp, str $name, scalar $params, int $param_
             my scalar $p = $params->[$ti];
             push(@pnames, $p->{"name"});
             push(@ptypes, $p->{"param_type"});
-            push(@pdefaults, $p->{"default_value"});
-            push(@poptional, $p->{"is_optional"});
+            my scalar $pdev = exists($p, "default") ? $p->{"default"} : $p->{"default_value"};
+            my int $popt = (exists($p, "has_default") && $p->{"has_default"} == 1) ? 1 : (($p->{"is_optional"} == 1) ? 1 : 0);
+            push(@pdefaults, $pdev);
+            push(@poptional, $popt);
             $ti = $ti + 1;
         }
         $fi{"__pnames"} = \@pnames;
@@ -2354,10 +2356,24 @@ func interp_unwind_locals(scalar $interp, int $depth) void {
     while (size($ls) > $depth) {
         my scalar $save = pop($ls);
         if (exists($save, "is_hash_elem") && $save->{"is_hash_elem"} == 1) {
-            if ($save->{"had_key"} == 1) {
-                $save->{"hash"}->{$save->{"key"}} = $save->{"value"};
+            my scalar $sh = $save->{"hash"};
+            if (ref($sh) eq "HASH" && exists($sh, "__tied__")) {
+                my scalar $tobj = $sh->{"__tied__"};
+                my str $tpkg = get_obj_class($tobj);
+                if ($save->{"had_key"} == 1) {
+                    if (length($tpkg) > 0) {
+                        my scalar $store_fn = interp_resolve_method($interp, $tpkg, "STORE");
+                        if (defined($store_fn)) {
+                            call_user_func($interp, $store_fn, [$tobj, $save->{"key"}, $save->{"value"}]);
+                        }
+                    }
+                } else {
+                    interp_hash_delete($interp, $sh, $save->{"key"});
+                }
+            } elsif ($save->{"had_key"} == 1) {
+                $sh->{$save->{"key"}} = $save->{"value"};
             } else {
-                delete($save->{"hash"}, $save->{"key"});
+                delete($sh, $save->{"key"});
             }
         } elsif ($save->{"had_key"} == 1) {
             env_set($interp->{"global_env"}, $save->{"name"}, $save->{"value"});
@@ -2552,29 +2568,18 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
             $ci = $ci + 1;
         }
 
-        my int $ran_around = 0;
+        my array @around_mods = ();
         my scalar $result = undef;
         $ci = 0;
-        while ($ci < size(\@mod_classes) && $ran_around == 0) {
+        while ($ci < size(\@mod_classes)) {
             my str $mcls = $mod_classes[$ci];
             my int $mi = 0;
-            while ($mi < $mod_count && $ran_around == 0) {
+            while ($mi < $mod_count) {
                 my scalar $mod = $mods->[$mi];
                 if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
                     my scalar $mod_fi = $mod->{"func_info"};
                     if (defined($mod_fi)) {
-                        my hash %orig = ();
-                        $orig{"__orig_func__"} = $func_info;
-                        my array @around_args = ();
-                        push(@around_args, \%orig);
-                        push(@around_args, $args->[0]);
-                        my int $aai = 1;
-                        while ($aai < size($args)) {
-                            push(@around_args, $args->[$aai]);
-                            $aai = $aai + 1;
-                        }
-                        $result = call_user_func($interp, $mod_fi, \@around_args);
-                        $ran_around = 1;
+                        push(@around_mods, $mod_fi);
                     }
                 }
                 $mi = $mi + 1;
@@ -2582,7 +2587,27 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
             $ci = $ci + 1;
         }
 
-        if ($ran_around == 0) {
+        if (size(\@around_mods) > 0) {
+            my hash %base_orig = ();
+            $base_orig{"__orig_func__"} = $func_info;
+            my scalar $chain = \%base_orig;
+            my int $ami = size(\@around_mods) - 1;
+            while ($ami >= 1) {
+                my hash %wrap = ();
+                $wrap{"__around_func__"} = $around_mods[$ami];
+                $wrap{"__next_orig__"} = $chain;
+                $chain = \%wrap;
+                $ami = $ami - 1;
+            }
+            my array @around_args = ();
+            push(@around_args, $chain);
+            my int $aai = 0;
+            while ($aai < size($args)) {
+                push(@around_args, $args->[$aai]);
+                $aai = $aai + 1;
+            }
+            $result = call_user_func($interp, $around_mods[0], \@around_args);
+        } else {
             $result = call_user_func($interp, $func_info, $args);
         }
 
@@ -2685,28 +2710,41 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
         my str $op = $node->{"op"};
         $oid = $interp->{"op_ids"}->{$op};
         $node->{"__oid"} = $oid;
+        if ($oid >= OP::NUM_EQ && $oid <= OP::SPACESHIP) {
+            my int $sq = 0;
+            if (ref($node->{"left"}) eq "HASH" && exists($node->{"left"}, "from_sq_str")) { $sq = $sq | 1; }
+            if (ref($node->{"right"}) eq "HASH" && exists($node->{"right"}, "from_sq_str")) { $sq = $sq | 2; }
+            if ($sq == 1 || $sq == 2) {
+                $node->{"__sq_mask"} = $sq;
+            }
+        }
     }
 
     # Short-circuit operators (must check before evaluating both sides)
     if ($oid == OP::LOG_AND || $oid == OP::WORD_AND) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         if (!$left) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
     }
     if ($oid == OP::LOG_OR || $oid == OP::WORD_OR) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         if ($left) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
     }
     if ($oid == OP::DEFOR) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         if (defined($left)) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
     }
 
     # Evaluate both sides
     my scalar $left = eval_node($interp, $node->{"left"}, $env);
+    if ($interp->{"signal"} != SIG::NONE) { return undef; }
     my scalar $right = eval_node($interp, $node->{"right"}, $env);
+    if ($interp->{"signal"} != SIG::NONE) { return undef; }
 
     # Check for operator overloading (skip entirely when no overloads registered)
     if ($interp->{"has_overloads"} == 1) {
@@ -2774,16 +2812,26 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
     }
 
     # Numeric comparison
-    if ($oid == OP::NUM_EQ) { return ($left == $right) ? 1 : 0; }
-    if ($oid == OP::NUM_NE) { return ($left != $right) ? 1 : 0; }
-    if ($oid == OP::NUM_LT) { return ($left < $right) ? 1 : 0; }
-    if ($oid == OP::NUM_GT) { return ($left > $right) ? 1 : 0; }
-    if ($oid == OP::NUM_LE) { return ($left <= $right) ? 1 : 0; }
-    if ($oid == OP::NUM_GE) { return ($left >= $right) ? 1 : 0; }
-    if ($oid == OP::SPACESHIP) {
-        if ($left < $right) { return -1; }
-        if ($left > $right) { return 1; }
-        return 0;
+    if ($oid >= OP::NUM_EQ && $oid <= OP::SPACESHIP) {
+        my int $sqm = $node->{"__sq_mask"};
+        if ($sqm == 2) {
+            my str $lt = typeof($left);
+            if ($lt eq "num" || $lt eq "str") { $right = $node->{"right"}->{"from_sq_str"}; }
+        } elsif ($sqm == 1) {
+            my str $rt = typeof($right);
+            if ($rt eq "num" || $rt eq "str") { $left = $node->{"left"}->{"from_sq_str"}; }
+        }
+        if ($oid == OP::NUM_EQ) { return ($left == $right) ? 1 : 0; }
+        if ($oid == OP::NUM_NE) { return ($left != $right) ? 1 : 0; }
+        if ($oid == OP::NUM_LT) { return ($left < $right) ? 1 : 0; }
+        if ($oid == OP::NUM_GT) { return ($left > $right) ? 1 : 0; }
+        if ($oid == OP::NUM_LE) { return ($left <= $right) ? 1 : 0; }
+        if ($oid == OP::NUM_GE) { return ($left >= $right) ? 1 : 0; }
+        if ($oid == OP::SPACESHIP) {
+            if ($left < $right) { return -1; }
+            if ($left > $right) { return 1; }
+            return 0;
+        }
     }
 
     # String comparison
@@ -3789,8 +3837,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::open($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_CLOSE) {
-        core::close($args->[0]);
-        return undef;
+        return core::close($args->[0]);
     }
     if ($bid == BI::SYS_READLINE) {
         if ($argc >= 2) { return core::readline($args->[0], $args->[1]); }
@@ -4368,9 +4415,14 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::MATH_EXP) { return math::exp($args->[0]); }
     if ($bid == BI::MATH_RAND) { return math::rand(); }
     if ($bid == BI::MATH_SRAND) {
-        my scalar $seed = $args->[0];
+        my int $has_seed = (size($args) > 0 && defined($args->[0])) ? 1 : 0;
+        my scalar $seed = $has_seed == 1 ? $args->[0] : 0;
         __C__ {
-            srand((unsigned int)strada_to_int(seed));
+            if (strada_to_int(has_seed)) {
+                srand((unsigned int)strada_to_int(seed));
+            } else {
+                srand((unsigned int)time(NULL));
+            }
         }
         return undef;
     }
@@ -4486,14 +4538,17 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $second = 0;
         __C__ {
             time_t t = time(NULL);
-            struct tm *tm_val = localtime(&t);
+            struct tm tm_buf;
+            struct tm *tm_val = localtime_r(&t, &tm_buf);
             strada_decref(epoch); epoch = strada_new_int((int64_t)t);
-            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
-            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
-            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
-            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
-            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
-            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            if (tm_val) {
+                strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+                strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+                strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+                strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+                strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+                strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            }
         }
         my hash %dt = ();
         $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
@@ -4507,14 +4562,17 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $hour = 0; my int $minute = 0; my int $second = 0;
         __C__ {
             time_t t = time(NULL);
-            struct tm *tm_val = gmtime(&t);
+            struct tm tm_buf;
+            struct tm *tm_val = gmtime_r(&t, &tm_buf);
             strada_decref(epoch); epoch = strada_new_int((int64_t)t);
-            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
-            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
-            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
-            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
-            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
-            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            if (tm_val) {
+                strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+                strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+                strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+                strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+                strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+                strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            }
         }
         my hash %dt = ();
         $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
@@ -4554,13 +4612,16 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $hour = 0; my int $minute = 0; my int $second = 0;
         __C__ {
             time_t t = (time_t)strada_to_int(ts);
-            struct tm *tm_val = localtime(&t);
-            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
-            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
-            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
-            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
-            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
-            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            struct tm tm_buf;
+            struct tm *tm_val = localtime_r(&t, &tm_buf);
+            if (tm_val) {
+                strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+                strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+                strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+                strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+                strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+                strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            }
         }
         my hash %dt = ();
         $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
@@ -4574,13 +4635,16 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $hour = 0; my int $minute = 0; my int $second = 0;
         __C__ {
             time_t t = (time_t)strada_to_int(ts);
-            struct tm *tm_val = gmtime(&t);
-            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
-            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
-            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
-            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
-            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
-            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            struct tm tm_buf;
+            struct tm *tm_val = gmtime_r(&t, &tm_buf);
+            if (tm_val) {
+                strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+                strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+                strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+                strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+                strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+                strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+            }
         }
         my hash %dt = ();
         $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
@@ -4597,6 +4661,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $dt_h = $dt->{"hour"};
         my int $dt_mi = $dt->{"minute"};
         my int $dt_s = $dt->{"second"};
+        my int $dt_utc = ((exists($dt, "tz") && $dt->{"tz"} eq "UTC") || (exists($dt, "utc") && $dt->{"utc"} == 1)) ? 1 : 0;
         my str $fmt = $args->[1];
         my str $result = "";
         __C__ {
@@ -4608,12 +4673,45 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
             tm_val.tm_hour = strada_to_int(dt_h);
             tm_val.tm_min = strada_to_int(dt_mi);
             tm_val.tm_sec = strada_to_int(dt_s);
-            tm_val.tm_isdst = -1;
-            mktime(&tm_val);
-            char buf[256];
-            size_t len = strftime(buf, sizeof(buf), fmt_str, &tm_val);
+            if (strada_to_int(dt_utc)) {
+                tm_val.tm_isdst = 0;
+                time_t t = timegm(&tm_val);
+                gmtime_r(&t, &tm_val);
+            } else {
+                tm_val.tm_isdst = -1;
+                mktime(&tm_val);
+            }
             strada_decref(result);
-            result = (len > 0) ? strada_new_str(buf) : strada_new_str("");
+            if (!fmt_str || fmt_str[0] == '\0') {
+                result = strada_new_str("");
+            } else {
+                size_t flen = strlen(fmt_str);
+                char *sfmt = (char *)malloc(flen + 2);
+                if (!sfmt) {
+                    result = strada_new_str("");
+                } else {
+                    sfmt[0] = 'x';
+                    memcpy(sfmt + 1, fmt_str, flen + 1);
+                    size_t cap = flen * 4 + 256;
+                    char *dyn_buf = (char *)malloc(cap);
+                    size_t len = 0;
+                    while (dyn_buf) {
+                        len = strftime(dyn_buf, cap, sfmt, &tm_val);
+                        if (len > 0 || cap >= 1048576) break;
+                        cap *= 2;
+                        char *nb = (char *)realloc(dyn_buf, cap);
+                        if (!nb) { free(dyn_buf); dyn_buf = NULL; len = 0; break; }
+                        dyn_buf = nb;
+                    }
+                    if (dyn_buf && len >= 1) {
+                        result = strada_new_str_len(dyn_buf + 1, len - 1);
+                    } else {
+                        result = strada_new_str("");
+                    }
+                    free(dyn_buf);
+                    free(sfmt);
+                }
+            }
             free(fmt_str);
         }
         return $result;
@@ -4683,11 +4781,20 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my int $offset = 0;
         __C__ {
             time_t t = time(NULL);
-            struct tm *local_tm = localtime(&t);
-            time_t local_t = mktime(local_tm);
-            struct tm *gm_tm = gmtime(&t);
-            time_t gm_t = mktime(gm_tm);
-            strada_decref(offset); offset = strada_new_int((int64_t)(local_t - gm_t));
+            struct tm local_tm;
+            struct tm *lt = localtime_r(&t, &local_tm);
+            int64_t off_sec = 0;
+            if (lt) {
+#if defined(__GLIBC__) || defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+                off_sec = (int64_t)local_tm.tm_gmtoff;
+#else
+                struct tm gm_tm;
+                gmtime_r(&t, &gm_tm);
+                gm_tm.tm_isdst = -1;
+                off_sec = (int64_t)difftime(mktime(&local_tm), mktime(&gm_tm));
+#endif
+            }
+            strada_decref(offset); offset = strada_new_int(off_sec);
         }
         return $offset;
     }
@@ -4695,9 +4802,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my str $tz_name = "";
         __C__ {
             time_t t = time(NULL);
-            struct tm *tm_val = localtime(&t);
+            struct tm tm_buf;
+            struct tm *tm_val = localtime_r(&t, &tm_buf);
             char buf[64];
-            strftime(buf, sizeof(buf), "%Z", tm_val);
+            buf[0] = '\0';
+            if (tm_val) {
+                strftime(buf, sizeof(buf), "%Z", tm_val);
+            }
             strada_decref(tz_name); tz_name = strada_new_str(buf);
         }
         return $tz_name;
@@ -4890,98 +5001,105 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
         $func_env->{"vars"}->{"__def_pkg__"} = $func_info->{"package"};
     }
 
-    # Bind parameters (skip entirely for zero-param functions)
-    if ($param_count > 0) {
-    my int $arg_count = size($args);
-    my int $pi = 0;
-    my int $is_variadic = $func_info->{"is_variadic"};
-
-    # Use pre-computed param binding template (avoids per-param hash lookups)
-    my scalar $pnames = $func_info->{"__pnames"};
-    if (defined($pnames)) {
-        my scalar $ptypes = $func_info->{"__ptypes"};
-        my scalar $pdefaults = $func_info->{"__pdefaults"};
-        my scalar $poptional = $func_info->{"__poptional"};
-        my scalar $vars = $func_env->{"vars"};
-        while ($pi < $param_count) {
-            my str $pname = $pnames->[$pi];
-            if ($is_variadic == 1 && $pi == $param_count - 1) {
-                my array @rest = ();
-                my int $ri = $pi;
-                while ($ri < $arg_count) {
-                    push(@rest, $args->[$ri]);
-                    $ri = $ri + 1;
-                }
-                $vars->{$pname} = \@rest;
-            } elsif ($pi < $arg_count) {
-                $vars->{$pname} = $args->[$pi];
-            } else {
-                my scalar $dv = $pdefaults->[$pi];
-                if ($poptional->[$pi] == 1 && defined($dv) && $dv != 0) {
-                    $vars->{$pname} = eval_node($interp, $dv, $func_env);
-                } else {
-                    my int $ptype = $ptypes->[$pi];
-                    if ($ptype == TI::INT) { $vars->{$pname} = 0; }
-                    elsif ($ptype == TI::NUM) { $vars->{$pname} = 0.0; }
-                    elsif ($ptype == TI::STR) { $vars->{$pname} = ""; }
-                    elsif ($ptype == TI::ARRAY) {
-                        my array @a = ();
-                        $vars->{$pname} = \@a;
-                    }
-                    elsif ($ptype == TI::HASH) {
-                        my hash %h = ();
-                        $vars->{$pname} = \%h;
-                    }
-                    else { $vars->{$pname} = undef; }
-                }
-            }
-            $pi = $pi + 1;
-        }
-    } else {
-        # Fallback for closures / anonymous functions without pre-computed template
-        while ($pi < $param_count) {
-            my scalar $param = $params->[$pi];
-            my str $pname = $param->{"name"};
-            if ($is_variadic == 1 && $pi == $param_count - 1) {
-                my array @rest = ();
-                my int $ri = $pi;
-                while ($ri < $arg_count) {
-                    push(@rest, $args->[$ri]);
-                    $ri = $ri + 1;
-                }
-                env_set($func_env, $pname, \@rest);
-            } elsif ($pi < $arg_count) {
-                env_set($func_env, $pname, $args->[$pi]);
-            } else {
-                if ($param->{"is_optional"} == 1 && defined($param->{"default_value"}) && $param->{"default_value"} != 0) {
-                    env_set($func_env, $pname, eval_node($interp, $param->{"default_value"}, $func_env));
-                } else {
-                    my int $ptype = $param->{"param_type"};
-                    if ($ptype == TI::INT) { env_set($func_env, $pname, 0); }
-                    elsif ($ptype == TI::NUM) { env_set($func_env, $pname, 0.0); }
-                    elsif ($ptype == TI::STR) { env_set($func_env, $pname, ""); }
-                    elsif ($ptype == TI::ARRAY) {
-                        my array @a = ();
-                        env_set($func_env, $pname, \@a);
-                    }
-                    elsif ($ptype == TI::HASH) {
-                        my hash %h = ();
-                        env_set($func_env, $pname, \%h);
-                    }
-                    else { env_set($func_env, $pname, undef); }
-                }
-            }
-            $pi = $pi + 1;
-        }
-    }
-    } # end if ($param_count > 0)
-
-    # Execute body - save local stack depth for dynamic scope restore
+    # Save local stack depth before binding params so throwing default values unwind cleanly
     my int $local_depth = size($interp->{"local_stack"});
     my scalar $result = undef;
 
     try {
-        $result = eval_block($interp, $body, $func_env);
+        # Bind parameters (skip entirely for zero-param functions)
+        if ($param_count > 0) {
+        my int $arg_count = size($args);
+        my int $pi = 0;
+        my int $is_variadic = $func_info->{"is_variadic"};
+
+        # Use pre-computed param binding template (avoids per-param hash lookups)
+        my scalar $pnames = $func_info->{"__pnames"};
+        if (defined($pnames)) {
+            my scalar $ptypes = $func_info->{"__ptypes"};
+            my scalar $pdefaults = $func_info->{"__pdefaults"};
+            my scalar $poptional = $func_info->{"__poptional"};
+            my scalar $vars = $func_env->{"vars"};
+            while ($pi < $param_count) {
+                my str $pname = $pnames->[$pi];
+                if ($is_variadic == 1 && $pi == $param_count - 1) {
+                    my array @rest = ();
+                    my int $ri = $pi;
+                    while ($ri < $arg_count) {
+                        push(@rest, $args->[$ri]);
+                        $ri = $ri + 1;
+                    }
+                    $vars->{$pname} = \@rest;
+                } elsif ($pi < $arg_count) {
+                    $vars->{$pname} = $args->[$pi];
+                } else {
+                    my scalar $dv = $pdefaults->[$pi];
+                    if ($poptional->[$pi] == 1 && defined($dv) && $dv != 0) {
+                        $vars->{$pname} = eval_node($interp, $dv, $func_env);
+                        if ($interp->{"signal"} != SIG::NONE) { last; }
+                    } else {
+                        my int $ptype = $ptypes->[$pi];
+                        if ($ptype == TI::INT) { $vars->{$pname} = 0; }
+                        elsif ($ptype == TI::NUM) { $vars->{$pname} = 0.0; }
+                        elsif ($ptype == TI::STR) { $vars->{$pname} = ""; }
+                        elsif ($ptype == TI::ARRAY) {
+                            my array @a = ();
+                            $vars->{$pname} = \@a;
+                        }
+                        elsif ($ptype == TI::HASH) {
+                            my hash %h = ();
+                            $vars->{$pname} = \%h;
+                        }
+                        else { $vars->{$pname} = undef; }
+                    }
+                }
+                $pi = $pi + 1;
+            }
+        } else {
+            # Fallback for closures / anonymous functions without pre-computed template
+            while ($pi < $param_count) {
+                my scalar $param = $params->[$pi];
+                my str $pname = $param->{"name"};
+                if ($is_variadic == 1 && $pi == $param_count - 1) {
+                    my array @rest = ();
+                    my int $ri = $pi;
+                    while ($ri < $arg_count) {
+                        push(@rest, $args->[$ri]);
+                        $ri = $ri + 1;
+                    }
+                    env_set($func_env, $pname, \@rest);
+                } elsif ($pi < $arg_count) {
+                    env_set($func_env, $pname, $args->[$pi]);
+                } else {
+                    my scalar $fdef = exists($param, "default") ? $param->{"default"} : $param->{"default_value"};
+                    my int $fopt = (exists($param, "has_default") && $param->{"has_default"} == 1) ? 1 : (($param->{"is_optional"} == 1) ? 1 : 0);
+                    if ($fopt == 1 && defined($fdef) && $fdef != 0) {
+                        env_set($func_env, $pname, eval_node($interp, $fdef, $func_env));
+                        if ($interp->{"signal"} != SIG::NONE) { last; }
+                    } else {
+                        my int $ptype = $param->{"param_type"};
+                        if ($ptype == TI::INT) { env_set($func_env, $pname, 0); }
+                        elsif ($ptype == TI::NUM) { env_set($func_env, $pname, 0.0); }
+                        elsif ($ptype == TI::STR) { env_set($func_env, $pname, ""); }
+                        elsif ($ptype == TI::ARRAY) {
+                            my array @a = ();
+                            env_set($func_env, $pname, \@a);
+                        }
+                        elsif ($ptype == TI::HASH) {
+                            my hash %h = ();
+                            env_set($func_env, $pname, \%h);
+                        }
+                        else { env_set($func_env, $pname, undef); }
+                    }
+                }
+                $pi = $pi + 1;
+            }
+        }
+        } # end if ($param_count > 0)
+
+        # Execute body (skip if default-value expression triggered a signal)
+        if ($interp->{"signal"} == SIG::NONE) {
+            $result = eval_block($interp, $body, $func_env);
+        }
     } catch ($e) {
         # Always unwind dynamic local() bindings and call_depth on throw
         interp_unwind_locals($interp, $local_depth);
@@ -5087,6 +5205,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
             $init = eval_node($interp, $node->{"init"}, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
             if ($var_type == TI::ARRAY && ref($init) ne "ARRAY") {
                 if (!defined($init) || (ref($init) eq "HASH" && size(keys($init)) == 0)) {
                     my array @empty_arr = ();
@@ -5241,9 +5360,11 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
         # Determine iteration variable name
         my str $var_name = "";
+        my int $has_lex_decl = 0;
         my scalar $var_decl = $node->{"var_decl"};
         if (defined($var_decl) && $var_decl != 0) {
             $var_name = $var_decl->{"name"};
+            $has_lex_decl = 1;
         } else {
             $var_name = $node->{"var_name"};
             if (length($var_name) == 0) {
@@ -5254,8 +5375,17 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my int $fi = 0;
         while ($fi < $arr_len) {
             my scalar $body_env = env_new($env);
-            env_set($body_env, $var_name, $arr->[$fi]);
-            env_set($body_env, "_", $arr->[$fi]);
+            if ($has_lex_decl == 1 || $var_name eq "_") {
+                env_set($body_env, $var_name, $arr->[$fi]);
+                env_set($body_env, "_", $arr->[$fi]);
+            } else {
+                if (env_exists($env, $var_name)) {
+                    env_update($env, $var_name, $arr->[$fi]);
+                } else {
+                    env_set($env, $var_name, $arr->[$fi]);
+                }
+                env_set($body_env, "_", $arr->[$fi]);
+            }
 
             my int $should_break = 0;
             my int $should_redo = 1;
@@ -5314,17 +5444,31 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- Closure Call ($ref->(args)) ---
     if ($type == NI::CLOSURE_CALL) {
         my scalar $closure = eval_node($interp, $node->{"closure"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $raw_args = $node->{"args"};
         my int $argc = $node->{"arg_count"};
 
         my array @args = ();
         my int $ai = 0;
         while ($ai < $argc) {
-            push(@args, eval_node($interp, $raw_args->[$ai], $env));
+            my scalar $av = eval_node($interp, $raw_args->[$ai], $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            push(@args, $av);
             $ai = $ai + 1;
         }
 
-        # Check for __orig_func__ wrapper (from around modifier)
+        # Check for chained __around_func__ and __orig_func__ wrappers (from around modifier)
+        if (ref($closure) eq "HASH" && exists($closure, "__around_func__")) {
+            my array @chained_args = ();
+            push(@chained_args, $closure->{"__next_orig__"});
+            my int $cai = 0;
+            while ($cai < size(\@args)) {
+                push(@chained_args, $args[$cai]);
+                $cai = $cai + 1;
+            }
+            return call_user_func($interp, $closure->{"__around_func__"}, \@chained_args);
+        }
+
         if (ref($closure) eq "HASH" && exists($closure, "__orig_func__")) {
             return call_user_func($interp, $closure->{"__orig_func__"}, \@args);
         }
@@ -5380,6 +5524,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- Map ---
     if ($type == NI::MAP) {
         my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $arr_len = size($arr);
         my array @result = ();
@@ -5387,12 +5532,33 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
         # Reuse single env across iterations (avoids N allocations)
         my scalar $map_env = env_new($env);
-        while ($mi < $arr_len) {
-            $map_env->{"vars"}->{"_"} = $arr->[$mi];
-            my scalar $val = eval_block($interp, $block, $map_env);
-            if ($interp->{"signal"} != SIG::NONE) { last; }
-            push(@result, $val);
-            $mi = $mi + 1;
+        try {
+            while ($mi < $arr_len) {
+                $map_env->{"vars"}->{"_"} = $arr->[$mi];
+                my scalar $val = eval_block($interp, $block, $map_env);
+                if ($interp->{"signal"} != SIG::NONE) {
+                    my int $msig = $interp->{"signal"};
+                    my str $mlbl = $interp->{"signal_label"};
+                    if ($msig == SIG::NEXT && length($mlbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        $mi = $mi + 1;
+                        next;
+                    } elsif ($msig == SIG::REDO && length($mlbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        next;
+                    } elsif ($msig == SIG::LAST && length($mlbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        last;
+                    } else {
+                        last;
+                    }
+                }
+                push(@result, $val);
+                $mi = $mi + 1;
+            }
+        } catch ($mg_e) {
+            $map_env->{"parent"} = undef;
+            throw($mg_e);
         }
         $map_env->{"parent"} = undef;
 
@@ -5402,6 +5568,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- Grep ---
     if ($type == NI::GREP) {
         my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $arr_len = size($arr);
         my array @result = ();
@@ -5409,14 +5576,35 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
         # Reuse single env across iterations
         my scalar $grep_env = env_new($env);
-        while ($gi < $arr_len) {
-            $grep_env->{"vars"}->{"_"} = $arr->[$gi];
-            my scalar $val = eval_block($interp, $block, $grep_env);
-            if ($interp->{"signal"} != SIG::NONE) { last; }
-            if ($val) {
-                push(@result, $arr->[$gi]);
+        try {
+            while ($gi < $arr_len) {
+                $grep_env->{"vars"}->{"_"} = $arr->[$gi];
+                my scalar $val = eval_block($interp, $block, $grep_env);
+                if ($interp->{"signal"} != SIG::NONE) {
+                    my int $gsig = $interp->{"signal"};
+                    my str $glbl = $interp->{"signal_label"};
+                    if ($gsig == SIG::NEXT && length($glbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        $gi = $gi + 1;
+                        next;
+                    } elsif ($gsig == SIG::REDO && length($glbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        next;
+                    } elsif ($gsig == SIG::LAST && length($glbl) == 0) {
+                        $interp->{"signal"} = SIG::NONE;
+                        last;
+                    } else {
+                        last;
+                    }
+                }
+                if ($val) {
+                    push(@result, $arr->[$gi]);
+                }
+                $gi = $gi + 1;
             }
-            $gi = $gi + 1;
+        } catch ($mg_e) {
+            $grep_env->{"parent"} = undef;
+            throw($mg_e);
         }
         $grep_env->{"parent"} = undef;
 
@@ -5474,7 +5662,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             $tc_result = eval_block($interp, $try_block, $try_env);
         } catch ($e) {
             interp_unwind_locals($interp, $try_local_depth);
-            if (is_signal($e, "return") || is_signal($e, "last") || is_signal($e, "next") || is_signal($e, "redo")) {
+            if (is_signal($e, "return") || is_signal($e, "last") || is_signal($e, "next") || is_signal($e, "redo") || is_signal($e, "goto")) {
                 $pending_rethrow = 1;
                 $pending_exc = $e;
             } else {
@@ -5804,13 +5992,23 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- TR (transliteration $str =~ tr/from/to/) ---
     if ($type == NI::TR) {
         my scalar $target_node = $node->{"target"};
-        my scalar $prep = eval_lvalue_prepare($interp, $target_node, $env);
-        my scalar $subj = eval_lvalue_read($interp, $prep, $env);
         my str $search = $node->{"search"};
         my str $repl = $node->{"replace"};
         my str $tr_flags = "";
         if (defined($node->{"flags"})) {
             $tr_flags = $node->{"flags"};
+        }
+        my int $tr_nondestruct = (index($tr_flags, "r") >= 0) ? 1 : 0;
+        my scalar $prep = undef;
+        my scalar $subj = undef;
+        if ($tr_nondestruct == 1) {
+            my scalar $raw_tv = eval_node($interp, $target_node, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            $subj = defined($raw_tv) ? ("" . $raw_tv) : "";
+        } else {
+            $prep = eval_lvalue_prepare($interp, $target_node, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            $subj = eval_lvalue_read($interp, $prep, $env);
         }
 
         my scalar $tr_res = undef;
@@ -5826,7 +6024,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             free(cr);
             free(cf);
         }
-        if (index($tr_flags, "r") < 0) {
+        if ($tr_nondestruct == 0) {
             eval_lvalue_write($interp, $prep, $subj, $env);
         }
         return $tr_res;
@@ -5846,6 +6044,32 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             my scalar $init = undef;
             if (defined($node->{"init"}) && $node->{"init"} != 0) {
                 $init = eval_node($interp, $node->{"init"}, $env);
+            }
+            if (ref($h) eq "HASH" && exists($h, "__tied__")) {
+                my scalar $tobj = $h->{"__tied__"};
+                my str $tpkg = get_obj_class($tobj);
+                my int $had_k = interp_hash_exists($interp, $h, $hkey);
+                my scalar $old_v = undef;
+                if ($had_k == 1 && length($tpkg) > 0) {
+                    my scalar $fetch_fn = interp_resolve_method($interp, $tpkg, "FETCH");
+                    if (defined($fetch_fn)) {
+                        $old_v = call_user_func($interp, $fetch_fn, [$tobj, $hkey]);
+                    }
+                }
+                my hash %hsave = ();
+                $hsave{"is_hash_elem"} = 1;
+                $hsave{"hash"} = $h;
+                $hsave{"key"} = $hkey;
+                $hsave{"had_key"} = $had_k;
+                $hsave{"value"} = $old_v;
+                push($interp->{"local_stack"}, \%hsave);
+                if (length($tpkg) > 0) {
+                    my scalar $store_fn = interp_resolve_method($interp, $tpkg, "STORE");
+                    if (defined($store_fn)) {
+                        call_user_func($interp, $store_fn, [$tobj, $hkey, $init]);
+                    }
+                }
+                return $init;
             }
             my int $had_k = (ref($h) eq "HASH" && exists($h, $hkey)) ? 1 : 0;
             my scalar $old_v = $had_k == 1 ? $h->{$hkey} : undef;
@@ -6010,8 +6234,46 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     }
 
     # --- Literals ---
-    if ($type == NI::INT_LITERAL || $type == NI::STR_LITERAL) {
+    if ($type == NI::STR_LITERAL) {
         return $node->{"value"};
+    }
+    if ($type == NI::INT_LITERAL) {
+        if (exists($node, "__iv")) {
+            return $node->{"__iv"};
+        }
+        my scalar $raw = $node->{"value"};
+        my scalar $iv = 0;
+        __C__ {
+            if (STRADA_IS_TAGGED_INT(raw) || (raw && raw->type == STRADA_INT)) {
+                strada_incref(raw);
+                strada_decref(iv);
+                iv = raw;
+            } else if (raw && raw->type == STRADA_STR && raw->value.pv) {
+                const char *p = raw->value.pv;
+                int neg = 0;
+                if (*p == '-') { neg = 1; p++; }
+                else if (*p == '+') { p++; }
+                uint64_t uv = 0;
+                if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                    uv = strtoull(p + 2, NULL, 16);
+                } else if (p[0] == '0' && (p[1] == 'b' || p[1] == 'B')) {
+                    uv = strtoull(p + 2, NULL, 2);
+                } else if (p[0] == '0' && (p[1] == 'o' || p[1] == 'O')) {
+                    uv = strtoull(p + 2, NULL, 8);
+                } else {
+                    uv = strtoull(p, NULL, 10);
+                }
+                int64_t val = neg ? (int64_t)(0ULL - uv) : (int64_t)uv;
+                strada_decref(iv);
+                iv = strada_new_int(val);
+            } else {
+                int64_t val = strada_to_int(raw);
+                strada_decref(iv);
+                iv = strada_new_int(val);
+            }
+        }
+        $node->{"__iv"} = $iv;
+        return $iv;
     }
     if ($type == NI::NUM_LITERAL) {
         my num $nv = $node->{"value"};
@@ -6036,6 +6298,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
             $init = eval_node($interp, $node->{"init"}, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
             # Array variable initialized with empty () produces empty hash from parser,
             # undef produces empty array, and scalar init wraps as 1-element array
             if ($var_type == TI::ARRAY) {
@@ -6127,18 +6390,23 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         if ($op ne "=") {
             my scalar $prep = eval_lvalue_prepare($interp, $target, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
             my scalar $cur = eval_lvalue_read($interp, $prep, $env);
             if ($op eq "//=") {
                 if (defined($cur)) { return $cur; }
                 $rhs = eval_node($interp, $node->{"value"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
             } elsif ($op eq "||=") {
                 if ($cur) { return $cur; }
                 $rhs = eval_node($interp, $node->{"value"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
             } elsif ($op eq "&&=") {
                 if (!$cur) { return $cur; }
                 $rhs = eval_node($interp, $node->{"value"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
             } else {
                 $rhs = eval_node($interp, $node->{"value"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
                 if ($op eq "+=") {
                     my scalar $ovl = check_overload($interp, $cur, "+");
                     if (defined($ovl)) {
@@ -6212,6 +6480,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             return $rhs;
         }
         $rhs = eval_node($interp, $node->{"value"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         assign_to($interp, $target, $rhs, $env);
         return $rhs;
     }
@@ -6380,6 +6649,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my scalar $val = undef;
         if (defined($node->{"value"}) && $node->{"value"} != 0) {
             $val = eval_node($interp, $node->{"value"}, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
         }
         $interp->{"signal"} = SIG::RETURN;
         $interp->{"signal_value"} = $val;
@@ -6473,6 +6743,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
                 # Spread: expand array into args
                 my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
                 my int $slen = size($spread_val);
                 my int $si = 0;
                 while ($si < $slen) {
@@ -6480,7 +6751,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     $si = $si + 1;
                 }
             } else {
-                push(@args, eval_node($interp, $arg_node, $env));
+                my scalar $av = eval_node($interp, $arg_node, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                push(@args, $av);
             }
             $ai = $ai + 1;
         }
@@ -6559,6 +6832,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             $obj_node = $node->{"object"};
         }
         my scalar $obj = eval_node($interp, $obj_node, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my str $method = $node->{"method"};
         my scalar $raw_args = $node->{"args"};
         my int $argc = $node->{"arg_count"};
@@ -6572,6 +6846,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 my scalar $arg_node = $raw_args->[$ai];
                 if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
                     my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
                     my int $slen = size($spread_val);
                     my int $si = 0;
                     while ($si < $slen) {
@@ -6579,7 +6854,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                         $si = $si + 1;
                     }
                 } else {
-                    push(@args, eval_node($interp, $arg_node, $env));
+                    my scalar $av = eval_node($interp, $arg_node, $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    push(@args, $av);
                 }
                 $ai = $ai + 1;
             }
@@ -7007,15 +7284,13 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     # --- Regex Substitution ---
     if ($type == NI::REGEX_SUBST) {
         my scalar $target_node = $node->{"target"};
-        my scalar $lv = eval_lvalue_prepare($interp, $target_node, $env);
-        my scalar $raw_tv = eval_lvalue_read($interp, $lv, $env);
-        my str $target_val = defined($raw_tv) ? ("" . $raw_tv) : "";
         my str $pattern = $node->{"pattern"};
         my str $replacement = $node->{"replacement"};
         my str $flags = $node->{"flags"};
 
         my int $is_global = 0;
         my int $is_eval = 0;
+        my int $is_nondestruct = 0;
 
         # Apply flags
         my str $effective_pattern = $pattern;
@@ -7028,6 +7303,8 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     $is_global = 1;
                 } elsif ($fc eq "e") {
                     $is_eval = 1;
+                } elsif ($fc eq "r") {
+                    $is_nondestruct = 1;
                 } else {
                     $inline_flags = $inline_flags . $fc;
                 }
@@ -7038,7 +7315,20 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
+        my scalar $lv = undef;
+        my scalar $raw_tv = undef;
+        if ($is_nondestruct == 1) {
+            $raw_tv = eval_node($interp, $target_node, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+        } else {
+            $lv = eval_lvalue_prepare($interp, $target_node, $env);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            $raw_tv = eval_lvalue_read($interp, $lv, $env);
+        }
+        my str $target_val = defined($raw_tv) ? ("" . $raw_tv) : "";
+
         my str $result = $target_val;
+        my int $subst_count = 0;
         if ($is_eval) {
             # /e flag: evaluate replacement as expression for each match
             my scalar $repl_node = $node->{"eval_expr"};
@@ -7059,6 +7349,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
             my scalar $matches = interp_regex_find_all($target_val, $pattern, $flags, $is_global);
             my int $mcnt = size($matches);
+            $subst_count = $mcnt;
             if ($mcnt > 0) {
                 my array @repls = ();
                 my int $mi = 0;
@@ -7078,28 +7369,30 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 $result = interp_regex_build_result($target_val, $matches, \@repls);
             }
         } else {
-            if ($is_global) {
-                my str $sg_str = $target_val;
-                my str $sg_pat = $effective_pattern;
-                my str $sg_rep = $replacement;
-                __C__ {
-                    char *s = strada_to_str(sg_str);
-                    char *p = strada_to_str(sg_pat);
-                    char *r = strada_to_str(sg_rep);
-                    char *res = strada_regex_replace_all(s, p, r, NULL);
-                    strada_decref(result);
-                    result = strada_new_str(res);
-                    free(res);
-                    free(r);
-                    free(p);
-                    free(s);
-                }
-            } else {
-                $result = replace($target_val, $effective_pattern, $replacement);
+            my str $sg_str = $target_val;
+            my str $sg_pat = $effective_pattern;
+            my str $sg_rep = $replacement;
+            __C__ {
+                char *s = strada_to_str(sg_str);
+                char *p = strada_to_str(sg_pat);
+                char *r = strada_to_str(sg_rep);
+                char *res = NULL;
+                int cnt = strada_regex_replace_capture(s, p, r, "", (int)strada_to_int(is_global), &res);
+                strada_decref(subst_count);
+                subst_count = strada_new_int((int64_t)cnt);
+                strada_decref(result);
+                result = strada_new_str(res ? res : s);
+                free(res);
+                free(r);
+                free(p);
+                free(s);
             }
         }
+        if ($is_nondestruct == 1) {
+            return $result;
+        }
         eval_lvalue_write($interp, $lv, $result, $env);
-        return $result;
+        return $subst_count;
     }
 
     # --- __PACKAGE__ ---
@@ -7858,20 +8151,10 @@ func eval_string_vm(str $code) scalar {
                         my int $ltype = $last_stmt->{"type"};
                         if ($ltype == NI::EXPR_STMT) {
                             my scalar $expr_node = $last_stmt->{"expr"};
-                            if (defined($expr_node) && ($expr_node->{"type"} == NI::REGEX_SUBST || $expr_node->{"type"} == NI::TR)) {
-                                my hash %undef_node = ();
-                                $undef_node{"type"} = NI::UNDEF;
-                                my hash %ret_u = ();
-                                $ret_u{"type"} = NI::RETURN_STMT;
-                                $ret_u{"value"} = \%undef_node;
-                                push($stmts, \%ret_u);
-                                $body->{"statement_count"} = $scnt + 1;
-                            } else {
-                                my hash %ret_node = ();
-                                $ret_node{"type"} = NI::RETURN_STMT;
-                                $ret_node{"value"} = $expr_node;
-                                $stmts->[$scnt - 1] = \%ret_node;
-                            }
+                            my hash %ret_node = ();
+                            $ret_node{"type"} = NI::RETURN_STMT;
+                            $ret_node{"value"} = $expr_node;
+                            $stmts->[$scnt - 1] = \%ret_node;
                         } elsif ($ltype != NI::RETURN_STMT) {
                             my hash %undef_node = ();
                             $undef_node{"type"} = NI::UNDEF;
@@ -7943,6 +8226,7 @@ func eval_string_vm(str $code) scalar {
                     vvm->has_exception = 0;
                 }
                 vm_export_globals(vvm, globals_ref);
+                vm_suspend(vvm);
                 vm_free(vvm);
             }
             free(ebuf);

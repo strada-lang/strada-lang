@@ -869,7 +869,7 @@ func find_doc(str $docs_path, str $topic) str {
                 }
                 $k = $k + 1;
             }
-            if ($base_lower =~ /$lower/) {
+            if (length($lower) > 0 && index($base_lower, $lower) >= 0) {
                 return $docs_path . "/" . $name;
             }
         }
@@ -898,7 +898,7 @@ func find_doc(str $docs_path, str $topic) str {
                     }
                     $k = $k + 1;
                 }
-                if ($base_lower =~ /$lower/) {
+                if (length($lower) > 0 && index($base_lower, $lower) >= 0) {
                     return $ext_path . "/" . $name;
                 }
             }

@@ -1305,11 +1305,18 @@ func render_string(str $template, scalar $vars) str {
                     if (scalar(@pipe_parts) > 1) {
                         my str $var_name = trim($pipe_parts[0]);
                         my str $value = Forma::resolve_var($var_name, $vars);
+                        my int $pipe_escaped = 0;
                         my int $pi = 1;
                         while ($pi < scalar(@pipe_parts)) {
                             my str $stage = trim($pipe_parts[$pi]);
                             if (length($stage) > 0) {
-                                $value = Forma::apply_filter_value($value, $stage, $vars);
+                                $value = Forma::apply_filter_value($value, $stage, $vars, $pipe_escaped);
+                                my str $slc = lc($stage);
+                                my int $ssp = index($slc, " ");
+                                my str $sn = ($ssp > 0) ? substr($slc, 0, $ssp) : $slc;
+                                if ($sn eq "escape" || $sn eq "h" || $sn eq "nl2br" || $sn eq "raw") {
+                                    $pipe_escaped = 1;
+                                }
                             }
                             $pi = $pi + 1;
                         }
@@ -1442,11 +1449,15 @@ private func is_pre_escaped_tag(str $tag_str) int {
     }
     my array @stages = Forma::split_pipe_stages($inner);
     if (scalar(@stages) > 1) {
-        my str $last_stage = lc(trim($stages[scalar(@stages) - 1]));
-        my int $sp = index($last_stage, " ");
-        my str $flt = ($sp > 0) ? substr($last_stage, 0, $sp) : $last_stage;
-        if ($flt eq "escape" || $flt eq "h" || $flt eq "nl2br" || $flt eq "raw") {
-            return 1;
+        my int $si = 1;
+        while ($si < scalar(@stages)) {
+            my str $stage = lc(trim($stages[$si]));
+            my int $sp = index($stage, " ");
+            my str $flt = ($sp > 0) ? substr($stage, 0, $sp) : $stage;
+            if ($flt eq "escape" || $flt eq "h" || $flt eq "nl2br" || $flt eq "raw") {
+                return 1;
+            }
+            $si = $si + 1;
         }
     }
     return 0;
@@ -3061,6 +3072,9 @@ func helper_truncate(str $args, scalar $vars) str {
 
     my str $var_name = $parts[0];
     my int $max_len = $parts[1] + 0;
+    if ($max_len < 0) {
+        $max_len = 0;
+    }
 
     my str $val = Forma::resolve_var($var_name, $vars);
     if (length($val) <= $max_len) {
@@ -3276,19 +3290,44 @@ func helper_plural(str $args, scalar $vars) str {
 # Accounting-style money format: thousands separators + exactly 2 decimals +
 # leading minus, no currency symbol (e.g. -1234567.5 -> "-1,234,567.50"). Reuses
 # helper_commas for the integer grouping.
-func helper_money(str $val) str {
-    my num $n = trim($val) + 0.0;
-    my num $a = ($n < 0.0) ? ($n * -1.0) : $n;
-    my str $sign = ($n < 0.0) ? "-" : "";
+private func format_fixed2(num $val_num, str $prefix) str {
+    my str $probe = lc(sprintf("%.2f", $val_num));
+    if (index($probe, "nan") >= 0) { return "NaN"; }
+    if (index($probe, "-inf") >= 0) { return "-Inf"; }
+    if (index($probe, "inf") >= 0) { return "Inf"; }
+
+    my str $sign = ($val_num < 0.0) ? "-" : "";
+    my num $a = ($val_num < 0.0) ? (0.0 - $val_num) : $val_num;
     my str $s = sprintf("%.2f", $a);
+    if ($s eq "0.00" || $s eq "0,00") {
+        $sign = "";
+    }
     my int $dot = index($s, ".");
+    if ($dot < 0) {
+        $dot = index($s, ",");
+    }
     my str $intpart = ($dot >= 0) ? substr($s, 0, $dot) : $s;
-    my str $frac    = ($dot >= 0) ? substr($s, $dot, length($s) - $dot) : ".00";
-    return $sign . Forma::helper_commas($intpart) . $frac;
+    my str $frac    = ($dot >= 0) ? ("." . substr($s, $dot + 1, length($s) - $dot - 1)) : ".00";
+    return $sign . $prefix . Forma::helper_commas($intpart) . $frac;
+}
+
+private func check_special_num_str(str $s) str {
+    my str $low = lc(trim($s));
+    if ($low eq "nan") { return "NaN"; }
+    if ($low eq "inf" || $low eq "+inf" || $low eq "infinity" || $low eq "+infinity") { return "Inf"; }
+    if ($low eq "-inf" || $low eq "-infinity") { return "-Inf"; }
+    return "";
+}
+
+func helper_money(str $val) str {
+    my str $sp = Forma::check_special_num_str($val);
+    if (length($sp) > 0) { return $sp; }
+    my num $n = trim($val) + 0.0;
+    return Forma::format_fixed2($n, "");
 }
 
 # Apply a filter directly to an already-resolved value (used by multi-stage pipes)
-private func apply_filter_value(str $val, str $filter, scalar $vars) str {
+private func apply_filter_value(str $val, str $filter, scalar $vars, int $already_escaped = 0) str {
     # Parse filter name and args
     my int $space_pos = index($filter, " ");
     my str $filter_name = $filter;
@@ -3330,6 +3369,9 @@ private func apply_filter_value(str $val, str $filter, scalar $vars) str {
     }
 
     if ($filter_name eq "escape" || $filter_name eq "h") {
+        if ($already_escaped == 1) {
+            return $val;
+        }
         return Forma::escape_html($val);
     }
 
@@ -3359,6 +3401,9 @@ private func apply_filter_value(str $val, str $filter, scalar $vars) str {
 
     if ($filter_name eq "truncate") {
         my int $max_len = length($filter_arg) > 0 ? $filter_arg + 0 : 50;
+        if ($max_len < 0) {
+            $max_len = 0;
+        }
         if (length($val) <= $max_len) {
             return $val;
         }
@@ -3389,13 +3434,19 @@ private func apply_filter_value(str $val, str $filter, scalar $vars) str {
     }
 
     if ($filter_name eq "nl2br") {
-        my str $src = ($g_forma_escape == 1) ? Forma::escape_html($val) : $val;
+        my str $src = ($g_forma_escape == 1 && $already_escaped == 0) ? Forma::escape_html($val) : $val;
         my str $out = "";
         my int $len = length($src);
         my int $j = 0;
         while ($j < $len) {
             my str $ch = substr($src, $j, 1);
-            if (ord($ch) == 10) {
+            my int $oc = ord($ch);
+            if ($oc == '\r') {
+                $out = $out . "<br>\n";
+                if ($j + 1 < $len && ord(substr($src, $j + 1, 1)) == '\n') {
+                    $j = $j + 1;
+                }
+            } elsif ($oc == '\n') {
                 $out = $out . "<br>\n";
             } else {
                 $out = $out . $ch;
@@ -4155,21 +4206,17 @@ func helper_currency(str $args, scalar $vars) str {
     my str $amount_str = $parts[0];
     my str $currency = scalar(@parts) >= 2 ? $parts[1] : "USD";
 
-    my num $amount = 0;
+    my str $raw_amt = "";
     if (Forma::looks_like_number($amount_str)) {
-        $amount = $amount_str + 0;
+        $raw_amt = $amount_str;
     } else {
-        my str $resolved = Forma::resolve_var($amount_str, $vars);
-        $amount = $resolved + 0;
+        $raw_amt = Forma::resolve_var($amount_str, $vars);
     }
-
-    # Format with 2 decimal places
-    my str $formatted = sprintf("%.2f", $amount);
-    # Add commas
-    my int $dot = index($formatted, ".");
-    my str $int_part = substr($formatted, 0, $dot);
-    my str $dec_part = substr($formatted, $dot, length($formatted) - $dot);
-    $int_part = Forma::helper_commas($int_part);
+    my str $sp = Forma::check_special_num_str($raw_amt);
+    if (length($sp) > 0) {
+        return $sp;
+    }
+    my num $amount = $raw_amt + 0.0;
 
     # Get currency symbol
     my str $symbol = "$";
@@ -4180,7 +4227,7 @@ func helper_currency(str $args, scalar $vars) str {
     elsif ($currency eq "INR") { $symbol = "₹"; }
     elsif ($currency eq "BTC") { $symbol = "₿"; }
 
-    return $symbol . $int_part . $dec_part;
+    return Forma::format_fixed2($amount, $symbol);
 }
 
 # {{percent value}} or {{percent value decimals}}

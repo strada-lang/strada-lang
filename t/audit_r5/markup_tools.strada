@@ -1,0 +1,170 @@
+use lib "lib";
+use Markdown;
+use YAML;
+use Forma;
+
+func check(int $cond, str $msg) int {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        return 1;
+    }
+    return 0;
+}
+
+func test_markdown() int {
+    # 1. CRLF normalization for headings, lists, blank lines, and HR
+    my str $crlf = "# Title\r\n\r\nPara 1\r\n\r\n- item a\r\n- item b\r\n\r\n---\r\n";
+    my str $h1 = Markdown::to_html($crlf);
+    if (check(index($h1, "<h1>Title</h1>") >= 0 &&
+              index($h1, "<p>Para 1</p>") >= 0 &&
+              index($h1, "<li>item a</li>") >= 0 &&
+              index($h1, "<hr>") >= 0,
+              "Markdown CRLF output=" . $h1)) {
+        return 1;
+    }
+
+    # 2. snake_case underscores untouched, boundary underscores paired cleanly
+    my str $sc = Markdown::to_html("foo_bar_baz and a__b__c");
+    if (check(index($sc, "foo_bar_baz") >= 0 &&
+              index($sc, "a__b__c") >= 0 &&
+              index($sc, "<em>") < 0 &&
+              index($sc, "<strong>") < 0,
+              "Markdown snake_case output=" . $sc)) {
+        return 1;
+    }
+
+    my str $em = Markdown::to_html("_foo_bar_ and __bold_word__ and ** and **** and __");
+    if (check(index($em, "<em>foo_bar</em>") >= 0 &&
+              index($em, "<strong>bold_word</strong>") >= 0 &&
+              index($em, "<strong></strong>") < 0 &&
+              index($em, "<em></em>") < 0,
+              "Markdown delimited emphasis output=" . $em)) {
+        return 1;
+    }
+
+    # 3. Raw HTML in prose and link text is escaped while inline code renders safely
+    my str $xss = Markdown::to_html("<script>alert(1)</script> [<b>link</b>](https://example.com) and `<b>code</b>`");
+    if (check(index($xss, "<script>") < 0 &&
+              index($xss, "&lt;script&gt;alert(1)&lt;/script&gt;") >= 0 &&
+              index($xss, "<a href=\"https://example.com\">&lt;b&gt;link&lt;/b&gt;</a>") >= 0 &&
+              index($xss, "<code>&lt;b&gt;code&lt;/b&gt;</code>") >= 0,
+              "Markdown XSS escaping output=" . $xss)) {
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_yaml() int {
+    # 1. Block scalar headers with trailing inline comments
+    my str $y1 = "msg: | # inline comment\n  line1\n  line2\ntrim: |- # strip\n  abc\nfold: >+ # keep\n  one\n  two\n";
+    my scalar $d1 = YAML::Load($y1);
+    if (check(ref($d1) eq "HASH" &&
+              $d1->{"msg"} eq "line1\nline2\n" &&
+              $d1->{"trim"} eq "abc" &&
+              index($d1->{"fold"}, "one two\n") == 0,
+              "YAML block scalar header comment")) {
+        return 1;
+    }
+
+    # 2. Document start/end markers (--- and ...)
+    my str $y2 = "---\na: 1\nb: 2\n...\nignored: 99\n";
+    my scalar $d2 = YAML::Load($y2);
+    if (check(ref($d2) eq "HASH" && $d2->{"a"} == 1 && $d2->{"b"} == 2 && !defined($d2->{"ignored"}),
+              "YAML hash doc markers")) {
+        return 1;
+    }
+
+    my str $y3 = "---\n- x\n- y\n...\n- z\n";
+    my scalar $d3 = YAML::Load($y3);
+    if (check(ref($d3) eq "ARRAY" && size($d3) == 2 && $d3->[0] eq "x" && $d3->[1] eq "y",
+              "YAML array doc markers")) {
+        return 1;
+    }
+
+    my scalar $d4 = YAML::Load("--- hello # scalar\n");
+    if (check("" . $d4 eq "hello", "YAML --- scalar marker")) {
+        return 1;
+    }
+
+    my scalar $d5 = YAML::Load("---\n...\n");
+    if (check(!defined($d5), "YAML empty doc returns undef")) {
+        return 1;
+    }
+
+    # 3. Malformed unclosed flow collections and unterminated quotes throw
+    my int $t1 = 0;
+    try { YAML::Load("{a: 1"); } catch ($e1) { $t1 = 1; }
+    my int $t2 = 0;
+    try { YAML::Load("[1, 2"); } catch ($e2) { $t2 = 1; }
+    my int $t3 = 0;
+    try { YAML::Load("{\"a\": 1} {\"b\": 2}"); } catch ($e3) { $t3 = 1; }
+    my int $t4 = 0;
+    try { YAML::Load("k: \"unterminated"); } catch ($e4) { $t4 = 1; }
+    my int $t5 = 0;
+    try { YAML::Load("{\"a\": \"unterminated}"); } catch ($e5) { $t5 = 1; }
+    if (check($t1 == 1 && $t2 == 1 && $t3 == 1 && $t4 == 1 && $t5 == 1,
+              "YAML malformed throw flags=" . $t1 . $t2 . $t3 . $t4 . $t5)) {
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_forma() int {
+    # 1. Negative truncate length clamped to 0
+    my str $tr1 = Forma::render_string("{{truncate text -5}}", {"text" => "abcdef"});
+    my str $tr2 = Forma::render_string("{{text | truncate -3}}", {"text" => "abcdef"});
+    my str $tr3 = Forma::render_string("{{text | truncate -3}}", {"text" => ""});
+    if (check($tr1 eq "..." && $tr2 eq "..." && $tr3 eq "",
+              "Forma negative truncate got " . $tr1 . "|" . $tr2 . "|" . $tr3)) {
+        return 1;
+    }
+
+    # 2. currency & money handle negative numbers, -0.001, NaN, Inf, -Inf
+    my str $c_neg = Forma::render_string("{{currency amt \"USD\"}}", {"amt" => -1234.56});
+    my str $c_zero = Forma::render_string("{{currency amt \"EUR\"}}", {"amt" => -0.001});
+    my str $c_nan = Forma::render_string("{{currency amt}}", {"amt" => "NaN"});
+    my str $c_inf = Forma::render_string("{{currency amt}}", {"amt" => "Inf"});
+    my str $c_ninf = Forma::render_string("{{currency amt}}", {"amt" => "-Inf"});
+    if (check($c_neg eq "-$1,234.56" &&
+              $c_zero eq "€0.00" &&
+              $c_nan eq "NaN" &&
+              $c_inf eq "Inf" &&
+              $c_ninf eq "-Inf",
+              "Forma currency got " . $c_neg . "|" . $c_zero . "|" . $c_nan . "|" . $c_inf . "|" . $c_ninf)) {
+        return 1;
+    }
+
+    if (check(Forma::helper_money("-1234.56") eq "-1,234.56" &&
+              Forma::helper_money("-0.001") eq "0.00" &&
+              Forma::helper_money("NaN") eq "NaN" &&
+              Forma::helper_money("Inf") eq "Inf" &&
+              Forma::helper_money("-Inf") eq "-Inf",
+              "Forma money edge cases")) {
+        return 1;
+    }
+
+    # 3. render_string_safe multi-stage pipe escaping & nl2br CRLF
+    my str $s1 = Forma::render_string_safe("{{x | escape | nl2br}}", {"x" => "<a\nb>"});
+    my str $s2 = Forma::render_string_safe("{{x | nl2br}}", {"x" => "<a\r\nb>"});
+    my str $s3 = Forma::render_string_safe("{{x | escape | trim}}", {"x" => "  <b>  "});
+    my str $s4 = Forma::render_string_safe("{{x | upper}}", {"x" => "<script>"});
+    if (check($s1 eq "&lt;a<br>\nb&gt;" &&
+              $s2 eq "&lt;a<br>\nb&gt;" &&
+              $s3 eq "&lt;b&gt;" &&
+              $s4 eq "&lt;SCRIPT&gt;",
+              "Forma safe pipes got " . $s1 . "|" . $s2 . "|" . $s3 . "|" . $s4)) {
+        return 1;
+    }
+
+    return 0;
+}
+
+func main() int {
+    if (test_markdown() != 0) { return 1; }
+    if (test_yaml() != 0) { return 1; }
+    if (test_forma() != 0) { return 1; }
+    say("R5_MARKUP_OK");
+    return 0;
+}

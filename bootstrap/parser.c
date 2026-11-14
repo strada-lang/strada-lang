@@ -974,6 +974,7 @@ static ASTNode* parse_primary(Parser *p) {
         
         case TOK_STR_LITERAL: {
             ASTNode *node = ast_new_str_literal(p->current->value.str_val);
+            node->char_code = p->current->char_code;
             advance(p);
             return node;
         }

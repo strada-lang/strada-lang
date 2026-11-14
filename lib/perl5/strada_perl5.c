@@ -58,6 +58,39 @@ static void perl5_push_inc(const char *path) {
     }
 }
 
+static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
+    if (!sv) return;
+    char *s = strada_to_str(v);
+    size_t len = (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR)
+        ? STRADA_STR_BYTELEN(v)
+        : (s ? strlen(s) : 0);
+    sv_setpvn(sv, s ? s : "", (STRLEN)len);
+    free(s);
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR && STRADA_STR_IS_UTF8(v)) {
+        SvUTF8_on(sv);
+    } else {
+        SvUTF8_off(sv);
+    }
+}
+
+static SV* perl5_sv_from_strada(StradaValue *v) {
+    SV *sv = newSV(0);
+    perl5_set_sv_from_strada(sv, v);
+    return sv;
+}
+
+static StradaValue* perl5_strada_from_sv(SV *sv) {
+    if (!sv || !SvOK(sv)) {
+        return strada_new_str("");
+    }
+    STRLEN len = 0;
+    const char *p = SvPV(sv, len);
+    if (SvUTF8(sv)) {
+        return strada_new_str_len_utf8(p ? p : "", (size_t)len);
+    }
+    return strada_new_str_len(p ? p : "", (size_t)len);
+}
+
 /* Initialize the Perl interpreter */
 int strada_perl5_init(void) {
     if (my_perl) {
@@ -106,31 +139,43 @@ int strada_perl5_is_init(void) {
     return my_perl != NULL;
 }
 
+/* Evaluate Perl code, return StradaValue preserving UTF-8 and NUL bytes */
+StradaValue* strada_perl5_eval_sv(StradaValue *code_sv) {
+    if (!my_perl) {
+        return strada_new_str("Error: Perl not initialized");
+    }
+
+    dSP;
+    ENTER;
+    SAVETMPS;
+    SV *sv = sv_2mortal(perl5_sv_from_strada(code_sv));
+    PUTBACK;
+    int count = eval_sv(sv, G_SCALAR);
+    SPAGAIN;
+
+    StradaValue *out = NULL;
+    if (SvTRUE(ERRSV)) {
+        if (count > 0) (void)POPs;
+        out = perl5_strada_from_sv(ERRSV);
+    } else if (count > 0) {
+        SV *ret = POPs;
+        out = perl5_strada_from_sv(ret);
+    } else {
+        out = strada_new_str("");
+    }
+
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return out;
+}
+
 /* Evaluate Perl code, return result as string */
 char* strada_perl5_eval(StradaValue *code_sv) {
-    if (!my_perl) {
-        return strdup("Error: Perl not initialized");
-    }
-
-    char *code = strada_to_str(code_sv);   /* malloc'd — must free */
-
-    SV *result = eval_pv(code, FALSE);
-    free(code);
-
-    if (SvTRUE(ERRSV)) {
-        /* Return error message */
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        return strdup(err);
-    }
-
-    if (result && SvOK(result)) {
-        STRLEN len;
-        const char *str = SvPV(result, len);
-        return strdup(str);
-    }
-
-    return strdup("");
+    StradaValue *sv = strada_perl5_eval_sv(code_sv);
+    char *out = strada_to_str(sv);
+    strada_decref(sv);
+    return out ? out : strdup("");
 }
 
 /* Execute Perl code (no return value) */
@@ -139,15 +184,22 @@ void strada_perl5_run(StradaValue *code_sv) {
         return;
     }
 
-    char *code = strada_to_str(code_sv);   /* malloc'd — must free */
-    eval_pv(code, FALSE);
-    free(code);
+    dSP;
+    ENTER;
+    SAVETMPS;
+    SV *sv = sv_2mortal(perl5_sv_from_strada(code_sv));
+    PUTBACK;
+    eval_sv(sv, G_DISCARD | G_VOID);
+    SPAGAIN;
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
 }
 
-/* Call a Perl subroutine with arguments, return scalar result */
-char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
+/* Call a Perl subroutine with arguments, return StradaValue preserving UTF-8 and NUL bytes */
+StradaValue* strada_perl5_call_sv(StradaValue *sub_sv, StradaValue *args_sv) {
     if (!my_perl) {
-        return strdup("Error: Perl not initialized");
+        return strada_new_str("Error: Perl not initialized");
     }
 
     const char *sub_name = strada_to_str(sub_sv);
@@ -158,25 +210,19 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
     PUSHMARK(SP);
 
     /* Push arguments from Strada array */
-    int pushed = 0;
     if (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_REF) {
         args_sv = strada_is_slot_ref(args_sv)
             ? (args_sv->value.ptr ? *(StradaValue **)args_sv->value.ptr : NULL)
             : args_sv->value.rv;
     }
     if (args_sv && STRADA_IS_TAGGED_INT(args_sv)) {
-        /* Tagged-int argument: dereferencing its odd pointer as a struct
-         * below would be a wild read; push the unboxed value directly. */
         XPUSHs(sv_2mortal(newSViv(STRADA_TAGGED_INT_VAL(args_sv))));
-        pushed++;
     } else if (args_sv) {
         if (args_sv->type == STRADA_ARRAY) {
             StradaArray *arr = args_sv->value.av;
             size_t len = strada_array_length(arr);
             for (size_t i = 0; i < len; i++) {
                 StradaValue *arg = strada_array_get(arr, i);
-                /* arg may be a tagged-int odd pointer — guard before any
-                 * arg->type / arg->value access (else wild read / crash). */
                 if (!arg || (!STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_UNDEF)) {
                     XPUSHs(&PL_sv_undef);
                 } else if (STRADA_IS_TAGGED_INT(arg)) {
@@ -186,13 +232,8 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                 } else if (arg->type == STRADA_NUM) {
                     XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
                 } else {
-                    char *str = strada_to_str(arg);     /* malloc'd — must free */
-                    size_t slen = (arg->type == STRADA_STR) ? STRADA_STR_BYTELEN(arg) : (str ? strlen(str) : 0);
-                    if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
-                    XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
-                    free(str);
+                    XPUSHs(sv_2mortal(perl5_sv_from_strada(arg)));
                 }
-                pushed++;
             }
         } else if (args_sv->type != STRADA_UNDEF) {
             /* Single scalar argument */
@@ -201,13 +242,8 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
             } else if (args_sv->type == STRADA_NUM) {
                 XPUSHs(sv_2mortal(newSVnv(args_sv->value.nv)));
             } else {
-                char *str = strada_to_str(args_sv);   /* malloc'd — must free */
-                size_t slen = (args_sv->type == STRADA_STR) ? STRADA_STR_BYTELEN(args_sv) : (str ? strlen(str) : 0);
-                if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
-                XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
-                free(str);
+                XPUSHs(sv_2mortal(perl5_sv_from_strada(args_sv)));
             }
-            pushed++;
         }
     }
 
@@ -216,28 +252,32 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
     SPAGAIN;
     free((char*)sub_name);   /* malloc'd by strada_to_str above */
 
-    char *result = NULL;
+    StradaValue *result = NULL;
     if (SvTRUE(ERRSV)) {
         if (count > 0) {
             (void)POPs;
         }
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        result = strdup(err);
+        result = perl5_strada_from_sv(ERRSV);
     } else if (count > 0) {
         SV *ret = POPs;
-        if (SvOK(ret)) {
-            STRLEN len;
-            const char *str = SvPV(ret, len);
-            result = strdup(str);
-        }
+        result = perl5_strada_from_sv(ret);
+    } else {
+        result = strada_new_str("");
     }
 
     PUTBACK;
     FREETMPS;
     LEAVE;
 
-    return result ? result : strdup("");
+    return result ? result : strada_new_str("");
+}
+
+/* Call a Perl subroutine with arguments, return scalar result */
+char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
+    StradaValue *sv = strada_perl5_call_sv(sub_sv, args_sv);
+    char *out = strada_to_str(sv);
+    strada_decref(sv);
+    return out ? out : strdup("");
 }
 
 /* Call a Perl subroutine, return array result */
@@ -274,11 +314,7 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
             } else if (arg->type == STRADA_NUM) {
                 XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
             } else {
-                char *str = strada_to_str(arg);     /* malloc'd — must free */
-                size_t slen = (arg->type == STRADA_STR) ? STRADA_STR_BYTELEN(arg) : (str ? strlen(str) : 0);
-                if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
-                XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
-                free(str);
+                XPUSHs(sv_2mortal(perl5_sv_from_strada(arg)));
             }
         }
     }
@@ -301,9 +337,7 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
             for (int i = 0; i < count; i++) {
                 SV *sv = POPs;
                 if (SvOK(sv)) {
-                    STRLEN len;
-                    const char *str = SvPV(sv, len);
-                    temp[i] = strada_new_str_len(str, (size_t)len);
+                    temp[i] = perl5_strada_from_sv(sv);
                 } else {
                     temp[i] = strada_new_undef();
                 }
@@ -372,7 +406,6 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
     }
 
     char *orig_name = strada_to_str(name_sv);
-    char *value = strada_to_str(value_sv);
     const char *name = orig_name;
 
     /* Skip the sigil if present */
@@ -381,15 +414,16 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
     }
 
     SV *sv = get_sv(name, GV_ADD);
-    sv_setpv(sv, value);
+    if (sv) {
+        perl5_set_sv_from_strada(sv, value_sv);
+    }
     free(orig_name);
-    free(value);
 }
 
-/* Get a Perl scalar variable */
-char* strada_perl5_get_scalar(StradaValue *name_sv) {
+/* Get a Perl scalar variable as StradaValue preserving UTF-8 and NUL bytes */
+StradaValue* strada_perl5_get_scalar_sv(StradaValue *name_sv) {
     if (!my_perl) {
-        return strdup("");
+        return strada_new_str("");
     }
 
     char *orig_name = strada_to_str(name_sv);
@@ -402,28 +436,36 @@ char* strada_perl5_get_scalar(StradaValue *name_sv) {
 
     SV *sv = get_sv(name, 0);
     free(orig_name);
-    if (sv && SvOK(sv)) {
-        STRLEN len;
-        const char *str = SvPV(sv, len);
-        return strdup(str);
+    return perl5_strada_from_sv(sv);
+}
+
+/* Get a Perl scalar variable */
+char* strada_perl5_get_scalar(StradaValue *name_sv) {
+    StradaValue *sv = strada_perl5_get_scalar_sv(name_sv);
+    char *out = strada_to_str(sv);
+    strada_decref(sv);
+    return out ? out : strdup("");
+}
+
+/* Get the last Perl error ($@) as StradaValue preserving UTF-8 and NUL bytes */
+StradaValue* strada_perl5_get_error_sv(void) {
+    if (!my_perl) {
+        return strada_new_str("Perl not initialized");
     }
 
-    return strdup("");
+    if (SvTRUE(ERRSV)) {
+        return perl5_strada_from_sv(ERRSV);
+    }
+
+    return strada_new_str("");
 }
 
 /* Get the last Perl error ($@) */
 char* strada_perl5_get_error(void) {
-    if (!my_perl) {
-        return strdup("Perl not initialized");
-    }
-
-    if (SvTRUE(ERRSV)) {
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        return strdup(err);
-    }
-
-    return strdup("");
+    StradaValue *sv = strada_perl5_get_error_sv();
+    char *out = strada_to_str(sv);
+    strada_decref(sv);
+    return out ? out : strdup("");
 }
 
 /* Add a path to @INC */

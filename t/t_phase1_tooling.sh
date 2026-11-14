@@ -148,11 +148,6 @@ else
     p1_record 1 "strada-proftext and strada-profhtml handle corrupt STFP lengths safely" "rc_pt=$rc_pt rc_ph=$rc_ph"
 fi
 
-# 7. xs2strada: fail nonzero on unwritable output
-printf "MODULE = X PACKAGE = X\n" > "$p1_dir/in.xs"
-! "$PROJECT_DIR/tools/xs2strada" "$p1_dir/in.xs" "$p1_dir/no_such_dir/out.strada" >/dev/null 2>&1
-p1_record $? "xs2strada fails nonzero on unwritable output path" ""
-
 # 8. perla-cpan and strada-repl compile and reject bad inputs / delegate cleanly
 "$PROJECT_DIR/strada" -O0 "$PROJECT_DIR/tools/perla-cpan.strada" -o "$p1_dir/perla-cpan" >/dev/null 2>&1 \
     && ! "$p1_dir/perla-cpan" install 'Bad;Mod' >/dev/null 2>&1

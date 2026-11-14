@@ -31,7 +31,6 @@ tools/strada-md2html
 tools/strada-repl
 tools/strada-jit
 tools/stradapp
-tools/xs2strada
 
 # Generated leak-test C
 t/leak_tests/*.c

@@ -1,0 +1,533 @@
+#!/usr/bin/env strada
+# Cycle 5 Audit regression tests: Batch 5C-1 Stdlib & C-Extension fixes
+
+use lib "lib";
+use DBI;
+use Async::Loop;
+use Async::Task;
+use Syslog;
+use JSON;
+use LWP;
+use LWP_SSL;
+use ssl;
+use Gettext;
+use Template;
+
+__C__ {
+#include <locale.h>
+#include <string.h>
+}
+
+# ============================================================
+# Tied test packages for JSON encoding & exception unwind
+# ============================================================
+
+package R5JsonScalar;
+func TIESCALAR(str $cls) scalar {
+    my hash %self = ("v" => "ts_ok");
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar {
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void {
+    $self->{"v"} = $v;
+}
+
+package R5JsonArray;
+func TIEARRAY(str $cls) scalar {
+    my hash %self = ("arr" => ["zero", "one"]);
+    return bless(\%self, $cls);
+}
+func FETCHSIZE(scalar $self) int {
+    return size($self->{"arr"});
+}
+func FETCH(scalar $self, int $i) scalar {
+    my scalar $a = $self->{"arr"};
+    return $a->[$i];
+}
+func STORE(scalar $self, int $i, scalar $v) void {
+    my scalar $a = $self->{"arr"};
+    $a->[$i] = $v;
+}
+
+package R5JsonHash;
+func TIEHASH(str $cls) scalar {
+    my array @keys = ("z", "a");
+    my hash %data = ("z" => 9, "a" => 1);
+    my hash %self = ("keys" => \@keys, "data" => \%data, "idx" => 0);
+    return bless(\%self, $cls);
+}
+func FIRSTKEY(scalar $self) scalar {
+    $self->{"idx"} = 0;
+    my scalar $ks = $self->{"keys"};
+    if (size($ks) == 0) { return undef; }
+    $self->{"idx"} = 1;
+    return $ks->[0];
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my scalar $ks = $self->{"keys"};
+    my int $idx = $self->{"idx"};
+    if ($idx >= size($ks)) { return undef; }
+    $self->{"idx"} = $idx + 1;
+    return $ks->[$idx];
+}
+func FETCH(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"data"};
+    return $d->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    my scalar $d = $self->{"data"};
+    $d->{$k} = $v;
+}
+
+package R5JsonThrowHash;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("k" => 1);
+    return bless(\%self, $cls);
+}
+func FIRSTKEY(scalar $self) scalar { return "boom"; }
+func NEXTKEY(scalar $self, str $last) scalar { return undef; }
+func FETCH(scalar $self, str $k) scalar {
+    die("r5_json_tied_boom");
+    return undef;
+}
+
+package main;
+
+func check(int $cond, str $msg) int {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        return 1;
+    }
+    return 0;
+}
+
+func test_math_srand() int {
+    math::srand(42);
+    my num $r = math::rand();
+    return check($r >= 0.0 && $r <= 1.0, "math::srand/rand");
+}
+
+func test_dbi() int {
+    # 1. RaiseError => 1 honored on connect_attrs failure
+    my int $threw = 0;
+    try {
+        my scalar $bad = DBI::connect_attrs("dbi:SQLite:dbname=/nonexistent_r5_dbi_dir_xyz/nope.db", "", "", {"RaiseError" => 1});
+    } catch ($e) {
+        $threw = 1;
+    }
+    if (check($threw == 1, "DBI::connect_attrs RaiseError => 1 on connect failure")) { return 1; }
+
+    # 2. Live $sth during DBI::disconnect($dbh) -> DBI::finish($sth) without UAF
+    my scalar $dbh = DBI::connect("dbi:SQLite:dbname=:memory:", "", "");
+    if (check(defined($dbh), "DBI connect :memory:")) { return 1; }
+    DBI::do_sql($dbh, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    DBI::exec($dbh, "INSERT INTO t (id, name) VALUES (?, ?)", [1, "alice"]);
+    my scalar $sth = DBI::prepare($dbh, "SELECT id, name FROM t");
+    DBI::execute($sth, []);
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    if (check(defined($row) && $row->{"name"} eq "alice", "DBI fetchrow_hashref")) { return 1; }
+    DBI::disconnect($dbh);
+    DBI::finish($sth);
+
+    # 3. quote() preserves UTF-8 flag & selectall_hashref returns undef on prepare error
+    my scalar $dbh2 = DBI::connect("dbi:SQLite:dbname=:memory:", "", "");
+    my str $u = "café";
+    utf8::decode($u);
+    my str $q = DBI::quote($dbh2, $u);
+    if (check(utf8::is_utf8($q) == 1 && index($q, "café") >= 0, "DBI::quote preserves UTF-8 flag: " . $q)) {
+        DBI::disconnect($dbh2);
+        return 1;
+    }
+    my scalar $bad_hr = DBI::selectall_hashref($dbh2, "SELECT * FROM no_such_table_r5", "id");
+    if (check(!defined($bad_hr), "DBI::selectall_hashref returns undef on prepare failure")) {
+        DBI::disconnect($dbh2);
+        return 1;
+    }
+    DBI::disconnect($dbh2);
+
+    # 4. _pg_rewrite_placeholders lexer edge cases
+    my str $pg_sql = "-- line ? comment\nSELECT /* outer /* inner ? */ ? */ 'it''s ?', E'esc\\'? ? end', \$tag\$dollar ?\$tag\$, \$\$anon ?\$\$, ? AND ?";
+    my array @pg_res = DBI::_pg_rewrite_placeholders($pg_sql);
+    my str $rewritten = $pg_res[0];
+    my int $pcnt = $pg_res[1];
+    my str $expected_pg = "-- line ? comment\nSELECT /* outer /* inner ? */ ? */ 'it''s ?', E'esc\\'? ? end', \$tag\$dollar ?\$tag\$, \$\$anon ?\$\$, \$1 AND \$2";
+    if (check($pcnt == 2 && $rewritten eq $expected_pg, "DBI::_pg_rewrite_placeholders got count=" . $pcnt . " sql=" . $rewritten)) {
+        return 1;
+    }
+    return 0;
+}
+
+func test_async() int {
+    # 1. Close-in-callback halts timer_after and spawn dispatch cleanly
+    my scalar $loop = Async::Loop::new();
+    my int $first_fired = 0;
+    my int $second_fired = 0;
+    $loop->timer_after(5, func () void {
+        $first_fired = 1;
+        $loop->close();
+    });
+    $loop->timer_after(10, func () void {
+        $second_fired = 1;
+    });
+    $loop->run();
+    if (check($first_fired == 1 && $second_fired == 0, "Async::Loop timer close-in-callback")) { return 1; }
+
+    # 2. Close from inside spawn coroutine
+    my scalar $loop2 = Async::Loop::new();
+    my int $coro_ran = 0;
+    my int $after_coro = 0;
+    $loop2->timer_after(10, func () void { $after_coro = 1; });
+    $loop2->spawn(func () void {
+        $coro_ran = 1;
+        $loop2->close();
+    });
+    $loop2->run();
+    if (check($coro_ran == 1 && $after_coro == 0, "Async::Loop coro close-in-callback")) { return 1; }
+
+    # 3. Negative timeout and short deadline in Async::Task recv / readline / connect
+    my scalar $asrv = core::socket_server(0);
+    my scalar $aname = core::getsockname($asrv);
+    my int $aport = $aname->{"port"};
+    my scalar $acli = core::socket_client("127.0.0.1", $aport);
+    my scalar $aacc = core::socket_accept($asrv);
+    my int $t0 = core::mono_ms();
+    my scalar $r1 = Async::Task::recv($acli, 64, -1);
+    my scalar $r2 = Async::Task::readline($acli, -1);
+    my scalar $r3 = Async::Task::readline($acli, 15);
+    core::socket_close($acli);
+    core::socket_close($aacc);
+    core::socket_close($asrv);
+    my scalar $c1 = Async::Task::connect("127.0.0.1", 1, -1);
+    my int $elapsed = core::mono_ms() - $t0;
+    if (check(!defined($r1) && !defined($r2) && !defined($r3) && !defined($c1) && $elapsed < 500,
+        "Async::Task negative/short timeout elapsed=" . $elapsed)) {
+        return 1;
+    }
+    return 0;
+}
+
+func test_syslog() int {
+    Syslog::open("strada_r5_a", 0, Syslog::LOG_USER());
+    Syslog::info("batch5c1 test message 1");
+    Syslog::open("strada_r5_b", 0, Syslog::LOG_USER());
+    Syslog::warning("batch5c1 test message 2");
+    Syslog::close();
+    return 0;
+}
+
+func set_comma_locale() str {
+    my str $picked = "";
+    __C__ {
+        const char *cands[] = { "de_DE.UTF-8", "fr_FR.UTF-8", "es_ES.UTF-8", "pt_BR.UTF-8", "de_DE.utf8", "fr_FR.utf8", NULL };
+        for (int i = 0; cands[i]; i++) {
+            if (setlocale(LC_NUMERIC, cands[i])) {
+                struct lconv *lc = localeconv();
+                if (lc && lc->decimal_point && strcmp(lc->decimal_point, ".") != 0) {
+                    strada_decref(picked);
+                    picked = strada_new_str(cands[i]);
+                    break;
+                }
+            }
+        }
+    }
+    return $picked;
+}
+
+func restore_c_locale() void {
+    __C__ {
+        setlocale(LC_NUMERIC, "C");
+    }
+}
+
+func test_json() int {
+    # 1. Tied scalar / array / hash encoding & canonical sorting
+    my scalar $ts = "";
+    tie($ts, "R5JsonScalar");
+    my array @ta = ();
+    tie(@ta, "R5JsonArray");
+    my hash %th = ();
+    tie(%th, "R5JsonHash");
+
+    my str $js_s = JSON::encode($ts);
+    my str $js_a = JSON::encode(\@ta);
+    my str $js_h = JSON::encode_opts(\%th, {"canonical" => 1});
+    my hash %wrap = ("s" => \$ts, "a" => \@ta, "h" => \%th);
+    my str $js_w = JSON::encode_opts(\%wrap, {"canonical" => 1});
+
+    if (check($js_s eq "\"ts_ok\"", "JSON tied scalar got=" . $js_s)) { return 1; }
+    if (check($js_a eq "[\"zero\",\"one\"]", "JSON tied array got=" . $js_a)) { return 1; }
+    if (check($js_h eq "{\"a\":1,\"z\":9}", "JSON tied canonical hash got=" . $js_h)) { return 1; }
+    if (check($js_w eq "{\"a\":[\"zero\",\"one\"],\"h\":{\"a\":1,\"z\":9},\"s\":\"ts_ok\"}", "JSON tied nested wrap got=" . $js_w)) { return 1; }
+
+    # 2. Exception thrown during tied FETCH unwinds safely
+    my hash %badh = ();
+    tie(%badh, "R5JsonThrowHash");
+    my int $threw = 0;
+    try {
+        my str $badj = JSON::encode(\%badh);
+    } catch ($e) {
+        $threw = 1;
+    }
+    if (check($threw == 1, "JSON tied throwing FETCH unwind")) { return 1; }
+
+    # 3. Locale decimal separator independence
+    my str $loc = set_comma_locale();
+    my str $flt_enc = JSON::encode(1.5);
+    my scalar $flt_dec = JSON::decode("3.25");
+    restore_c_locale();
+    if (check($flt_enc eq "1.5" && $flt_dec > 3.24 && $flt_dec < 3.26,
+        "JSON locale float (" . ($loc eq "" ? "C" : $loc) . ") enc=" . $flt_enc)) {
+        return 1;
+    }
+    return 0;
+}
+
+func count_substr(str $hay, str $needle) int {
+    my int $cnt = 0;
+    my int $pos = 0;
+    my int $nlen = core::byte_length($needle);
+    while (1) {
+        my int $idx = core::byte_index($hay, $needle, $pos);
+        if ($idx < 0) { last; }
+        $cnt = $cnt + 1;
+        $pos = $idx + $nlen;
+    }
+    return $cnt;
+}
+
+func test_lwp_and_ssl() int {
+    # 1. parse_url userinfo stripping (LWP & LWP_SSL)
+    my hash %u1 = LWP::parse_url("http://user:p\@ss\@example.com:8080/p");
+    my hash %u2 = LWP::parse_url("https://u:p\@[::1]:8443/q");
+    my hash %u3 = LWP_SSL::parse_url("http://user:p\@ss\@example.com:8080/p");
+    my hash %u4 = LWP_SSL::parse_url("https://u:p\@[::1]:8443/q");
+    if (check($u1{"host"} eq "example.com" && $u1{"port"} == 8080, "LWP parse_url userinfo")) { return 1; }
+    if (check($u2{"host"} eq "::1" && $u2{"port"} == 8443, "LWP parse_url userinfo+IPv6")) { return 1; }
+    if (check($u3{"host"} eq "example.com" && $u3{"port"} == 8080, "LWP_SSL parse_url userinfo")) { return 1; }
+    if (check($u4{"host"} eq "::1" && $u4{"port"} == 8443, "LWP_SSL parse_url userinfo+IPv6")) { return 1; }
+
+    # 2. Conflicting & non-numeric Content-Length rejection (incl. UTF-8 header string)
+    my str $bad1 = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\nhello";
+    my str $bad2 = "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nhello";
+    my str $good_u8 = "HTTP/1.1 200 OK\r\nX-Note: café\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello";
+    utf8::decode($good_u8);
+    my str $bad_u8 = "HTTP/1.1 200 OK\r\nX-Note: café\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello";
+    utf8::decode($bad_u8);
+
+    my hash %pr1 = LWP::parse_response($bad1);
+    my hash %pr2 = LWP::parse_response($bad2);
+    my hash %pr3 = LWP::parse_response($good_u8);
+    my hash %pr4 = LWP::parse_response($bad_u8);
+    my hash %spr1 = LWP_SSL::parse_response($bad1);
+    my hash %spr4 = LWP_SSL::parse_response($bad_u8);
+    if (check($pr1{"success"} == 0 && index($pr1{"error"}, "Content-Length") >= 0, "LWP reject duplicate CL")) { return 1; }
+    if (check($pr2{"success"} == 0 && index($pr2{"error"}, "Content-Length") >= 0, "LWP reject non-numeric CL")) { return 1; }
+    if (check($pr3{"success"} == 1 && $pr3{"content"} eq "hello", "LWP accept matching CL after UTF-8 hdr")) { return 1; }
+    if (check($pr4{"success"} == 0 && index($pr4{"error"}, "Content-Length") >= 0, "LWP reject conflicting CL after UTF-8 hdr")) { return 1; }
+    if (check($spr1{"success"} == 0 && $spr4{"success"} == 0, "LWP_SSL reject conflicting CL")) { return 1; }
+
+    # 3. Custom Host / User-Agent / Connection / Content-Length not duplicated in LWP_SSL::build_request
+    my str $built = LWP_SSL::build_request("POST", "127.0.0.1", "/x", "abc", {
+        "headers" => {
+            "Host" => "custom.example",
+            "User-Agent" => "CustomUA/1",
+            "Connection" => "keep-alive",
+            "Content-Length" => "3"
+        }
+    });
+    my str $lc_built = lc($built);
+    if (check(count_substr($lc_built, "\nhost:") == 1 &&
+              count_substr($lc_built, "\nuser-agent:") == 1 &&
+              count_substr($lc_built, "\nconnection:") == 1 &&
+              count_substr($lc_built, "\ncontent-length:") == 1,
+              "LWP_SSL::build_request no duplicate override headers")) {
+        return 1;
+    }
+
+    # 4. Loopback LWP: custom Host override & 303 PUT -> GET redirect rewrite
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"};
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        # Req 1: check headers -> return 303 redirect
+        my scalar $c1 = core::socket_accept($srv);
+        my str $req1 = core::socket_recv($c1, 4096);
+        my str $lc1 = lc($req1);
+        my int $dup = (count_substr($lc1, "\nhost:") != 1 || index($req1, "Host: override.local") < 0) ? 1 : 0;
+        my int $starts_put = (index($req1, "PUT /step1 ") == 0) ? 1 : 0;
+        if ($dup == 1 || $starts_put == 0) {
+            core::socket_send($c1, "HTTP/1.1 500 Bad Req\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad");
+        } else {
+            core::socket_send($c1, "HTTP/1.1 303 See Other\r\nLocation: /step2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+        core::socket_close($c1);
+
+        # Req 2: must be GET /step2 with no body
+        my scalar $c2 = core::socket_accept($srv);
+        my str $req2 = core::socket_recv($c2, 4096);
+        if (index($req2, "GET /step2 ") == 0 && index($req2, "body_payload") < 0) {
+            core::socket_send($c2, "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n303_ok");
+        } else {
+            core::socket_send($c2, "HTTP/1.1 500 Fail\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail");
+        }
+        core::socket_close($c2);
+        core::exit(0);
+    }
+    core::socket_close($srv);
+    my hash %r303 = LWP::do_request("PUT", "http://127.0.0.1:" . $port . "/step1", "body_payload", {
+        "headers" => {"Host" => "override.local"},
+        "timeout" => 2
+    });
+    core::waitpid($pid, 0);
+    if (check($r303{"success"} == 1 && $r303{"content"} eq "303_ok",
+        "LWP custom Host + 303 PUT->GET got content=" . $r303{"content"} . " err=" . $r303{"error"})) {
+        return 1;
+    }
+
+    # 5. Loopback HTTPS silent peer: ssl::timed_out + LWP_SSL::do_https_request "HTTP read timeout"
+    my int $mypid = core::getpid();
+    my str $cert = "/tmp/r5_cert_" . $mypid . ".pem";
+    my str $key = "/tmp/r5_key_" . $mypid . ".pem";
+    my int $orc = core::system("openssl req -x509 -newkey rsa:2048 -nodes -keyout " . $key . " -out " . $cert . " -days 1 -subj /CN=localhost >/dev/null 2>&1");
+    if ($orc != 0) {
+        core::unlink($cert);
+        core::unlink($key);
+        return check(0, "openssl cert generation failed");
+    }
+    my scalar $tsrv = core::socket_server(0);
+    my int $tport = core::getsockname($tsrv)->{"port"};
+    my int $ctx = ssl::server(0, $cert, $key);
+    my int $tpid = core::fork();
+    if ($tpid == 0) {
+        my int $k = 0;
+        while ($k < 2) {
+            my scalar $tc = core::socket_accept($tsrv);
+            my int $fd = core::socket_fd($tc);
+            my int $tls = ssl::attach_server_fd($ctx, $fd);
+            if ($tls != 0) {
+                my int $steps = 0;
+                while ($steps < 200) {
+                    my int $hr = ssl::handshake_step($tls);
+                    if ($hr == 1 || $hr < 0) { last; }
+                    core::socket_select([$tc], 20);
+                    $steps = $steps + 1;
+                }
+                core::usleep(350000);
+                ssl::close($tls);
+            }
+            core::socket_close($tc);
+            $k = $k + 1;
+        }
+        core::exit(0);
+    }
+    core::socket_close($tsrv);
+
+    # Check A: direct ssl::read + ssl::timed_out
+    my scalar $cs = core::socket_client("127.0.0.1", $tport);
+    if (!defined($cs)) {
+        core::kill($tpid, 9);
+        core::waitpid($tpid, 0);
+        core::unlink($cert);
+        core::unlink($key);
+        return check(0, "TLS client connect failed");
+    }
+    my int $cfd = core::socket_fd($cs);
+    my int $c_tls = ssl::attach_fd($cfd, 0, "localhost");
+    my int $hs = 0;
+    while ($hs < 200) {
+        my int $hr = ssl::handshake_step($c_tls);
+        if ($hr == 1 || $hr < 0) { last; }
+        core::socket_select([$cs], 20);
+        $hs = $hs + 1;
+    }
+    ssl::set_timeout($c_tls, 80);
+    my str $empty_r = ssl::read($c_tls, 128);
+    my int $to_flag = ssl::timed_out($c_tls);
+    ssl::close($c_tls);
+    core::socket_close($cs);
+
+    # Check B: LWP_SSL::do_https_request timeout
+    my str $hreq = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    my hash %hres = LWP_SSL::do_https_request("127.0.0.1", $tport, $hreq, 65536, 67108864, "GET", 80, 0);
+
+    core::waitpid($tpid, 0);
+    core::unlink($cert);
+    core::unlink($key);
+
+    if (check(core::byte_length($empty_r) == 0 && $to_flag == 1, "ssl::timed_out after silent ssl::read")) { return 1; }
+    if (check($hres{"success"} == 0 && $hres{"error"} eq "HTTP read timeout",
+        "LWP_SSL::do_https_request timeout got err='" . $hres{"error"} . "'")) {
+        return 1;
+    }
+    return 0;
+}
+
+func test_gettext() int {
+    my str $orig_loc = Gettext::get_locale();
+    if (check(length($orig_loc) > 0, "Gettext::get_locale non-empty")) { return 1; }
+    Gettext::set_locale("C");
+    my str $c_loc = Gettext::get_locale();
+    Gettext::set_locale("no_SUCH_locale_r5_999");
+    my str $after_bad = Gettext::get_locale();
+    if (check($c_loc eq "C" && $after_bad eq "C", "Gettext live get_locale got=" . $c_loc . "/" . $after_bad)) { return 1; }
+    my str $u = Gettext::_("café");
+    if (check(utf8::is_utf8($u) == 1 && $u eq "café", "Gettext::_ sets UTF-8 flag")) { return 1; }
+    Gettext::set_locale($orig_loc);
+    return 0;
+}
+
+func test_template() int {
+    my scalar $tt = Template::new({});
+    # 1. UTF-8 percent_encode on both unflagged bytes and UTF-8-flagged string
+    my str $raw_s = "café/a b";
+    my str $flag_s = "café/a b";
+    utf8::decode($flag_s);
+    my str $out_raw = $tt->process_string("[% s | uri %]|[% s | url %]", {"s" => $raw_s});
+    my str $out_flg = $tt->process_string("[% s | uri %]|[% s | url %]", {"s" => $flag_s});
+    my str $want_uri_url = "caf%C3%A9%2Fa%20b|caf%C3%A9/a%20b";
+    if (check($out_raw eq $want_uri_url && $out_flg eq $want_uri_url,
+        "Template UTF-8 uri/url raw=" . $out_raw . " flg=" . $out_flg)) {
+        return 1;
+    }
+
+    # 2. safe_format valid cases
+    my str $ok_fmt = $tt->process_string("[% n | format('100%% %.2f') %]", {"n" => 3.14159});
+    if (check($ok_fmt eq "100% 3.14", "Template valid format got=" . $ok_fmt)) { return 1; }
+
+    # 3. safe_format blocked cases (filter + format plugin)
+    my array @bad_tpls = (
+        "[% x | format('%p') %]",
+        "[% x | format('%n') %]",
+        "[% x | format('%5000s') %]",
+        "[% x | format('%.5000f') %]",
+        "[% x | format('%s %s') %]",
+        "[% USE f = format('%p') %][% f(x) %]"
+    );
+    my int $i = 0;
+    while ($i < size(@bad_tpls)) {
+        my int $threw = 0;
+        try {
+            my str $o = $tt->process_string($bad_tpls[$i], {"x" => "hi"});
+        } catch ($e) {
+            $threw = 1;
+        }
+        if (check($threw == 1, "Template safe_format rejected: " . $bad_tpls[$i])) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func main() int {
+    if (test_math_srand() != 0) { return 1; }
+    if (test_dbi() != 0) { return 2; }
+    if (test_async() != 0) { return 3; }
+    if (test_syslog() != 0) { return 4; }
+    if (test_json() != 0) { return 5; }
+    if (test_lwp_and_ssl() != 0) { return 6; }
+    if (test_gettext() != 0) { return 7; }
+    if (test_template() != 0) { return 8; }
+    say("R5_STDLIB_OK");
+    return 0;
+}

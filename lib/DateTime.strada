@@ -528,14 +528,36 @@ func format(scalar $dt, str $fmt) str {
             mktime(&tm_val);  // Normalize and fill in wday, yday, tz
         }
 
-        char buf[256];
-        size_t len = strftime(buf, sizeof(buf), fmt_str, &tm_val);
-
         strada_decref(result);
-        if (len > 0) {
-            result = strada_new_str(buf);
-        } else {
+        if (!fmt_str || fmt_str[0] == '\0') {
             result = strada_new_str("");
+        } else {
+            size_t flen = strlen(fmt_str);
+            char *sfmt = (char *)malloc(flen + 2);
+            if (!sfmt) {
+                result = strada_new_str("");
+            } else {
+                sfmt[0] = 'x';
+                memcpy(sfmt + 1, fmt_str, flen + 1);
+                size_t cap = flen * 4 + 256;
+                char *dyn_buf = (char *)malloc(cap);
+                size_t len = 0;
+                while (dyn_buf) {
+                    len = strftime(dyn_buf, cap, sfmt, &tm_val);
+                    if (len > 0 || cap >= 1048576) break;
+                    cap *= 2;
+                    char *nb = (char *)realloc(dyn_buf, cap);
+                    if (!nb) { free(dyn_buf); dyn_buf = NULL; len = 0; break; }
+                    dyn_buf = nb;
+                }
+                if (dyn_buf && len >= 1) {
+                    result = strada_new_str_len(dyn_buf + 1, len - 1);
+                } else {
+                    result = strada_new_str("");
+                }
+                free(dyn_buf);
+                free(sfmt);
+            }
         }
 
         free(fmt_str);

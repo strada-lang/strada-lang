@@ -1,0 +1,100 @@
+use lib "../lib";
+use lib "lib";
+use DateTime;
+
+package R5LeakAroundBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R5LeakAroundBase");
+}
+func calc(scalar $self, int $x) int { return $self->{"v"} + $x; }
+around "calc" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x * 2) + 100;
+}
+
+package R5LeakAroundChild;
+extends R5LeakAroundBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R5LeakAroundChild");
+}
+around "calc" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x + 1) + 10;
+}
+
+package R5LeakTieV;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("d" => {"k" => "v0"});
+    return bless(\%s, "R5LeakTieV");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}, $k);
+    return $old;
+}
+
+package main;
+
+func upper_w(str $s) str { return uc($s); }
+func def_throw_fn() int { throw("r5_leak_def"); return 0; }
+func with_def_throw(int $x = def_throw_fn()) int { return $x; }
+func map_ret_fn() int {
+    my array @xs = (1, 2, 3);
+    my int $v = scalar(map { return 99; } @xs) + 5;
+    return $v;
+}
+
+func run_iter() int {
+    my scalar $fh = core::open_str("alpha\nbeta\n", "r");
+    my str $ln = core::readline($fh);
+    core::close($fh);
+    if ($ln ne "alpha") { return 1; }
+
+    my scalar $pfh = core::popen("echo r5vm", "r");
+    my str $pout = core::readline($pfh);
+    my int $prc = core::pclose($pfh);
+    if ($pout ne "r5vm" || $prc != 0) { return 2; }
+
+    my str $s = "ab cd";
+    my str $sr = ($s =~ s/([a-z]+)/upper_w($1)/ger);
+    my str $tr = ($s =~ tr/a-z/A-Z/r);
+    if ($sr ne "AB CD" || $tr ne "AB CD") { return 3; }
+
+    if (map_ret_fn() != 99) { return 4; }
+
+    try { with_def_throw(); } catch ($e) {}
+
+    my scalar $obj = R5LeakAroundChild::new(5);
+    if ($obj->calc(3) != 123) { return 5; }
+
+    my hash %th = ();
+    tie(%th, "R5LeakTieV");
+    {
+        local $th{"k"} = "v1";
+        local $th{"extra"} = "v2";
+    }
+    if ($th{"k"} ne "v0" || exists($th{"extra"})) { return 6; }
+    untie(%th);
+
+    my scalar $dt = DateTime::make(2026, 6, 15, 14, 30, 0);
+    my str $fmt = "%Y-" . ("0123456789" x 30);
+    my str $dout = DateTime::format($dt, $fmt);
+    if (length($dout) != 305) { return 7; }
+
+    return 0;
+}
+
+func main() int {
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        my int $rc = run_iter();
+        if ($rc != 0) {
+            say("FAIL rc=" . $rc);
+            return $rc;
+        }
+    }
+    say("R5_VM_LEAKS_OK");
+    return 0;
+}

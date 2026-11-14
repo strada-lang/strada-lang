@@ -102,24 +102,105 @@ func moose_type(str $t) str {
 # Helper: replace a single-arg function call with a prefix+suffix wrapper
 # e.g. replace_func_1arg($line, "core::getenv", "$ENV{", "}")
 #   core::getenv("KEY") -> $ENV{"KEY"}
+func is_ident_ch(int $c) int {
+    if (($c >= '0' && $c <= '9') || $c == ':' || ($c >= 'A' && $c <= 'Z') || $c == '_' || ($c >= 'a' && $c <= 'z')) {
+        return 1;
+    }
+    return 0;
+}
+
+# Find matching ')' for '(' at $open_pos, skipping quotes/escapes and nested delimiters.
+func find_matching_paren(str $s, int $open_pos) int {
+    my int $len = length($s);
+    my int $depth = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    my int $j = $open_pos;
+    while ($j < $len) {
+        my int $c = char_at($s, $j);
+        if ($in_dq == 1) {
+            if ($c == '\\') { $j = $j + 2; next; }
+            if ($c == '"') { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($c == '\\') { $j = $j + 2; next; }
+            if ($c == '\'') { $in_sq = 0; }
+        } else {
+            if ($c == '"') { $in_dq = 1; }
+            elsif ($c == '\'') { $in_sq = 1; }
+            elsif ($c == '(') { $depth = $depth + 1; }
+            elsif ($c == ')') {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    return $j;
+                }
+            }
+        }
+        $j = $j + 1;
+    }
+    return 0 - 1;
+}
+
+# Find top-level ',' within ($start .. $end - 1) respecting nested (), [], {} and quotes.
+func find_top_comma(str $s, int $start, int $end) int {
+    my int $depth = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    my int $j = $start;
+    while ($j < $end) {
+        my int $c = char_at($s, $j);
+        if ($in_dq == 1) {
+            if ($c == '\\') { $j = $j + 2; next; }
+            if ($c == '"') { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($c == '\\') { $j = $j + 2; next; }
+            if ($c == '\'') { $in_sq = 0; }
+        } else {
+            if ($c == '"') { $in_dq = 1; }
+            elsif ($c == '\'') { $in_sq = 1; }
+            elsif ($c == '(' || $c == '[' || $c == '{') { $depth = $depth + 1; }
+            elsif ($c == ')' || $c == ']' || $c == '}') {
+                if ($depth > 0) { $depth = $depth - 1; }
+            } elsif ($c == ',' && $depth == 0) {
+                return $j;
+            }
+        }
+        $j = $j + 1;
+    }
+    return 0 - 1;
+}
+
 # ============================================================
 func replace_func_1arg(str $line, str $fname, str $prefix, str $suffix) str {
     my str $result = $line;
     my str $search = $fname . "(";
+    my int $pos = 0;
     my int $guard = 0;
-    while (match($result, $fname . "\\(") && $guard < 20) {
+    while ($guard < 40) {
         $guard = $guard + 1;
-        my int $start = index($result, $search);
+        my int $start = index($result, $search, $pos);
         if ($start < 0) { last; }
-        my int $arg_start = $start + length($search);
-        my int $close = index($result, ")", $arg_start);
-        if ($close < 0) { last; }
+        if ($start > 0 && is_ident_ch(char_at($result, $start - 1)) == 1) {
+            $pos = $start + 1;
+            next;
+        }
+        my int $open_pos = $start + length($fname);
+        my int $arg_start = $open_pos + 1;
+        my int $close = find_matching_paren($result, $open_pos);
+        if ($close < 0) {
+            $pos = $start + 1;
+            next;
+        }
         my str $arg = substr($result, $arg_start, $close - $arg_start);
         $arg =~ s/^\s+//;
         $arg =~ s/\s+$//;
         my str $before = substr($result, 0, $start);
         my str $after = substr($result, $close + 1);
         $result = $before . $prefix . $arg . $suffix . $after;
+        if (index($prefix, $search) >= 0) {
+            $pos = $start + length($search);
+        } else {
+            $pos = length($before) + length($prefix);
+        }
     }
     return $result;
 }
@@ -132,25 +213,42 @@ func replace_func_1arg(str $line, str $fname, str $prefix, str $suffix) str {
 func replace_func_2arg_assign(str $line, str $fname, str $prefix, str $mid, str $suffix) str {
     my str $result = $line;
     my str $search = $fname . "(";
+    my int $pos = 0;
     my int $guard = 0;
-    while (match($result, $fname . "\\(") && $guard < 20) {
+    while ($guard < 40) {
         $guard = $guard + 1;
-        my int $start = index($result, $search);
+        my int $start = index($result, $search, $pos);
         if ($start < 0) { last; }
-        my int $arg_start = $start + length($search);
-        my int $comma = index($result, ",", $arg_start);
-        if ($comma < 0) { last; }
+        if ($start > 0 && is_ident_ch(char_at($result, $start - 1)) == 1) {
+            $pos = $start + 1;
+            next;
+        }
+        my int $open_pos = $start + length($fname);
+        my int $arg_start = $open_pos + 1;
+        my int $close = find_matching_paren($result, $open_pos);
+        if ($close < 0) {
+            $pos = $start + 1;
+            next;
+        }
+        my int $comma = find_top_comma($result, $arg_start, $close);
+        if ($comma < 0) {
+            $pos = $start + 1;
+            next;
+        }
         my str $arg1 = substr($result, $arg_start, $comma - $arg_start);
         $arg1 =~ s/^\s+//;
         $arg1 =~ s/\s+$//;
-        my int $close = index($result, ")", $comma + 1);
-        if ($close < 0) { last; }
         my str $arg2 = substr($result, $comma + 1, $close - $comma - 1);
         $arg2 =~ s/^\s+//;
         $arg2 =~ s/\s+$//;
         my str $before = substr($result, 0, $start);
         my str $after = substr($result, $close + 1);
         $result = $before . $prefix . $arg1 . $mid . $arg2 . $suffix . $after;
+        if (index($prefix, $search) >= 0) {
+            $pos = $start + length($search);
+        } else {
+            $pos = length($before) + length($prefix);
+        }
     }
     return $result;
 }
@@ -498,6 +596,9 @@ func convert_line(str $line) str {
     $result = replace_all($result, "captures()[7]", "$7");
     $result = replace_all($result, "captures()[8]", "$8");
     $result = replace_all($result, "captures()[9]", "$9");
+    if (index($result, "captures()[") >= 0) {
+        $result = replace_all($result, "captures()[", "(captures())[");
+    }
 
     # --- ::func() and .::func() -> func() (current-package shorthand) ---
     $result = replace($result, "\\.::([a-zA-Z_])", "$1");
@@ -785,7 +886,20 @@ func gen_header(str $source, int $needs_cwd, int $needs_fbase, int $needs_posix,
 
     $h = $h . "# match($str, $pattern) -> 1 if matches, 0 otherwise\n";
     $h = $h . "# NOTE: For replacements with backrefs ($1,$2), use s/// directly.\n";
-    $h = $h . "sub match { return $_[0] =~ /$_[1]/ ? 1 : 0 }\n";
+    $h = $h . "our @__strada_caps = ();\n";
+    $h = $h . "sub match {\n";
+    $h = $h . "    my ($s, $pat) = @_;\n";
+    $h = $h . "    if ($s =~ /$pat/) {\n";
+    $h = $h . "        @__strada_caps = ($&, $1, $2, $3, $4, $5, $6, $7, $8, $9);\n";
+    $h = $h . "        while (@__strada_caps && !defined($__strada_caps[-1])) { pop @__strada_caps; }\n";
+    $h = $h . "        return 1;\n";
+    $h = $h . "    }\n";
+    $h = $h . "    @__strada_caps = ();\n";
+    $h = $h . "    return 0;\n";
+    $h = $h . "}\n";
+    $h = $h . "sub captures { return @__strada_caps }\n";
+    $h = $h . "sub capture { my ($s, $pat) = @_; return match($s, $pat) ? @__strada_caps : () }\n";
+    $h = $h . "sub str_replace { my ($s,$f,$t) = @_; $s =~ s/\\Q$f\\E/$t/g; return $s }\n";
     $h = $h . "sub replace { my ($s,$f,$t) = @_; $s =~ s/$f/$t/; return $s }\n";
     $h = $h . "sub replace_all { my ($s,$f,$t) = @_; $s =~ s/$f/$t/g; return $s }\n";
     $h = $h . "sub char_at { return ord(substr($_[0], $_[1], 1)) }\n";
@@ -852,6 +966,7 @@ func convert_file(str $input_path, str $output_path) int {
     my str $current_package = "main";
     my int $brace_depth = 0;
     my array @catch_chain_stack = ();
+    my array @anon_sub_depths = ();
 
     my int $i = 0;
     while ($i < size(@lines)) {
@@ -863,6 +978,9 @@ func convert_file(str $input_path, str $output_path) int {
         my int $closes = count_closes($ln);
         my int $prev_brace_depth = $brace_depth;
         $brace_depth = $brace_depth + $opens - $closes;
+        while (size(@anon_sub_depths) > 0 && $brace_depth <= $anon_sub_depths[size(@anon_sub_depths) - 1]) {
+            pop(@anon_sub_depths);
+        }
         if (!match($trimmed, "^\\}\\s*catch\\s*\\(")) {
             while (size(@catch_chain_stack) > 0) {
                 my str $top_cc = $catch_chain_stack[size(@catch_chain_stack) - 1];
@@ -887,6 +1005,13 @@ func convert_file(str $input_path, str $output_path) int {
             if ($c_depth <= 0) {
                 $in_c_block = 0;
             }
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Pure comment line: pass through untouched before structural checks ---
+        if (match($trimmed, "^#")) {
+            $body = $body . $ln . "\n";
             $i = $i + 1;
             next;
         }
@@ -938,22 +1063,25 @@ func convert_file(str $input_path, str $output_path) int {
             # main_depth already updated above (before state handlers)
             if ($trimmed eq "}" && $main_depth <= 0) {
                 $in_main = 0;
+                @anon_sub_depths = ();
                 $i = $i + 1;
                 next;
             }
-            # Skip return 0; at end of main
-            if (match($trimmed, "^return\\s+0\\s*;")) {
-                $i = $i + 1;
-                next;
-            }
-            # Convert return N; to exit(N);
-            if (match($trimmed, "^return\\s+")) {
-                my str $conv = convert_line($ln);
-                $conv = replace($conv, "return\\s+", "exit(");
-                $conv = replace($conv, ";", ");");
-                $body = $body . $conv . "\n";
-                $i = $i + 1;
-                next;
+            if (size(@anon_sub_depths) == 0) {
+                # Skip return 0; at top level of main
+                if ($main_depth == 1 && match($trimmed, "^return\\s+0\\s*;")) {
+                    $i = $i + 1;
+                    next;
+                }
+                # Convert return N; to exit(N);
+                if (match($trimmed, "^return\\s+")) {
+                    my str $conv = convert_line($ln);
+                    $conv = replace($conv, "return\\s+", "exit(");
+                    $conv = replace($conv, ";\\s*$", ");");
+                    $body = $body . $conv . "\n";
+                    $i = $i + 1;
+                    next;
+                }
             }
             # Fall through to state machine checks below
             # so try/catch, __C__, BEGIN/END, anonymous func, etc. are handled
@@ -991,7 +1119,7 @@ func convert_file(str $input_path, str $output_path) int {
         # ============================================================
 
         # --- __C__ block ---
-        if (match($trimmed, "^__C__\\s*\\{") || match($trimmed, "__C__\\s*\\{")) {
+        if (match($trimmed, "^__C__\\s*\\{")) {
             $body = $body . "# __C__ block removed (C interop code)\n";
             $in_c_block = 1;
             $c_depth = $opens - $closes;
@@ -1213,6 +1341,9 @@ func convert_file(str $input_path, str $output_path) int {
                         }
                     }
                 }
+            }
+            if ($brace_depth > $prev_brace_depth) {
+                push(@anon_sub_depths, $prev_brace_depth);
             }
             $body = $body . convert_line($conv) . "\n";
             $i = $i + 1;

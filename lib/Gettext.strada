@@ -210,14 +210,24 @@ my str $_gt_locale = "";
 # High-Level API
 # ============================================================================
 
+# Internal: convert C string pointer returned by gettext to UTF-8-flagged Strada str
+private func _ptr_to_utf8(int $ptr) str {
+    my str $s = c::ptr_to_str($ptr);
+    utf8::decode($s);
+    return $s;
+}
+
 # Initialize gettext with domain and locale directory
 # Example: Gettext::init("myapp", "./locale")
 func init(str $domain, str $localedir) void {
     # Set locale from environment
     my int $lc_all = gt_LC_ALL();
     my int $empty = c::str_to_ptr("");
-    gt_setlocale($lc_all, $empty);
+    my int $ret = gt_setlocale($lc_all, $empty);
     c::free($empty);
+    if ($ret != 0) {
+        $_gt_locale = c::ptr_to_str($ret);
+    }
 
     # Bind domain to directory
     my int $domain_ptr = c::str_to_ptr($domain);
@@ -244,7 +254,7 @@ func init_locale(str $domain, str $localedir, str $locale) void {
     # Set explicit locale
     my int $lc_all = gt_LC_ALL();
     my int $locale_ptr = c::str_to_ptr($locale);
-    gt_setlocale($lc_all, $locale_ptr);
+    my int $ret = gt_setlocale($lc_all, $locale_ptr);
     c::free($locale_ptr);
 
     # Bind domain to directory
@@ -264,7 +274,9 @@ func init_locale(str $domain, str $localedir, str $locale) void {
     c::free($localedir_ptr);
 
     $_gt_domain = $domain;
-    $_gt_locale = $locale;
+    if ($ret != 0) {
+        $_gt_locale = c::ptr_to_str($ret);
+    }
 }
 
 # Translate a string (main function)
@@ -272,7 +284,7 @@ func init_locale(str $domain, str $localedir, str $locale) void {
 func _(str $msgid) str {
     my int $msgid_ptr = c::str_to_ptr($msgid);
     my int $result_ptr = gt_gettext($msgid_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
+    my str $result = _ptr_to_utf8($result_ptr);
     c::free($msgid_ptr);
     # Note: result_ptr points to gettext's internal memory, don't free it
     return $result;
@@ -290,7 +302,7 @@ func n(str $singular, str $plural, int $n) str {
     my int $plural_ptr = c::str_to_ptr($plural);
     my int $nn = ($n >= 0) ? $n : 0;
     my int $result_ptr = gt_ngettext($singular_ptr, $plural_ptr, $nn);
-    my str $result = c::ptr_to_str($result_ptr);
+    my str $result = _ptr_to_utf8($result_ptr);
     c::free($singular_ptr);
     c::free($plural_ptr);
     return $result;
@@ -307,7 +319,7 @@ func d(str $domain, str $msgid) str {
     my int $domain_ptr = c::str_to_ptr($domain);
     my int $msgid_ptr = c::str_to_ptr($msgid);
     my int $result_ptr = gt_dgettext($domain_ptr, $msgid_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
+    my str $result = _ptr_to_utf8($result_ptr);
     c::free($domain_ptr);
     c::free($msgid_ptr);
     return $result;
@@ -325,7 +337,7 @@ func dn(str $domain, str $singular, str $plural, int $n) str {
     my int $plural_ptr = c::str_to_ptr($plural);
     my int $nn = ($n >= 0) ? $n : 0;
     my int $result_ptr = gt_dngettext($domain_ptr, $singular_ptr, $plural_ptr, $nn);
-    my str $result = c::ptr_to_str($result_ptr);
+    my str $result = _ptr_to_utf8($result_ptr);
     c::free($domain_ptr);
     c::free($singular_ptr);
     c::free($plural_ptr);
@@ -413,13 +425,19 @@ func add_domain(str $domain, str $localedir) void {
 func set_locale(str $locale) void {
     my int $lc_all = gt_LC_ALL();
     my int $locale_ptr = c::str_to_ptr($locale);
-    gt_setlocale($lc_all, $locale_ptr);
+    my int $ret = gt_setlocale($lc_all, $locale_ptr);
     c::free($locale_ptr);
-    $_gt_locale = $locale;
+    if ($ret != 0) {
+        $_gt_locale = c::ptr_to_str($ret);
+    }
 }
 
 # Get current locale
 func get_locale() str {
+    my int $cur = gt_setlocale(gt_LC_MESSAGES(), 0);
+    if ($cur != 0) {
+        return c::ptr_to_str($cur);
+    }
     return $_gt_locale;
 }
 

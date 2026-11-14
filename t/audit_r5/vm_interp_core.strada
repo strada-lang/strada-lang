@@ -1,0 +1,454 @@
+# Regression tests for VM & Tree-Walk Interpreter + Stdlib Batch 5B (runnable on compiled ./strada, --vm, and --tree-walk)
+
+use lib "lib";
+use DateTime;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+# --- VM5-08: throwing default parameter ---
+our int $g_def_calls = 0;
+func throw_default_helper() int {
+    $g_def_calls = $g_def_calls + 1;
+    throw("default_boom");
+    return 0;
+}
+
+func bad_default_fn(int $x = throw_default_helper()) int {
+    return $x + 1;
+}
+
+func opt_add_pair(int $a = 19, int $b = 100) int {
+    return $a + $b;
+}
+
+# --- VM5-07 helpers ---
+our int $g_rhs_called = 0;
+func rhs_should_not_run() int {
+    $g_rhs_called = $g_rhs_called + 1;
+    return 1000;
+}
+
+func take_two_ints(int $a, int $b) int {
+    return $a + $b;
+}
+
+func ret_in_binop_left() int {
+    my array @xs = (1, 2);
+    my int $v = scalar(map { return 42; } @xs) + rhs_should_not_run();
+    return $v;
+}
+
+func ret_in_call_first_arg() int {
+    my array @xs = (1, 2);
+    return take_two_ints(scalar(map { return 77; } @xs), rhs_should_not_run());
+}
+
+# --- VM5-09: MRO-chained around modifiers ---
+package R5AroundP;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R5AroundP");
+}
+func calc(scalar $self, int $x) int {
+    return $self->{"v"} + $x;
+}
+around "calc" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x * 2) + 100;
+}
+
+package R5AroundC;
+extends R5AroundP;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R5AroundC");
+}
+around "calc" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x + 1) + 10;
+}
+
+# --- VM5-09: Tied hash for local $h{"k"} ---
+package R5TrackTie;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ();
+    my hash %data = ();
+    my array @log = ();
+    $self{"data"} = \%data;
+    $self{"log"} = \@log;
+    return bless(\%self, "R5TrackTie");
+}
+
+func FETCH(scalar $self, str $key) scalar {
+    push($self->{"log"}, "FETCH:" . $key);
+    my scalar $d = $self->{"data"};
+    return $d->{$key};
+}
+
+func STORE(scalar $self, str $key, scalar $val) void {
+    push($self->{"log"}, "STORE:" . $key . "=" . (defined($val) ? ("" . $val) : "undef"));
+    my scalar $d = $self->{"data"};
+    $d->{$key} = $val;
+}
+
+func EXISTS(scalar $self, str $key) int {
+    my scalar $d = $self->{"data"};
+    return exists($d->{$key}) ? 1 : 0;
+}
+
+func DELETE(scalar $self, str $key) scalar {
+    push($self->{"log"}, "DELETE:" . $key);
+    my scalar $d = $self->{"data"};
+    my scalar $old = $d->{$key};
+    delete($d, $key);
+    return $old;
+}
+
+func logs(scalar $self) str {
+    return join(",", @{$self->{"log"}});
+}
+
+package main;
+
+func uc_word(str $s) str {
+    return uc($s);
+}
+
+func test_vm5_01_handles() void {
+    my str $tmp = "/tmp/r5_vic_io_test.txt";
+    my scalar $wfd = core::open($tmp, "w");
+    ok(defined($wfd), "VM5-01 open write filehandle");
+    say($wfd, "line1");
+    say($wfd, "line2");
+    core::close($wfd);
+
+    my scalar $rfd = core::open($tmp, "r");
+    ok(defined($rfd), "VM5-01 open read filehandle");
+    core::seek($rfd, 6, 0);
+    my int $pos = core::tell($rfd);
+    ok($pos == 6, "VM5-01 seek/tell keeps handle open");
+    my str $rest = core::slurp_fh($rfd);
+    ok($rest eq "line2\n", "VM5-01 slurp_fh after seek/tell");
+    my int $rc = core::close($rfd);
+    ok($rc == 1, "VM5-01 explicit close succeeds");
+    my int $rc2 = core::close($rfd);
+    ok($rc2 == 0, "VM5-01 second close on closed handle returns 0");
+    core::unlink($tmp);
+
+    my scalar $mwh = core::open_str("", "w");
+    say($mwh, "mem_alpha");
+    my str $got_mem = core::str_from_fh($mwh);
+    ok($got_mem eq "mem_alpha\n", "VM5-01 open_str write + str_from_fh");
+    core::close($mwh);
+
+    my scalar $mrh = core::open_str("mem_first\nmem_second\n", "r");
+    my str $rl = core::readline($mrh);
+    ok($rl eq "mem_first", "VM5-01 open_str read + readline");
+    core::close($mrh);
+
+    my scalar $pfh = core::popen("echo vm5_popen_ok", "r");
+    ok(defined($pfh), "VM5-01 popen returns valid handle");
+    my str $pout = core::readline($pfh);
+    ok($pout eq "vm5_popen_ok", "VM5-01 popen readline");
+    my int $pc1 = core::pclose($pfh);
+    ok($pc1 == 0, "VM5-01 pclose returns 0");
+    my int $pc2 = core::pclose($pfh);
+    ok($pc2 == -1, "VM5-01 double pclose returns -1 safely");
+}
+
+func test_vm5_04_regex() void {
+    my str $s1 = "hello foo world";
+    my int $c1 = ($s1 =~ s/(foo)/bar/);
+    my array @caps1 = captures();
+    ok($c1 == 1, "VM5-04 s/// returns count 1");
+    ok($s1 eq "hello bar world", "VM5-04 s/// mutates target");
+    ok($1 eq "foo" && size(@caps1) >= 2 && $caps1[1] eq "foo", "VM5-04 s/// populates \$1 and captures()");
+
+    my str $s2 = "a1b22c333";
+    my int $c2 = ($s2 =~ s/\d+/X/g);
+    ok($c2 == 3 && $s2 eq "aXbXcX", "VM5-04 s///g returns count 3 and mutates target");
+
+    my str $s3 = "ab cd";
+    my int $c3 = ($s3 =~ s/([a-z]+)/uc_word($1)/ge);
+    ok($c3 == 2 && $s3 eq "AB CD", "VM5-04 s///ge returns count and evaluates replacement");
+
+    my str $s4 = "foo baz";
+    my str $r4 = ($s4 =~ s/foo/bar/r);
+    ok($r4 eq "bar baz" && $s4 eq "foo baz", "VM5-04 s///r returns modified copy without mutating");
+    my str $r4_nomatch = ($s4 =~ s/nomatch/bar/r);
+    ok($r4_nomatch eq "foo baz" && $s4 eq "foo baz", "VM5-04 s///r zero-match returns copy without mutating");
+    my str $r4_lit = ("hi there" =~ s/there/strada/r);
+    ok($r4_lit eq "hi strada", "VM5-04 s///r on string literal");
+    my str $s4e = "ab cd";
+    my str $r4e = ($s4e =~ s/([a-z]+)/uc_word($1)/ger);
+    ok($r4e eq "AB CD" && $s4e eq "ab cd", "VM5-04 s///ger evaluates replacement without mutating target");
+
+    my str $tr_in = "hello 123";
+    my str $tr_out = ($tr_in =~ tr/a-z/A-Z/r);
+    ok($tr_out eq "HELLO 123" && $tr_in eq "hello 123", "VM5-04 tr///r returns translated copy without mutating");
+    my str $tr_lit = ("xyz" =~ tr/x-z/A-C/r);
+    ok($tr_lit eq "ABC", "VM5-04 tr///r on string literal");
+
+    my int $m5 = match("abc123", "([a-z]+)(\\d+)");
+    ok($m5 == 1 && $1 eq "abc" && $2 eq "123", "VM5-04 match() populates \$1 and \$2");
+
+    my str $roff1 = "a\"b-c";
+    $roff1 =~ s/"/\\(dq/g;
+    $roff1 =~ s/-/\\-/g;
+    my str $roff2 = "p\\q";
+    $roff2 =~ s/\\/\\\\/g;
+    my str $roff3 = "xy";
+    $roff3 =~ s/(x)/\\$1/g;
+    ok($roff1 eq "a\\(dqb\\-c" && $roff2 eq "p\\\\q" && $roff3 eq "\\xy"
+       && ("p\\q" =~ /\\/) && !("pq" =~ /\\/) && ($roff2 =~ /\\\\/),
+       "CC5-07 s/// and m// replacement/pattern backslash preservation");
+}
+
+func test_vm5_05_many_block_locals() int {
+    my int $sum = 0;
+    { my int $a1 = 1; my int $b1 = 2; my int $c1 = 3; my int $d1 = 4; my int $e1 = 5; $sum = $sum + $a1 + $b1 + $c1 + $d1 + $e1; }
+    { my int $a2 = 1; my int $b2 = 2; my int $c2 = 3; my int $d2 = 4; my int $e2 = 5; $sum = $sum + $a2 + $b2 + $c2 + $d2 + $e2; }
+    { my int $a3 = 1; my int $b3 = 2; my int $c3 = 3; my int $d3 = 4; my int $e3 = 5; $sum = $sum + $a3 + $b3 + $c3 + $d3 + $e3; }
+    { my int $a4 = 1; my int $b4 = 2; my int $c4 = 3; my int $d4 = 4; my int $e4 = 5; $sum = $sum + $a4 + $b4 + $c4 + $d4 + $e4; }
+    { my int $a5 = 1; my int $b5 = 2; my int $c5 = 3; my int $d5 = 4; my int $e5 = 5; $sum = $sum + $a5 + $b5 + $c5 + $d5 + $e5; }
+    { my int $a6 = 1; my int $b6 = 2; my int $c6 = 3; my int $d6 = 4; my int $e6 = 5; $sum = $sum + $a6 + $b6 + $c6 + $d6 + $e6; }
+    { my int $a7 = 1; my int $b7 = 2; my int $c7 = 3; my int $d7 = 4; my int $e7 = 5; $sum = $sum + $a7 + $b7 + $c7 + $d7 + $e7; }
+    { my int $a8 = 1; my int $b8 = 2; my int $c8 = 3; my int $d8 = 4; my int $e8 = 5; $sum = $sum + $a8 + $b8 + $c8 + $d8 + $e8; }
+    { my int $a9 = 1; my int $b9 = 2; my int $c9 = 3; my int $d9 = 4; my int $e9 = 5; $sum = $sum + $a9 + $b9 + $c9 + $d9 + $e9; }
+    { my int $a10 = 1; my int $b10 = 2; my int $c10 = 3; my int $d10 = 4; my int $e10 = 5; $sum = $sum + $a10 + $b10 + $c10 + $d10 + $e10; }
+    { my int $a11 = 1; my int $b11 = 2; my int $c11 = 3; my int $d11 = 4; my int $e11 = 5; $sum = $sum + $a11 + $b11 + $c11 + $d11 + $e11; }
+    { my int $a12 = 1; my int $b12 = 2; my int $c12 = 3; my int $d12 = 4; my int $e12 = 5; $sum = $sum + $a12 + $b12 + $c12 + $d12 + $e12; }
+    { my int $a13 = 1; my int $b13 = 2; my int $c13 = 3; my int $d13 = 4; my int $e13 = 5; $sum = $sum + $a13 + $b13 + $c13 + $d13 + $e13; }
+    { my int $a14 = 1; my int $b14 = 2; my int $c14 = 3; my int $d14 = 4; my int $e14 = 5; $sum = $sum + $a14 + $b14 + $c14 + $d14 + $e14; }
+    { my int $a15 = 1; my int $b15 = 2; my int $c15 = 3; my int $d15 = 4; my int $e15 = 5; $sum = $sum + $a15 + $b15 + $c15 + $d15 + $e15; }
+    { my int $a16 = 1; my int $b16 = 2; my int $c16 = 3; my int $d16 = 4; my int $e16 = 5; $sum = $sum + $a16 + $b16 + $c16 + $d16 + $e16; }
+    { my int $a17 = 1; my int $b17 = 2; my int $c17 = 3; my int $d17 = 4; my int $e17 = 5; $sum = $sum + $a17 + $b17 + $c17 + $d17 + $e17; }
+    { my int $a18 = 1; my int $b18 = 2; my int $c18 = 3; my int $d18 = 4; my int $e18 = 5; $sum = $sum + $a18 + $b18 + $c18 + $d18 + $e18; }
+    { my int $a19 = 1; my int $b19 = 2; my int $c19 = 3; my int $d19 = 4; my int $e19 = 5; $sum = $sum + $a19 + $b19 + $c19 + $d19 + $e19; }
+    { my int $a20 = 1; my int $b20 = 2; my int $c20 = 3; my int $d20 = 4; my int $e20 = 5; $sum = $sum + $a20 + $b20 + $c20 + $d20 + $e20; }
+    { my int $a21 = 1; my int $b21 = 2; my int $c21 = 3; my int $d21 = 4; my int $e21 = 5; $sum = $sum + $a21 + $b21 + $c21 + $d21 + $e21; }
+    { my int $a22 = 1; my int $b22 = 2; my int $c22 = 3; my int $d22 = 4; my int $e22 = 5; $sum = $sum + $a22 + $b22 + $c22 + $d22 + $e22; }
+    { my int $a23 = 1; my int $b23 = 2; my int $c23 = 3; my int $d23 = 4; my int $e23 = 5; $sum = $sum + $a23 + $b23 + $c23 + $d23 + $e23; }
+    { my int $a24 = 1; my int $b24 = 2; my int $c24 = 3; my int $d24 = 4; my int $e24 = 5; $sum = $sum + $a24 + $b24 + $c24 + $d24 + $e24; }
+    { my int $a25 = 1; my int $b25 = 2; my int $c25 = 3; my int $d25 = 4; my int $e25 = 5; $sum = $sum + $a25 + $b25 + $c25 + $d25 + $e25; }
+    { my int $a26 = 1; my int $b26 = 2; my int $c26 = 3; my int $d26 = 4; my int $e26 = 5; $sum = $sum + $a26 + $b26 + $c26 + $d26 + $e26; }
+    { my int $a27 = 1; my int $b27 = 2; my int $c27 = 3; my int $d27 = 4; my int $e27 = 5; $sum = $sum + $a27 + $b27 + $c27 + $d27 + $e27; }
+    { my int $a28 = 1; my int $b28 = 2; my int $c28 = 3; my int $d28 = 4; my int $e28 = 5; $sum = $sum + $a28 + $b28 + $c28 + $d28 + $e28; }
+    { my int $a29 = 1; my int $b29 = 2; my int $c29 = 3; my int $d29 = 4; my int $e29 = 5; $sum = $sum + $a29 + $b29 + $c29 + $d29 + $e29; }
+    { my int $a30 = 1; my int $b30 = 2; my int $c30 = 3; my int $d30 = 4; my int $e30 = 5; $sum = $sum + $a30 + $b30 + $c30 + $d30 + $e30; }
+    { my int $a31 = 1; my int $b31 = 2; my int $c31 = 3; my int $d31 = 4; my int $e31 = 5; $sum = $sum + $a31 + $b31 + $c31 + $d31 + $e31; }
+    { my int $a32 = 1; my int $b32 = 2; my int $c32 = 3; my int $d32 = 4; my int $e32 = 5; $sum = $sum + $a32 + $b32 + $c32 + $d32 + $e32; }
+    { my int $a33 = 1; my int $b33 = 2; my int $c33 = 3; my int $d33 = 4; my int $e33 = 5; $sum = $sum + $a33 + $b33 + $c33 + $d33 + $e33; }
+    { my int $a34 = 1; my int $b34 = 2; my int $c34 = 3; my int $d34 = 4; my int $e34 = 5; $sum = $sum + $a34 + $b34 + $c34 + $d34 + $e34; }
+    { my int $a35 = 1; my int $b35 = 2; my int $c35 = 3; my int $d35 = 4; my int $e35 = 5; $sum = $sum + $a35 + $b35 + $c35 + $d35 + $e35; }
+    { my int $a36 = 1; my int $b36 = 2; my int $c36 = 3; my int $d36 = 4; my int $e36 = 5; $sum = $sum + $a36 + $b36 + $c36 + $d36 + $e36; }
+    { my int $a37 = 1; my int $b37 = 2; my int $c37 = 3; my int $d37 = 4; my int $e37 = 5; $sum = $sum + $a37 + $b37 + $c37 + $d37 + $e37; }
+    { my int $a38 = 1; my int $b38 = 2; my int $c38 = 3; my int $d38 = 4; my int $e38 = 5; $sum = $sum + $a38 + $b38 + $c38 + $d38 + $e38; }
+    { my int $a39 = 1; my int $b39 = 2; my int $c39 = 3; my int $d39 = 4; my int $e39 = 5; $sum = $sum + $a39 + $b39 + $c39 + $d39 + $e39; }
+    { my int $a40 = 1; my int $b40 = 2; my int $c40 = 3; my int $d40 = 4; my int $e40 = 5; $sum = $sum + $a40 + $b40 + $c40 + $d40 + $e40; }
+    { my int $a41 = 1; my int $b41 = 2; my int $c41 = 3; my int $d41 = 4; my int $e41 = 5; $sum = $sum + $a41 + $b41 + $c41 + $d41 + $e41; }
+    { my int $a42 = 1; my int $b42 = 2; my int $c42 = 3; my int $d42 = 4; my int $e42 = 5; $sum = $sum + $a42 + $b42 + $c42 + $d42 + $e42; }
+    { my int $a43 = 1; my int $b43 = 2; my int $c43 = 3; my int $d43 = 4; my int $e43 = 5; $sum = $sum + $a43 + $b43 + $c43 + $d43 + $e43; }
+    { my int $a44 = 1; my int $b44 = 2; my int $c44 = 3; my int $d44 = 4; my int $e44 = 5; $sum = $sum + $a44 + $b44 + $c44 + $d44 + $e44; }
+    { my int $a45 = 1; my int $b45 = 2; my int $c45 = 3; my int $d45 = 4; my int $e45 = 5; $sum = $sum + $a45 + $b45 + $c45 + $d45 + $e45; }
+    { my int $a46 = 1; my int $b46 = 2; my int $c46 = 3; my int $d46 = 4; my int $e46 = 5; $sum = $sum + $a46 + $b46 + $c46 + $d46 + $e46; }
+    { my int $a47 = 1; my int $b47 = 2; my int $c47 = 3; my int $d47 = 4; my int $e47 = 5; $sum = $sum + $a47 + $b47 + $c47 + $d47 + $e47; }
+    { my int $a48 = 1; my int $b48 = 2; my int $c48 = 3; my int $d48 = 4; my int $e48 = 5; $sum = $sum + $a48 + $b48 + $c48 + $d48 + $e48; }
+    { my int $a49 = 1; my int $b49 = 2; my int $c49 = 3; my int $d49 = 4; my int $e49 = 5; $sum = $sum + $a49 + $b49 + $c49 + $d49 + $e49; }
+    { my int $a50 = 1; my int $b50 = 2; my int $c50 = 3; my int $d50 = 4; my int $e50 = 5; $sum = $sum + $a50 + $b50 + $c50 + $d50 + $e50; }
+    { my int $a51 = 1; my int $b51 = 2; my int $c51 = 3; my int $d51 = 4; my int $e51 = 5; $sum = $sum + $a51 + $b51 + $c51 + $d51 + $e51; }
+    { my int $a52 = 1; my int $b52 = 2; my int $c52 = 3; my int $d52 = 4; my int $e52 = 5; $sum = $sum + $a52 + $b52 + $c52 + $d52 + $e52; }
+    { my int $a53 = 1; my int $b53 = 2; my int $c53 = 3; my int $d53 = 4; my int $e53 = 5; $sum = $sum + $a53 + $b53 + $c53 + $d53 + $e53; }
+    { my int $a54 = 1; my int $b54 = 2; my int $c54 = 3; my int $d54 = 4; my int $e54 = 5; $sum = $sum + $a54 + $b54 + $c54 + $d54 + $e54; }
+    { my int $a55 = 1; my int $b55 = 2; my int $c55 = 3; my int $d55 = 4; my int $e55 = 5; $sum = $sum + $a55 + $b55 + $c55 + $d55 + $e55; }
+    { my int $a56 = 1; my int $b56 = 2; my int $c56 = 3; my int $d56 = 4; my int $e56 = 5; $sum = $sum + $a56 + $b56 + $c56 + $d56 + $e56; }
+    { my int $a57 = 1; my int $b57 = 2; my int $c57 = 3; my int $d57 = 4; my int $e57 = 5; $sum = $sum + $a57 + $b57 + $c57 + $d57 + $e57; }
+    { my int $a58 = 1; my int $b58 = 2; my int $c58 = 3; my int $d58 = 4; my int $e58 = 5; $sum = $sum + $a58 + $b58 + $c58 + $d58 + $e58; }
+    { my int $a59 = 1; my int $b59 = 2; my int $c59 = 3; my int $d59 = 4; my int $e59 = 5; $sum = $sum + $a59 + $b59 + $c59 + $d59 + $e59; }
+    { my int $a60 = 1; my int $b60 = 2; my int $c60 = 3; my int $d60 = 4; my int $e60 = 5; $sum = $sum + $a60 + $b60 + $c60 + $d60 + $e60; }
+    { my int $a61 = 1; my int $b61 = 2; my int $c61 = 3; my int $d61 = 4; my int $e61 = 5; $sum = $sum + $a61 + $b61 + $c61 + $d61 + $e61; }
+    { my int $a62 = 1; my int $b62 = 2; my int $c62 = 3; my int $d62 = 4; my int $e62 = 5; $sum = $sum + $a62 + $b62 + $c62 + $d62 + $e62; }
+    { my int $a63 = 1; my int $b63 = 2; my int $c63 = 3; my int $d63 = 4; my int $e63 = 5; $sum = $sum + $a63 + $b63 + $c63 + $d63 + $e63; }
+
+    # for + try/catch slot reuse + non-scalar container mixed before scalar
+    for (my int $fi = 0; $fi < 3; $fi = $fi + 1) {
+        $sum = $sum + $fi;
+    }
+    try {
+        throw("e1");
+    } catch ($ce) {
+        $sum = $sum + 10;
+    }
+    {
+        my array @tmp_arr = (10, 20, 30);
+        $sum = $sum + size(@tmp_arr);
+    }
+    {
+        my int $after_arr = 7;
+        $sum = $sum + $after_arr;
+    }
+    return $sum; # 63*15 + 3 + 10 + 3 + 7 = 945 + 23 = 968
+}
+
+func test_vm5_07_signals() void {
+    $g_rhs_called = 0;
+    ok(ret_in_binop_left() == 42 && $g_rhs_called == 0, "VM5-07 return in binop left aborts RHS");
+    ok(ret_in_call_first_arg() == 77 && $g_rhs_called == 0, "VM5-07 return in call arg aborts remaining args");
+
+    my int $redo_tries = 0;
+    my array @nums = (1, 2, 3, 4, 5);
+    my array @mapped = map {
+        if ($_ == 2) { next; }
+        if ($_ == 3 && $redo_tries == 0) { $redo_tries = 1; redo; }
+        if ($_ == 5) { last; }
+        $_ * 10;
+    } @nums;
+    ok(join(",", @mapped) eq "10,30,40", "VM5-07 next/redo/last inside map");
+
+    my int $g_redo = 0;
+    my array @grepped = grep {
+        if ($_ == 1) { next; }
+        if ($_ == 2 && $g_redo == 0) { $g_redo = 1; redo; }
+        if ($_ == 5) { last; }
+        $_ % 2 == 0;
+    } @nums;
+    ok(join(",", @grepped) eq "2,4", "VM5-07 next/redo/last inside grep");
+
+    my int $fin_ran = 0;
+    my int $catch_ran = 0;
+    try {
+        goto AFTER_TRY;
+    } catch ($e) {
+        $catch_ran = 1;
+    } finally {
+        $fin_ran = 1;
+    }
+    AFTER_TRY:
+    ok($fin_ran == 1 && $catch_ran == 0, "VM5-07 goto out of try runs finally without catch");
+}
+
+func test_vm5_08_default_throw() void {
+    core::set_recursion_limit(15);
+    $g_def_calls = 0;
+    my int $caught = 0;
+    my int $i = 0;
+    while ($i < 20) {
+        try {
+            bad_default_fn();
+        } catch ($e) {
+            $caught = $caught + 1;
+        }
+        $i = $i + 1;
+    }
+    core::set_recursion_limit(1000);
+    ok($caught == 20 && $g_def_calls == 20, "VM5-08 throwing default param does not leak call_depth");
+    ok(bad_default_fn(10) == 11, "VM5-08 explicit arg skips throwing default");
+    ok(opt_add_pair() == 119 && opt_add_pair(4) == 104 && opt_add_pair(4, 1) == 5 && opt_add_pair(0, 0) == 0, "VM5-08 multi-arg default parameters (including explicit 0)");
+}
+
+func test_vm5_09_and_11() void {
+    # Non-lexical foreach $outer
+    my int $outer = 0;
+    my array @items = (11, 22, 33);
+    foreach $outer (@items) {
+    }
+    ok($outer == 33, "VM5-09 non-lexical foreach updates outer scalar");
+
+    # MRO-chained around modifiers
+    my scalar $obj = R5AroundC::new(5);
+    # Child around: orig($x+1) + 10; Parent around: orig($x*2) + 100; calc: 5 + $x
+    # Expected: ((5 + (3 + 1) * 2) + 100) + 10 = (13 + 100) + 10 = 123
+    ok($obj->calc(3) == 123, "VM5-09 MRO-chained around modifiers run child -> parent -> method");
+
+    # Tied hash with local $th{"k"}
+    my hash %th = ();
+    my scalar $tobj = tie(%th, "R5TrackTie");
+    $th{"keep"} = "orig";
+    {
+        local $th{"keep"} = "temp_keep";
+        local $th{"added"} = "temp_add";
+        ok($th{"keep"} eq "temp_keep" && $th{"added"} eq "temp_add", "VM5-09 local tied hash inside block");
+    }
+    ok($th{"keep"} eq "orig" && !exists($th{"added"}), "VM5-09 local tied hash restored on block exit");
+    my str $logs = $tobj->logs();
+    ok(index($logs, "STORE:keep=temp_keep") >= 0 && index($logs, "DELETE:added") >= 0 && index($logs, "STORE:keep=orig") >= 0, "VM5-09 local tied hash invoked STORE and DELETE");
+    untie(%th);
+
+    # VM5-11: forward & backward goto + standalone LABEL:
+    my int $step = 0;
+    my str $trace = "";
+    goto START_SM;
+    $trace = $trace . "SKIPPED:";
+    START_SM:
+    $step = $step + 1;
+    $trace = $trace . $step;
+    if ($step < 3) {
+        goto START_SM;
+    }
+    ok($trace eq "123", "VM5-11 forward and backward goto state machine");
+
+    # VM5-11: labeled outer loop next OUTER
+    my int $ticks = 0;
+    OUTER: for (my int $oi = 0; $oi < 3; $oi = $oi + 1) {
+        for (my int $ij = 0; $ij < 3; $ij = $ij + 1) {
+            if ($ij == 1) {
+                next OUTER;
+            }
+            $ticks = $ticks + 1;
+        }
+    }
+    ok($ticks == 3, "VM5-11 next OUTER advances outer for step expression");
+}
+
+func test_sl5_03_08_rand_datetime() void {
+    core::srand();
+    core::srandom();
+    math::srand();
+    my num $rn = math::rand();
+    ok($rn >= 0.0 && $rn <= 1.0, "SL5-03 0-arg srand/srandom/math::srand");
+
+    my int $off = DateTime::timezone_offset();
+    my str $tzn = DateTime::timezone_name();
+    ok($off >= -50400 && $off <= 50400 && length($tzn) > 0, "SL5-08 DateTime timezone_offset & timezone_name");
+
+    my scalar $dt = DateTime::make(2026, 6, 15, 14, 30, 0);
+    my str $pad = "0123456789" x 30;
+    my str $fmt = "%Y-" . $pad;
+    my str $out = DateTime::format($dt, $fmt);
+    ok(length($out) == 305 && index($out, "2026-0123456789") == 0, "SL5-08 DateTime::format >256 bytes");
+}
+
+func main() int {
+    test_vm5_01_handles();
+    test_vm5_04_regex();
+    ok(test_vm5_05_many_block_locals() == 968, "VM5-05 >300 sequential block locals + mixed container/scalar");
+    test_vm5_07_signals();
+    test_vm5_08_default_throw();
+    test_vm5_09_and_11();
+    test_sl5_03_08_rand_datetime();
+
+    my int $cc_a = 65;
+    my int $cc_z = 90;
+    my str $nl = '\n';
+    my str $s0 = '0';
+    my num $f0 = 0.0;
+    ok('0' == 48 && '9' == 57 && $cc_a == 'A' && $cc_z == 'Z' && 'Z' == 90
+       && '\n' == 10 && '\t' == 9 && '\r' == 13 && '\0' == 0
+       && '\'' == 39 && '\\' == 92 && '"' == 34 && '\x7f' == 127
+       && 'a' < 'z' && ord("A") == 65
+       && typeof(48) eq "int" && 0xFF == 255 && 0b1010 == 10 && 0o77 == 63
+       && length($nl) == 2 && $s0 eq '0' && $f0 == '0',
+       "CC5-06 single-char comparisons 'x'");
+
+    if ($g_fail > 0) {
+        say("VM_INTERP_CORE_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R5_VM_INTERP_CORE_OK");
+    return 0;
+}

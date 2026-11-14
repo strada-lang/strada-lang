@@ -3,6 +3,7 @@
 
 #include "vm_compiler.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
 
@@ -47,6 +48,7 @@
 #define NI_TRY_CATCH     106
 #define NI_THROW         107
 #define NI_LABEL         108
+#define NI_GOTO          109
 #define NI_FOREACH_STMT  110
 #define NI_ANON_FUNC     111
 #define NI_CLOSURE_CALL  112
@@ -105,6 +107,23 @@ static StradaValue *ast_get(StradaValue *node, const char *key) {
 
 static int64_t ast_int(StradaValue *node, const char *key) {
     StradaValue *v = ast_get(node, key);
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR && v->value.pv) {
+        const char *p = v->value.pv;
+        int neg = 0;
+        if (*p == '-') { neg = 1; p++; }
+        else if (*p == '+') { p++; }
+        uint64_t uv = 0;
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            uv = strtoull(p + 2, NULL, 16);
+        } else if (p[0] == '0' && (p[1] == 'b' || p[1] == 'B')) {
+            uv = strtoull(p + 2, NULL, 2);
+        } else if (p[0] == '0' && (p[1] == 'o' || p[1] == 'O')) {
+            uv = strtoull(p + 2, NULL, 8);
+        } else {
+            uv = strtoull(p, NULL, 10);
+        }
+        return neg ? (int64_t)(0ULL - uv) : (int64_t)uv;
+    }
     return strada_to_int(v);
 }
 
@@ -269,12 +288,26 @@ typedef struct TryCtx {
 } TryCtx;
 
 typedef struct {
+    char *name;
+    size_t offset;
+    int has_offset;
+    int try_handler_depth;
+    int local_restore_depth;
+} VMLabelDef;
+
+typedef struct {
+    char *name;
+    size_t patch_off;
+} VMGotoPatch;
+
+typedef struct {
     VMChunk *chunk;
     VMProgram *prog;
     char *local_names[256];
     char local_sigils[256];
     int local_count;
     int max_local_count;
+    int has_non_scalar;
     const char *func_name;
     const char *cur_package;  /* enclosing package for unqualified-call fallback */
     int errors;
@@ -290,6 +323,14 @@ typedef struct {
     /* Local restore tracking */
     char *local_restores[32];
     int local_restore_count;
+    /* Label & goto tracking */
+    const char *pending_loop_label;
+    VMLabelDef *labels;
+    int label_count;
+    int label_cap;
+    VMGotoPatch *gotos;
+    int goto_count;
+    int goto_cap;
 } CompCtx;
 
 static int ctx_find_local_sigil(CompCtx *ctx, const char *name, char sigil) {
@@ -312,6 +353,9 @@ static int ctx_find_local(CompCtx *ctx, const char *name) {
 }
 
 static int ctx_add_local(CompCtx *ctx, const char *name, char sigil) {
+    if (sigil != '$' && sigil != '\0') {
+        ctx->has_non_scalar = 1;
+    }
     /* local_names[]/local_sigils[] are fixed 256-entry arrays. Without this
      * bound check, a function/scope with >=256 accumulated locals overflowed
      * them (stack buffer overflow when compiling untrusted source). Fail with
@@ -320,7 +364,8 @@ static int ctx_add_local(CompCtx *ctx, const char *name, char sigil) {
         fprintf(stderr, "VM compile error: too many local variables in one scope (max %d); "
                         "this function is too large for the bytecode VM backend\n",
                 (int)(sizeof(ctx->local_names) / sizeof(ctx->local_names[0])));
-        exit(1);
+        ctx->errors++;
+        return 255;
     }
     int slot = ctx->local_count;
     if (ctx->local_names[slot]) free(ctx->local_names[slot]);
@@ -373,7 +418,8 @@ static int ctx_add_capture(CompCtx *ctx, const char *name, char sigil, int outer
     if (ctx->capture_count >= (int)(sizeof(ctx->captures) / sizeof(ctx->captures[0]))) {
         fprintf(stderr, "VM compile error: closure captures too many variables (max %d)\n",
                 (int)(sizeof(ctx->captures) / sizeof(ctx->captures[0])));
-        exit(1);
+        ctx->errors++;
+        return 63;
     }
     int idx = ctx->capture_count;
     ctx->captures[idx].name = strdup(name);
@@ -554,6 +600,218 @@ static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
     }
     while (cur_lr > target->local_restore_depth) {
         emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+    }
+}
+
+static VMLabelDef *vm_ctx_find_label(CompCtx *ctx, const char *name) {
+    if (!name || !name[0]) return NULL;
+    for (int i = 0; i < ctx->label_count; i++) {
+        if (ctx->labels[i].name && strcmp(ctx->labels[i].name, name) == 0) {
+            return &ctx->labels[i];
+        }
+    }
+    return NULL;
+}
+
+static VMLabelDef *vm_ctx_ensure_label(CompCtx *ctx, const char *name) {
+    VMLabelDef *existing = vm_ctx_find_label(ctx, name);
+    if (existing) return existing;
+    if (ctx->label_count >= ctx->label_cap) {
+        ctx->label_cap = ctx->label_cap ? ctx->label_cap * 2 : 16;
+        ctx->labels = realloc(ctx->labels, (size_t)ctx->label_cap * sizeof(VMLabelDef));
+    }
+    VMLabelDef *lbl = &ctx->labels[ctx->label_count++];
+    memset(lbl, 0, sizeof(*lbl));
+    lbl->name = strdup(name);
+    return lbl;
+}
+
+static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int local_d) {
+    if (!node || STRADA_IS_TAGGED_INT(node)) return local_d;
+    node = ast_deref(node);
+    if (!node || STRADA_IS_TAGGED_INT(node) || node->type != STRADA_HASH) return local_d;
+
+    int type = (int)ast_int(node, "type");
+    switch (type) {
+    case NI_ANON_FUNC:
+        return local_d;
+    case NI_LOCAL_DECL:
+        return (local_d < 32) ? local_d + 1 : local_d;
+    case NI_LABEL: {
+        const char *name = ast_str(node, "name");
+        if (name && name[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, name);
+            lbl->try_handler_depth = try_h;
+            lbl->local_restore_depth = local_d;
+        }
+        return prescan_vm_labels(ctx, ast_get(node, "statement"), try_h, local_d);
+    }
+    case NI_BLOCK: {
+        StradaValue *stmts = ast_get(node, "statements");
+        int count = (int)ast_int(node, "statement_count");
+        int cur_ld = local_d;
+        for (int i = 0; i < count; i++) {
+            cur_ld = prescan_vm_labels(ctx, ast_arr_get(stmts, i), try_h, cur_ld);
+        }
+        return local_d;
+    }
+    case NI_IF_STMT: {
+        prescan_vm_labels(ctx, ast_get(node, "then_block"), try_h, local_d);
+        StradaValue *elsif_blocks = ast_get(node, "elsif_blocks");
+        int elsif_count = (int)ast_int(node, "elsif_count");
+        for (int i = 0; i < elsif_count; i++) {
+            prescan_vm_labels(ctx, ast_arr_get(elsif_blocks, i), try_h, local_d);
+        }
+        prescan_vm_labels(ctx, ast_get(node, "else_block"), try_h, local_d);
+        return local_d;
+    }
+    case NI_WHILE_STMT:
+    case NI_DO_WHILE_STMT:
+    case NI_FOREACH_STMT: {
+        const char *lbl_name = ast_str(node, "label");
+        if (lbl_name && lbl_name[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, lbl_name);
+            lbl->try_handler_depth = try_h;
+            lbl->local_restore_depth = local_d;
+        }
+        prescan_vm_labels(ctx, ast_get(node, "body"), try_h, local_d);
+        return local_d;
+    }
+    case NI_FOR_STMT: {
+        const char *lbl_name = ast_str(node, "label");
+        if (lbl_name && lbl_name[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, lbl_name);
+            lbl->try_handler_depth = try_h;
+            lbl->local_restore_depth = local_d;
+        }
+        int cur_ld = prescan_vm_labels(ctx, ast_get(node, "init"), try_h, local_d);
+        prescan_vm_labels(ctx, ast_get(node, "body"), try_h, cur_ld);
+        return cur_ld;
+    }
+    case NI_SWITCH: {
+        StradaValue *blocks = ast_get(node, "blocks");
+        int case_count = (int)ast_int(node, "case_count");
+        for (int i = 0; i < case_count; i++) {
+            prescan_vm_labels(ctx, ast_arr_get(blocks, i), try_h, local_d);
+        }
+        prescan_vm_labels(ctx, ast_get(node, "default_block"), try_h, local_d);
+        return local_d;
+    }
+    case NI_TRY_CATCH: {
+        StradaValue *catches = ast_get(node, "catch_clauses");
+        int catch_count = (int)ast_int(node, "catch_count");
+        StradaValue *finally_block = ast_get(node, "finally_block");
+        int has_finally = (finally_block && !STRADA_IS_TAGGED_INT(finally_block)) ? 1 : 0;
+        int try_inner_h = try_h + ((has_finally && catch_count > 0) ? 2 : 1);
+        prescan_vm_labels(ctx, ast_get(node, "try_block"), try_inner_h, local_d);
+        int catch_inner_h = try_h + (has_finally ? 1 : 0);
+        for (int i = 0; i < catch_count; i++) {
+            StradaValue *cc = ast_arr_get(catches, i);
+            prescan_vm_labels(ctx, ast_get(cc, "catch_block"), catch_inner_h, local_d);
+        }
+        if (has_finally) {
+            prescan_vm_labels(ctx, finally_block, try_h, local_d);
+        }
+        return local_d;
+    }
+    default:
+        return local_d;
+    }
+}
+
+static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_local_d) {
+    int saved_lr_count = ctx->local_restore_count;
+    char *saved_lr_ptrs[32];
+    if (saved_lr_count > 0) {
+        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
+    }
+    int cur_lr = saved_lr_count;
+
+    int cur_try_h = 0;
+    for (TryCtx *tc = ctx->try_ctx; tc != NULL; tc = tc->parent) {
+        cur_try_h += tc->handlers_active;
+    }
+
+    if (ctx->try_ctx && cur_try_h > target_try_h) {
+        TryCtx *saved_try = ctx->try_ctx;
+        int remaining_h = cur_try_h;
+        for (TryCtx *tc = saved_try; tc != NULL && remaining_h > target_try_h; tc = tc->parent) {
+            while (cur_lr > tc->local_restore_depth && cur_lr > target_local_d) {
+                emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+            }
+            int to_pop = tc->handlers_active;
+            if (remaining_h - to_pop < target_try_h) {
+                to_pop = remaining_h - target_try_h;
+            }
+            for (int h = 0; h < to_pop; h++) {
+                vm_chunk_emit(ctx->chunk, OP_TRY_END);
+            }
+            remaining_h -= to_pop;
+            if (tc->finally_block && remaining_h >= target_try_h) {
+                ctx->try_ctx = tc->parent;
+                ctx->local_restore_count = cur_lr;
+                for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
+                compile_block(ctx, tc->finally_block);
+            }
+        }
+        ctx->try_ctx = saved_try;
+        ctx->local_restore_count = saved_lr_count;
+        if (saved_lr_count > 0) {
+            memcpy(ctx->local_restores, saved_lr_ptrs, (size_t)saved_lr_count * sizeof(char *));
+        }
+    }
+    while (cur_lr > target_local_d) {
+        emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+    }
+}
+
+static void resolve_vm_gotos(CompCtx *ctx) {
+    for (int i = 0; i < ctx->goto_count; i++) {
+        VMLabelDef *lbl = vm_ctx_find_label(ctx, ctx->gotos[i].name);
+        if (!lbl || !lbl->has_offset) {
+            fprintf(stderr, "VM compile error: unresolved goto label '%s'\n",
+                    ctx->gotos[i].name ? ctx->gotos[i].name : "");
+            ctx->errors++;
+        } else {
+            patch_u16(ctx, ctx->gotos[i].patch_off, (uint16_t)lbl->offset);
+        }
+        free(ctx->gotos[i].name);
+    }
+    free(ctx->gotos);
+    ctx->gotos = NULL;
+    ctx->goto_count = ctx->goto_cap = 0;
+    for (int i = 0; i < ctx->label_count; i++) {
+        free(ctx->labels[i].name);
+    }
+    free(ctx->labels);
+    ctx->labels = NULL;
+    ctx->label_count = ctx->label_cap = 0;
+}
+
+static void emit_param_defaults(CompCtx *ctx, StradaValue *params, int param_count, int is_synth, int func_idx) {
+    for (int i = 0; i < param_count; i++) {
+        StradaValue *param = ast_arr_get(params, i);
+        const char *psigil = ast_str(param, "sigil");
+        int is_variadic = (int)ast_int(param, "is_variadic");
+        if (is_variadic || (is_synth && psigil[0] == '@') || (ctx->is_closure && psigil[0] == '@')) {
+            continue;
+        }
+        int has_def = (int)ast_int(param, "has_default") || (int)ast_int(param, "is_optional");
+        StradaValue *def_expr = ast_deref(ast_get(param, "default"));
+        if (!def_expr || STRADA_IS_TAGGED_INT(def_expr) || def_expr->type == STRADA_UNDEF) {
+            def_expr = ast_deref(ast_get(param, "default_value"));
+        }
+        if (has_def && def_expr && !STRADA_IS_TAGGED_INT(def_expr) && def_expr->type == STRADA_HASH) {
+            vm_chunk_emit(ctx->chunk, OP_ARG_PRESENT);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)i);
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_TRUE);
+            size_t skip_patch = emit_patch_u16(ctx);
+            compile_expr(ctx, def_expr);
+            if (func_idx >= 0) ctx->chunk = &ctx->prog->funcs[func_idx];
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)i);
+            patch_u16(ctx, skip_patch, (uint16_t)ctx->chunk->code_len);
+        }
     }
 }
 
@@ -1054,9 +1312,11 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     const char *pattern = ast_str(node, "pattern");
     const char *flags = ast_str(node, "flags");
     int is_global = flags && strchr(flags, 'g') != NULL;
+    int is_nondestruct = flags && strchr(flags, 'r') != NULL;
 
-    VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
-    if (lv.kind == LV_NONE) return 0;
+    VMLValueTarget lv = {0};
+    if (!is_nondestruct) lv = compile_lvalue_prepare(ctx, target);
+    if (lv.kind == LV_NONE && !is_nondestruct) return 0;
 
     size_t pat_idx = add_pattern_const(ctx, pattern, flags);
     int w = ctx_add_local(ctx, "__se_w", '$');   /* subject */
@@ -1065,19 +1325,25 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     int ms = ctx_add_local(ctx, "__se_s", '$');  /* match start */
     int me = ctx_add_local(ctx, "__se_e", '$');  /* match end */
     int wl = ctx_add_local(ctx, "__se_l", '$');  /* byte length of subject */
+    int cnt = ctx_add_local(ctx, "__se_cnt", '$'); /* substitution count */
 
 #define E8(op)   vm_chunk_emit(ctx->chunk, (op))
 #define E16(v)   vm_chunk_emit_u16(ctx->chunk, (uint16_t)(v))
 #define LD(sl)   do { E8(OP_LOAD_LOCAL); E16(sl); } while (0)
 #define ST(sl)   do { E8(OP_STORE_LOCAL); E16(sl); } while (0)
 
-    /* W = target; O = ""; P = 0; WL = bytes(W) */
-    compile_lvalue_load(ctx, &lv);
+    /* W = target; O = ""; P = 0; WL = bytes(W); CNT = 0 */
+    if (lv.kind != LV_NONE) {
+        compile_lvalue_load(ctx, &lv);
+    } else {
+        compile_expr(ctx, target);
+    }
     ST(w);
     LD(w); E8(OP_BYTES); ST(wl);
     size_t empty_idx = vm_chunk_add_str_const(ctx->chunk, "");
     E8(OP_PUSH_STR); E16(empty_idx); ST(o);
     E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 0); ST(pp);
+    E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 0); ST(cnt);
 
     size_t loop_top = ctx->chunk->code_len;
     /* (S, E) = find(W, P) */
@@ -1092,8 +1358,9 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     size_t after_tail_patches[4];
     int atp_count = 0;
 
-    /* O = O . <eval_expr> (captures are live) */
+    /* O = O . <eval_expr> (captures are live); CNT++ */
     LD(o); compile_expr(ctx, eval_expr); E8(OP_CONCAT); ST(o);
+    E8(OP_INCR); E16(cnt);
 
     if (is_global) {
         /* If zero-width match (E == S): if E >= wl finish, else copy 1 char and P = E + 1 */
@@ -1119,9 +1386,14 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     for (int pi = 0; pi < atp_count; pi++) {
         patch_u16(ctx, after_tail_patches[pi], (uint16_t)ctx->chunk->code_len);
     }
-    /* store back + leave value */
-    compile_lvalue_store_slot(ctx, &lv, o, 1);
-    compile_lvalue_finish(ctx, &lv);
+    if (is_nondestruct) {
+        if (lv.kind != LV_NONE) compile_lvalue_finish(ctx, &lv);
+        LD(o);
+    } else {
+        compile_lvalue_store_slot(ctx, &lv, o, 0);
+        compile_lvalue_finish(ctx, &lv);
+        LD(cnt);
+    }
     return 1;
 
 #undef E8
@@ -1343,8 +1615,31 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
-        compile_expr(ctx, ast_get(node, "left"));
-        compile_expr(ctx, ast_get(node, "right"));
+        StradaValue *lnode = ast_get(node, "left");
+        StradaValue *rnode = ast_get(node, "right");
+        int is_num_cmp = (op == OP_AST_NUM_EQ || op == OP_AST_NUM_NE ||
+                          op == OP_AST_NUM_LT || op == OP_AST_NUM_GT ||
+                          op == OP_AST_NUM_LE || op == OP_AST_NUM_GE ||
+                          op == OP_AST_SPACESHIP);
+        StradaValue *l_sq = is_num_cmp ? ast_get(lnode, "from_sq_str") : NULL;
+        StradaValue *r_sq = is_num_cmp ? ast_get(rnode, "from_sq_str") : NULL;
+        if (l_sq && (STRADA_IS_TAGGED_INT(l_sq) || l_sq->type != STRADA_STR)) l_sq = NULL;
+        if (r_sq && (STRADA_IS_TAGGED_INT(r_sq) || r_sq->type != STRADA_STR)) r_sq = NULL;
+
+        compile_expr(ctx, lnode);
+        compile_expr(ctx, rnode);
+
+        if (l_sq && !r_sq) {
+            size_t sidx = vm_chunk_add_str_const(ctx->chunk, l_sq->value.pv ? l_sq->value.pv : "");
+            vm_chunk_emit(ctx->chunk, OP_SQ_COERCE);
+            vm_chunk_emit(ctx->chunk, 0);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sidx);
+        } else if (r_sq && !l_sq) {
+            size_t sidx = vm_chunk_add_str_const(ctx->chunk, r_sq->value.pv ? r_sq->value.pv : "");
+            vm_chunk_emit(ctx->chunk, OP_SQ_COERCE);
+            vm_chunk_emit(ctx->chunk, 1);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sidx);
+        }
 
         switch (op) {
         case OP_AST_ADD:    vm_chunk_emit(ctx->chunk, OP_ADD); break;
@@ -1705,16 +2000,27 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             }
         }
         inner.chunk->fixed_param_count = fixed_params;
+        emit_param_defaults(&inner, params, param_count, 0, inner_func_idx);
 
+        prescan_vm_labels(&inner, body, 0, 0);
         compile_block(&inner, body);
 
         /* Refresh chunk pointers after potential realloc from nested closures */
         inner.chunk = &ctx->prog->funcs[inner_func_idx];
         if (outer_func_idx >= 0) ctx->chunk = &ctx->prog->funcs[outer_func_idx];
 
+        resolve_vm_gotos(&inner);
+
         /* Implicit return undef */
         vm_chunk_emit(inner.chunk, OP_PUSH_UNDEF);
         vm_chunk_emit(inner.chunk, OP_RETURN);
+        if (inner.chunk->code_len > 0xFFFF) {
+            fprintf(stderr, "VM compile error: closure '%s' compiles to %zu bytes of bytecode, "
+                            "exceeding the VM backend's 65535-byte limit\n",
+                    closurename, (size_t)inner.chunk->code_len);
+            inner.errors++;
+        }
+        ctx->errors += inner.errors;
 
         int inner_final_lc = inner.max_local_count > inner.local_count ? inner.max_local_count : inner.local_count;
         inner.chunk->local_count = inner_final_lc;
@@ -2264,7 +2570,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "sprintf") == 0) {
             if (argc > 255) {
                 fprintf(stderr, "VM compile error: sprintf() with %d arguments exceeds the bytecode VM limit of 255\n", argc);
-                exit(1);
+                ctx->errors++;
+                vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+                break;
             }
             for (int i = 0; i < argc; i++) {
                 compile_expr(ctx, ast_arr_get(args, i));
@@ -3365,14 +3673,19 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         const char *replacement = ast_str(node, "replacement");
         const char *flags = ast_str(node, "flags");
         if (!flags) flags = "";
-        int is_global = (strchr(flags, 'g') != NULL);
 
         /* s///e: evaluated replacement (parser supplies eval_expr) */
         if (strchr(flags, 'e') && compile_regex_subst_e(ctx, node)) break;
 
-        VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
-        if (lv.kind != LV_NONE) {
-            compile_lvalue_load(ctx, &lv);
+        int is_nondestruct = (strchr(flags, 'r') != NULL);
+        VMLValueTarget lv = {0};
+        if (!is_nondestruct) lv = compile_lvalue_prepare(ctx, target);
+        if (is_nondestruct || lv.kind != LV_NONE) {
+            if (!is_nondestruct && lv.kind != LV_NONE) {
+                compile_lvalue_load(ctx, &lv);
+            } else {
+                compile_expr(ctx, target);
+            }
 
             size_t pat_idx = add_pattern_const(ctx, pattern, flags);
             vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
@@ -3382,15 +3695,41 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-            vm_chunk_emit_u16(ctx->chunk, is_global ? BUILTIN_REPLACE_ALL : BUILTIN_REPLACE);
-            vm_chunk_emit(ctx->chunk, 3);
+            size_t flags_idx = vm_chunk_add_str_const(ctx->chunk, flags);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
 
-            int val_slot = ctx_add_local(ctx, "__rs_v", '$');
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_REGEX_SUBST);
+            vm_chunk_emit(ctx->chunk, 4);
+
+            int pair_slot = ctx_add_local(ctx, "__rs_p", '$');
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
-            compile_lvalue_store_slot(ctx, &lv, val_slot, 1);
-            compile_lvalue_finish(ctx, &lv);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)pair_slot);
+
+            if (is_nondestruct) {
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)pair_slot);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, 0);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+            } else {
+                int val_slot = ctx_add_local(ctx, "__rs_v", '$');
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)pair_slot);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, 0);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+                compile_lvalue_store_slot(ctx, &lv, val_slot, 0);
+                compile_lvalue_finish(ctx, &lv);
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)pair_slot);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, 1);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+            }
             break;
         }
         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
@@ -3781,6 +4120,11 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
 
     int tmp_slot = ctx_add_local(ctx, "__mg_tmp", '$');
 
+    LoopCtx lctx = {0};
+    lctx.parent = ctx->loop_ctx;
+    lctx.local_restore_depth = ctx->local_restore_count;
+    ctx->loop_ctx = &lctx;
+
     size_t loop_top = ctx->chunk->code_len;
     vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
@@ -3800,6 +4144,8 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
 
+    lctx.redo_target = ctx->chunk->code_len;
+
     /* Compile body block */
     compile_block_expr(ctx, body, underscore_slot);
 
@@ -3814,6 +4160,10 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)tmp_slot);
     vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
 
+    for (int i = 0; i < lctx.next_count; i++) {
+        patch_u16(ctx, lctx.next_patches[i], (uint16_t)ctx->chunk->code_len);
+    }
+
     vm_chunk_emit(ctx->chunk, OP_INCR);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
 
@@ -3821,6 +4171,11 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)loop_top);
 
     patch_u16(ctx, exit_patch, (uint16_t)ctx->chunk->code_len);
+    for (int i = 0; i < lctx.break_count; i++) {
+        patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
+    }
+    loop_free_patches(&lctx);
+    ctx->loop_ctx = lctx.parent;
 
     vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)res_slot);
@@ -3851,6 +4206,11 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     int underscore_slot = ctx_find_local(ctx, "_");
     if (underscore_slot < 0) underscore_slot = ctx_add_local(ctx, "_", '$');
 
+    LoopCtx lctx = {0};
+    lctx.parent = ctx->loop_ctx;
+    lctx.local_restore_depth = ctx->local_restore_count;
+    ctx->loop_ctx = &lctx;
+
     size_t loop_top = ctx->chunk->code_len;
     vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
@@ -3870,6 +4230,8 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
 
+    lctx.redo_target = ctx->chunk->code_len;
+
     /* Compile condition block */
     compile_block_expr(ctx, body, underscore_slot);
 
@@ -3884,6 +4246,9 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
 
     patch_u16(ctx, skip_patch, (uint16_t)ctx->chunk->code_len);
+    for (int i = 0; i < lctx.next_count; i++) {
+        patch_u16(ctx, lctx.next_patches[i], (uint16_t)ctx->chunk->code_len);
+    }
 
     vm_chunk_emit(ctx->chunk, OP_INCR);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
@@ -3891,6 +4256,11 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)loop_top);
 
     patch_u16(ctx, exit_patch, (uint16_t)ctx->chunk->code_len);
+    for (int i = 0; i < lctx.break_count; i++) {
+        patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
+    }
+    loop_free_patches(&lctx);
+    ctx->loop_ctx = lctx.parent;
 
     vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)res_slot);
@@ -4222,7 +4592,16 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         lctx.parent = ctx->loop_ctx;
         lctx.local_restore_depth = ctx->local_restore_count;
         const char *wlabel = ast_str(node, "label");
-        if (wlabel[0]) lctx.label = wlabel;
+        if ((!wlabel || !wlabel[0]) && ctx->pending_loop_label && ctx->pending_loop_label[0]) {
+            wlabel = ctx->pending_loop_label;
+            ctx->pending_loop_label = NULL;
+        }
+        if (wlabel && wlabel[0]) {
+            lctx.label = wlabel;
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, wlabel);
+            lbl->offset = ctx->chunk->code_len;
+            lbl->has_offset = 1;
+        }
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -4262,7 +4641,16 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         lctx.parent = ctx->loop_ctx;
         lctx.local_restore_depth = ctx->local_restore_count;
         const char *dlabel = ast_str(node, "label");
-        if (dlabel[0]) lctx.label = dlabel;
+        if ((!dlabel || !dlabel[0]) && ctx->pending_loop_label && ctx->pending_loop_label[0]) {
+            dlabel = ctx->pending_loop_label;
+            ctx->pending_loop_label = NULL;
+        }
+        if (dlabel && dlabel[0]) {
+            lctx.label = dlabel;
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, dlabel);
+            lbl->offset = ctx->chunk->code_len;
+            lbl->has_offset = 1;
+        }
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -4289,14 +4677,24 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_FOR_STMT: {
+        int saved_for_lc = ctx->local_count;
+        const char *flabel = ast_str(node, "label");
+        if ((!flabel || !flabel[0]) && ctx->pending_loop_label && ctx->pending_loop_label[0]) {
+            flabel = ctx->pending_loop_label;
+            ctx->pending_loop_label = NULL;
+        }
+        if (flabel && flabel[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, flabel);
+            lbl->offset = ctx->chunk->code_len;
+            lbl->has_offset = 1;
+        }
         StradaValue *init = ast_get(node, "init");
         if (init && !STRADA_IS_TAGGED_INT(init)) compile_stmt(ctx, init);
 
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
         lctx.local_restore_depth = ctx->local_restore_count;
-        const char *flabel = ast_str(node, "label");
-        if (flabel[0]) lctx.label = flabel;
+        if (flabel && flabel[0]) lctx.label = flabel;
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -4340,6 +4738,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
+        ctx->local_count = saved_for_lc;
         break;
     }
 
@@ -4381,7 +4780,16 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         lctx.parent = ctx->loop_ctx;
         lctx.local_restore_depth = ctx->local_restore_count;
         const char *felabel = ast_str(node, "label");
-        if (felabel[0]) lctx.label = felabel;
+        if ((!felabel || !felabel[0]) && ctx->pending_loop_label && ctx->pending_loop_label[0]) {
+            felabel = ctx->pending_loop_label;
+            ctx->pending_loop_label = NULL;
+        }
+        if (felabel && felabel[0]) {
+            lctx.label = felabel;
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, felabel);
+            lbl->offset = ctx->chunk->code_len;
+            lbl->has_offset = 1;
+        }
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -4488,42 +4896,53 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_LABEL: {
-        /* Label: statement — set label on the next loop context */
         const char *label = ast_str(node, "name");
+        if (label && label[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, label);
+            lbl->offset = ctx->chunk->code_len;
+            lbl->has_offset = 1;
+        }
         StradaValue *stmt = ast_get(node, "statement");
-
         if (stmt && !STRADA_IS_TAGGED_INT(stmt)) {
-            /* Simpler: detect labeled loops and set label directly */
             StradaValue *inner = ast_deref(stmt);
-            int inner_type = inner ? (int)ast_int(inner, "type") : 0;
-            if (inner_type == NI_WHILE_STMT || inner_type == NI_FOR_STMT ||
-                inner_type == NI_FOREACH_STMT || inner_type == NI_DO_WHILE_STMT) {
-                /* Create a "pending label" by wrapping in a loop context */
-                LoopCtx labeled_ctx = {0};
-                labeled_ctx.parent = ctx->loop_ctx;
-                labeled_ctx.local_restore_depth = ctx->local_restore_count;
-                labeled_ctx.label = label;
-                /* Record loop top for 'next LABEL' — same as the start of the inner loop */
-                labeled_ctx.redo_target = ctx->chunk->code_len;
-                ctx->loop_ctx = &labeled_ctx;
-
-                compile_stmt(ctx, stmt);
-
-                /* Patch breaks from this labeled context */
-                for (int i = 0; i < labeled_ctx.break_count; i++) {
-                    patch_u16(ctx, labeled_ctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
+            if (inner && !STRADA_IS_TAGGED_INT(inner) && inner->type == STRADA_HASH) {
+                int inner_type = (int)ast_int(inner, "type");
+                if (label && label[0] && (inner_type == NI_WHILE_STMT || inner_type == NI_FOR_STMT ||
+                    inner_type == NI_FOREACH_STMT || inner_type == NI_DO_WHILE_STMT)) {
+                    ctx->pending_loop_label = label;
                 }
-                /* Patch next LABEL — jump to loop top (re-check condition) */
-                for (int i = 0; i < labeled_ctx.next_count; i++) {
-                    patch_u16(ctx, labeled_ctx.next_patches[i], (uint16_t)labeled_ctx.redo_target);
-                }
-
-                loop_free_patches(&labeled_ctx);
-                ctx->loop_ctx = labeled_ctx.parent;
-            } else {
                 compile_stmt(ctx, stmt);
+                ctx->pending_loop_label = NULL;
             }
         }
+        break;
+    }
+
+    case NI_GOTO: {
+        const char *target = ast_str(node, "target");
+        if (!target || !target[0]) target = ast_str(node, "label");
+        VMLabelDef *lbl = (target && target[0]) ? vm_ctx_find_label(ctx, target) : NULL;
+        if (!lbl) {
+            fprintf(stderr, "VM compile error: unknown goto label '%s'\n", target ? target : "");
+            ctx->errors++;
+            break;
+        }
+        int cur_try_h = 0;
+        for (TryCtx *tc = ctx->try_ctx; tc != NULL; tc = tc->parent) {
+            cur_try_h += tc->handlers_active;
+        }
+        if (cur_try_h > lbl->try_handler_depth || ctx->local_restore_count > lbl->local_restore_depth) {
+            emit_try_unwind_to_depth(ctx, lbl->try_handler_depth, lbl->local_restore_depth);
+        }
+        vm_chunk_emit(ctx->chunk, OP_JMP);
+        size_t poff = emit_patch_u16(ctx);
+        if (ctx->goto_count >= ctx->goto_cap) {
+            ctx->goto_cap = ctx->goto_cap ? ctx->goto_cap * 2 : 16;
+            ctx->gotos = realloc(ctx->gotos, (size_t)ctx->goto_cap * sizeof(VMGotoPatch));
+        }
+        ctx->gotos[ctx->goto_count].name = strdup(target);
+        ctx->gotos[ctx->goto_count].patch_off = poff;
+        ctx->goto_count++;
         break;
     }
 
@@ -4643,11 +5062,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
                     size_t next_catch = emit_patch_u16(ctx);
 
+                    int saved_catch_lc = ctx->local_count;
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
                     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    ctx->local_count = saved_catch_lc;
 
                     if (has_finally) {
                         vm_chunk_emit(ctx->chunk, OP_TRY_END);
@@ -4658,11 +5079,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     patch_u16(ctx, next_catch, (uint16_t)ctx->chunk->code_len);
                 } else {
                     /* Untyped catch-all */
+                    int saved_catch_lc = ctx->local_count;
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
                     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    ctx->local_count = saved_catch_lc;
 
                     if (has_finally) {
                         vm_chunk_emit(ctx->chunk, OP_TRY_END);
@@ -4687,6 +5110,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         if (has_finally) {
             /* Exception unwind path: save pending exception, run finally, re-throw */
             patch_u16(ctx, finally_rethrow_patch, (uint16_t)ctx->chunk->code_len);
+            int saved_fin_lc = ctx->local_count;
             int fin_exc_slot = ctx_add_local(ctx, "__fin_exc", '$');
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)fin_exc_slot);
@@ -4694,6 +5118,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)fin_exc_slot);
             vm_chunk_emit(ctx->chunk, OP_THROW);
+            ctx->local_count = saved_fin_lc;
         }
 
         /* Normal exit path (try completed or catch handled): run finally if present */
@@ -4783,40 +5208,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_REGEX_SUBST: {
-        StradaValue *target = ast_get(node, "target");
-        const char *pattern = ast_str(node, "pattern");
-        const char *replacement = ast_str(node, "replacement");
-        const char *flags = ast_str(node, "flags");
-        int is_global_flag = (flags && strchr(flags, 'g'));
-
-        /* s///e: evaluated replacement (statement form — discard value) */
-        if (flags && strchr(flags, 'e') && compile_regex_subst_e(ctx, node)) {
-            vm_chunk_emit(ctx->chunk, OP_POP);
-            break;
-        }
-
-        VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
-        if (lv.kind != LV_NONE) {
-            compile_lvalue_load(ctx, &lv);
-
-            size_t pat_idx = add_pattern_const(ctx, pattern, flags);
-            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
-
-            size_t repl_idx = vm_chunk_add_str_const(ctx->chunk, replacement);
-            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
-
-            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-            vm_chunk_emit_u16(ctx->chunk, is_global_flag ? BUILTIN_REPLACE_ALL : BUILTIN_REPLACE);
-            vm_chunk_emit(ctx->chunk, 3);
-
-            int val_slot = ctx_add_local(ctx, "__rs_v", '$');
-            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
-            compile_lvalue_store_slot(ctx, &lv, val_slot, 0);
-            compile_lvalue_finish(ctx, &lv);
-        }
+        compile_expr(ctx, node);
+        vm_chunk_emit(ctx->chunk, OP_POP);
         break;
     }
 
@@ -4920,9 +5313,11 @@ static void compile_block(CompCtx *ctx, StradaValue *block) {
     int count = (int)ast_int(block, "statement_count");
 
     int saved_lr = ctx->local_restore_count;
+    int saved_lc = ctx->local_count;
     for (int i = 0; i < count; i++) {
         compile_stmt(ctx, ast_arr_get(stmts, i));
     }
+    ctx->local_count = saved_lc;
     while (ctx->local_restore_count > saved_lr) {
         ctx->local_restore_count--;
         char *lr_name = ctx->local_restores[ctx->local_restore_count];
@@ -4982,8 +5377,12 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         }
     }
     chunk->fixed_param_count = fixed_params;
+    emit_param_defaults(&ctx, params, param_count, is_synth, (int)(chunk - prog->funcs));
+    chunk = ctx.chunk;
 
-    compile_block(&ctx, ast_get(func_node, "body"));
+    StradaValue *fn_body = ast_get(func_node, "body");
+    prescan_vm_labels(&ctx, fn_body, 0, 0);
+    compile_block(&ctx, fn_body);
 
     /* Refresh chunk pointer — may have been invalidated by realloc during
      * closure compilation inside compile_block */
@@ -4993,6 +5392,8 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
     for (int i = ctx.local_restore_count - 1; i >= 0; i--) {
         emit_local_restore(chunk, ctx.local_restores[i]);
     }
+
+    resolve_vm_gotos(&ctx);
 
     /* Implicit return 0 at end */
     vm_chunk_emit(chunk, OP_PUSH_INT);
@@ -5008,14 +5409,14 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         fprintf(stderr, "VM compile error: function '%s' compiles to %zu bytes of bytecode, "
                         "exceeding the VM backend's 65535-byte limit (16-bit jump offsets)\n",
                 name ? name : "(anon)", (size_t)chunk->code_len);
-        exit(1);
+        ctx.errors++;
     }
 
     int final_lc = ctx.max_local_count > ctx.local_count ? ctx.max_local_count : ctx.local_count;
     chunk->local_count = final_lc;
 
     /* Detect int-only functions */
-    int all_int = 1;
+    int all_int = ctx.has_non_scalar ? 0 : 1;
     for (int i = 0; i < final_lc; i++) {
         if (ctx.local_sigils[i] != '$' && ctx.local_sigils[i] != '\0') {
             all_int = 0;
@@ -5364,6 +5765,10 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         ictx.chunk = ichunk;
         ictx.prog = prog;
         ictx.func_name = iname;
+        int icur_ld = 0;
+        for (int i = 0; i < global_count; i++) {
+            icur_ld = prescan_vm_labels(&ictx, ast_arr_get(globals, i), 0, icur_ld);
+        }
         for (int i = 0; i < global_count; i++) {
             StradaValue *gdecl = ast_arr_get(globals, i);
             /* File-scope `my` decls share the our-global machinery in the
@@ -5380,9 +5785,18 @@ VMProgram *vm_compile_program(StradaValue *ast) {
             compile_stmt(&ictx, gdecl);
         }
         ichunk = &prog->funcs[ifunc_idx]; /* refresh after potential realloc */
+        ictx.chunk = ichunk;
+        resolve_vm_gotos(&ictx);
         vm_chunk_emit(ichunk, OP_PUSH_INT);
         vm_chunk_emit_i64(ichunk, 0);
         vm_chunk_emit(ichunk, OP_RETURN);
+        if (ichunk->code_len > 0xFFFF) {
+            fprintf(stderr, "VM compile error: __globals_init compiles to %zu bytes of bytecode, "
+                            "exceeding the VM backend's 65535-byte limit\n",
+                    (size_t)ichunk->code_len);
+            ictx.errors++;
+        }
+        total_errors += ictx.errors;
         int ifinal_lc = ictx.max_local_count > ictx.local_count ? ictx.max_local_count : ictx.local_count;
         ichunk->local_count = ifinal_lc;
         for (int j = 0; j < ifinal_lc; j++) if (ictx.local_names[j]) free(ictx.local_names[j]);
@@ -5408,11 +5822,21 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         bctx.chunk = bchunk;
         bctx.prog = prog;
         bctx.func_name = bname;
+        prescan_vm_labels(&bctx, block, 0, 0);
         compile_block(&bctx, block);
         bchunk = &prog->funcs[bfunc_idx]; /* refresh after potential realloc */
+        bctx.chunk = bchunk;
+        resolve_vm_gotos(&bctx);
         vm_chunk_emit(bchunk, OP_PUSH_INT);
         vm_chunk_emit_i64(bchunk, 0);
         vm_chunk_emit(bchunk, OP_RETURN);
+        if (bchunk->code_len > 0xFFFF) {
+            fprintf(stderr, "VM compile error: BEGIN block '%s' compiles to %zu bytes of bytecode, "
+                            "exceeding the VM backend's 65535-byte limit\n",
+                    bname, (size_t)bchunk->code_len);
+            bctx.errors++;
+        }
+        total_errors += bctx.errors;
         int bfinal_lc = bctx.max_local_count > bctx.local_count ? bctx.max_local_count : bctx.local_count;
         bchunk->local_count = bfinal_lc;
         for (int j = 0; j < bfinal_lc; j++) if (bctx.local_names[j]) free(bctx.local_names[j]);
@@ -5437,11 +5861,21 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         ectx.chunk = echunk;
         ectx.prog = prog;
         ectx.func_name = ename;
+        prescan_vm_labels(&ectx, block, 0, 0);
         compile_block(&ectx, block);
         echunk = &prog->funcs[efunc_idx]; /* refresh after potential realloc */
+        ectx.chunk = echunk;
+        resolve_vm_gotos(&ectx);
         vm_chunk_emit(echunk, OP_PUSH_INT);
         vm_chunk_emit_i64(echunk, 0);
         vm_chunk_emit(echunk, OP_RETURN);
+        if (echunk->code_len > 0xFFFF) {
+            fprintf(stderr, "VM compile error: END block '%s' compiles to %zu bytes of bytecode, "
+                            "exceeding the VM backend's 65535-byte limit\n",
+                    ename, (size_t)echunk->code_len);
+            ectx.errors++;
+        }
+        total_errors += ectx.errors;
         int efinal_lc = ectx.max_local_count > ectx.local_count ? ectx.max_local_count : ectx.local_count;
         echunk->local_count = efinal_lc;
         for (int j = 0; j < efinal_lc; j++) if (ectx.local_names[j]) free(ectx.local_names[j]);

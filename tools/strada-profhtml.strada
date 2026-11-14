@@ -114,6 +114,10 @@ func fp_read_u64() int {
         uint64_t v = 0;
         if (_fp_file && fread(&v, 8, 1, _fp_file) == 1) {
             if (_fp_rem >= 8) _fp_rem -= 8; else _fp_rem = 0;
+            if (v > (uint64_t)INT64_MAX) {
+                _fp_eof = 1;
+                v = 0;
+            }
         } else {
             _fp_eof = 1;
             v = 0;
@@ -122,6 +126,25 @@ func fp_read_u64() int {
         val = strada_new_int((int64_t)v);
     }
     return $val;
+}
+
+func sat_add(int $a, int $b) int {
+    my int $res = 0;
+    __C__ {
+        int64_t av = strada_to_int(a);
+        int64_t bv = strada_to_int(b);
+        int64_t r;
+        if (av < 0) av = 0;
+        if (bv < 0) bv = 0;
+        if (av > INT64_MAX - bv) {
+            r = INT64_MAX;
+        } else {
+            r = av + bv;
+        }
+        strada_decref(res);
+        res = strada_new_int(r);
+    }
+    return $res;
 }
 
 func fp_read_string(int $len) str {
@@ -167,6 +190,7 @@ func usage() void {
 }
 
 func format_time(int $ns) str {
+    if ($ns <= 0) { return "0.000000"; }
     my int $sec = ($ns - $ns % 1000000000) / 1000000000;
     my int $frac = $ns % 1000000000;
     if ($frac < 0) { $frac = 0 - $frac; }
@@ -179,12 +203,11 @@ func format_time(int $ns) str {
 }
 
 func format_pct_str(int $part_ns, int $total_ns) str {
-    if ($total_ns == 0) { return "0.0"; }
-    my int $pct10 = ($part_ns * 1000 - ($part_ns * 1000) % $total_ns) / $total_ns;
-    my int $whole = ($pct10 - $pct10 % 10) / 10;
-    my int $frac = $pct10 % 10;
-    if ($frac < 0) { $frac = 0 - $frac; }
-    return "" . $whole . "." . $frac;
+    if ($total_ns <= 0 || $part_ns <= 0) { return "0.0"; }
+    my num $pct = (($part_ns + 0.0) * 100.0) / ($total_ns + 0.0);
+    if ($pct < 0.0) { $pct = 0.0; }
+    if ($pct > 100.0) { $pct = 100.0; }
+    return sprintf("%.1f", $pct);
 }
 
 func sort_funcs_by_excl(scalar $funcs) void {
@@ -244,22 +267,24 @@ func html_escape(str $s) str {
 
 # Compute heat color: 0=white, 100=red
 func heat_color(int $part_ns, int $max_ns) str {
-    if ($max_ns == 0) { return "ffffff"; }
-    # Scale from 0..255
-    my int $intensity = ($part_ns * 255 - ($part_ns * 255) % $max_ns) / $max_ns;
-    if ($intensity > 255) { $intensity = 255; }
-    # Go from white (ff,ff,ff) to red (ff,80,80)
-    my int $g = 255 - ($intensity * 127 - ($intensity * 127) % 255) / 255;
-    my int $b = $g;
-    # Convert to hex
+    if ($max_ns <= 0 || $part_ns <= 0) { return "ffffff"; }
+    my num $ratio = ($part_ns + 0.0) / ($max_ns + 0.0);
+    if ($ratio < 0.0) { $ratio = 0.0; }
+    if ($ratio > 1.0) { $ratio = 1.0; }
     my str $gs = "";
     my str $bs = "";
     __C__ {
+        double r = strada_to_num(ratio);
+        int intensity = (int)(r * 255.0);
+        if (intensity < 0) intensity = 0;
+        if (intensity > 255) intensity = 255;
+        int g = 255 - (intensity * 127) / 255;
+        if (g < 128) g = 128;
+        if (g > 255) g = 255;
         char hexbuf[8];
-        snprintf(hexbuf, 8, "%02x", (int)strada_to_int(g));
+        snprintf(hexbuf, 8, "%02x", g);
         strada_decref(gs);
         gs = strada_new_str(hexbuf);
-        snprintf(hexbuf, 8, "%02x", (int)strada_to_int(b));
         strada_decref(bs);
         bs = strada_new_str(hexbuf);
     }
@@ -273,7 +298,7 @@ func safe_filename(str $s) str {
     my int $len = length($s);
     while ($i < $len) {
         my int $c = ord(substr($s, $i, 1));
-        if (($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c == 95 || $c == 45) {
+        if (($c >= '0' && $c <= '9') || ($c >= 'A' && $c <= 'Z') || ($c >= 'a' && $c <= 'z') || $c == '_' || $c == '-') {
             $out = $out . chr($c);
         } else {
             $out = $out . "_";
@@ -450,7 +475,7 @@ func generate_file_page(str $outdir, int $file_idx, str $filename, scalar $lines
     my int $file_total_ns = 0;
     $li = 0;
     while ($li < $line_count) {
-        $file_total_ns = $file_total_ns + $lines->[$li]->{"time_ns"};
+        $file_total_ns = sat_add($file_total_ns, $lines->[$li]->{"time_ns"});
         $li = $li + 1;
     }
 
@@ -560,7 +585,11 @@ func main() int {
         if ($arg eq "-h" || $arg eq "--help") {
             usage();
             return 0;
-        } elsif (substr($arg, 0, 1) ne "-") {
+        } elsif (substr($arg, 0, 1) eq "-") {
+            warn("Error: Unknown option: " . $arg . "\n");
+            usage();
+            return 1;
+        } else {
             if ($positional == 0) {
                 $input_file = $arg;
             } elsif ($positional == 1) {
@@ -679,8 +708,8 @@ func main() int {
         $entry->{"exclusive_ns"} = $exclusive_ns;
         push(@funcs, $entry);
 
-        $total_time_ns = $total_time_ns + $exclusive_ns;
-        $total_calls = $total_calls + $calls;
+        $total_time_ns = sat_add($total_time_ns, $exclusive_ns);
+        $total_calls = sat_add($total_calls, $calls);
         $fi = $fi + 1;
     }
 

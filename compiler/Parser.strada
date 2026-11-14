@@ -973,7 +973,12 @@ func parse_primary(scalar $parser) scalar {
     # String literal
     if ($type eq "STR_LITERAL") {
         parser_advance($parser);
-        return ast_new_str_literal($tok->{"value"});
+        my scalar $snode = ast_new_str_literal($tok->{"value"});
+        if (($tok->{"has_char_code"} + 0) == 1) {
+            $snode->{"has_char_code"} = 1;
+            $snode->{"char_code"} = $tok->{"char_code"};
+        }
+        return $snode;
     }
 
     # Regex literal /pattern/flags — as primary expression (e.g., in split(/,/, $str))
@@ -2018,8 +2023,13 @@ func parse_primary(scalar $parser) scalar {
         # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
             if (parser_check($parser, "MY") || (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "local") ||
-                parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
-                parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
+                parser_check($parser, "IF") || parser_check($parser, "UNLESS") ||
+                parser_check($parser, "WHILE") || parser_check($parser, "UNTIL") ||
+                parser_check($parser, "FOR") || parser_check($parser, "FOREACH") ||
+                parser_check($parser, "RETURN") || parser_check($parser, "LAST") ||
+                parser_check($parser, "NEXT") || parser_check($parser, "REDO") ||
+                parser_check($parser, "TRY") || parser_check($parser, "THROW") ||
+                parser_check($parser, "GOTO") || parser_check($parser, "SWITCH")) {
                 ast_add_statement($block, parse_statement($parser));
                 next;
             }
@@ -2058,7 +2068,13 @@ func parse_primary(scalar $parser) scalar {
             # (`{ $a <=> $b }`, as documented); the trailing `;` is optional,
             # mirroring map/grep. `return EXPR;` is also accepted.
             while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
-                if (parser_check($parser, "RETURN") || parser_check($parser, "MY")) {
+                if (parser_check($parser, "RETURN") || parser_check($parser, "MY") ||
+                    (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "local") ||
+                    parser_check($parser, "IF") || parser_check($parser, "UNLESS") ||
+                    parser_check($parser, "WHILE") || parser_check($parser, "UNTIL") ||
+                    parser_check($parser, "FOR") || parser_check($parser, "FOREACH") ||
+                    parser_check($parser, "TRY") || parser_check($parser, "THROW") ||
+                    parser_check($parser, "SWITCH")) {
                     my scalar $stmt = parse_statement($parser);
                     ast_add_statement($block, $stmt);
                     next;
@@ -2099,8 +2115,13 @@ func parse_primary(scalar $parser) scalar {
         # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
             if (parser_check($parser, "MY") || (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "local") ||
-                parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
-                parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
+                parser_check($parser, "IF") || parser_check($parser, "UNLESS") ||
+                parser_check($parser, "WHILE") || parser_check($parser, "UNTIL") ||
+                parser_check($parser, "FOR") || parser_check($parser, "FOREACH") ||
+                parser_check($parser, "RETURN") || parser_check($parser, "LAST") ||
+                parser_check($parser, "NEXT") || parser_check($parser, "REDO") ||
+                parser_check($parser, "TRY") || parser_check($parser, "THROW") ||
+                parser_check($parser, "GOTO") || parser_check($parser, "SWITCH")) {
                 ast_add_statement($block, parse_statement($parser));
                 next;
             }
@@ -2878,7 +2899,12 @@ func parse_case_value(scalar $parser) scalar {
     # String literal
     if ($type eq "STR_LITERAL") {
         parser_advance($parser);
-        return ast_new_str_literal($tok->{"value"});
+        my scalar $snode = ast_new_str_literal($tok->{"value"});
+        if (($tok->{"has_char_code"} + 0) == 1) {
+            $snode->{"has_char_code"} = 1;
+            $snode->{"char_code"} = $tok->{"char_code"};
+        }
+        return $snode;
     }
 
     # Variable (without hash access interpretation)
@@ -6328,7 +6354,7 @@ func str_to_int(str $s) int {
     while ($i < $len) {
         my str $ch = substr($s, $i, 1);
         if ($ch ge "0" && $ch le "9") {
-            $result = $result * 10 + (ord($ch) - 48);  # '0'
+            $result = $result * 10 + (ord($ch) - ord("0"));
         }
         $i = $i + 1;
     }

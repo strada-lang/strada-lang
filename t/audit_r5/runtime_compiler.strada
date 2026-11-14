@@ -1,0 +1,562 @@
+#!/usr/bin/env strada
+# Cycle 5 Audit regression tests: Runtime/GC (RT5-01..16) & Compiler/CodeGen (CC5-01..05)
+
+use lib "lib";
+
+package R5Obj;
+has ro int $x = 1;
+has ro int $y = 2;
+has ro str $label = "ok";
+
+func check_pair() int {
+    return 0;
+}
+
+package R5AttrMod;
+has ro str $val = "base";
+our int $before_hits = 0;
+our int $after_hits = 0;
+our int $around_hits = 0;
+
+before "val" func (scalar $self) void {
+    $before_hits = $before_hits + 1;
+}
+after "val" func (scalar $self) void {
+    $after_hits = $after_hits + 1;
+}
+around "val" func (scalar $orig, scalar $self) scalar {
+    $around_hits = $around_hits + 1;
+    my scalar $r = $orig->($self);
+    return $r . "_wrapped";
+}
+
+func read_via_self(scalar $self) str {
+    return $self->val();
+}
+func get_before_hits() int { return $before_hits; }
+func get_after_hits() int { return $after_hits; }
+func get_around_hits() int { return $around_hits; }
+
+package R5MutHashElem;
+func new(scalar $h, str $key) scalar {
+    my hash %self = ("h" => $h, "key" => $key, "v" => 10);
+    return bless(\%self, "R5MutHashElem");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    my scalar $h = $self->{"h"};
+    delete($h->{$self->{"key"}});
+    return $self->{"v"} + $other;
+}
+use overload "+" => "add_op";
+
+package R5MutArrElem;
+func new(scalar $arr) scalar {
+    my hash %self = ("arr" => $arr, "v" => 20);
+    return bless(\%self, "R5MutArrElem");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    my scalar $a = $self->{"arr"};
+    while (size(@$a) > 0) {
+        pop(@$a);
+    }
+    return $self->{"v"} + $other;
+}
+use overload "+" => "add_op";
+
+package R5ThrowStr;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "R5ThrowStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("r5_to_str_boom");
+}
+use overload '""' => "to_str";
+
+package R5ThrowDot;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "R5ThrowDot");
+}
+func dot_op(scalar $self, scalar $other, int $rev) str {
+    die("r5_dot_boom");
+}
+use overload "." => "dot_op";
+
+package R5SendStr;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "R5SendStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return $self->{"s"};
+}
+use overload '""' => "to_str";
+
+package R5AfterThrow;
+func new() scalar {
+    my hash %self = ("x" => 1);
+    return bless(\%self, "R5AfterThrow");
+}
+func ping(scalar $self) str {
+    return "pong_" . "owned";
+}
+after "ping" func (scalar $self) void {
+    die("after_modifier_boom");
+}
+
+package R5DynTarget;
+func new() scalar {
+    my hash %self = ("ok" => 1);
+    return bless(\%self, "R5DynTarget");
+}
+func no_def(scalar $self, scalar $a, scalar $b) str {
+    my str $sa = defined($a) ? ("" . $a) : "U";
+    my str $sb = defined($b) ? ("" . $b) : "U";
+    return $sa . ":" . $sb;
+}
+func with_def(scalar $self, scalar $a, str $b = "def") str {
+    my str $sa = defined($a) ? ("" . $a) : "U";
+    return $sa . ":" . $b;
+}
+
+package R5ThrowTie;
+func TIESCALAR(str $cls) scalar {
+    my hash %self = ("v" => "init");
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { die("tie_store_boom"); }
+
+package R5ThrowTieHash;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("keys" => ["a", "b"]);
+    return bless(\%self, $cls);
+}
+func FIRSTKEY(scalar $self) scalar { return "a"; }
+func NEXTKEY(scalar $self, str $last) scalar { die("tie_nextkey_boom"); }
+func DELETE(scalar $self, str $k) scalar { return undef; }
+
+package R5ThrowTieArr;
+func TIEARRAY(str $cls) scalar {
+    my hash %self = ("data" => ["x", "y"]);
+    return bless(\%self, $cls);
+}
+func FETCHSIZE(scalar $self) int { return size($self->{"data"}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"data"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { die("tie_arr_store_boom"); }
+func STORESIZE(scalar $self, int $n) void { }
+
+package main;
+
+our scalar $g_r5_tied = undef;
+
+func check(int $cond, str $label) int {
+    if (!$cond) {
+        say("FAIL: " . $label);
+        return 1;
+    }
+    return 0;
+}
+
+func make_throw_rhs() scalar {
+    die("rhs_boom");
+    return 1;
+}
+
+func fin_return_val() int {
+    try {
+        die("orig_fin_exc");
+    } finally {
+        return 42;
+    }
+    return 0;
+}
+
+func test_goto_for(int $skip) int {
+    my int $reached = 0;
+    try {
+        for (my str $item = "start_" . $skip; length($item) > 0; $item = "") {
+            my str $inner = "inner_" . $skip;
+            if ($skip == 1) {
+                goto DONE_FOR;
+            }
+            $reached = 1;
+        }
+    } catch ($e) {
+        return -1;
+    }
+DONE_FOR:
+    return $reached;
+}
+
+func c_replace_first(scalar $sv, str $find, str $rep) scalar {
+    my scalar $res = undef;
+    __C__ {
+        char *f = strada_to_str(find);
+        char *r = strada_to_str(rep);
+        res = strada_sv_replace_first(sv, f, r);
+        free(f);
+        free(r);
+    }
+    return $res;
+}
+
+func c_has_utf8_flag(scalar $sv) int {
+    my int $flag = 0;
+    __C__ {
+        if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && STRADA_STR_IS_UTF8(sv)) {
+            strada_decref(flag);
+            flag = strada_new_int(1);
+        }
+    }
+    return $flag;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # RT5-01: thread-safe inline ctor static caches & interning
+    my array @th = ();
+    my int $ti = 0;
+    while ($ti < 4) {
+        push(@th, thread::create(func () {
+            my int $j = 0;
+            while ($j < 400) {
+                my scalar $o2 = R5Obj::new("x" => $j, "y" => $j + 1);
+                my scalar $o3 = R5Obj::new("x" => $j, "y" => $j + 2, "label" => "t");
+                if ($o2->x() != $j || $o3->label() ne "t") {
+                    return 1;
+                }
+                $j = $j + 1;
+            }
+            return 0;
+        }));
+        $ti = $ti + 1;
+    }
+    $ti = 0;
+    while ($ti < size(@th)) {
+        my int $trc = thread::join($th[$ti]);
+        $fail = $fail + check($trc == 0, "RT5-01 threaded inline ctors");
+        $ti = $ti + 1;
+    }
+
+    # RT5-02: compound assign where existing container element mutates/deletes entry
+    my hash %mh = ();
+    $mh{"k"} = R5MutHashElem::new(\%mh, "k");
+    $mh{"k"} += 5;
+    $fail = $fail + check($mh{"k"} == 15, "RT5-02 hash compound assign old mutates entry");
+
+    my array @ma = ();
+    push(@ma, R5MutArrElem::new(\@ma));
+    $ma[0] += 7;
+    $fail = $fail + check($ma[0] == 27, "RT5-02 array compound assign old pops array");
+
+    # RT5-06: after modifier throw, tied global/tr/hash clear/array splice unwind
+    my scalar $at = R5AfterThrow::new();
+    my str $at_err = "";
+    try {
+        my str $ign = $at->ping();
+    } catch ($e) {
+        $at_err = "" . $e;
+    }
+    $fail = $fail + check(index($at_err, "after_modifier_boom") >= 0, "RT5-06 after modifier throw");
+
+    tie($g_r5_tied, "R5ThrowTie");
+    my str $gt_err = "";
+    try {
+        $g_r5_tied = "new_" . "val";
+    } catch ($e) {
+        $gt_err = "" . $e;
+    }
+    $fail = $fail + check(index($gt_err, "tie_store_boom") >= 0, "RT5-06 tied global store throw");
+
+    my scalar $ts = "abc";
+    tie($ts, "R5ThrowTie");
+    my str $tr_err = "";
+    try {
+        $ts =~ tr/a-z/A-Z/;
+    } catch ($e) {
+        $tr_err = "" . $e;
+    }
+    $fail = $fail + check(index($tr_err, "tie_store_boom") >= 0, "RT5-06 tied scalar tr throw");
+
+    my hash %tth = ();
+    tie(%tth, "R5ThrowTieHash");
+    my str $th_err = "";
+    try {
+        %tth = ();
+    } catch ($e) {
+        $th_err = "" . $e;
+    }
+    $fail = $fail + check(index($th_err, "tie_nextkey_boom") >= 0, "RT5-06 tied hash clear throw");
+
+    my array @tta = ();
+    tie(@tta, "R5ThrowTieArr");
+    my str $ta_err = "";
+    try {
+        splice(@tta, 0, 1, "z");
+    } catch ($e) {
+        $ta_err = "" . $e;
+    }
+    $fail = $fail + check(index($ta_err, "tie_arr_store_boom") >= 0, "RT5-06 tied array splice throw");
+
+    # RT5-07: binary-safe reverse & UTF-8 reverse & embedded NUL hash reverse
+    my str $u_rev_in = "a\x00café\x00b";
+    utf8::decode($u_rev_in);
+    my str $u_rev_out = reverse($u_rev_in);
+    $fail = $fail + check(core::byte_length($u_rev_out) == core::byte_length($u_rev_in)
+                          && utf8::is_utf8($u_rev_out) == 1
+                          && substr($u_rev_out, 0, 1) eq "b"
+                          && substr($u_rev_out, 1, 1) eq "\x00",
+                          "RT5-07 utf8 reverse with embedded NUL");
+
+    my str $raw_bin = "A\x00" . core::pack("CC", 255, 254) . "B";
+    my str $raw_rev = reverse($raw_bin);
+    $fail = $fail + check(core::byte_length($raw_rev) == 5
+                          && $raw_rev eq ("B" . core::pack("CC", 254, 255) . "\x00A"),
+                          "RT5-07 binary reverse non-UTF8 bytes with NUL");
+
+    my hash %bh = ();
+    $bh{"k\x00a"} = "v1";
+    $bh{"k\x00b"} = "v2";
+    my array @bh_rev = reverse(%bh);
+    $fail = $fail + check(size(@bh_rev) == 4
+                          && (($bh_rev[0] eq "v1" && $bh_rev[2] eq "v2") || ($bh_rev[0] eq "v2" && $bh_rev[2] eq "v1")),
+                          "RT5-07 reverse hash with embedded NUL keys");
+
+    # RT5-08: pack length prefix `/` binary-safe length
+    my str $packed = core::pack("C/a*", "ab\x00cd");
+    $fail = $fail + check(core::byte_length($packed) == 6 && $packed eq ("\x05ab\x00cd"),
+                          "RT5-08 pack C/a* preserves embedded NUL length");
+    my str $packed_n = core::pack("N/a*", "x\x00\x00y");
+    $fail = $fail + check(core::byte_length($packed_n) == 8,
+                          "RT5-08 pack N/a* preserves embedded NUL length");
+
+    # RT5-09: utf8::downgrade & utf8::upgrade semantics + slot mutation
+    my str $u8 = "café";
+    utf8::decode($u8);
+    my int $dg_threw = 0;
+    my str $dg_msg = "";
+    try {
+        utf8::downgrade($u8);
+    } catch ($e) {
+        $dg_threw = 1;
+        $dg_msg = "" . $e;
+    }
+    $fail = $fail + check($dg_threw == 1 && index($dg_msg, "Wide character") >= 0,
+                          "RT5-09 utf8::downgrade throws catchable exception");
+    my scalar $dg_fail = utf8::downgrade($u8, 1);
+    $fail = $fail + check(!defined($dg_fail), "RT5-09 utf8::downgrade fail_ok returns undef");
+
+    my str $asc = "hello_ascii";
+    utf8::upgrade($asc);
+    $fail = $fail + check(utf8::is_utf8($asc) == 1 && c_has_utf8_flag($asc) == 1,
+                          "RT5-09 utf8::upgrade sets UTF8 flag in place");
+    my str $dg_ok = utf8::downgrade($asc);
+    $fail = $fail + check(c_has_utf8_flag($asc) == 0 && $dg_ok eq "hello_ascii" && c_has_utf8_flag($dg_ok) == 0 && utf8::is_utf8($dg_ok) == 1,
+                          "RT5-09 utf8::downgrade clears UTF8 flag on ASCII");
+
+    my str $lit_u8 = "café";
+    utf8::upgrade($lit_u8);
+    $fail = $fail + check(utf8::is_utf8($lit_u8) == 1 && $lit_u8 eq "café",
+                          "RT5-09 utf8::upgrade valid UTF-8 avoids double encoding");
+
+    my str $lat1 = "caf" . core::pack("C", 233);
+    utf8::upgrade($lat1);
+    $fail = $fail + check(utf8::is_utf8($lat1) == 1 && $lat1 eq "café" && core::byte_length($lat1) == 5,
+                          "RT5-09 utf8::upgrade raw Latin-1 transcodes to UTF-8");
+
+    # RT5-10: clone hash with embedded NULs & 32-bit DJB2 collision keys
+    my hash %orig_h = ();
+    $orig_h{"Aa"} = 10;
+    $orig_h{"Aa\x00one"} = 20;
+    $orig_h{"Aa\x00two"} = 30;
+    $orig_h{"B@\x00z"} = 40;
+    my scalar $cloned = clone(\%orig_h);
+    $fail = $fail + check($cloned->{"Aa"} == 10 && $cloned->{"Aa\x00one"} == 20
+                          && $cloned->{"Aa\x00two"} == 30 && $cloned->{"B@\x00z"} == 40,
+                          "RT5-10 clone hash preserves NUL and DJB2-colliding keys");
+
+    # RT5-11: strada_sv_replace_first & socket_try_send binary-safety
+    my str $rf_in = "x\x00y\x00z";
+    my scalar $rf_out = c_replace_first($rf_in, "y", "YY");
+    $fail = $fail + check(core::byte_length("" . $rf_out) == 6 && $rf_out eq "x\x00YY\x00z",
+                          "RT5-11 replace_first preserves embedded NUL");
+    my str $rf_u = "caf\xC3\xA9";
+    utf8::decode($rf_u);
+    my scalar $rf_nomatch = c_replace_first($rf_u, "missing", "Z");
+    $fail = $fail + check(utf8::is_utf8($rf_nomatch) == 1 && $rf_nomatch eq $rf_u,
+                          "RT5-11 replace_first preserves UTF8 flag on nomatch");
+
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"} + 0;
+    my scalar $cli = core::socket_client("127.0.0.1", $port);
+    my scalar $acc = core::socket_accept($srv);
+    my int $sent1 = core::socket_try_send($cli, "p\x00q\x00r");
+    my scalar $send_ov = R5SendStr::new("ab\rcd\r\n");
+    my int $sent2 = core::socket_try_send($cli, $send_ov);
+    core::shutdown($cli, 1);
+    my str $got_all = core::socket_recv($acc, 64);
+    # Test readline_max on second connection for RT5-15
+    core::socket_close($acc);
+    core::socket_close($cli);
+
+    my scalar $cli2 = core::socket_client("127.0.0.1", $port);
+    my scalar $acc2 = core::socket_accept($srv);
+    core::socket_send($cli2, "ab\rcd\r\nxy\r\n");
+    core::shutdown($cli2, 1);
+    my str $line1 = core::readline($acc2, 1024);
+    my str $line2 = core::readline($acc2, 1024);
+    core::socket_close($acc2);
+    core::socket_close($cli2);
+    core::socket_close($srv);
+    $fail = $fail + check($sent1 == 5 && $sent2 == 7 && core::byte_length($got_all) == 12
+                          && $got_all eq "p\x00q\x00rab\rcd\r\n",
+                          "RT5-11 socket_try_send binary + overload");
+    $fail = $fail + check($line1 eq "ab\rcd" && $line2 eq "xy",
+                          "RT5-15 readline socket preserves mid-line CR");
+
+    # RT5-12: length on double + uint64 stringification in overloaded object
+    my num $dbl = 1.5;
+    $fail = $fail + check(length($dbl) == 3, "RT5-12 length(1.5) == 3");
+
+    # RT5-13: long die message (>1023 bytes) preserved cleanly
+    my str $long_msg = "M" x 2500;
+    my str $caught_long = "";
+    try {
+        die($long_msg);
+    } catch ($e) {
+        $caught_long = "" . $e;
+    }
+    $fail = $fail + check(index($caught_long, $long_msg) >= 0 && length($caught_long) >= 2500,
+                          "RT5-13 die >1023 bytes not truncated");
+
+    # RT5-14: slurp_fh on pipe (unseekable stream)
+    my array @pfd = sys::pipe();
+    my scalar $rfh = sys::fdopen_read($pfd[0]);
+    my scalar $wfh = sys::fdopen_write($pfd[1]);
+    sys::fwrite($wfh, "pipe_payload\x00end");
+    sys::close($wfh);
+    my str $pipe_got = sys::slurp_fh($rfh);
+    sys::close($rfh);
+    $fail = $fail + check(core::byte_length($pipe_got) == 16 && $pipe_got eq "pipe_payload\x00end",
+                          "RT5-14 slurp_fh on unseekable pipe");
+
+    # RT5-16: tr/// with >256 chars in search/replace lists
+    my str $tr_s = "hello!";
+    $tr_s =~ tr/a-za-za-za-za-za-za-za-za-za-z!/a-za-za-za-za-za-za-za-za-za-z?/;
+    $fail = $fail + check($tr_s eq "hello?", "RT5-16 tr/// >256 chars in pattern lists");
+
+    # CC5-01: goto out of for(my ...)
+    $fail = $fail + check(test_goto_for(1) == 0 && test_goto_for(0) == 1,
+                          "CC5-01 goto across for(my ...)");
+
+    # CC5-02: method modifiers on has attributes via $self->attr()
+    my scalar $am = R5AttrMod::new();
+    my str $am_val = $am->read_via_self();
+    $fail = $fail + check($am_val eq "base_wrapped" && R5AttrMod::get_before_hits() == 1
+                          && R5AttrMod::get_after_hits() == 1 && R5AttrMod::get_around_hits() == 1,
+                          "CC5-02 self->attr() runs method modifiers");
+
+    # CC5-03: finally early return & finally re-throw
+    $fail = $fail + check(fin_return_val() == 42, "CC5-03 finally return");
+    my str $fin2 = "";
+    try {
+        try {
+            die("first_err");
+        } finally {
+            die("second_err");
+        }
+    } catch ($e) {
+        $fin2 = "" . $e;
+    }
+    $fail = $fail + check(index($fin2, "second_err") >= 0, "CC5-03 finally override die");
+
+    # CC5-04: compound assign & builtin throwing paths
+    my int $sv_x = 10;
+    my scalar $sv_r = \$sv_x;
+    my str $cc4_err = "";
+    try { $$sv_r += make_throw_rhs(); } catch ($e) { $cc4_err = "" . $e; }
+    $fail = $fail + check(index($cc4_err, "rhs_boom") >= 0, "CC5-04 scalar deref += throw");
+
+    $cc4_err = "";
+    try { $$sv_r /= 0; } catch ($e) { $cc4_err = "" . $e; }
+    $fail = $fail + check(length($cc4_err) > 0, "CC5-04 scalar deref /= 0 throw");
+
+    my hash %cc4_h = ("k" => 10);
+    $cc4_err = "";
+    try { $cc4_h{"k"} %= 0; } catch ($e) { $cc4_err = "" . $e; }
+    $fail = $fail + check(length($cc4_err) > 0, "CC5-04 hash %= 0 throw");
+
+    my array @cc4_a = (10);
+    $cc4_err = "";
+    try { $cc4_a[0] /= 0; } catch ($e) { $cc4_err = "" . $e; }
+    $fail = $fail + check(length($cc4_err) > 0, "CC5-04 array /= 0 throw");
+
+    my scalar $tdot = R5ThrowDot::new();
+    $cc4_err = "";
+    try {
+        my str $z = ("owned_" . "l") . $tdot;
+    } catch ($e) {
+        $cc4_err = "" . $e;
+    }
+    $fail = $fail + check(index($cc4_err, "r5_dot_boom") >= 0, "CC5-04 overloaded concat throw");
+
+    my scalar $tstr = R5ThrowStr::new();
+    $cc4_err = "";
+    try {
+        die("prefix_" . "owned", $tstr);
+    } catch ($e) {
+        $cc4_err = "" . $e;
+    }
+    $fail = $fail + check(index($cc4_err, "r5_to_str_boom") >= 0, "CC5-04 multi-arg die throw");
+
+    # CC5-05: dynamic method wrapper omitting args (with & without defaults)
+    my scalar $dt = R5DynTarget::new();
+    my str $m1 = "no_def";
+    my str $m2 = "with_def";
+    $fail = $fail + check($dt->$m1() eq "U:U" && $dt->$m2() eq "U:def" && $dt->$m1(7) eq "7:U",
+                          "CC5-05 dynamic method call missing args receive undef/default");
+
+    # Single-char comparison semantics ('x') and ord("X") constant folding
+    my int $cc_a = 65;
+    my int $cc_z = 90;
+    my str $nl = '\n';
+    my str $s0 = '0';
+    my num $f0 = 0.0;
+    $fail = $fail + check(
+        '0' == 48 && '9' == 57 && $cc_a == 'A' && $cc_z == 'Z' && 'Z' == 90
+        && '\n' == 10 && '\t' == 9 && '\r' == 13 && '\0' == 0
+        && '\'' == 39 && '\\' == 92 && '"' == 34 && '\x7f' == 127
+        && 'a' < 'z' && ord("A") == 65
+        && length($nl) == 2 && $s0 eq '0' && $f0 == '0',
+        "CC5-06 single-char comparisons 'x' and string/float preservation");
+
+    # s/// replacement backslash preservation (strada-md2man roff escapes)
+    my str $roff1 = "a\"b-c";
+    $roff1 =~ s/"/\\(dq/g;
+    $roff1 =~ s/-/\\-/g;
+    my str $roff2 = "p\\q";
+    $roff2 =~ s/\\/\\\\/g;
+    my str $roff3 = "xy";
+    $roff3 =~ s/(x)/\\$1/g;
+    $fail = $fail + check(
+        $roff1 eq "a\\(dqb\\-c" && $roff2 eq "p\\\\q" && $roff3 eq "\\xy"
+        && ("p\\q" =~ /\\/) && !("pq" =~ /\\/) && ($roff2 =~ /\\\\/),
+        "CC5-07 s/// and m// replacement/pattern backslash preservation");
+
+    # Void statement deref-hash assignment with autoviv chain and borrowed RHS variable
+    my hash %av_dh = ();
+    my str $av_borrowed = "keep_" . "val";
+    $av_dh{"outer"}->{"inner"} = $av_borrowed;
+    $fail = $fail + check(
+        $av_dh{"outer"}->{"inner"} eq "keep_val" && $av_borrowed eq "keep_val",
+        "CC5-08 autoviv deref-hash borrowed RHS preserves variable refcount");
+
+    if ($fail == 0) {
+        say("R5_RUNTIME_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

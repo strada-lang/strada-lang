@@ -54,6 +54,9 @@ private func remaining(int $deadline) int {
 
 # Receive up to $max bytes. Returns "" on EOF; undef on timeout.
 func recv(scalar $sock, int $max, int $timeout_ms = 0) str {
+    if ($timeout_ms < 0) {
+        return undef;
+    }
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
         my scalar $data = core::socket_try_recv($sock, $max);
@@ -77,6 +80,9 @@ func recv(scalar $sock, int $max, int $timeout_ms = 0) str {
 # $max_bytes > 0 returns at most that many bytes (capped by the 8192-byte
 # socket buffer); the rest of a longer line is left for the next call.
 func readline(scalar $sock, int $timeout_ms = 0, int $max_bytes = 0) str {
+    if ($timeout_ms < 0) {
+        return undef;
+    }
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
         my scalar $line = core::socket_try_readline($sock, $max_bytes);
@@ -96,7 +102,12 @@ func readline(scalar $sock, int $timeout_ms = 0, int $max_bytes = 0) str {
         my int $left = remaining($deadline);
         if ($left < 0) { return undef; }
         if (park($sock, "r", $left) == 0) {
-            core::usleep(1000);                          # not in a task: poll
+            if ($deadline > 0) {
+                my scalar $ready = core::socket_select([$sock], $left);
+                if (!defined($ready) || scalar($ready) == 0) { return undef; }
+            } else {
+                core::usleep(1000);                      # not in a task: poll
+            }
         }
     }
 }
@@ -161,6 +172,9 @@ func accept(scalar $listener, int $timeout_ms = 0) scalar {
 # Connect without blocking the loop during the TCP handshake. Returns the
 # connected socket, or undef on failure/timeout.
 func connect(str $host, int $port, int $timeout_ms = 0) scalar {
+    if ($timeout_ms < 0) {
+        return undef;
+    }
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     # Strip bracketed IPv6 literal notation (e.g. "[::1]")
     my int $was_bracketed_v6 = 0;

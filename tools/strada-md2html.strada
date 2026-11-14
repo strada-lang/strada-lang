@@ -29,86 +29,99 @@ func html_escape(str $s) str {
     return $result;
 }
 
+# Escape HTML special characters in prose (preserve literal quotes/apostrophes)
+func prose_escape(str $s) str {
+    my str $result = $s;
+    $result =~ s/&/&amp;/g;
+    $result =~ s/</&lt;/g;
+    $result =~ s/>/&gt;/g;
+    return $result;
+}
+
+func is_alnum_char(str $ch) int {
+    if (length($ch) == 0) { return 0; }
+    my int $c = ord($ch);
+    if (($c >= '0' && $c <= '9') || ($c >= 'A' && $c <= 'Z') || ($c >= 'a' && $c <= 'z')) {
+        return 1;
+    }
+    return 0;
+}
+
+func apply_delim_emph(str $s, str $delim, int $dlen, str $tag, int $word_boundary) str {
+    my str $result = $s;
+    my str $dch = substr($delim, 0, 1);
+    my int $pos = 0;
+    while (1) {
+        my int $rlen = length($result);
+        my int $start = index($result, $delim, $pos);
+        if ($start < 0) {
+            last;
+        }
+        my int $run_end = $start;
+        while ($run_end < $rlen && substr($result, $run_end, 1) eq $dch) {
+            $run_end = $run_end + 1;
+        }
+        my int $run_len = $run_end - $start;
+        if (($dlen == 1 && $run_len != 1) || ($dlen == 2 && ($run_len < 2 || $run_len > 3))) {
+            $pos = $run_end;
+            next;
+        }
+        if ($word_boundary == 1 && $start > 0 && is_alnum_char(substr($result, $start - 1, 1)) == 1) {
+            $pos = $run_end;
+            next;
+        }
+        my int $search_end = $run_end;
+        my int $end = 0 - 1;
+        while (1) {
+            my int $cand = index($result, $delim, $search_end);
+            if ($cand < 0) {
+                last;
+            }
+            my int $c_run_end = $cand;
+            while ($c_run_end < $rlen && substr($result, $c_run_end, 1) eq $dch) {
+                $c_run_end = $c_run_end + 1;
+            }
+            my int $c_run_len = $c_run_end - $cand;
+            if ($c_run_len != $run_len) {
+                $search_end = $c_run_end;
+                next;
+            }
+            if ($cand == $run_end) {
+                $search_end = $c_run_end;
+                next;
+            }
+            if ($word_boundary == 1 && $c_run_end < $rlen && is_alnum_char(substr($result, $c_run_end, 1)) == 1) {
+                $search_end = $c_run_end;
+                next;
+            }
+            if ($run_len == 3) {
+                $end = $c_run_end - 2;
+            } else {
+                $end = $cand;
+            }
+            last;
+        }
+        if ($end < 0) {
+            $pos = $run_end;
+            next;
+        }
+        my str $before = substr($result, 0, $start);
+        my str $inner = substr($result, $start + $dlen, $end - $start - $dlen);
+        my str $after = substr($result, $end + $dlen, length($result) - $end - $dlen);
+        my str $wrapped = "<" . $tag . ">" . $inner . "</" . $tag . ">";
+        $result = $before . $wrapped . $after;
+        $pos = length($before) + length($wrapped);
+    }
+    return $result;
+}
+
 # Apply emphasis (**bold**, __bold__, *italic*, _italic_) to plain text
 func process_inline_emph(str $s) str {
     my str $result = $s;
-
-    # Bold: **text**
-    my int $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "**");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "**", $start + 2);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $bold = substr($result, $start + 2, $end - $start - 2);
-                my str $after = substr($result, $end + 2, length($result) - $end - 2);
-                $result = $before . "<strong>" . $bold . "</strong>" . $after;
-            }
-        }
-    }
-
-    # Bold: __text__
-    $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "__");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "__", $start + 2);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $bold = substr($result, $start + 2, $end - $start - 2);
-                my str $after = substr($result, $end + 2, length($result) - $end - 2);
-                $result = $before . "<strong>" . $bold . "</strong>" . $after;
-            }
-        }
-    }
-
-    # Italic: *text*
-    $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "*");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "*", $start + 1);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $italic = substr($result, $start + 1, $end - $start - 1);
-                my str $after = substr($result, $end + 1, length($result) - $end - 1);
-                $result = $before . "<em>" . $italic . "</em>" . $after;
-            }
-        }
-    }
-
-    # Italic: _text_
-    $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "_");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "_", $start + 1);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $italic = substr($result, $start + 1, $end - $start - 1);
-                my str $after = substr($result, $end + 1, length($result) - $end - 1);
-                $result = $before . "<em>" . $italic . "</em>" . $after;
-            }
-        }
-    }
-
+    $result = apply_delim_emph($result, "**", 2, "strong", 0);
+    $result = apply_delim_emph($result, "__", 2, "strong", 1);
+    $result = apply_delim_emph($result, "*", 1, "em", 0);
+    $result = apply_delim_emph($result, "_", 1, "em", 1);
     return $result;
 }
 
@@ -120,7 +133,7 @@ func sanitize_url(str $u) str {
     my int $len = length($u);
     while ($i < $len) {
         my str $ch = substr($u, $i, 1);
-        if (ord($ch) > 32) {
+        if (ord($ch) > ' ') {
             $cleaned = $cleaned . lc($ch);
         }
         $i = $i + 1;
@@ -224,7 +237,7 @@ func process_inline(str $line) str {
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
                         my int $tidx = size(@tokens);
                         my str $ph = $soh . "T" . $tidx . $stx;
-                        push(@tokens, "<a href=\"" . sanitize_url($url) . "\">" . process_inline_emph($text) . "</a>");
+                        push(@tokens, "<a href=\"" . sanitize_url($url) . "\">" . process_inline_emph(prose_escape($text)) . "</a>");
                         $result = $before . $ph . $after;
                         $search_from = length($before) + length($ph);
                     }
@@ -233,8 +246,8 @@ func process_inline(str $line) str {
         }
     }
 
-    # 4. Format emphasis on remaining non-protected text
-    $result = process_inline_emph($result);
+    # 4. Format emphasis on remaining non-protected text (HTML-escaped first)
+    $result = process_inline_emph(prose_escape($result));
 
     # 5. Restore protected tokens in reverse order (so nested tokens inside links expand)
     my int $ti = size(@tokens) - 1;
@@ -465,9 +478,16 @@ func get_fence_lang(str $line, int $fence_len = 3) str {
 # Convert markdown to HTML (depth-guarded for nested blockquotes)
 func md2html_depth(str $markdown, int $depth) str {
     my array @lines = split("\n", $markdown);
+    my int $num_lines = size(@lines);
+    for (my int $li = 0; $li < $num_lines; $li++) {
+        my str $ln = $lines[$li];
+        my int $ll = length($ln);
+        if ($ll > 0 && ord(substr($ln, $ll - 1, 1)) == '\r') {
+            $lines[$li] = substr($ln, 0, $ll - 1);
+        }
+    }
     my str $html = "";
     my int $i = 0;
-    my int $num_lines = size(@lines);
     my int $in_paragraph = 0;
     my str $paragraph = "";
 

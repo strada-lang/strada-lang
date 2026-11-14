@@ -352,6 +352,8 @@ typedef enum {
     DBI_DRIVER_POSTGRES
 } DbiDriverType;
 
+struct DbiStatement;
+
 /* Database handle structure */
 typedef struct DbiHandle {
     DbiDriverType driver;
@@ -366,11 +368,14 @@ typedef struct DbiHandle {
     int print_error;
     int connected;
     int refcount;
+    struct DbiStatement *sth_head;
 } DbiHandle;
 
 /* Statement handle structure */
 typedef struct DbiStatement {
     DbiHandle *dbh;
+    struct DbiStatement *prev_sth;
+    struct DbiStatement *next_sth;
     void *stmt;
     char *sql;
     int num_params;
@@ -423,6 +428,7 @@ static void dbi_pg_append_conn_kv(char *dst, size_t cap, size_t *off, const char
     if (*off + 1 < cap) dst[(*off)++] = '\'';
     dst[*off] = '\0';
 }
+#endif
 
 /* Ensure capacity in dbi_pg_rewrite_placeholders; frees and returns 0 on OOM. */
 static int dbi_pg_ensure_cap(char **out, size_t *cap, size_t need) {
@@ -439,7 +445,34 @@ static int dbi_pg_ensure_cap(char **out, size_t *cap, size_t need) {
     return 1;
 }
 
-/* Rewrite SQL '?' placeholders outside single/double quotes and comments into '$1', '$2', ... */
+/* Return dollar-quote tag length (>= 2, including both '$' delimiters) if sql[pos..]
+ * begins a valid PostgreSQL dollar-quoted literal tag ($$ or $ident$), else 0. */
+static size_t dbi_pg_dollar_tag_len(const char *sql, size_t pos, size_t slen) {
+    if (pos + 1 >= slen || sql[pos] != '$') return 0;
+    unsigned char first = (unsigned char)sql[pos + 1];
+    if (first == '$') return 2;
+    if (!((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') ||
+          first == '_' || first >= 0x80)) {
+        return 0;
+    }
+    for (size_t j = pos + 2; j < slen; j++) {
+        unsigned char uc = (unsigned char)sql[j];
+        if (uc == '$') return (j - pos) + 1;
+        if (!((uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z') ||
+              (uc >= '0' && uc <= '9') || uc == '_' || uc >= 0x80)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int dbi_is_ident_char(unsigned char uc) {
+    return (uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z') ||
+           (uc >= '0' && uc <= '9') || uc == '_' || uc == '$';
+}
+
+/* Rewrite SQL '?' placeholders outside single/double quotes, E'...' escapes,
+ * $tag$...$tag$ dollar-quoted literals, and SQL comments into '$1', '$2', ... */
 static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
     if (!sql) { *out_nparams = 0; return strdup(""); }
     size_t slen = strlen(sql);
@@ -449,32 +482,51 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
     size_t oi = 0;
     int count = 0;
     int in_sq = 0;
+    int in_sq_esc = 0;
     int in_dq = 0;
     int in_line_comment = 0;
-    int in_block_comment = 0;
+    int block_depth = 0;
     for (size_t i = 0; i < slen; i++) {
         char c = sql[i];
         if (in_line_comment) {
             if (c == '\n') in_line_comment = 0;
-        } else if (in_block_comment) {
+        } else if (block_depth > 0) {
+            if (c == '/' && i + 1 < slen && sql[i + 1] == '*') {
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                block_depth++;
+                continue;
+            }
             if (c == '*' && i + 1 < slen && sql[i + 1] == '/') {
                 if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
-                in_block_comment = 0;
+                block_depth--;
                 continue;
             }
         } else if (in_sq) {
+            if (in_sq_esc && c == '\\') {
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 3)) { *out_nparams = 0; return NULL; }
+                out[oi++] = c;
+                if (i + 1 < slen) {
+                    out[oi++] = sql[++i];
+                }
+                continue;
+            }
             if (c == '\'' && i + 1 < slen && sql[i + 1] == '\'') {
-                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 3)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
                 continue;
             }
-            if (c == '\'') in_sq = 0;
+            if (c == '\'') {
+                in_sq = 0;
+                in_sq_esc = 0;
+            }
         } else if (in_dq) {
             if (c == '"' && i + 1 < slen && sql[i + 1] == '"') {
-                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 3)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
                 continue;
@@ -484,15 +536,41 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
             if (c == '-' && i + 1 < slen && sql[i + 1] == '-') {
                 in_line_comment = 1;
             } else if (c == '/' && i + 1 < slen && sql[i + 1] == '*') {
-                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 3)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
-                in_block_comment = 1;
+                block_depth = 1;
+                continue;
+            } else if ((c == 'E' || c == 'e') && i + 1 < slen && sql[i + 1] == '\'' &&
+                       (i == 0 || !dbi_is_ident_char((unsigned char)sql[i - 1]))) {
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 3)) { *out_nparams = 0; return NULL; }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                in_sq = 1;
+                in_sq_esc = 1;
                 continue;
             } else if (c == '\'') {
                 in_sq = 1;
+                in_sq_esc = 0;
             } else if (c == '"') {
                 in_dq = 1;
+            } else if (c == '$') {
+                size_t tlen = dbi_pg_dollar_tag_len(sql, i, slen);
+                if (tlen > 0) {
+                    size_t end_pos = slen;
+                    for (size_t j = i + tlen; j + tlen <= slen; j++) {
+                        if (sql[j] == '$' && memcmp(sql + j, sql + i, tlen) == 0) {
+                            end_pos = j + tlen;
+                            break;
+                        }
+                    }
+                    size_t span = end_pos - i;
+                    if (!dbi_pg_ensure_cap(&out, &cap, oi + span + 1)) { *out_nparams = 0; return NULL; }
+                    memcpy(out + oi, sql + i, span);
+                    oi += span;
+                    i = end_pos - 1;
+                    continue;
+                }
             } else if (c == '?') {
                 count++;
                 char num[24];
@@ -506,11 +584,11 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
         if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
         out[oi++] = c;
     }
+    if (!dbi_pg_ensure_cap(&out, &cap, oi + 1)) { *out_nparams = 0; return NULL; }
     out[oi] = '\0';
     *out_nparams = count;
     return out;
 }
-#endif
 
 /* Helper: Set error */
 static void dbi_set_error(DbiHandle *dbh, int code, const char *msg) {
@@ -607,14 +685,19 @@ static DbiDriverType dbi_parse_dsn(const char *dsn, char **database, char **host
     return driver;
 }
 
-/* Connect to database */
-static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char *pass,
-                                   int auto_commit, int print_error) {
+/* Connect to database; writes any failure message into err_out before releasing dbh. */
+static DbiHandle* dbi_connect_raw_ex(const char *dsn, const char *user, const char *pass,
+                                      int auto_commit, int print_error, int raise_error,
+                                      char *err_out, size_t err_cap) {
+    if (err_out && err_cap > 0) err_out[0] = '\0';
     DbiHandle *dbh = calloc(1, sizeof(DbiHandle));
-    if (!dbh) return NULL;
+    if (!dbh) {
+        if (err_out && err_cap > 0) snprintf(err_out, err_cap, "Out of memory");
+        return NULL;
+    }
 
     dbh->auto_commit = auto_commit;
-    dbh->raise_error = 0;
+    dbh->raise_error = 0; /* kept 0 until connect succeeds so error paths free cleanly */
     dbh->print_error = print_error;
     dbh->refcount = 1;
 
@@ -633,6 +716,9 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
             int rc = sqlite3_open(database ? database : ":memory:", &db);
             if (rc != SQLITE_OK) {
                 dbi_set_error(dbh, rc, sqlite3_errmsg(db));
+                if (err_out && err_cap > 0 && dbh->error_msg) {
+                    snprintf(err_out, err_cap, "%s", dbh->error_msg);
+                }
                 sqlite3_close_v2(db);
                 free(database);
                 free(host);
@@ -654,6 +740,9 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
             MYSQL *mysql = mysql_init(NULL);
             if (!mysql) {
                 dbi_set_error(dbh, -1, "MySQL initialization failed");
+                if (err_out && err_cap > 0 && dbh->error_msg) {
+                    snprintf(err_out, err_cap, "%s", dbh->error_msg);
+                }
                 free(database);
                 free(host);
                 dbi_handle_release(dbh);
@@ -662,6 +751,9 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
             if (!mysql_real_connect(mysql, host ? host : "localhost", user, pass,
                                    database, port ? port : 3306, NULL, 0)) {
                 dbi_set_error(dbh, mysql_errno(mysql), mysql_error(mysql));
+                if (err_out && err_cap > 0 && dbh->error_msg) {
+                    snprintf(err_out, err_cap, "%s", dbh->error_msg);
+                }
                 mysql_close(mysql);
                 free(database);
                 free(host);
@@ -690,6 +782,9 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
             PGconn *pg = PQconnectdb(conninfo);
             if (PQstatus(pg) != CONNECTION_OK) {
                 dbi_set_error(dbh, -1, PQerrorMessage(pg));
+                if (err_out && err_cap > 0 && dbh->error_msg) {
+                    snprintf(err_out, err_cap, "%s", dbh->error_msg);
+                }
                 PQfinish(pg);
                 free(database);
                 free(host);
@@ -709,20 +804,32 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
 
         default:
             dbi_set_error(dbh, -1, "Unknown database driver, or its support is not compiled in (DBI is built with -DHAVE_SQLITE3 / -DHAVE_MYSQL / -DHAVE_POSTGRES; run ./configure and rebuild)");
+            if (err_out && err_cap > 0 && dbh->error_msg) {
+                snprintf(err_out, err_cap, "%s", dbh->error_msg);
+            }
             free(database);
             free(host);
             dbi_handle_release(dbh);
             return NULL;
     }
 
+    dbh->raise_error = raise_error;
     free(database);
     free(host);
     return dbh;
 }
 
-/* Forward declarations for transaction functions */
+static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char *pass,
+                                   int auto_commit, int print_error) {
+    return dbi_connect_raw_ex(dsn, user, pass, auto_commit, print_error, 0, NULL, 0);
+}
+
+/* Forward declarations for transaction & cleanup helpers */
 static int dbi_do_sql(DbiHandle *dbh, const char *sql);
 static int dbi_rollback(DbiHandle *dbh);
+#ifdef HAVE_MYSQL
+static void dbi_free_mysql_results(DbiStatement *sth);
+#endif
 
 /* Disconnect from database */
 static void dbi_disconnect(DbiHandle *dbh) {
@@ -735,6 +842,34 @@ static void dbi_disconnect(DbiHandle *dbh) {
             dbh->auto_commit = 1;
             dbi_rollback(dbh);
             dbh->raise_error = saved_raise;
+        }
+
+        /* Close active child statements while dbh->conn is still valid so
+         * mysql_stmt_close / sqlite3_finalize never use-after-free the parent conn. */
+        for (DbiStatement *s = dbh->sth_head; s; s = s->next_sth) {
+#ifdef HAVE_SQLITE3
+            if (dbh->driver == DBI_DRIVER_SQLITE && s->stmt) {
+                sqlite3_finalize((sqlite3_stmt*)s->stmt);
+                s->stmt = NULL;
+            }
+#endif
+#ifdef HAVE_MYSQL
+            if (dbh->driver == DBI_DRIVER_MYSQL && s->stmt) {
+                dbi_free_mysql_results(s);
+                mysql_stmt_close((MYSQL_STMT*)s->stmt);
+                s->stmt = NULL;
+            }
+#endif
+#ifdef HAVE_POSTGRES
+            if (dbh->driver == DBI_DRIVER_POSTGRES && s->result) {
+                PQclear((PGresult*)s->result);
+                s->result = NULL;
+                s->pg_cur_row = -1;
+            }
+#endif
+            s->finished = 1;
+            s->executed = 0;
+            s->sqlite_has_prefetched_row = 0;
         }
 
         switch (dbh->driver) {
@@ -834,12 +969,15 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
 
     sth->dbh = dbh;
     sth->sql = strdup(sql);
-
-    const char *p = sql;
-    while ((p = strchr(p, '?')) != NULL) {
-        sth->num_params++;
-        p++;
+    if (!sth->sql) {
+        free(sth);
+        return NULL;
     }
+
+    int lexed_params = 0;
+    char *rw_tmp = dbi_pg_rewrite_placeholders(sql, &lexed_params);
+    free(rw_tmp);
+    sth->num_params = lexed_params;
 
     switch (dbh->driver) {
 #ifdef HAVE_SQLITE3
@@ -859,10 +997,26 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
             sth->num_params = sqlite3_bind_parameter_count(stmt);
             sth->num_columns = sqlite3_column_count(stmt);
             if (sth->num_columns > 0) {
-                sth->column_names = calloc(sth->num_columns, sizeof(char*));
+                sth->column_names = calloc((size_t)sth->num_columns, sizeof(char*));
+                if (!sth->column_names) {
+                    sqlite3_finalize(stmt);
+                    free(sth->sql);
+                    free(sth);
+                    dbi_set_error(dbh, -1, "Out of memory");
+                    return NULL;
+                }
                 for (int i = 0; i < sth->num_columns; i++) {
                     const char *name = sqlite3_column_name(stmt, i);
                     sth->column_names[i] = name ? strdup(name) : strdup("");
+                    if (!sth->column_names[i]) {
+                        for (int j = 0; j < i; j++) free(sth->column_names[j]);
+                        free(sth->column_names);
+                        sqlite3_finalize(stmt);
+                        free(sth->sql);
+                        free(sth);
+                        dbi_set_error(dbh, -1, "Out of memory");
+                        return NULL;
+                    }
                 }
             }
             break;
@@ -888,10 +1042,22 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
 
             /* Allocate parameter binding arrays */
             if (sth->num_params > 0) {
-                sth->mysql_param_binds = calloc(sth->num_params, sizeof(MYSQL_BIND));
-                sth->mysql_param_lengths = calloc(sth->num_params, sizeof(unsigned long));
-                sth->mysql_param_nulls = calloc(sth->num_params, sizeof(char));
-                sth->mysql_param_buffers = calloc(sth->num_params, sizeof(char*));
+                sth->mysql_param_binds = calloc((size_t)sth->num_params, sizeof(MYSQL_BIND));
+                sth->mysql_param_lengths = calloc((size_t)sth->num_params, sizeof(unsigned long));
+                sth->mysql_param_nulls = calloc((size_t)sth->num_params, sizeof(char));
+                sth->mysql_param_buffers = calloc((size_t)sth->num_params, sizeof(char*));
+                if (!sth->mysql_param_binds || !sth->mysql_param_lengths ||
+                    !sth->mysql_param_nulls || !sth->mysql_param_buffers) {
+                    free(sth->mysql_param_binds);
+                    free(sth->mysql_param_lengths);
+                    free(sth->mysql_param_nulls);
+                    free(sth->mysql_param_buffers);
+                    mysql_stmt_close(stmt);
+                    free(sth->sql);
+                    free(sth);
+                    dbi_set_error(dbh, -1, "Out of memory");
+                    return NULL;
+                }
                 sth->mysql_params_bound = 0;
             }
 
@@ -909,12 +1075,27 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
             int nparams = 0;
             sth->stmt = NULL;
             sth->pg_sql = dbi_pg_rewrite_placeholders(sql, &nparams);
+            if (!sth->pg_sql) {
+                free(sth->sql);
+                free(sth);
+                dbi_set_error(dbh, -1, "Out of memory");
+                return NULL;
+            }
             sth->num_params = nparams;
             sth->pg_param_cap = nparams;
             sth->pg_cur_row = -1;
             if (nparams > 0) {
                 sth->pg_param_values = calloc((size_t)nparams, sizeof(char*));
                 sth->pg_param_lengths = calloc((size_t)nparams, sizeof(int));
+                if (!sth->pg_param_values || !sth->pg_param_lengths) {
+                    free(sth->pg_param_values);
+                    free(sth->pg_param_lengths);
+                    free(sth->pg_sql);
+                    free(sth->sql);
+                    free(sth);
+                    dbi_set_error(dbh, -1, "Out of memory");
+                    return NULL;
+                }
             }
             break;
         }
@@ -927,6 +1108,10 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
     }
 
     dbh->refcount++;
+    sth->prev_sth = NULL;
+    sth->next_sth = dbh->sth_head;
+    if (dbh->sth_head) dbh->sth_head->prev_sth = sth;
+    dbh->sth_head = sth;
     return sth;
 }
 
@@ -1026,11 +1211,18 @@ static int dbi_execute_raw(DbiStatement *sth) {
                 }
 
                 int ncols = sth->num_columns;
-                sth->mysql_result_binds = calloc(ncols, sizeof(MYSQL_BIND));
-                sth->mysql_lengths = calloc(ncols, sizeof(unsigned long));
-                sth->mysql_nulls = calloc(ncols, sizeof(char));  /* Use char for is_null flags */
-                sth->mysql_buffers = calloc(ncols, sizeof(char*));
-                sth->mysql_buffer_sizes = calloc(ncols, sizeof(unsigned long));
+                sth->mysql_result_binds = calloc((size_t)ncols, sizeof(MYSQL_BIND));
+                sth->mysql_lengths = calloc((size_t)ncols, sizeof(unsigned long));
+                sth->mysql_nulls = calloc((size_t)ncols, sizeof(char));  /* Use char for is_null flags */
+                sth->mysql_buffers = calloc((size_t)ncols, sizeof(char*));
+                sth->mysql_buffer_sizes = calloc((size_t)ncols, sizeof(unsigned long));
+                if (!sth->mysql_result_binds || !sth->mysql_lengths || !sth->mysql_nulls ||
+                    !sth->mysql_buffers || !sth->mysql_buffer_sizes) {
+                    dbi_free_mysql_results(sth);
+                    mysql_free_result(meta);
+                    dbi_set_error(dbh, -1, "Out of memory");
+                    return -1;
+                }
 
                 MYSQL_FIELD *fields = mysql_fetch_fields(meta);
                 for (int i = 0; i < ncols; i++) {
@@ -1038,6 +1230,12 @@ static int dbi_execute_raw(DbiStatement *sth) {
                     unsigned long bufsize = fields[i].max_length + 1;
                     if (bufsize < 256) bufsize = 256;
                     sth->mysql_buffers[i] = calloc(bufsize, 1);
+                    if (!sth->mysql_buffers[i]) {
+                        dbi_free_mysql_results(sth);
+                        mysql_free_result(meta);
+                        dbi_set_error(dbh, -1, "Out of memory");
+                        return -1;
+                    }
                     sth->mysql_buffer_sizes[i] = bufsize;
 
                     sth->mysql_result_binds[i].buffer_type = MYSQL_TYPE_STRING;
@@ -1119,9 +1317,30 @@ static int dbi_execute_raw(DbiStatement *sth) {
                 if (sth->num_columns > 0) {
                     sth->column_names = calloc((size_t)sth->num_columns, sizeof(char*));
                     sth->column_types = calloc((size_t)sth->num_columns, sizeof(int));
+                    if (!sth->column_names || !sth->column_types) {
+                        free(sth->column_names);
+                        sth->column_names = NULL;
+                        free(sth->column_types);
+                        sth->column_types = NULL;
+                        sth->num_columns = 0;
+                        PQclear(res);
+                        dbi_set_error(dbh, -1, "Out of memory");
+                        return -1;
+                    }
                     for (int i = 0; i < sth->num_columns; i++) {
                         const char *cn = PQfname(res, i);
                         sth->column_names[i] = cn ? strdup(cn) : strdup("");
+                        if (!sth->column_names[i]) {
+                            for (int j = 0; j < i; j++) free(sth->column_names[j]);
+                            free(sth->column_names);
+                            sth->column_names = NULL;
+                            free(sth->column_types);
+                            sth->column_types = NULL;
+                            sth->num_columns = 0;
+                            PQclear(res);
+                            dbi_set_error(dbh, -1, "Out of memory");
+                            return -1;
+                        }
                         Oid oid = PQftype(res, i);
                         if (oid == 16 || oid == 20 || oid == 21 || oid == 23) {
                             sth->column_types[i] = 1;
@@ -1779,20 +1998,40 @@ static void dbi_free_statement(DbiStatement *sth) {
     if (!sth) return;
 
     if (sth->dbh) {
+        if (sth->prev_sth) {
+            sth->prev_sth->next_sth = sth->next_sth;
+        } else if (sth->dbh->sth_head == sth) {
+            sth->dbh->sth_head = sth->next_sth;
+        }
+        if (sth->next_sth) {
+            sth->next_sth->prev_sth = sth->prev_sth;
+        }
+        sth->prev_sth = NULL;
+        sth->next_sth = NULL;
+
         switch (sth->dbh->driver) {
 #ifdef HAVE_SQLITE3
             case DBI_DRIVER_SQLITE:
-                if (sth->stmt) sqlite3_finalize((sqlite3_stmt*)sth->stmt);
+                if (sth->stmt && sth->dbh->connected && sth->dbh->conn) {
+                    sqlite3_finalize((sqlite3_stmt*)sth->stmt);
+                    sth->stmt = NULL;
+                }
                 break;
 #endif
 #ifdef HAVE_MYSQL
             case DBI_DRIVER_MYSQL:
-                if (sth->stmt) mysql_stmt_close((MYSQL_STMT*)sth->stmt);
+                if (sth->stmt && sth->dbh->connected && sth->dbh->conn) {
+                    mysql_stmt_close((MYSQL_STMT*)sth->stmt);
+                    sth->stmt = NULL;
+                }
                 break;
 #endif
 #ifdef HAVE_POSTGRES
             case DBI_DRIVER_POSTGRES:
-                if (sth->result) PQclear((PGresult*)sth->result);
+                if (sth->result) {
+                    PQclear((PGresult*)sth->result);
+                    sth->result = NULL;
+                }
                 break;
 #endif
             default:
@@ -2134,24 +2373,32 @@ func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar
     }
 
     my int $dbh_ptr = 0;
+    my str $err_msg = "";
     __C__ {
         char *dsn_str = strada_to_str(dsn);
         char *user_str = strada_to_str(username);
         char *pass_str = strada_to_str(password);
         int ac = (int)strada_to_int(auto_commit);
         int pe = (int)strada_to_int(print_error);
-        DbiHandle *dbh = dbi_connect_raw(dsn_str, user_str, pass_str, ac, pe);
-        if (dbh) {
-            dbh->raise_error = (int)strada_to_int(raise_error);
-        }
+        int re = (int)strada_to_int(raise_error);
+        char err_buf[1024];
+        err_buf[0] = '\0';
+        DbiHandle *dbh = dbi_connect_raw_ex(dsn_str, user_str, pass_str, ac, pe, re, err_buf, sizeof(err_buf));
         strada_decref(dbh_ptr);  /* Free old value before reassign */
         dbh_ptr = strada_new_int((int64_t)(intptr_t)dbh);
         free(dsn_str);
         free(user_str);
         free(pass_str);
+        if (!dbh) {
+            strada_decref(err_msg);
+            err_msg = strada_new_str(err_buf[0] ? err_buf : "DBI connect failed");
+        }
     }
 
     if ($dbh_ptr == 0) {
+        if ($raise_error) {
+            throw($err_msg);
+        }
         return undef;
     }
 
@@ -2765,11 +3012,31 @@ func ping(scalar $dbh) int {
 # Convenience Functions
 # ============================================================
 
+# Internal/testing helper: rewrite '?' placeholders to '$1', '$2', ... using the PG SQL lexer.
+# Returns [rewritten_sql, nparams].
+func _pg_rewrite_placeholders(str $sql) array {
+    my str $out = "";
+    my int $n = 0;
+    __C__ {
+        char *sql_str = strada_to_str(sql);
+        int nparams = 0;
+        char *rw = dbi_pg_rewrite_placeholders(sql_str ? sql_str : "", &nparams);
+        free(sql_str);
+        strada_decref(out);
+        out = strada_new_str(rw ? rw : "");
+        free(rw);
+        strada_decref(n);
+        n = strada_new_int(nparams);
+    }
+    my array @res = ($out, $n);
+    return @res;
+}
+
 # Select all rows into an array of hash refs
 func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
     my scalar $sth = DBI::prepare($dbh, $sql);
     if (!defined($sth)) {
-        return [];
+        return undef;
     }
 
     my array @results = ();

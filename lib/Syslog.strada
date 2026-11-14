@@ -7,9 +7,11 @@ __C__ {
 #include <syslog.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 /* openlog() keeps a reference to ident, so we must keep it alive */
 static char *syslog_ident = NULL;
+static pthread_mutex_t syslog_mutex = PTHREAD_MUTEX_INITIALIZER;
 }
 
 # Facility constants
@@ -56,26 +58,30 @@ func LOG_PERROR() int { return 32; }    # Also log to stderr
 # facility: LOG_USER, LOG_DAEMON, LOG_LOCAL0-7, etc
 func open(str $ident, int $option, int $facility) void {
     __C__ {
-        /* Free previous ident if any */
+        char *new_ident = strada_to_str(ident);
+        int opt = (int)strada_to_int(option);
+        int fac = (int)strada_to_int(facility);
+        pthread_mutex_lock(&syslog_mutex);
+        /* Keep ident alive - openlog stores the pointer, doesn't copy */
         if (syslog_ident != NULL) {
             free(syslog_ident);
         }
-        /* Keep ident alive - openlog stores the pointer, doesn't copy */
-        syslog_ident = strada_to_str(ident);
-        int opt = (int)strada_to_int(option);
-        int fac = (int)strada_to_int(facility);
+        syslog_ident = new_ident;
         openlog(syslog_ident, opt, fac);
+        pthread_mutex_unlock(&syslog_mutex);
     }
 }
 
 # Close syslog connection
 func close() void {
     __C__ {
+        pthread_mutex_lock(&syslog_mutex);
         closelog();
         if (syslog_ident != NULL) {
             free(syslog_ident);
             syslog_ident = NULL;
         }
+        pthread_mutex_unlock(&syslog_mutex);
     }
 }
 
@@ -84,7 +90,9 @@ func write(int $priority, str $message) void {
     __C__ {
         int prio = (int)strada_to_int(priority);
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(prio, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -95,7 +103,9 @@ func write(int $priority, str $message) void {
 func emerg(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_EMERG, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -103,7 +113,9 @@ func emerg(str $message) void {
 func alert(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_ALERT, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -111,7 +123,9 @@ func alert(str $message) void {
 func crit(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_CRIT, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -119,7 +133,9 @@ func crit(str $message) void {
 func err(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_ERR, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -127,7 +143,9 @@ func err(str $message) void {
 func warning(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_WARNING, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -135,7 +153,9 @@ func warning(str $message) void {
 func notice(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_NOTICE, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -143,7 +163,9 @@ func notice(str $message) void {
 func info(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_INFO, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }
@@ -151,7 +173,9 @@ func info(str $message) void {
 func debug(str $message) void {
     __C__ {
         char *msg = strada_to_str(message);
+        pthread_mutex_lock(&syslog_mutex);
         syslog(LOG_DEBUG, "%s", msg);
+        pthread_mutex_unlock(&syslog_mutex);
         free(msg);
     }
 }

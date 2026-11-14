@@ -221,6 +221,7 @@ __C__ {
 #include <netdb.h>
 #include <poll.h>
 #include <errno.h>
+#include <limits.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
@@ -234,6 +235,7 @@ typedef struct {
     int borrowed_fd; /* fd owned by a Strada socket SV — do not close here */
     int wait_ms;     /* per-connection wait limit (see ssl::set_timeout) */
     int wait_ms_set; /* 0 = use the process default (ssl::set_default_timeout) */
+    int last_timed_out; /* 1 if last read/wait gave up due to timeout */
 } SSLConnection;
 
 static int ssl_initialized = 0;
@@ -351,9 +353,15 @@ static void ssl_apply_sock_timeout(SSLConnection *c) {
 static int ssl_wait_want(SSLConnection *c, int err) {
     if (!c || c->socket_fd < 0) return 0;
     int fl = fcntl(c->socket_fd, F_GETFL, 0);
-    if (fl < 0 || !(fl & O_NONBLOCK)) return 0;
+    if (fl < 0 || !(fl & O_NONBLOCK)) {
+        if (fl >= 0) c->last_timed_out = 1;
+        return 0;
+    }
     int wait_ms = c->wait_ms_set ? c->wait_ms : ssl_default_wait_ms;
-    if (wait_ms == 0) return 0;
+    if (wait_ms == 0) {
+        c->last_timed_out = 1;
+        return 0;
+    }
     if (wait_ms < 0) wait_ms = -1;   /* poll(): infinite */
     struct pollfd pfd;
     pfd.fd = c->socket_fd;
@@ -363,10 +371,15 @@ static int ssl_wait_want(SSLConnection *c, int err) {
     do {
         r = poll(&pfd, 1, wait_ms);
     } while (r < 0 && errno == EINTR);
+    if (r == 0) {
+        c->last_timed_out = 1;
+        return 0;
+    }
     return r > 0 ? 1 : 0;
 }
 
 static int ssl_read_retry(SSLConnection *c, char *buf, int max_len) {
+    if (c) c->last_timed_out = 0;
     for (;;) {
         int n = SSL_read(c->ssl, buf, max_len);
         if (n > 0) return n;
@@ -375,7 +388,12 @@ static int ssl_read_retry(SSLConnection *c, char *buf, int max_len) {
             if (!ssl_wait_want(c, err)) return n;
             continue;
         }
-        if (err == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+        if (err == SSL_ERROR_SYSCALL) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+                if (c) c->last_timed_out = 1;
+            }
+        }
         return n;
     }
 }
@@ -1173,7 +1191,8 @@ func try_write(int $conn, str $data) int {
                 strada_decref(result);
                 result = strada_new_int(0);
             } else {
-                int n = SSL_write(c->ssl, bytes, (int)len);
+                size_t chunk = len > (size_t)INT_MAX ? (size_t)INT_MAX : len;
+                int n = SSL_write(c->ssl, bytes, (int)chunk);
                 free(owned);
                 if (n > 0) {
                     strada_decref(result);
@@ -1210,6 +1229,19 @@ func try_accept_fd(int $server) int {
                 strada_decref(result);
                 result = strada_new_int(cfd);
             }
+        }
+    }
+    return $result;
+}
+
+# Return 1 if the most recent blocking read on $conn gave up due to timeout, else 0.
+func timed_out(int $conn) int {
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c && c->last_timed_out) {
+            strada_decref(result);
+            result = strada_new_int(1);
         }
     }
     return $result;

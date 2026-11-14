@@ -199,6 +199,39 @@ static void perl5_push_inc(const char *path) {
         av_push(inc, newSVpv(path, 0));
     }
 }
+
+static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
+    if (!sv) return;
+    char *s = strada_to_str(v);
+    size_t len = (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR)
+        ? STRADA_STR_BYTELEN(v)
+        : (s ? strlen(s) : 0);
+    sv_setpvn(sv, s ? s : "", (STRLEN)len);
+    free(s);
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR && STRADA_STR_IS_UTF8(v)) {
+        SvUTF8_on(sv);
+    } else {
+        SvUTF8_off(sv);
+    }
+}
+
+static SV* perl5_sv_from_strada(StradaValue *v) {
+    SV *sv = newSV(0);
+    perl5_set_sv_from_strada(sv, v);
+    return sv;
+}
+
+static StradaValue* perl5_strada_from_sv(SV *sv) {
+    if (!sv || !SvOK(sv)) {
+        return strada_new_str("");
+    }
+    STRLEN len = 0;
+    const char *p = SvPV(sv, len);
+    if (SvUTF8(sv)) {
+        return strada_new_str_len_utf8(p ? p : "", (size_t)len);
+    }
+    return strada_new_str_len(p ? p : "", (size_t)len);
+}
 }
 
 # Initialize the Perl interpreter
@@ -267,22 +300,28 @@ func eval(str $code) str {
             strada_decref(result);
             result = strada_new_str("Error: Perl not initialized");
         } else {
-            char *code_str = strada_to_str(code);
-            SV *perl_result = eval_pv(code_str, FALSE);
-            free(code_str);
+            dSP;
+            ENTER;
+            SAVETMPS;
+            SV *code_sv = sv_2mortal(perl5_sv_from_strada(code));
+            PUTBACK;
+            int count = eval_sv(code_sv, G_SCALAR);
+            SPAGAIN;
 
             strada_decref(result);
             if (SvTRUE(ERRSV)) {
-                STRLEN len;
-                const char *err = SvPV(ERRSV, len);
-                result = strada_new_str_len(err, (size_t)len);
-            } else if (perl_result && SvOK(perl_result)) {
-                STRLEN len;
-                const char *str = SvPV(perl_result, len);
-                result = strada_new_str_len(str, (size_t)len);
+                if (count > 0) (void)POPs;
+                result = perl5_strada_from_sv(ERRSV);
+            } else if (count > 0) {
+                SV *ret = POPs;
+                result = perl5_strada_from_sv(ret);
             } else {
                 result = strada_new_str("");
             }
+
+            PUTBACK;
+            FREETMPS;
+            LEAVE;
         }
     }
     return $result;
@@ -292,9 +331,16 @@ func eval(str $code) str {
 func run(str $code) void {
     __C__ {
         if (my_perl) {
-            char *code_str = strada_to_str(code);
-            eval_pv(code_str, FALSE);
-            free(code_str);
+            dSP;
+            ENTER;
+            SAVETMPS;
+            SV *code_sv = sv_2mortal(perl5_sv_from_strada(code));
+            PUTBACK;
+            eval_sv(code_sv, G_DISCARD | G_VOID);
+            SPAGAIN;
+            PUTBACK;
+            FREETMPS;
+            LEAVE;
         }
     }
 }
@@ -308,11 +354,6 @@ func call(str $sub_name, str $arg) str {
             result = strada_new_str("Error: Perl not initialized");
         } else {
             char *sub_str = strada_to_str(sub_name);
-            char *arg_str = strada_to_str(arg);
-            size_t arg_len = (arg && !STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_STR)
-                ? STRADA_STR_BYTELEN(arg)
-                : (arg_str ? strlen(arg_str) : 0);
-            if (arg_len == 0 && arg_str && arg_str[0] != '\0') arg_len = strlen(arg_str);
 
             dSP;
             ENTER;
@@ -320,32 +361,23 @@ func call(str $sub_name, str $arg) str {
             PUSHMARK(SP);
 
             if (arg && (STRADA_IS_TAGGED_INT(arg) || arg->type != STRADA_UNDEF)) {
-                XPUSHs(sv_2mortal(newSVpvn(arg_str ? arg_str : "", arg_len)));
+                XPUSHs(sv_2mortal(perl5_sv_from_strada(arg)));
             }
 
             PUTBACK;
             int count = call_pv(sub_str, G_SCALAR | G_EVAL);
             SPAGAIN;
             free(sub_str);
-            free(arg_str);
 
             strada_decref(result);
             if (SvTRUE(ERRSV)) {
                 if (count > 0) {
                     (void)POPs;
                 }
-                STRLEN len;
-                const char *err = SvPV(ERRSV, len);
-                result = strada_new_str_len(err, (size_t)len);
+                result = perl5_strada_from_sv(ERRSV);
             } else if (count > 0) {
                 SV *ret = POPs;
-                if (SvOK(ret)) {
-                    STRLEN len;
-                    const char *str = SvPV(ret, len);
-                    result = strada_new_str_len(str, (size_t)len);
-                } else {
-                    result = strada_new_str("");
-                }
+                result = perl5_strada_from_sv(ret);
             } else {
                 result = strada_new_str("");
             }
@@ -445,11 +477,6 @@ func set_var(str $name, str $value) void {
     __C__ {
         if (my_perl) {
             char *orig_name = strada_to_str(name);
-            char *value_str = strada_to_str(value);
-            size_t vlen = (value && !STRADA_IS_TAGGED_INT(value) && value->type == STRADA_STR)
-                ? STRADA_STR_BYTELEN(value)
-                : (value_str ? strlen(value_str) : 0);
-            if (vlen == 0 && value_str && value_str[0] != '\0') vlen = strlen(value_str);
             const char *name_str = orig_name;
 
             /* Skip the sigil if present */
@@ -459,10 +486,9 @@ func set_var(str $name, str $value) void {
 
             SV *sv = get_sv(name_str, GV_ADD);
             if (sv) {
-                sv_setpvn(sv, value_str ? value_str : "", vlen);
+                perl5_set_sv_from_strada(sv, value);
             }
             free(orig_name);
-            free(value_str);
         }
     }
 }
@@ -485,13 +511,7 @@ func get_var(str $name) str {
 
             SV *sv = get_sv(name_str, 0);
             free(orig_name);
-            if (sv && SvOK(sv)) {
-                STRLEN len;
-                const char *str = SvPV(sv, len);
-                result = strada_new_str_len(str, (size_t)len);
-            } else {
-                result = strada_new_str("");
-            }
+            result = perl5_strada_from_sv(sv);
         }
     }
     return $result;
@@ -505,9 +525,7 @@ func get_error() str {
         if (!my_perl) {
             result = strada_new_str("Perl not initialized");
         } else if (SvTRUE(ERRSV)) {
-            STRLEN len;
-            const char *err = SvPV(ERRSV, len);
-            result = strada_new_str_len(err, (size_t)len);
+            result = perl5_strada_from_sv(ERRSV);
         } else {
             result = strada_new_str("");
         }
