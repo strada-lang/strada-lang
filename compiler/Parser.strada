@@ -5244,6 +5244,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             if (length("" . $dst_ols->{$opkg}) == 0) {
                 my hash %new_pkg_ol = ();
                 $dst_ols->{$opkg} = \%new_pkg_ol;
+                if (defined($program->{"overload_pkg_list"})) {
+                    push($program->{"overload_pkg_list"}, $opkg);
+                }
             }
             my scalar $dst_pkg_ol = $dst_ols->{$opkg};
             my array @ol_ops = keys(%{$src_pkg_ol});
@@ -5397,6 +5400,9 @@ func parse_use_overload(scalar $parser, scalar $program) void {
     if (length($pkg_check) == 0) {
         my hash %pkg_overloads = ();
         $overloads->{$pkg} = \%pkg_overloads;
+        if (defined($program->{"overload_pkg_list"})) {
+            push($program->{"overload_pkg_list"}, $pkg);
+        }
     }
     my scalar $pkg_ol = $overloads->{$pkg};
 
@@ -6137,6 +6143,9 @@ func merge_imported_meta(scalar $parser, scalar $program, scalar $info) void {
             if (length("" . $dst_ols->{$opkg}) == 0) {
                 my hash %new_pkg_ol = ();
                 $dst_ols->{$opkg} = \%new_pkg_ol;
+                if (defined($program->{"overload_pkg_list"})) {
+                    push($program->{"overload_pkg_list"}, $opkg);
+                }
             }
             $dst_ols->{$opkg}->{$oop} = $ometh;
             $program->{"overloaded_ops"}->{$oop} = 1;

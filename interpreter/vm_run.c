@@ -17,7 +17,6 @@ extern StradaValue* parse(StradaValue *tokens, StradaValue *filename);
 extern StradaValue *ARGV, *ARGC;
 extern StradaValue *v_STDIN, *v_STDOUT, *v_STDERR;
 extern StradaValue *__child_status, *__program_name;
-extern StradaValue *g_eval_interp, *g_lib_paths;
 extern void __Strada_Interpreter_oop_init(void);
 
 /* Initialize the minimum Strada runtime state needed for lex/parse */
@@ -35,8 +34,6 @@ static void init_strada_runtime(const char *prog_name) {
     ARGC = strada_new_int(0);
     __child_status = STRADA_MAKE_TAGGED_INT(0);
     __program_name = strada_new_str(prog_name);
-    g_eval_interp = strada_new_undef();
-    g_lib_paths = strada_new_array();
 
     /* Stack trace support */
     strada_stack_push("main", "vm_run");
@@ -107,6 +104,10 @@ int main(int argc, char **argv) {
         else {
             fprintf(stderr, "Error: no 'main' or 'run' function found\n");
             vm_program_free(prog);
+            strada_decref(ast);
+            strada_decref(tokens);
+            strada_decref(source_sv);
+            strada_decref(filename_sv);
             return 1;
         }
     }
@@ -118,7 +119,7 @@ int main(int argc, char **argv) {
     /* Run END blocks (LIFO order) */
     vm_run_end_blocks(vm);
 
-    int exit_code = VM_IS_INT(result) ? (int)VM_INT_VAL(result) : 0;
+    int exit_code = VM_IS_ANY_INT(result) ? (int)VM_ANY_INT_VAL(result) : 0;
 
     vm_free(vm);
     vm_program_free(prog);

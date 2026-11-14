@@ -659,44 +659,105 @@ func strip_pp_comment(str $s) str {
     return trim($out);
 }
 
-# Find '__C__' outside Strada string literals and '#' comments; returns index or -1.
+func pp_kw_allows_regex(str $w) int {
+    if ($w eq "split" || $w eq "return" || $w eq "if" || $w eq "elsif" || $w eq "unless"
+        || $w eq "while" || $w eq "until" || $w eq "for" || $w eq "die" || $w eq "warn"
+        || $w eq "say" || $w eq "print" || $w eq "throw" || $w eq "and" || $w eq "or"
+        || $w eq "not" || $w eq "eq" || $w eq "ne" || $w eq "cmp" || $w eq "m"
+        || $w eq "qr" || $w eq "s") {
+        return 1;
+    }
+    return 0;
+}
+
+# Find '__C__' outside Strada string literals, comments, and regexes; returns index or -1.
 func find_c_block_kw(str $line) int {
     my int $len = length($line);
     my int $i = 0;
     my int $in_dq = 0;
     my int $in_sq = 0;
+    my int $can_regex = 1;
     while ($i < $len) {
         my str $ch = substr($line, $i, 1);
         if ($in_dq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "\"") { $in_dq = 0; }
+            if ($ch eq "\"") { $in_dq = 0; $can_regex = 0; }
             $i++;
             next;
         }
         if ($in_sq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "'") { $in_sq = 0; }
+            if ($ch eq "'") { $in_sq = 0; $can_regex = 0; }
             $i++;
             next;
         }
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\r") { $i++; next; }
         if ($ch eq "\"") { $in_dq = 1; $i++; next; }
         if ($ch eq "'") { $in_sq = 1; $i++; next; }
         if ($ch eq "#") { return -1; }
-        if ($i + 5 <= $len && substr($line, $i, 5) eq "__C__") {
-            my int $prev_ok = 1;
-            if ($i > 0 && is_ident_char(substr($line, $i - 1, 1)) == 1) {
-                $prev_ok = 0;
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            if ($can_regex == 1) { return -1; }
+            $i = $i + 2;
+            $can_regex = 1;
+            next;
+        }
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            my int $ci = $i + 2;
+            my int $c_closed = 0;
+            while ($ci + 1 < $len) {
+                if (substr($line, $ci, 2) eq "*/") {
+                    $i = $ci + 2;
+                    $c_closed = 1;
+                    last;
+                }
+                $ci++;
             }
-            my int $next_ok = 1;
-            if ($i + 5 < $len) {
-                my str $nc = substr($line, $i + 5, 1);
-                if ($nc ne " " && $nc ne "\t" && $nc ne "{") {
-                    $next_ok = 0;
+            if ($c_closed == 0) { return -1; }
+            next;
+        }
+        if ($ch eq "/" && $can_regex == 1) {
+            my int $rj = $i + 1;
+            my int $rclosed = 0;
+            while ($rj < $len) {
+                my str $rc = substr($line, $rj, 1);
+                if ($rc eq "\\") { $rj = $rj + 2; next; }
+                if ($rc eq "/") { $rj++; $rclosed = 1; last; }
+                $rj++;
+            }
+            if ($rclosed == 1) {
+                $i = $rj;
+                $can_regex = 0;
+                next;
+            }
+            $i++;
+            $can_regex = 1;
+            next;
+        }
+        if (is_ident_char($ch) == 1) {
+            my int $ws = $i;
+            while ($i < $len && is_ident_char(substr($line, $i, 1)) == 1) {
+                $i++;
+            }
+            my str $tok = substr($line, $ws, $i - $ws);
+            if ($tok eq "__C__") {
+                my int $next_ok = 1;
+                if ($i < $len) {
+                    my str $nc = substr($line, $i, 1);
+                    if ($nc ne " " && $nc ne "\t" && $nc ne "{") {
+                        $next_ok = 0;
+                    }
+                }
+                if ($next_ok == 1) {
+                    return $ws;
                 }
             }
-            if ($prev_ok == 1 && $next_ok == 1) {
-                return $i;
-            }
+            $can_regex = pp_kw_allows_regex($tok);
+            next;
+        }
+        if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
+            $can_regex = 0;
+        } else {
+            $can_regex = 1;
         }
         $i++;
     }
@@ -756,23 +817,63 @@ func pp_detect_heredoc_tag(str $line) str {
     my int $i = 0;
     my int $in_dq = 0;
     my int $in_sq = 0;
+    my int $can_regex = 1;
     while ($i < $len) {
         my str $ch = substr($line, $i, 1);
         if ($in_dq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "\"") { $in_dq = 0; }
+            if ($ch eq "\"") { $in_dq = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
         if ($in_sq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "'") { $in_sq = 0; }
+            if ($ch eq "'") { $in_sq = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\r") { $i = $i + 1; next; }
         if ($ch eq "\"") { $in_dq = 1; $i = $i + 1; next; }
         if ($ch eq "'") { $in_sq = 1; $i = $i + 1; next; }
         if ($ch eq "#") { return ""; }
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            if ($can_regex == 1) { return ""; }
+            $i = $i + 2;
+            $can_regex = 1;
+            next;
+        }
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            my int $ci = $i + 2;
+            my int $c_closed = 0;
+            while ($ci + 1 < $len) {
+                if (substr($line, $ci, 2) eq "*/") {
+                    $i = $ci + 2;
+                    $c_closed = 1;
+                    last;
+                }
+                $ci = $ci + 1;
+            }
+            if ($c_closed == 0) { return ""; }
+            next;
+        }
+        if ($ch eq "/" && $can_regex == 1) {
+            my int $rj = $i + 1;
+            my int $rclosed = 0;
+            while ($rj < $len) {
+                my str $rc = substr($line, $rj, 1);
+                if ($rc eq "\\") { $rj = $rj + 2; next; }
+                if ($rc eq "/") { $rj = $rj + 1; $rclosed = 1; last; }
+                $rj = $rj + 1;
+            }
+            if ($rclosed == 1) {
+                $i = $rj;
+                $can_regex = 0;
+                next;
+            }
+            $i = $i + 1;
+            $can_regex = 1;
+            next;
+        }
         if ($ch eq "<" && $i + 2 < $len && substr($line, $i + 1, 1) eq "<") {
             my int $j = $i + 2;
             my str $q = "";
@@ -821,6 +922,22 @@ func pp_detect_heredoc_tag(str $line) str {
                     }
                 }
             }
+            $i = $i + 2;
+            $can_regex = 1;
+            next;
+        }
+        if (is_ident_char($ch) == 1) {
+            my int $ws = $i;
+            while ($i < $len && is_ident_char(substr($line, $i, 1)) == 1) {
+                $i = $i + 1;
+            }
+            $can_regex = pp_kw_allows_regex(substr($line, $ws, $i - $ws));
+            next;
+        }
+        if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
+            $can_regex = 0;
+        } else {
+            $can_regex = 1;
         }
         $i = $i + 1;
     }
@@ -830,6 +947,7 @@ func pp_detect_heredoc_tag(str $line) str {
 func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref) void {
     my int $len = length($line);
     my int $i = 0;
+    my int $can_regex = 1;
     while ($i < $len) {
         my str $ch = substr($line, $i, 1);
         if ($$cmt_ref == 1) {
@@ -843,14 +961,21 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
         }
         if ($$dq_ref == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "\"") { $$dq_ref = 0; }
+            if ($ch eq "\"") { $$dq_ref = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
         if ($$sq_ref == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "'") { $$sq_ref = 0; }
+            if ($ch eq "'") { $$sq_ref = 0; $can_regex = 0; }
             $i = $i + 1;
+            next;
+        }
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\r") { $i = $i + 1; next; }
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            if ($can_regex == 1) { last; }
+            $i = $i + 2;
+            $can_regex = 1;
             next;
         }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
@@ -858,9 +983,40 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             $i = $i + 2;
             next;
         }
+        if ($ch eq "/" && $can_regex == 1) {
+            my int $rj = $i + 1;
+            my int $rclosed = 0;
+            while ($rj < $len) {
+                my str $rc = substr($line, $rj, 1);
+                if ($rc eq "\\") { $rj = $rj + 2; next; }
+                if ($rc eq "/") { $rj = $rj + 1; $rclosed = 1; last; }
+                $rj = $rj + 1;
+            }
+            if ($rclosed == 1) {
+                $i = $rj;
+                $can_regex = 0;
+                next;
+            }
+            $i = $i + 1;
+            $can_regex = 1;
+            next;
+        }
         if ($ch eq "#") { last; }
-        if ($ch eq "\"") { $$dq_ref = 1; }
-        elsif ($ch eq "'") { $$sq_ref = 1; }
+        if ($ch eq "\"") { $$dq_ref = 1; $i = $i + 1; next; }
+        if ($ch eq "'") { $$sq_ref = 1; $i = $i + 1; next; }
+        if (is_ident_char($ch) == 1) {
+            my int $ws = $i;
+            while ($i < $len && is_ident_char(substr($line, $i, 1)) == 1) {
+                $i = $i + 1;
+            }
+            $can_regex = pp_kw_allows_regex(substr($line, $ws, $i - $ws));
+            next;
+        }
+        if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
+            $can_regex = 0;
+        } else {
+            $can_regex = 1;
+        }
         $i = $i + 1;
     }
 }
@@ -955,11 +1111,11 @@ func preprocess(str $filename) str {
             next;
         }
 
-        # Check for __C__ block start or continuation
+        # Check for __C__ block start or continuation (even inside inactive branches)
         my int $c_scan_from = -1;
         if ($in_c_block != 0) {
             $c_scan_from = 0;
-        } elsif ($active) {
+        } elsif (substr($trimmed, 0, 1) ne "#") {
             my int $kw_pos = find_c_block_kw($line);
             if ($kw_pos >= 0) {
                 $in_c_block = 2;

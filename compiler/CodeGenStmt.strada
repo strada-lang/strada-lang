@@ -502,7 +502,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 1; }
                         emit($cg, "({ StradaValue *__lr = ");
                         gen_expression($cg, $init);
-                        emit($cg, "; if (!__lr || STRADA_IS_TAGGED_INT(__lr) || (__lr->type != STRADA_ARRAY && !(__lr->type == STRADA_REF && __lr->value.rv && !STRADA_IS_TAGGED_INT(__lr->value.rv) && __lr->value.rv->type == STRADA_ARRAY))) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
+                        emit($cg, "; if (!strada_sv_is_array_or_aref(__lr)) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 0; }
                     } else {
                         # Set array context for dynamic function calls
@@ -5332,6 +5332,31 @@ func gen_program(scalar $cg, scalar $program) void {
             codegen_track_method($cg, $tfn, $tfn_pkg);
         }
         $i = $i + 1;
+    }
+    if ($program->{"has_overloads"} == 1 && defined($program->{"overload_pkg_list"})) {
+        my scalar $ol_plist = $program->{"overload_pkg_list"};
+        my scalar $ol_local = $program->{"overload_local"};
+        my int $ol_pi = 0;
+        my int $ol_pn = size($ol_plist);
+        while ($ol_pi < $ol_pn) {
+            my str $ol_p = $ol_plist->[$ol_pi];
+            if ($cg->{"module_only_mode"} == 0 || ($ol_local && $ol_local->{$ol_p})) {
+                codegen_ensure_oop_pkg($cg, $ol_p);
+            }
+            $ol_pi = $ol_pi + 1;
+        }
+    }
+    if (defined($program->{"method_modifiers"})) {
+        my scalar $mm_plist = $program->{"method_modifiers"};
+        my int $mm_pi = 0;
+        my int $mm_pn = $program->{"method_modifier_count"} + 0;
+        while ($mm_pi < $mm_pn) {
+            my scalar $mm_e = $mm_plist->[$mm_pi];
+            if (cg_skip_for_module($program, $mm_e->{"from_use"} + 0) == 0) {
+                codegen_ensure_oop_pkg($cg, $mm_e->{"package"});
+            }
+            $mm_pi = $mm_pi + 1;
+        }
     }
     check_override_signatures($cg, $program);
 

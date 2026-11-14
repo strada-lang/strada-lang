@@ -225,6 +225,8 @@ typedef enum {
     OP_STORE_SREF,      /* pop newv, pop ref — store newv through VMScalarRef, push newv */
     OP_ARG_PRESENT,     /* u16 param_idx — push 1 if param_idx < frame->passed_argc else 0 */
     OP_SQ_COERCE,       /* u8 side (0=left, 1=right), u16 str_idx — restore 'x' str when peer is float/str */
+    OP_POST_INCR,       /* u16 local_slot — push pre-increment value, increment local/tied scalar */
+    OP_POST_DECR,       /* u16 local_slot — push pre-decrement value, decrement local/tied scalar */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -559,6 +561,7 @@ enum VMObjType {
     VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
     VM_OBJ_SREF = 18,     /* live scalar reference */
     VM_OBJ_TIED_SCALAR = 20, /* TIESCALAR wrapper holding tied object */
+    VM_OBJ_INT64 = 22,    /* boxed 64-bit integer outside 63-bit tagged range */
 };
 typedef struct VMObjHeader {
     enum VMObjType obj_type;
@@ -606,9 +609,17 @@ typedef struct {
 #define VM_IS_UNDEF(v)  ((v) == 0)
 #define VM_IS_PTR(v)    (((v) != 0) && !((v) & 1))
 
-static inline int64_t VM_INT_VAL(VMValue v) { return (int64_t)v >> 1; }
-static inline VMValue VM_MAKE_INT(int64_t i) { return ((uint64_t)i << 1) | 1; }
 #define VM_INT_MAX (INT64_MAX >> 1)
+#define VM_INT_MIN (-(INT64_MAX >> 1) - 1)
+VMValue vm_box_int64(int64_t v);
+
+static inline int64_t VM_INT_VAL(VMValue v) { return (int64_t)v >> 1; }
+static inline VMValue VM_MAKE_INT(int64_t i) {
+    if (i >= VM_INT_MIN && i <= VM_INT_MAX) {
+        return ((uint64_t)i << 1) | 1ULL;
+    }
+    return vm_box_int64(i);
+}
 #define VM_UNDEF_VAL ((VMValue)0)
 static inline VMValue VM_MAKE_PTR(void *p) { return (VMValue)(uintptr_t)p; }
 static inline void *VM_TO_PTR(VMValue v) { return (void*)(uintptr_t)v; }
@@ -616,6 +627,18 @@ static inline void *VM_TO_PTR(VMValue v) { return (void*)(uintptr_t)v; }
 /* Type-safe object accessors */
 static inline enum VMObjType VM_PTR_TYPE(VMValue v) {
     return ((VMObjHeader*)VM_TO_PTR(v))->obj_type;
+}
+typedef struct {
+    VMObjHeader hdr;
+    int64_t val;
+} VMInt64;
+static inline VMInt64 *VM_AS_INT64(VMValue v) { return (VMInt64*)VM_TO_PTR(v); }
+static inline int VM_IS_ANY_INT(VMValue v) {
+    return VM_IS_INT(v) || (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_INT64);
+}
+static inline int64_t VM_ANY_INT_VAL(VMValue v) {
+    if (VM_IS_INT(v)) return VM_INT_VAL(v);
+    return VM_AS_INT64(v)->val;
 }
 static inline VMString *VM_AS_STR(VMValue v) { return (VMString*)VM_TO_PTR(v); }
 static inline VMArray  *VM_AS_ARRAY(VMValue v) { return (VMArray*)VM_TO_PTR(v); }
@@ -708,6 +731,7 @@ struct VMHash {
     char *class_name;
     int iter_pos;       /* iteration position for each() */
     VMValue tied_obj;   /* tie(): implementation object (0/undef = untied) */
+    VMValue tied_last_key; /* tie(): last key returned by each() */
 };
 
 /* Closure */
@@ -971,8 +995,8 @@ VMValue vm_execute(VM *vm, const char *func_name);
 VMArray *vm_array_new(int cap);
 void vm_array_free(VMArray *a);
 void vm_array_push(VMArray *a, VMValue v);
-VMValue vm_array_get(VMArray *a, int idx);
-void vm_array_set(VMArray *a, int idx, VMValue v);
+VMValue vm_array_get(VMArray *a, int64_t idx);
+void vm_array_set(VMArray *a, int64_t idx, VMValue v);
 
 /* VMHash API */
 VMHash *vm_hash_new(int cap);

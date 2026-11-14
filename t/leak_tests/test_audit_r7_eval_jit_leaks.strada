@@ -1,0 +1,54 @@
+#!/usr/bin/env strada
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    for (my int $i = 0; $i < 5; $i = $i + 1) {
+        my scalar $v1 = Strada::Interpreter::eval_string_vm('
+            func r7_helper(int $x) int { return $x * 3; }
+            my int $a = main::r7_helper(' . ($i + 2) . ');
+            $a + 1;
+        ');
+        if (($v1 + 0) != (($i + 2) * 3 + 1)) {
+            die("bad eval_string_vm main:: call");
+        }
+
+        try {
+            Strada::Interpreter::eval_string_vm('
+                func die_in_vm() void { die("r7_vm_boom"); }
+                die_in_vm();
+            ');
+        } catch ($e) {}
+
+        my scalar $tw1 = Strada::Interpreter::eval_string('
+            my str $s = ("xy" x 40) . "|z";
+            my hash %h = ("a" => 1, "b" => 2);
+            try { die("r7_tw_boom"); } catch ($e2) {}
+            length($s) + size(keys(%h));
+        ');
+        if (($tw1 + 0) != 84) {
+            die("bad eval_string tw");
+        }
+
+        Strada::Interpreter::reset();
+    }
+
+    Strada::JIT::init();
+    for (my int $j = 0; $j < 3; $j = $j + 1) {
+        my scalar $jr = Strada::JIT::eval('
+            my hash %jh = ("k" => ' . ($j + 10) . ');
+            $jh{"k"} * 2;
+        ');
+        if (($jr + 0) != (($j + 10) * 2)) {
+            die("bad jit eval");
+        }
+        try {
+            Strada::JIT::eval('die("r7_jit_boom");');
+        } catch ($je) {}
+    }
+    Strada::JIT::reset();
+
+    say("R7_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

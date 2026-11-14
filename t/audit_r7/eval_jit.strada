@@ -1,0 +1,69 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # Bug #28: Eval::eval_string & Eval::eval_string_vm entry selection
+    my scalar $tw1 = Strada::Interpreter::eval_string('func main() int { return 1; } return 2;');
+    check(($tw1 + 0) == 2, "Bug #28 eval_string prefers script body over user main()");
+
+    my scalar $vm1 = Strada::Interpreter::eval_string_vm('func main() int { return 1; } return 2;');
+    check(($vm1 + 0) == 2, "Bug #28 eval_string_vm prefers __eval__ over user main()");
+
+    # Bugs #29 & #30 inside eval_string and eval_string_vm
+    my scalar $tw_sort = Strada::Interpreter::eval_string('
+        my int $dir = -1;
+        my array @s = sort { return $dir * ($a <=> $b); } (3, 1, 2);
+        join(",", @s);
+    ');
+    check(("" . $tw_sort) eq "3,2,1", "Bug #29 eval_string sort { return } + capture");
+
+    my scalar $vm_sort = Strada::Interpreter::eval_string_vm('
+        my int $dir = -1;
+        my array @s = sort { return $dir * ($a <=> $b); } (3, 1, 2);
+        join(",", @s);
+    ');
+    check(("" . $vm_sort) eq "3,2,1", "Bug #29/#30 eval_string_vm sort { return } + capture");
+
+    Strada::Interpreter::reset();
+
+    my scalar $vm_main = Strada::Interpreter::eval_string_vm('func main() int { return 42; }');
+    check(($vm_main + 0) == 42, "Bug #28 eval_string_vm runs new main() when body is empty");
+    my scalar $vm_decl = Strada::Interpreter::eval_string_vm('func r7_decl_only() int { return 7; }');
+    check(!defined($vm_decl), "Bug #28 eval_string_vm does not re-run persisted main() on decl-only eval");
+    my scalar $vm_after = Strada::Interpreter::eval_string_vm('return r7_decl_only() + main();');
+    check(($vm_after + 0) == 49, "Bug #28 eval_string_vm body calls persisted functions");
+    Strada::Interpreter::reset();
+
+    # Bug #37: Strada::JIT regex brace, do {}, void-prefix //
+    Strada::JIT::init();
+
+    Strada::JIT::eval('func r7_re_brace(str $s) int { if ($s =~ /\{/) { return 1; } return 0; }');
+    my scalar $jr1 = Strada::JIT::eval('return r7_re_brace("a{b");');
+    check(($jr1 + 0) == 1, "Bug #37 JIT extract_function_def handles /\\{/ regex brace");
+
+    my scalar $jr2 = Strada::JIT::eval('do { my int $x = 10; $x + 15; }');
+    check(($jr2 + 0) == 25, "Bug #37 JIT do { ... } returns last expression value");
+
+    Strada::JIT::eval('func r7_void() void { }');
+    my scalar $jr3 = Strada::JIT::eval('r7_void() // 42');
+    check(($jr3 + 0) == 42, "Bug #37 JIT void_fn() // 42 is not treated as void statement");
+
+    Strada::JIT::reset();
+
+    if ($g_fail > 0) {
+        say("R7_EVAL_JIT_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R7_EVAL_JIT_OK");
+    return 0;
+}

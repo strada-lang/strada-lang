@@ -947,6 +947,142 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         }
                     }
                     $can_regex = 0;
+                } elsif ($cc == '<' && $sc + 1 < $len && char_at($src, $sc + 1) == '<' && $can_regex == 1) {
+                    my int $hj = $sc + 2;
+                    my int $hq = 0;
+                    if ($hj < $len && (char_at($src, $hj) == '\'' || char_at($src, $hj) == '"')) {
+                        $hq = char_at($src, $hj);
+                        $hj = $hj + 1;
+                    }
+                    my int $hdc0 = 0;
+                    if ($hj < $len) { $hdc0 = char_at($src, $hj); }
+                    my str $hdelim = "";
+                    if (($hdc0 >= 'A' && $hdc0 <= 'Z') || ($hdc0 >= 'a' && $hdc0 <= 'z') || $hdc0 == '_') {
+                        my int $hds = $hj;
+                        while ($hj < $len && lex_pp_is_word_char(char_at($src, $hj)) == 1) {
+                            $hj = $hj + 1;
+                        }
+                        if ($hq == 0 || ($hj < $len && char_at($src, $hj) == $hq)) {
+                            $hdelim = substr_bytes($src, $hds, $hj - $hds);
+                            if ($hq != 0) { $hj = $hj + 1; }
+                        }
+                    }
+                    if (length($hdelim) > 0) {
+                        my array @hdelims = ();
+                        push(\@hdelims, $hdelim);
+                        # Skip rest of opening line (and collect any extra heredoc tags on same line)
+                        my int $h_in_cmt = 0;
+                        my int $h_dq = 0;
+                        my int $h_sq = 0;
+                        my int $h_can = 0;
+                        $sc = $hj;
+                        while ($sc < $len) {
+                            my int $hc = char_at($src, $sc);
+                            if ($h_in_cmt == 1) {
+                                if ($hc == '\n') { $line = $line + 1; }
+                                if ($hc == '*' && $sc + 1 < $len && char_at($src, $sc + 1) == '/') {
+                                    $h_in_cmt = 0;
+                                    $sc = $sc + 2;
+                                    next;
+                                }
+                                $sc = $sc + 1;
+                                next;
+                            }
+                            if ($hc == '\n') { last; }
+                            if ($h_dq == 1) {
+                                if ($hc == '\\' && $sc + 1 < $len) {
+                                    if (char_at($src, $sc + 1) == '\n') { $line = $line + 1; }
+                                    $sc = $sc + 2;
+                                    next;
+                                }
+                                if ($hc == '"') { $h_dq = 0; $h_can = 0; }
+                            } elsif ($h_sq == 1) {
+                                if ($hc == '\\' && $sc + 1 < $len) {
+                                    if (char_at($src, $sc + 1) == '\n') { $line = $line + 1; }
+                                    $sc = $sc + 2;
+                                    next;
+                                }
+                                if ($hc == '\'') { $h_sq = 0; $h_can = 0; }
+                            } else {
+                                if ($hc == '"') { $h_dq = 1; }
+                                elsif ($hc == '\'') { $h_sq = 1; }
+                                elsif ($hc == '#') {
+                                    while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
+                                    last;
+                                } elsif ($hc == '/' && $sc + 1 < $len) {
+                                    my int $hc2 = char_at($src, $sc + 1);
+                                    if ($hc2 == '/' && $h_can == 1) {
+                                        while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
+                                        last;
+                                    } elsif ($hc2 == '*') {
+                                        $h_in_cmt = 1;
+                                        $sc = $sc + 2;
+                                        next;
+                                    }
+                                    $h_can = 1;
+                                } elsif ($hc == '<' && $sc + 1 < $len && char_at($src, $sc + 1) == '<' && $h_can == 1) {
+                                    my int $ehj = $sc + 2;
+                                    my int $ehq = 0;
+                                    if ($ehj < $len && (char_at($src, $ehj) == '\'' || char_at($src, $ehj) == '"')) {
+                                        $ehq = char_at($src, $ehj);
+                                        $ehj = $ehj + 1;
+                                    }
+                                    my int $ehdc0 = 0;
+                                    if ($ehj < $len) { $ehdc0 = char_at($src, $ehj); }
+                                    if (($ehdc0 >= 'A' && $ehdc0 <= 'Z') || ($ehdc0 >= 'a' && $ehdc0 <= 'z') || $ehdc0 == '_') {
+                                        my int $ehds = $ehj;
+                                        while ($ehj < $len && lex_pp_is_word_char(char_at($src, $ehj)) == 1) {
+                                            $ehj = $ehj + 1;
+                                        }
+                                        if ($ehq == 0 || ($ehj < $len && char_at($src, $ehj) == $ehq)) {
+                                            push(\@hdelims, substr_bytes($src, $ehds, $ehj - $ehds));
+                                            if ($ehq != 0) { $ehj = $ehj + 1; }
+                                            $sc = $ehj;
+                                            $h_can = 0;
+                                            next;
+                                        }
+                                    }
+                                    $h_can = 1;
+                                } elsif ($hc == ',' || $hc == '(' || $hc == '=' || $hc == '.') {
+                                    $h_can = 1;
+                                } elsif ($hc != ' ' && $hc != '\t' && $hc != '\r') {
+                                    $h_can = 0;
+                                }
+                            }
+                            $sc = $sc + 1;
+                        }
+                        # Consume bodies of all queued heredoc delimiters from subsequent lines
+                        my int $hdi = 0;
+                        my int $hdn = size(@hdelims);
+                        while ($hdi < $hdn && $sc < $len) {
+                            my str $want = $hdelims[$hdi];
+                            if (char_at($src, $sc) == '\n') {
+                                $sc = $sc + 1;
+                                $line = $line + 1;
+                            } else {
+                                last;
+                            }
+                            while ($sc < $len) {
+                                my int $hls = $sc;
+                                while ($sc < $len && char_at($src, $sc) != '\n') {
+                                    $sc = $sc + 1;
+                                }
+                                my str $hline = substr_bytes($src, $hls, $sc - $hls);
+                                if ($hline eq $want) {
+                                    last;
+                                }
+                                if ($sc < $len && char_at($src, $sc) == '\n') {
+                                    $sc = $sc + 1;
+                                    $line = $line + 1;
+                                }
+                            }
+                            $hdi = $hdi + 1;
+                        }
+                        last;
+                    } else {
+                        $sc = $sc + 2;
+                        $can_regex = 1;
+                    }
                 } elsif (lex_pp_is_word_char($cc) == 1) {
                     my int $ws = $sc;
                     while ($sc < $len && lex_pp_is_word_char(char_at($src, $sc)) == 1) {

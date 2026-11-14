@@ -90,6 +90,7 @@ static void vm_gc_free_one(VMObjHeader *hdr) {
     switch (hdr->obj_type) {
     case VM_OBJ_STR:
     case VM_OBJ_FLOAT:
+    case VM_OBJ_INT64:
     case VM_OBJ_CELL:
     case VM_OBJ_TIED_SCALAR:
         free(hdr);
@@ -175,6 +176,13 @@ static inline void vm_temp_free(VMValue *v) {
     *v = VM_UNDEF_VAL;
 }
 
+VMValue vm_box_int64(int64_t v) {
+    VMInt64 *b = malloc(sizeof(VMInt64));
+    vm_gc_init_hdr(&b->hdr, VM_OBJ_INT64);
+    b->val = v;
+    return VM_MAKE_PTR(b);
+}
+
 static inline int vm_is_float_operand(VMValue v) {
     if (!VM_IS_PTR(v)) return 0;
     enum VMObjType t = VM_PTR_TYPE(v);
@@ -191,7 +199,7 @@ static inline int vm_is_float_operand(VMValue v) {
 }
 
 static inline int64_t vm_to_int(VMValue v) {
-    if (VM_IS_INT(v)) return VM_INT_VAL(v);
+    if (VM_IS_ANY_INT(v)) return VM_ANY_INT_VAL(v);
     if (VM_IS_PTR(v)) {
         switch (VM_PTR_TYPE(v)) {
         case VM_OBJ_FLOAT: {
@@ -209,7 +217,7 @@ static inline int64_t vm_to_int(VMValue v) {
 }
 
 static inline double vm_to_num(VMValue v) {
-    if (VM_IS_INT(v)) return (double)VM_INT_VAL(v);
+    if (VM_IS_ANY_INT(v)) return (double)VM_ANY_INT_VAL(v);
     if (VM_IS_PTR(v)) {
         switch (VM_PTR_TYPE(v)) {
         case VM_OBJ_FLOAT: return VM_AS_FLOAT(v)->val;
@@ -227,7 +235,7 @@ static inline double vm_to_num(VMValue v) {
 #define VM_PUSH_DOUBLE(sp, result) SP_PUSH(VM_MAKE_FLOAT(result))
 
 static inline int vm_to_bool(VMValue v) {
-    if (VM_IS_INT(v)) return VM_INT_VAL(v) != 0;
+    if (VM_IS_ANY_INT(v)) return VM_ANY_INT_VAL(v) != 0;
     if (VM_IS_UNDEF(v)) return 0;
     if (VM_IS_PTR(v)) {
         switch (VM_PTR_TYPE(v)) {
@@ -249,7 +257,7 @@ static inline int vm_to_bool(VMValue v) {
 }
 
 static const char *vm_to_cstr(VMValue v, char *buf, size_t bufsz) {
-    if (VM_IS_INT(v)) { snprintf(buf, bufsz, "%lld", (long long)VM_INT_VAL(v)); return buf; }
+    if (VM_IS_ANY_INT(v)) { snprintf(buf, bufsz, "%lld", (long long)VM_ANY_INT_VAL(v)); return buf; }
     if (VM_IS_UNDEF(v)) return "";
     switch (VM_PTR_TYPE(v)) {
     case VM_OBJ_FLOAT: { snprintf(buf, bufsz, "%.15g", VM_AS_FLOAT(v)->val); return buf; }
@@ -327,22 +335,24 @@ void vm_array_push(VMArray *a, VMValue v) {
     a->items[a->size++] = v;
 }
 
-VMValue vm_array_get(VMArray *a, int idx) {
-    if (idx < 0) idx = a->size + idx;
-    if (idx < 0 || idx >= a->size) return VM_UNDEF_VAL;
+VMValue vm_array_get(VMArray *a, int64_t idx) {
+    if (idx < 0) idx = (int64_t)a->size + idx;
+    if (idx < 0 || idx >= (int64_t)a->size) return VM_UNDEF_VAL;
     return a->items[idx];
 }
 
-void vm_array_set(VMArray *a, int idx, VMValue v) {
+void vm_array_set(VMArray *a, int64_t idx, VMValue v) {
     /* Negative index counts from the end (mirrors vm_array_get). Without this,
      * $arr[-1] = v wrote at a->items[negative] — an out-of-bounds heap write. */
-    if (idx < 0) { idx = a->size + idx; if (idx < 0) return; }
-    if (idx >= a->cap) {
+    if (idx < 0) { idx = (int64_t)a->size + idx; if (idx < 0) return; }
+    if (idx > (int64_t)(INT_MAX / 2)) return;
+    int sidx = (int)idx;
+    if (sidx >= a->cap) {
         int old_cap = a->cap;
-        while (idx >= a->cap) {
+        while (sidx >= a->cap) {
             int new_cap = a->cap < 1024 ? a->cap * 2 : a->cap + a->cap / 2;
             if (new_cap < 8) new_cap = 8;
-            if (new_cap <= idx) new_cap = idx + 1;
+            if (new_cap <= sidx) new_cap = sidx + 1;
             a->cap = new_cap;
         }
         a->items = realloc(a->items, a->cap * sizeof(VMValue));
@@ -351,16 +361,16 @@ void vm_array_set(VMArray *a, int idx, VMValue v) {
             if (a->cap > old_cap) memset(a->holes + old_cap, 0, (size_t)(a->cap - old_cap));
         }
     }
-    if (idx > a->size && !a->holes) {
+    if (sidx > a->size && !a->holes) {
         a->holes = calloc((size_t)a->cap, sizeof(uint8_t));
     }
-    while (a->size < idx) {
+    while (a->size < sidx) {
         if (a->holes) a->holes[a->size] = 1;
         a->items[a->size++] = VM_UNDEF_VAL;
     }
-    if (idx >= a->size) a->size = idx + 1;
-    if (a->holes) a->holes[idx] = 0;
-    a->items[idx] = v;
+    if (sidx >= a->size) a->size = sidx + 1;
+    if (a->holes) a->holes[sidx] = 0;
+    a->items[sidx] = v;
 }
 
 static VMValue vm_array_pop(VMArray *a) {
@@ -863,6 +873,7 @@ void vm_gc_collect(VM *vm) {
         case VM_OBJ_HASH: {
             VMHash *h = (VMHash*)obj;
             vm_gc_mark_val(h->tied_obj, &work, &wlen, &wcap);
+            vm_gc_mark_val(h->tied_last_key, &work, &wlen, &wcap);
             for (int i = 0; i < h->capacity; i++) {
                 if (h->entries[i].occupied == 1) {
                     vm_gc_mark_val(h->entries[i].value, &work, &wlen, &wcap);
@@ -1647,7 +1658,7 @@ static VMValue vm_tied_scalar_fetch(VM *vm, VMValue ts_val);
  * Depth-capped: cyclic VM structures (e.g. the weak-ref tests' two-hash
  * cycles) previously recursed until the C stack corrupted the heap. */
 static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
-    if (VM_IS_INT(v)) return STRADA_MAKE_TAGGED_INT(VM_INT_VAL(v));
+    if (VM_IS_ANY_INT(v)) return strada_new_int(VM_ANY_INT_VAL(v));
     if (VM_IS_UNDEF(v)) return strada_new_undef();
     if (depth >= 32) return strada_new_undef();
     if (VM_IS_PTR(v)) {
@@ -1690,8 +1701,12 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
         }
         case VM_OBJ_CELL:
             return vm_to_sv_depth(VM_AS_CELL(v)->val, depth + 1);
-        case VM_OBJ_TIED_SCALAR:
-            return g_active_vm ? vm_to_sv_depth(vm_tied_scalar_fetch(g_active_vm, v), depth + 1) : strada_new_undef();
+        case VM_OBJ_TIED_SCALAR: {
+            if (!g_active_vm || g_active_vm->has_pending_exc) return strada_new_undef();
+            VMValue fv = vm_tied_scalar_fetch(g_active_vm, v);
+            if (g_active_vm->has_pending_exc) return strada_new_undef();
+            return vm_to_sv_depth(fv, depth + 1);
+        }
         case VM_OBJ_FILEHANDLE: {
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(v);
             StradaValue *sv = vm_fh_ensure_sv(fh);
@@ -1747,7 +1762,13 @@ static VMValue sv_to_vm_depth(StradaValue *sv, int depth) {
     if (!sv) return VM_UNDEF_VAL;
     if (STRADA_IS_TAGGED_INT(sv)) return VM_MAKE_INT(STRADA_TAGGED_INT_VAL(sv));
     switch (sv->type) {
-    case STRADA_INT: return VM_MAKE_INT(sv->value.iv);
+    case STRADA_INT:
+        if (sv->struct_size & STRADA_UV_FLAG) {
+            uint64_t uv = (uint64_t)sv->value.iv;
+            if (uv <= (uint64_t)INT64_MAX) return VM_MAKE_INT((int64_t)uv);
+            return VM_MAKE_FLOAT((double)uv);
+        }
+        return VM_MAKE_INT(sv->value.iv);
     case STRADA_NUM: return VM_MAKE_FLOAT(sv->value.nv);
     case STRADA_STR: {
         if (!sv->value.pv) return VM_UNDEF_VAL;
@@ -2972,6 +2993,84 @@ static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj) {
     return vm_to_int(r);
 }
 
+static int vm_collect_spread_items(VM *vm, VMValue arr_val, VMValue *stk_buf, int stk_cap, VMValue **out_items, int *out_count) {
+    *out_items = stk_buf;
+    *out_count = 0;
+    if (!(VM_IS_PTR(arr_val) && VM_PTR_TYPE(arr_val) == VM_OBJ_ARRAY)) return 0;
+    VMArray *sa = VM_AS_ARRAY(arr_val);
+    if (VM_IS_UNDEF(sa->tied_obj)) {
+        int n = sa->size;
+        if (n <= 0) return 0;
+        VMValue *dst = (n > stk_cap) ? malloc((size_t)n * sizeof(VMValue)) : stk_buf;
+        for (int i = 0; i < n; i++) dst[i] = sa->items[i];
+        *out_items = dst;
+        *out_count = n;
+        return 0;
+    }
+    vm->gc_pause++;
+    int64_t sz = vm_tied_array_fetchsize(vm, sa->tied_obj);
+    if (vm->has_pending_exc) { vm->gc_pause--; return 1; }
+    int n = (sz > 0) ? (int)sz : 0;
+    if (n == 0) { vm->gc_pause--; return 0; }
+    VMValue *dst = (n > stk_cap) ? malloc((size_t)n * sizeof(VMValue)) : stk_buf;
+    int ffidx = vm_tied_array_find_method(vm, sa->tied_obj, "FETCH");
+    for (int i = 0; i < n; i++) {
+        VMValue iv = VM_MAKE_INT(i);
+        dst[i] = (ffidx >= 0) ? vm_tied_array_call(vm, sa->tied_obj, ffidx, &iv, 1) : VM_UNDEF_VAL;
+        if (vm->has_pending_exc) {
+            vm->gc_pause--;
+            if (dst != stk_buf) free(dst);
+            return 1;
+        }
+    }
+    vm->gc_pause--;
+    *out_items = dst;
+    *out_count = n;
+    return 0;
+}
+
+static VMArray *vm_materialize_array(VM *vm, VMArray *src) {
+    if (!src) return vm_array_new(0);
+    if (VM_IS_UNDEF(src->tied_obj)) {
+        VMArray *cp = vm_array_new(src->size > 0 ? src->size : 8);
+        for (int i = 0; i < src->size; i++) vm_array_push(cp, vm_val_copy(src->items[i]));
+        return cp;
+    }
+    vm->gc_pause++;
+    int64_t sz = vm_tied_array_fetchsize(vm, src->tied_obj);
+    if (vm->has_pending_exc) { vm->gc_pause--; return NULL; }
+    int n = (sz > 0) ? (int)sz : 0;
+    VMArray *cp = vm_array_new(n > 0 ? n : 8);
+    int ffidx = vm_tied_array_find_method(vm, src->tied_obj, "FETCH");
+    for (int i = 0; i < n; i++) {
+        VMValue iv = VM_MAKE_INT(i);
+        VMValue v = (ffidx >= 0) ? vm_tied_array_call(vm, src->tied_obj, ffidx, &iv, 1) : VM_UNDEF_VAL;
+        if (vm->has_pending_exc) { vm->gc_pause--; return NULL; }
+        vm_array_push(cp, v);
+    }
+    vm->gc_pause--;
+    return cp;
+}
+
+static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_firstkey) {
+    int fk_fidx = vm_tied_array_find_method(vm, tied_obj, "FIRSTKEY");
+    if (has_firstkey) *has_firstkey = (fk_fidx >= 0);
+    if (fk_fidx < 0) return NULL;
+    int nk_fidx = vm_tied_array_find_method(vm, tied_obj, "NEXTKEY");
+    VMArray *keys = vm_array_new(8);
+    vm->gc_pause++;
+    VMValue k = vm_tied_array_call(vm, tied_obj, fk_fidx, NULL, 0);
+    while (!vm->has_pending_exc && !VM_IS_UNDEF(k)) {
+        char kbuf[256];
+        vm_array_push(keys, vm_str(vm_to_cstr(k, kbuf, sizeof(kbuf))));
+        if (nk_fidx < 0) break;
+        k = vm_tied_array_call(vm, tied_obj, nk_fidx, &k, 1);
+    }
+    vm->gc_pause--;
+    if (vm->has_pending_exc) return NULL;
+    return keys;
+}
+
 static VMArray *vm_tied_array_splice(VM *vm, VMArray *arr, int argc, VMValue *args) {
     vm->gc_pause++;
     int64_t sz = vm_tied_array_fetchsize(vm, arr->tied_obj);
@@ -3322,7 +3421,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     #define VM_VALUE_IS_TRUTHY(val_expr, res_bool) do { \
         VMValue _tv = (val_expr); \
-        if (VM_IS_INT(_tv)) { (res_bool) = (VM_INT_VAL(_tv) != 0); } \
+        if (VM_IS_ANY_INT(_tv)) { (res_bool) = (VM_ANY_INT_VAL(_tv) != 0); } \
         else if (VM_IS_UNDEF(_tv)) { (res_bool) = 0; } \
         else if (__builtin_expect(VM_IS_PTR(_tv) && ( \
             VM_PTR_TYPE(_tv) == VM_OBJ_TIED_SCALAR || \
@@ -3366,7 +3465,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         DT(OP_LE); DT(OP_GE); DT(OP_STR_EQ); DT(OP_STR_NE);
         DT(OP_JMP); DT(OP_JMP_IF_FALSE); DT(OP_JMP_IF_TRUE);
         DT(OP_CALL); DT(OP_RETURN); DT(OP_SAY); DT(OP_PRINT);
-        DT(OP_INCR); DT(OP_DECR);
+        DT(OP_INCR); DT(OP_DECR); DT(OP_POST_INCR); DT(OP_POST_DECR);
         DT(OP_NEW_ARRAY); DT(OP_ARRAY_PUSH); DT(OP_ARRAY_GET);
         DT(OP_ARRAY_SET); DT(OP_ARRAY_SIZE);
         DT(OP_NEW_HASH); DT(OP_HASH_GET); DT(OP_HASH_SET);
@@ -3615,11 +3714,20 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VM_TRY_BIN_OV("/");
         double db = vm_to_num(b);
         if (db == 0.0) {
-            SP_PUSH(VM_MAKE_INT(0));
+            vm_temp_free(&a); vm_temp_free(&b);
+            throw_exc = vm_str("Illegal division by zero");
+            goto L_vm_throw_exc;
+        } else if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) {
+            int64_t av = VM_ANY_INT_VAL(a), bv = VM_ANY_INT_VAL(b);
+            if (!(av == INT64_MIN && bv == -1) && (av % bv) == 0) {
+                SP_PUSH(VM_MAKE_INT(av / bv));
+            } else {
+                SP_PUSH(VM_MAKE_FLOAT((double)av / (double)bv));
+            }
         } else {
             double dr = vm_to_num(a) / db;
             if (!vm_is_float_operand(a) && !vm_is_float_operand(b) &&
-                isfinite(dr) && dr >= -4.6e18 && dr <= 4.6e18 && dr == (double)(int64_t)dr) {
+                isfinite(dr) && dr >= -9.2e18 && dr <= 9.2e18 && dr == (double)(int64_t)dr) {
                 SP_PUSH(VM_MAKE_INT((int64_t)dr));
             } else {
                 SP_PUSH(VM_MAKE_FLOAT(dr));
@@ -3632,8 +3740,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue b = SP_POP(), a = SP_POP();
         VM_TRY_BIN_OV("%");
         int64_t av = vm_to_int(a), bv = vm_to_int(b);
+        if (bv == 0) {
+            vm_temp_free(&a); vm_temp_free(&b);
+            throw_exc = vm_str("Illegal modulus zero");
+            goto L_vm_throw_exc;
+        }
         int64_t r = 0;
-        if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+        if (!(av == INT64_MIN && bv == -1)) {
             r = av % bv;
             if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
         }
@@ -3646,15 +3759,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_BIT_AND): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_int(a) & vm_to_int(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_BIT_OR):  { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_int(a) | vm_to_int(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_BIT_XOR): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_int(a) ^ vm_to_int(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_BIT_SHL): { VMValue b = SP_POP(), a = SP_POP(); int sh = (int)(vm_to_int(b) & 63); SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)vm_to_int(a) << sh))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_BIT_SHR): { VMValue b = SP_POP(), a = SP_POP(); int sh = (int)(vm_to_int(b) & 63); SP_PUSH(VM_MAKE_INT(vm_to_int(a) >> sh)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_BIT_SHL): { VMValue b = SP_POP(), a = SP_POP(); int64_t sh = vm_to_int(b); SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? 0 : (int64_t)((uint64_t)vm_to_int(a) << (int)sh))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_BIT_SHR): { VMValue b = SP_POP(), a = SP_POP(); int64_t sh = vm_to_int(b); SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? 0 : (vm_to_int(a) >> (int)sh))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_BIT_NOT): { VMValue a = SP_POP(); SP_PUSH(VM_MAKE_INT(~vm_to_int(a))); vm_temp_free(&a); DISPATCH(); }
 
     /* Integer comparisons */
-    CASE(OP_LT): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("<"); SP_PUSH(VM_MAKE_INT(vm_to_num(a) < vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_LE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("<="); SP_PUSH(VM_MAKE_INT(vm_to_num(a) <= vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_GT): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV(">"); SP_PUSH(VM_MAKE_INT(vm_to_num(a) > vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_GE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV(">="); SP_PUSH(VM_MAKE_INT(vm_to_num(a) >= vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_LT): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("<"); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) < VM_ANY_INT_VAL(b)) : (vm_to_num(a) < vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_LE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("<="); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) <= VM_ANY_INT_VAL(b)) : (vm_to_num(a) <= vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_GT): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV(">"); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) > VM_ANY_INT_VAL(b)) : (vm_to_num(a) > vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_GE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV(">="); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) >= VM_ANY_INT_VAL(b)) : (vm_to_num(a) >= vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_CASE_EQ): {
         VMValue b = SP_POP(), a = SP_POP();
         int eq = 0;
@@ -3666,6 +3779,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             const char *ap = vm_bytes_view(a, ba, sizeof(ba), &alen);
             const char *bp = vm_bytes_view(b, bb, sizeof(bb), &blen);
             eq = (alen == blen && (alen == 0 || memcmp(ap, bp, alen) == 0));
+        } else if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) {
+            eq = (VM_ANY_INT_VAL(a) == VM_ANY_INT_VAL(b));
         } else {
             eq = (vm_to_num(a) == vm_to_num(b));
         }
@@ -3673,8 +3788,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         vm_temp_free(&a); vm_temp_free(&b);
         DISPATCH();
     }
-    CASE(OP_EQ): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("=="); SP_PUSH(VM_MAKE_INT(vm_to_num(a) == vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
-    CASE(OP_NE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("!="); SP_PUSH(VM_MAKE_INT(vm_to_num(a) != vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_EQ): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("=="); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) == VM_ANY_INT_VAL(b)) : (vm_to_num(a) == vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_NE): { VMValue b = SP_POP(), a = SP_POP(); VM_TRY_BIN_OV("!="); int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) != VM_ANY_INT_VAL(b)) : (vm_to_num(a) != vm_to_num(b)); SP_PUSH(VM_MAKE_INT(res)); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
 
     CASE(OP_STR_EQ): {
         VMValue b = SP_POP(), a = SP_POP();
@@ -3746,8 +3861,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_SPACESHIP): {
         VMValue b = SP_POP(), a = SP_POP();
         VM_TRY_BIN_OV("<=>");
-        double av = vm_to_num(a), bv = vm_to_num(b);   /* compare as numbers, not truncated ints */
-        SP_PUSH(VM_MAKE_INT(av < bv ? -1 : (av > bv ? 1 : 0)));
+        int cmp;
+        if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) {
+            int64_t av = VM_ANY_INT_VAL(a), bv = VM_ANY_INT_VAL(b);
+            cmp = av < bv ? -1 : (av > bv ? 1 : 0);
+        } else {
+            double av = vm_to_num(a), bv = vm_to_num(b);   /* compare as numbers, not truncated ints */
+            cmp = av < bv ? -1 : (av > bv ? 1 : 0);
+        }
+        SP_PUSH(VM_MAKE_INT(cmp));
         vm_temp_free(&a); vm_temp_free(&b);              /* also fixes a string-operand leak */
         DISPATCH();
     }
@@ -3822,12 +3944,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_CALL_SPREAD): {
         call_fidx = read_u16(ip); ip += 2;
         VMValue arr_val = SP_POP();
-        call_argc = 0;
-        if (VM_IS_PTR(arr_val) && VM_PTR_TYPE(arr_val) == VM_OBJ_ARRAY) {
-            VMArray *aa = VM_AS_ARRAY(arr_val);
-            call_argc = aa->size;
-            for (int i = 0; i < call_argc; i++) SP_PUSH(aa->items[i]);
-        }
+        VMValue sbuf[16];
+        VMValue *sitems = NULL;
+        int cnt = 0;
+        frame->ip = ip; vm->stack_top = sp;
+        int exc = vm_collect_spread_items(vm, arr_val, sbuf, 16, &sitems, &cnt);
+        stack = vm->stack; RELOAD();
+        if (exc) { VM_CHECK_EXC(); }
+        call_argc = cnt;
+        for (int i = 0; i < cnt; i++) SP_PUSH(sitems[i]);
+        if (sitems && sitems != sbuf) free(sitems);
         goto L_do_op_call;
     }
 
@@ -4071,12 +4197,12 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VMValue cur = vm_tied_scalar_fetch(vm, ts);
             if (!vm->has_pending_exc) {
                 VMValue nxt;
-                if (VM_IS_INT(cur)) {
-                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(cur) + 1ULL));
+                if (VM_IS_ANY_INT(cur)) {
+                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(cur) + 1ULL));
                 } else {
                     double n = vm_to_num(cur) + 1.0;
                     int was_float = (VM_IS_PTR(cur) && VM_PTR_TYPE(cur) == VM_OBJ_FLOAT);
-                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -4.6e18 && n <= 4.6e18)
+                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
                           ? VM_MAKE_INT((int64_t)n) : VM_MAKE_FLOAT(n);
                 }
                 vm_tied_scalar_store(vm, ts, nxt);
@@ -4086,14 +4212,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VM_CHECK_EXC();
             DISPATCH();
         }
-        if (VM_IS_INT(*islot)) {
-            *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(*islot) + 1ULL));
+        if (VM_IS_ANY_INT(*islot)) {
+            *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(*islot) + 1ULL));
         } else {
             /* Coerce undef/float/string instead of corrupting the pointer with += 2. */
             double n = vm_to_num(*islot) + 1.0;
             int was_float = (VM_IS_PTR(*islot) && VM_PTR_TYPE(*islot) == VM_OBJ_FLOAT);
             VMValue old = *islot;
-            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -4.6e18 && n <= 4.6e18)
+            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
                 *islot = VM_MAKE_INT((int64_t)n);
             else
                 *islot = VM_MAKE_FLOAT(n);
@@ -4111,12 +4237,12 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VMValue cur = vm_tied_scalar_fetch(vm, ts);
             if (!vm->has_pending_exc) {
                 VMValue nxt;
-                if (VM_IS_INT(cur)) {
-                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(cur) - 1ULL));
+                if (VM_IS_ANY_INT(cur)) {
+                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(cur) - 1ULL));
                 } else {
                     double n = vm_to_num(cur) - 1.0;
                     int was_float = (VM_IS_PTR(cur) && VM_PTR_TYPE(cur) == VM_OBJ_FLOAT);
-                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -4.6e18 && n <= 4.6e18)
+                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
                           ? VM_MAKE_INT((int64_t)n) : VM_MAKE_FLOAT(n);
                 }
                 vm_tied_scalar_store(vm, ts, nxt);
@@ -4126,18 +4252,98 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VM_CHECK_EXC();
             DISPATCH();
         }
-        if (VM_IS_INT(*dslot)) {
-            *dslot = VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(*dslot) - 1ULL));
+        if (VM_IS_ANY_INT(*dslot)) {
+            *dslot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(*dslot) - 1ULL));
         } else {
             double n = vm_to_num(*dslot) - 1.0;
             int was_float = (VM_IS_PTR(*dslot) && VM_PTR_TYPE(*dslot) == VM_OBJ_FLOAT);
             VMValue old = *dslot;
-            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -4.6e18 && n <= 4.6e18)
+            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
                 *dslot = VM_MAKE_INT((int64_t)n);
             else
                 *dslot = VM_MAKE_FLOAT(n);
             vm_temp_free(&old);
         }
+        DISPATCH();
+    }
+    CASE(OP_POST_INCR): {
+        uint16_t s = read_u16(ip); ip += 2;
+        VMValue *islot = (VM_IS_PTR(locals[s]) && VM_PTR_TYPE(locals[s]) == VM_OBJ_CELL)
+                         ? &VM_AS_CELL(locals[s])->val : &locals[s];
+        if (__builtin_expect(VM_IS_PTR(*islot) && VM_PTR_TYPE(*islot) == VM_OBJ_TIED_SCALAR, 0)) {
+            VMValue ts = *islot;
+            frame->ip = ip; vm->stack_top = sp; vm->gc_pause++;
+            VMValue cur = vm_tied_scalar_fetch(vm, ts);
+            if (!vm->has_pending_exc) {
+                VMValue nxt;
+                if (VM_IS_ANY_INT(cur)) {
+                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(cur) + 1ULL));
+                } else {
+                    double n = vm_to_num(cur) + 1.0;
+                    int was_float = (VM_IS_PTR(cur) && VM_PTR_TYPE(cur) == VM_OBJ_FLOAT);
+                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
+                          ? VM_MAKE_INT((int64_t)n) : VM_MAKE_FLOAT(n);
+                }
+                vm_tied_scalar_store(vm, ts, nxt);
+            }
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            VM_CHECK_EXC();
+            SP_PUSH(cur);
+            DISPATCH();
+        }
+        VMValue old = *islot;
+        if (VM_IS_ANY_INT(old)) {
+            *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(old) + 1ULL));
+        } else {
+            double n = vm_to_num(old) + 1.0;
+            int was_float = (VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_FLOAT);
+            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
+                *islot = VM_MAKE_INT((int64_t)n);
+            else
+                *islot = VM_MAKE_FLOAT(n);
+        }
+        SP_PUSH(old);
+        DISPATCH();
+    }
+    CASE(OP_POST_DECR): {
+        uint16_t s = read_u16(ip); ip += 2;
+        VMValue *dslot = (VM_IS_PTR(locals[s]) && VM_PTR_TYPE(locals[s]) == VM_OBJ_CELL)
+                         ? &VM_AS_CELL(locals[s])->val : &locals[s];
+        if (__builtin_expect(VM_IS_PTR(*dslot) && VM_PTR_TYPE(*dslot) == VM_OBJ_TIED_SCALAR, 0)) {
+            VMValue ts = *dslot;
+            frame->ip = ip; vm->stack_top = sp; vm->gc_pause++;
+            VMValue cur = vm_tied_scalar_fetch(vm, ts);
+            if (!vm->has_pending_exc) {
+                VMValue nxt;
+                if (VM_IS_ANY_INT(cur)) {
+                    nxt = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(cur) - 1ULL));
+                } else {
+                    double n = vm_to_num(cur) - 1.0;
+                    int was_float = (VM_IS_PTR(cur) && VM_PTR_TYPE(cur) == VM_OBJ_FLOAT);
+                    nxt = (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
+                          ? VM_MAKE_INT((int64_t)n) : VM_MAKE_FLOAT(n);
+                }
+                vm_tied_scalar_store(vm, ts, nxt);
+            }
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            VM_CHECK_EXC();
+            SP_PUSH(cur);
+            DISPATCH();
+        }
+        VMValue old = *dslot;
+        if (VM_IS_ANY_INT(old)) {
+            *dslot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(old) - 1ULL));
+        } else {
+            double n = vm_to_num(old) - 1.0;
+            int was_float = (VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_FLOAT);
+            if (!was_float && isfinite(n) && n == (double)(int64_t)n && n >= -9.2e18 && n <= 9.2e18)
+                *dslot = VM_MAKE_INT((int64_t)n);
+            else
+                *dslot = VM_MAKE_FLOAT(n);
+        }
+        SP_PUSH(old);
         DISPATCH();
     }
 
@@ -4234,7 +4440,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VM_IS_PTR(res) && VM_PTR_TYPE(res) == VM_OBJ_ARRAY) {
             VMArray *ia = VM_AS_ARRAY(idxs), *sa = VM_AS_ARRAY(src), *ra = VM_AS_ARRAY(res);
             for (int i = 0; i < ia->size; i++) {
-                VMValue e = vm_array_get(sa, (int)vm_to_int(ia->items[i]));
+                VMValue e = vm_array_get(sa, vm_to_int(ia->items[i]));
                 vm_array_push(ra, vm_val_copy(e));
             }
         }
@@ -4261,7 +4467,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VM_CHECK_EXC();
                 SP_PUSH(r);
             } else {
-                VMValue e = vm_array_get(a, (int)vm_to_int(idx));
+                VMValue e = vm_array_get(a, vm_to_int(idx));
                 SP_PUSH(vm_val_copy(e));
             }
         } else SP_PUSH(VM_UNDEF_VAL);
@@ -4287,7 +4493,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 stack = vm->stack; RELOAD();
                 VM_CHECK_EXC();
             } else {
-                vm_array_set(a, (int)vm_to_int(idx), v);
+                vm_array_set(a, vm_to_int(idx), v);
             }
         }
         vm_temp_free(&idx);
@@ -4373,6 +4579,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
     CASE(OP_ARRAY_REVERSE): {
         VMValue a = SP_POP();
+        if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_CELL) a = VM_AS_CELL(a)->val;
+        if (__builtin_expect(VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_TIED_SCALAR, 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            a = vm_tied_scalar_fetch(vm, a);
+            stack = vm->stack; RELOAD();
+            VM_CHECK_EXC();
+        }
         if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_ARRAY) {
             VMArray *arr = VM_AS_ARRAY(a);
             if (__builtin_expect(!VM_IS_UNDEF(arr->tied_obj), 0)) {
@@ -4396,10 +4609,52 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 for (int i = arr->size - 1; i >= 0; i--) vm_array_push(rev, vm_val_copy(arr->items[i]));
                 SP_PUSH(VM_MAKE_PTR(rev));
             }
+        } else if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_HASH) {
+            VMHash *h = VM_AS_HASH(a);
+            int has_fk = 0;
+            VMArray *keys = NULL;
+            if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                keys = vm_tied_hash_collect_keys(vm, h->tied_obj, &has_fk);
+                stack = vm->stack; RELOAD();
+                VM_CHECK_EXC();
+            }
+            if (has_fk) {
+                int n = keys ? keys->size : 0;
+                VMArray *rev = vm_array_new(n * 2);
+                int ffidx = vm_tied_array_find_method(vm, h->tied_obj, "FETCH");
+                frame->ip = ip; vm->stack_top = sp; vm->gc_pause++;
+                for (int i = n - 1; i >= 0; i--) {
+                    VMValue kv = keys->items[i];
+                    VMValue vv = (ffidx >= 0) ? vm_tied_array_call(vm, h->tied_obj, ffidx, &kv, 1) : VM_UNDEF_VAL;
+                    if (vm->has_pending_exc) { vm->gc_pause--; stack = vm->stack; RELOAD(); VM_CHECK_EXC(); }
+                    vm_array_push(rev, vv);
+                    vm_array_push(rev, vm_val_copy(kv));
+                }
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                SP_PUSH(VM_MAKE_PTR(rev));
+            } else {
+                VMArray *rev = vm_array_new(h->size > 0 ? h->size * 2 : 8);
+                for (int i = h->capacity - 1; i >= 0; i--) {
+                    if (h->entries[i].occupied == 1) {
+                        int nonascii = 0;
+                        int u8 = (vm_utf8_is_valid_str(h->entries[i].key, h->entries[i].keylen, &nonascii) && nonascii);
+                        vm_array_push(rev, vm_val_copy(h->entries[i].value));
+                        vm_array_push(rev, vm_make_str_flag(h->entries[i].key, h->entries[i].keylen, u8));
+                    }
+                }
+                SP_PUSH(VM_MAKE_PTR(rev));
+            }
+        } else if (VM_IS_UNDEF(a)) {
+            SP_PUSH(vm_str(""));
         } else if (VM_IS_PTR(a) && (VM_PTR_TYPE(a) == VM_OBJ_STR || VM_PTR_TYPE(a) == VM_OBJ_STRBUF)) {
             /* reverse() on a string: reverse characters/bytes */
             SP_PUSH(vm_reverse_str_val(a));
-        } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+        } else {
+            char sbuf[256];
+            SP_PUSH(vm_reverse_str_val(vm_str(vm_to_cstr(a, sbuf, sizeof(sbuf)))));
+        }
         DISPATCH();
     }
     CASE(OP_ARRAY_JOIN): {
@@ -4472,15 +4727,25 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_ARRAY_SORT): {
         uint16_t func_idx = read_u16(ip); ip += 2;
         VMValue arr = SP_POP();
+        VMClosure *cl = NULL;
+        if (func_idx == 0xFFFF) {
+            VMValue cl_val = SP_POP();
+            if (VM_IS_PTR(cl_val) && VM_PTR_TYPE(cl_val) == VM_OBJ_CLOSURE) {
+                cl = VM_AS_CLOSURE(cl_val);
+                func_idx = (uint16_t)cl->func_idx;
+            }
+        }
         if (VM_IS_PTR(arr) && VM_PTR_TYPE(arr) == VM_OBJ_ARRAY) {
-            VMArray *a = VM_AS_ARRAY(arr);
-            VMArray *sorted = vm_array_new(a->size);
-            for (int i = 0; i < a->size; i++) vm_array_push(sorted, vm_val_copy(a->items[i]));
-
-            /* Save current VM state around nested vm_execute_call comparator */
+            /* Save current VM state around tied materialization / nested comparator calls */
             frame->ip = ip;
             vm->stack_top = sp;
+            VMArray *sorted = vm_materialize_array(vm, VM_AS_ARRAY(arr));
+            stack = vm->stack;
+            RELOAD();
+            VM_CHECK_EXC();
+            if (!sorted) sorted = vm_array_new(0);
 
+            vm->gc_pause++;
             for (int i = 1; i < sorted->size; i++) {
                 VMValue key = sorted->items[i];
                 int j = i - 1;
@@ -4488,8 +4753,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     VMValue cargs[2];
                     cargs[0] = vm_val_copy(sorted->items[j]);
                     cargs[1] = vm_val_copy(key);
-                    VMValue cres = vm_execute_call(vm, func_idx, cargs, 2);
+                    VMValue cres = vm_execute_call_cl(vm, func_idx, cl, cargs, 2, 2);
                     if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        vm->gc_pause--;
                         throw_exc = vm->pending_exc;
                         vm->pending_exc = VM_UNDEF_VAL;
                         vm->has_pending_exc = 0;
@@ -4509,6 +4775,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 }
                 sorted->items[j + 1] = key;
             }
+            vm->gc_pause--;
 
             stack = vm->stack;
             RELOAD();
@@ -4618,7 +4885,23 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
     CASE(OP_HASH_KEYS): {
         VMValue hash = SP_POP();
-        SP_PUSH(VM_MAKE_PTR(VM_IS_PTR(hash) && VM_PTR_TYPE(hash) == VM_OBJ_HASH ? vm_hash_keys(VM_AS_HASH(hash)) : vm_array_new(0)));
+        if (VM_IS_PTR(hash) && VM_PTR_TYPE(hash) == VM_OBJ_HASH) {
+            VMHash *h = VM_AS_HASH(hash);
+            if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+                int has_fk = 0;
+                frame->ip = ip; vm->stack_top = sp;
+                VMArray *tkeys = vm_tied_hash_collect_keys(vm, h->tied_obj, &has_fk);
+                stack = vm->stack; RELOAD();
+                VM_CHECK_EXC();
+                if (has_fk) {
+                    SP_PUSH(VM_MAKE_PTR(tkeys ? tkeys : vm_array_new(0)));
+                    DISPATCH();
+                }
+            }
+            SP_PUSH(VM_MAKE_PTR(vm_hash_keys(h)));
+        } else {
+            SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+        }
         DISPATCH();
     }
     CASE(OP_HASH_EXISTS): {
@@ -5249,12 +5532,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_METHOD_CALL_SPREAD): {
         mcall_idx = read_u16(ip); ip += 2;
         VMValue arr_val = SP_POP();
-        mcall_argc = 0;
-        if (VM_IS_PTR(arr_val) && VM_PTR_TYPE(arr_val) == VM_OBJ_ARRAY) {
-            VMArray *aa = VM_AS_ARRAY(arr_val);
-            mcall_argc = aa->size;
-            for (int i = 0; i < mcall_argc; i++) SP_PUSH(aa->items[i]);
-        }
+        VMValue sbuf[16];
+        VMValue *sitems = NULL;
+        int cnt = 0;
+        frame->ip = ip; vm->stack_top = sp;
+        int exc = vm_collect_spread_items(vm, arr_val, sbuf, 16, &sitems, &cnt);
+        stack = vm->stack; RELOAD();
+        if (exc) { VM_CHECK_EXC(); }
+        mcall_argc = cnt;
+        for (int i = 0; i < cnt; i++) SP_PUSH(sitems[i]);
+        if (sitems && sitems != sbuf) free(sitems);
         mcall_method_cstr = chunk->str_consts[mcall_idx];
         mcall_is_dyn = 0;
         goto L_do_op_method_call;
@@ -5308,6 +5595,35 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             cls_name = VM_AS_STR(self)->data;
         } else if (VM_IS_PTR(self) && VM_PTR_TYPE(self) == VM_OBJ_STRBUF) {
             cls_name = VM_AS_STRBUF(self)->data;
+        }
+
+        /* Built-in UNIVERSAL isa/can for dynamic method calls (static calls lower to OP_ISA/OP_CAN) */
+        if (strcmp(method, "isa") == 0 || strcmp(method, "can") == 0) {
+            int is_isa = (method[0] == 'i');
+            VMValue arg0 = VM_UNDEF_VAL;
+            for (int ai = argc - 1; ai >= 0; ai--) {
+                VMValue v = SP_POP();
+                if (ai == 0) arg0 = v;
+                else vm_val_free(&v);
+            }
+            VMValue self_v = SP_POP();
+            int res = 0;
+            if (argc >= 1) {
+                char buf[128];
+                const char *arg_s = vm_to_cstr(arg0, buf, sizeof(buf));
+                if (cls_name && cls_name[0] && arg_s[0]) {
+                    if (is_isa) {
+                        res = vm_class_isa(vm->program, cls_name, arg_s, 0);
+                    } else {
+                        res = (strcmp(arg_s, "isa") == 0 || strcmp(arg_s, "can") == 0 ||
+                               vm_find_method(vm->program, cls_name, arg_s) >= 0) ? 1 : 0;
+                    }
+                }
+                vm_val_free(&arg0);
+            }
+            vm_temp_free(&self_v);
+            SP_PUSH(VM_MAKE_INT(res));
+            DISPATCH();
         }
 
         int fidx = -1;
@@ -5858,7 +6174,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     /* Int/string concat key building supporting INT64_MIN, >128B keys, and stringify overloads */
     #define CONCAT_KEY_FORMAT_INT(pfx_ptr, plen, suffix_val, key_buf, kptr, heap_key, klen) do { \
-        int64_t _n = VM_INT_VAL(suffix_val); \
+        int64_t _n = VM_ANY_INT_VAL(suffix_val); \
         uint64_t _u = (_n < 0) ? (0ULL - (uint64_t)_n) : (uint64_t)_n; \
         char _tmp[24]; int _tl = 0; \
         if (_u == 0) { _tmp[_tl++] = '0'; } \
@@ -5894,7 +6210,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             SP_PUSH(VM_UNDEF_VAL);
             DISPATCH();
         }
-        if (!VM_IS_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
+        if (!VM_IS_ANY_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
             frame->ip = ip; SP_PUSH(hash); vm->stack_top = sp;
             suffix = vm_stringify_ov(vm, suffix);
             stack = vm->stack; RELOAD();
@@ -5910,7 +6226,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         const char *pfx = chunk->str_consts[pfx_idx];
         size_t plen = strlen(pfx);
         char key_buf[256]; char *kptr = key_buf; char *heap_key = NULL; size_t klen = 0;
-        if (VM_IS_INT(suffix)) {
+        if (VM_IS_ANY_INT(suffix)) {
             CONCAT_KEY_FORMAT_INT(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
         } else {
             CONCAT_KEY_FORMAT_BYTES(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
@@ -5953,7 +6269,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             vm_temp_free(&val); vm_temp_free(&suffix);
             DISPATCH();
         }
-        if (!VM_IS_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
+        if (!VM_IS_ANY_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
             frame->ip = ip; SP_PUSH(hash); SP_PUSH(val); vm->stack_top = sp;
             suffix = vm_stringify_ov(vm, suffix);
             stack = vm->stack; RELOAD();
@@ -5969,7 +6285,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         const char *pfx = chunk->str_consts[pfx_idx];
         size_t plen = strlen(pfx);
         char key_buf[256]; char *kptr = key_buf; char *heap_key = NULL; size_t klen = 0;
-        if (VM_IS_INT(suffix)) {
+        if (VM_IS_ANY_INT(suffix)) {
             CONCAT_KEY_FORMAT_INT(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
         } else {
             CONCAT_KEY_FORMAT_BYTES(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
@@ -6011,7 +6327,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             vm_temp_free(&suffix);
             DISPATCH();
         }
-        if (!VM_IS_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
+        if (!VM_IS_ANY_INT(suffix) && __builtin_expect(vm_has_stringify(vm->program, suffix), 0)) {
             frame->ip = ip; SP_PUSH(hash); vm->stack_top = sp;
             suffix = vm_stringify_ov(vm, suffix);
             stack = vm->stack; RELOAD();
@@ -6027,7 +6343,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         const char *pfx = chunk->str_consts[pfx_idx];
         size_t plen = strlen(pfx);
         char key_buf[256]; char *kptr = key_buf; char *heap_key = NULL; size_t klen = 0;
-        if (VM_IS_INT(suffix)) {
+        if (VM_IS_ANY_INT(suffix)) {
             CONCAT_KEY_FORMAT_INT(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
         } else {
             CONCAT_KEY_FORMAT_BYTES(pfx, plen, suffix, key_buf, kptr, heap_key, klen);
@@ -6189,12 +6505,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_CALL_CLOSURE_SPREAD): {
         clcall_val = SP_POP();
         VMValue arr_val = SP_POP();
-        clcall_argc = 0;
-        if (VM_IS_PTR(arr_val) && VM_PTR_TYPE(arr_val) == VM_OBJ_ARRAY) {
-            VMArray *aa = VM_AS_ARRAY(arr_val);
-            clcall_argc = aa->size;
-            for (int i = 0; i < clcall_argc; i++) SP_PUSH(aa->items[i]);
-        }
+        VMValue sbuf[16];
+        VMValue *sitems = NULL;
+        int cnt = 0;
+        frame->ip = ip; vm->stack_top = sp;
+        int exc = vm_collect_spread_items(vm, arr_val, sbuf, 16, &sitems, &cnt);
+        stack = vm->stack; RELOAD();
+        if (exc) { VM_CHECK_EXC(); }
+        clcall_argc = cnt;
+        for (int i = 0; i < cnt; i++) SP_PUSH(sitems[i]);
+        if (sitems && sitems != sbuf) free(sitems);
         goto L_do_op_call_closure;
     }
 
@@ -6661,7 +6981,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 DISPATCH();
             }
         }
-        if (VM_IS_INT(v)) SP_PUSH(VM_MAKE_INT((int64_t)(0ULL - (uint64_t)VM_INT_VAL(v))));
+        if (VM_IS_ANY_INT(v)) SP_PUSH(VM_MAKE_INT((int64_t)(0ULL - (uint64_t)VM_ANY_INT_VAL(v))));
         else SP_PUSH(VM_MAKE_FLOAT(-vm_to_num(v)));
         vm_temp_free(&v);
         DISPATCH();
@@ -6688,8 +7008,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_DEFINED): { VMValue v = SP_POP(); SP_PUSH(VM_MAKE_INT(!VM_IS_UNDEF(v))); vm_temp_free(&v); DISPATCH(); }
     CASE(OP_ABS): {
         VMValue v = SP_POP();
-        if (VM_IS_INT(v)) {
-            int64_t iv = VM_INT_VAL(v);
+        if (VM_IS_ANY_INT(v)) {
+            int64_t iv = VM_ANY_INT_VAL(v);
             SP_PUSH(VM_MAKE_INT(iv < 0 ? (int64_t)(0ULL - (uint64_t)iv) : iv));
         } else {
             SP_PUSH(VM_MAKE_FLOAT(fabs(vm_to_num(v))));
@@ -6702,7 +7022,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VM_TRY_BIN_OV("**");
         double r = pow(vm_to_num(a), vm_to_num(b));
         if (!vm_is_float_operand(a) && !vm_is_float_operand(b) && vm_to_int(b) >= 0 &&
-            isfinite(r) && r >= -4.6e18 && r <= 4.6e18 && r == (double)(int64_t)r) {
+            isfinite(r) && r >= -9.2e18 && r <= 9.2e18 && r == (double)(int64_t)r) {
             SP_PUSH(VM_MAKE_INT((int64_t)r));
         } else {
             SP_PUSH(VM_MAKE_FLOAT(r));
@@ -6756,7 +7076,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_ADD_OV): {
         VMValue b = SP_POP(), a = SP_POP();
         VM_TRY_BIN_OV("+");
-        SP_PUSH(VM_MAKE_INT(vm_to_int(a) + vm_to_int(b)));
+        SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)vm_to_int(a) + (uint64_t)vm_to_int(b))));
         vm_temp_free(&a); vm_temp_free(&b);
         DISPATCH();
     }
@@ -7234,6 +7554,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 p->inherits[p->inherit_count].child = strdup(child);
                 p->inherits[p->inherit_count].parent = strdup(parent);
                 p->inherit_count++;
+                memset(vm->method_cache, 0, sizeof(vm->method_cache));
             }
             SP_PUSH(VM_UNDEF_VAL);
             break;
@@ -7243,11 +7564,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             break;
         }
         case BUILTIN_MATH_FLOOR: {
-            SP_PUSH(VM_MAKE_INT((int64_t)floor(vm_to_num(args[0]))));
+            VM_PUSH_DOUBLE(sp, floor(vm_to_num(args[0])));
             break;
         }
         case BUILTIN_MATH_CEIL: {
-            SP_PUSH(VM_MAKE_INT((int64_t)ceil(vm_to_num(args[0]))));
+            VM_PUSH_DOUBLE(sp, ceil(vm_to_num(args[0])));
             break;
         }
         case BUILTIN_MATH_POW: {
@@ -7495,9 +7816,21 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_SORT_DEFAULT: {
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
                 VMArray *src = VM_AS_ARRAY(args[0]);
+                VMArray *sorted;
+                if (__builtin_expect(!VM_IS_UNDEF(src->tied_obj), 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    sorted = vm_materialize_array(vm, src);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                        goto L_builtin_throw_exc;
+                    }
+                    if (!sorted) sorted = vm_array_new(8);
+                } else {
+                    sorted = vm_array_new(src->size > 0 ? src->size : 8);
+                    for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+                }
                 /* Simple insertion sort by string comparison */
-                VMArray *sorted = vm_array_new(src->size > 0 ? src->size : 8);
-                for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
                 for (int i = 1; i < sorted->size; i++) {
                     VMValue key = sorted->items[i];
                     char kbuf[256]; const char *ks = vm_to_cstr(key, kbuf, 256);
@@ -7652,6 +7985,37 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_HASH_VALUES: {
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH) {
                 VMHash *h = VM_AS_HASH(args[0]);
+                if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+                    int has_fk = 0;
+                    frame->ip = ip; vm->stack_top = sp;
+                    VMArray *tkeys = vm_tied_hash_collect_keys(vm, h->tied_obj, &has_fk);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                        goto L_builtin_throw_exc;
+                    }
+                    if (has_fk) {
+                        int n = tkeys ? tkeys->size : 0;
+                        VMArray *vals = vm_array_new(n > 0 ? n : 8);
+                        int ffidx = vm_tied_array_find_method(vm, h->tied_obj, "FETCH");
+                        vm->gc_pause++;
+                        for (int i = 0; i < n; i++) {
+                            VMValue kv = tkeys->items[i];
+                            VMValue vv = (ffidx >= 0) ? vm_tied_array_call(vm, h->tied_obj, ffidx, &kv, 1) : VM_UNDEF_VAL;
+                            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                                vm->gc_pause--;
+                                stack = vm->stack; RELOAD();
+                                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                                goto L_builtin_throw_exc;
+                            }
+                            vm_array_push(vals, vv);
+                        }
+                        vm->gc_pause--;
+                        stack = vm->stack; RELOAD();
+                        SP_PUSH(VM_MAKE_PTR(vals));
+                        break;
+                    }
+                }
                 VMArray *vals = vm_array_new(h->size > 0 ? h->size : 8);
                 for (int i = 0; i < h->capacity; i++) {
                     if (h->entries[i].occupied == 1) {
@@ -7771,6 +8135,53 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_HASH_EACH: {
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH) {
                 VMHash *h = VM_AS_HASH(args[0]);
+                if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+                    int fidx = VM_IS_UNDEF(h->tied_last_key)
+                        ? vm_tied_array_find_method(vm, h->tied_obj, "FIRSTKEY")
+                        : vm_tied_array_find_method(vm, h->tied_obj, "NEXTKEY");
+                    if (fidx >= 0 || !VM_IS_UNDEF(h->tied_last_key)) {
+                        frame->ip = ip; vm->stack_top = sp; vm->gc_pause++;
+                        VMValue k = VM_UNDEF_VAL;
+                        if (VM_IS_UNDEF(h->tied_last_key)) {
+                            k = vm_tied_array_call(vm, h->tied_obj, fidx, NULL, 0);
+                        } else if (fidx >= 0) {
+                            VMValue last_k = h->tied_last_key;
+                            k = vm_tied_array_call(vm, h->tied_obj, fidx, &last_k, 1);
+                        }
+                        if (__builtin_expect(vm->has_pending_exc, 0)) {
+                            vm->gc_pause--;
+                            stack = vm->stack; RELOAD();
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                        if (VM_IS_UNDEF(k)) {
+                            h->tied_last_key = VM_UNDEF_VAL;
+                            vm->gc_pause--;
+                            stack = vm->stack; RELOAD();
+                            SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+                        } else {
+                            char kbuf[256];
+                            VMValue key_str = (VM_IS_PTR(k) && VM_PTR_TYPE(k) == VM_OBJ_STR)
+                                ? vm_val_copy(k) : vm_str(vm_to_cstr(k, kbuf, sizeof(kbuf)));
+                            h->tied_last_key = key_str;
+                            int ffidx = vm_tied_array_find_method(vm, h->tied_obj, "FETCH");
+                            VMValue v = (ffidx >= 0) ? vm_tied_array_call(vm, h->tied_obj, ffidx, &k, 1) : VM_UNDEF_VAL;
+                            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                                vm->gc_pause--;
+                                stack = vm->stack; RELOAD();
+                                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                                goto L_builtin_throw_exc;
+                            }
+                            vm->gc_pause--;
+                            stack = vm->stack; RELOAD();
+                            VMArray *pair = vm_array_new(2);
+                            vm_array_push(pair, vm_val_copy(key_str));
+                            vm_array_push(pair, v);
+                            SP_PUSH(VM_MAKE_PTR(pair));
+                        }
+                        break;
+                    }
+                }
                 /* Find next occupied entry starting from iter_pos */
                 while (h->iter_pos < h->capacity && h->entries[h->iter_pos].occupied != 1)
                     h->iter_pos++;
@@ -8763,6 +9174,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 enum VMObjType tt = VM_PTR_TYPE(args[0]);
                 if (tt == VM_OBJ_HASH && !VM_IS_UNDEF(VM_AS_HASH(args[0])->tied_obj)) {
                     VM_AS_HASH(args[0])->tied_obj = VM_UNDEF_VAL;
+                    VM_AS_HASH(args[0])->tied_last_key = VM_UNDEF_VAL;
                     SP_PUSH(VM_UNDEF_VAL);
                     break;
                 }
@@ -9151,7 +9563,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         case BUILTIN_TYPEOF: {
             if (argc >= 1) {
-                if (VM_IS_INT(args[0])) SP_PUSH(vm_str("int"));
+                if (VM_IS_ANY_INT(args[0])) SP_PUSH(vm_str("int"));
                 else if (VM_IS_UNDEF(args[0])) SP_PUSH(vm_str("undef"));
                 else if (VM_IS_PTR(args[0])) {
                     switch (VM_PTR_TYPE(args[0])) {
@@ -9261,14 +9673,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             if (argc >= 1 && VM_IS_PTR(args[0])) {
                 switch (VM_PTR_TYPE(args[0])) {
                 case VM_OBJ_ARRAY: SP_PUSH(vm_str("ARRAY")); break;
-                case VM_OBJ_HASH: {
-                    VMHash *h = VM_AS_HASH(args[0]);
-                    SP_PUSH(vm_str(h->class_name ? h->class_name : "HASH"));
-                    break;
-                }
+                case VM_OBJ_HASH: SP_PUSH(vm_str("HASH")); break;
                 case VM_OBJ_CLOSURE: SP_PUSH(vm_str("CODE")); break;
                 case VM_OBJ_SREF: SP_PUSH(vm_str("SCALAR")); break;
-                case VM_OBJ_NATIVE_SV: SP_PUSH(vm_str("REF")); break;
+                case VM_OBJ_NATIVE_SV: {
+                    VMNativeSV *nsv = (VMNativeSV*)VM_TO_PTR(args[0]);
+                    SP_PUSH(vm_str(strada_reftype_raw(nsv->sv)));
+                    break;
+                }
                 default: SP_PUSH(vm_str("")); break;
                 }
             } else {
@@ -9278,19 +9690,30 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         case BUILTIN_DEREF: {
             if (argc >= 1) {
+                VMValue raw = args[0];
                 if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_SREF) {
                     VMScalarRef *sr = VM_AS_SREF(args[0]);
                     if (sr->global_name) {
-                        SP_PUSH(vm_val_copy(vm_hash_get(vm->globals, sr->global_name)));
+                        raw = vm_hash_get(vm->globals, sr->global_name);
                     } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
-                        SP_PUSH(vm_val_copy(VM_AS_CELL(sr->cell)->val));
+                        raw = VM_AS_CELL(sr->cell)->val;
                     } else {
-                        SP_PUSH(VM_UNDEF_VAL);
+                        raw = VM_UNDEF_VAL;
                     }
                 } else if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_CELL) {
-                    SP_PUSH(vm_val_copy(VM_AS_CELL(args[0])->val));
+                    raw = VM_AS_CELL(args[0])->val;
+                }
+                if (__builtin_expect(VM_IS_PTR(raw) && VM_PTR_TYPE(raw) == VM_OBJ_TIED_SCALAR, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    raw = vm_tied_scalar_fetch(vm, raw);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                        goto L_builtin_throw_exc;
+                    }
+                    SP_PUSH(raw);
                 } else {
-                    SP_PUSH(vm_val_copy(args[0]));
+                    SP_PUSH(vm_val_copy(raw));
                 }
             } else {
                 SP_PUSH(VM_UNDEF_VAL);
@@ -9300,14 +9723,28 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_IS_REF:
         case BUILTIN_IS_REFTO: {
             int is_r = 0;
+            const char *rt = "";
             if (argc >= 1 && VM_IS_PTR(args[0])) {
                 enum VMObjType t = VM_PTR_TYPE(args[0]);
-                if (t == VM_OBJ_ARRAY || t == VM_OBJ_HASH || t == VM_OBJ_CLOSURE ||
-                    t == VM_OBJ_SREF || t == VM_OBJ_NATIVE_SV) {
-                    is_r = 1;
+                if (t == VM_OBJ_ARRAY) { is_r = 1; rt = "ARRAY"; }
+                else if (t == VM_OBJ_HASH) { is_r = 1; rt = "HASH"; }
+                else if (t == VM_OBJ_CLOSURE) { is_r = 1; rt = "CODE"; }
+                else if (t == VM_OBJ_SREF) { is_r = 1; rt = "SCALAR"; }
+                else if (t == VM_OBJ_NATIVE_SV) {
+                    VMNativeSV *nsv = (VMNativeSV*)VM_TO_PTR(args[0]);
+                    if (strada_is_ref(nsv->sv)) {
+                        is_r = 1;
+                        rt = strada_reftype_raw(nsv->sv);
+                    }
                 }
             }
-            SP_PUSH(VM_MAKE_INT(is_r));
+            if (bid == BUILTIN_IS_REFTO && argc >= 2) {
+                char tbuf[128];
+                const char *want = vm_to_cstr(args[1], tbuf, sizeof(tbuf));
+                SP_PUSH(VM_MAKE_INT(is_r && rt && strcmp(rt, want) == 0));
+            } else {
+                SP_PUSH(VM_MAKE_INT(is_r));
+            }
             break;
         }
         case BUILTIN_BYTE_INDEX: {
@@ -9335,8 +9772,20 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             /* Numeric sort */
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
                 VMArray *src = VM_AS_ARRAY(args[0]);
-                VMArray *sorted = vm_array_new(src->size > 0 ? src->size : 8);
-                for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+                VMArray *sorted;
+                if (__builtin_expect(!VM_IS_UNDEF(src->tied_obj), 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    sorted = vm_materialize_array(vm, src);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                        goto L_builtin_throw_exc;
+                    }
+                    if (!sorted) sorted = vm_array_new(8);
+                } else {
+                    sorted = vm_array_new(src->size > 0 ? src->size : 8);
+                    for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+                }
                 /* Insertion sort by numeric value */
                 for (int i = 1; i < sorted->size; i++) {
                     VMValue key = sorted->items[i];
@@ -9383,8 +9832,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 int64_t char_code = vm_to_int(args[2]);
                 if (VM_IS_UNDEF(sw)) {
                     eq = (lit_len == 0);
-                } else if (VM_IS_INT(sw)) {
-                    eq = (VM_INT_VAL(sw) == char_code);
+                } else if (VM_IS_ANY_INT(sw)) {
+                    eq = (VM_ANY_INT_VAL(sw) == char_code);
                 } else {
                     size_t slen = 0;
                     const char *sp_v = vm_bytes_view(sw, sbuf, sizeof(sbuf), &slen);
@@ -9656,6 +10105,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue *orig_vars = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(VMValue)) : orig_buf;
         StradaValue **sv_vars = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(StradaValue*)) : sv_buf;
         StradaValue **orig_sv = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(StradaValue*)) : orig_sv_buf;
+        frame->ip = ip; vm->stack_top = sp;
         for (int i = 0; i < cb->var_count; i++) {
             int slot = cb->var_slots[i];
             VMValue raw_v = locals[slot];
@@ -9663,10 +10113,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             orig_vars[i] = raw_v;
             sv_vars[i] = vm_to_sv(orig_vars[i]);
             orig_sv[i] = sv_vars[i];
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                for (int k = 0; k <= i; k++) {
+                    if (sv_vars[k]) strada_decref(sv_vars[k]);
+                }
+                if (orig_vars != orig_buf) { free(orig_vars); free(sv_vars); free(orig_sv); }
+                stack = vm->stack;
+                RELOAD();
+                VM_CHECK_EXC();
+            }
         }
 
         /* Call the compiled C block */
-        frame->ip = ip; vm->stack_top = sp;
         if (vm_c_call_cblock(vm, (void(*)(StradaValue**))cb->fn, sv_vars, &throw_exc)) {
             stack = vm->stack;
             RELOAD();
@@ -9686,15 +10144,91 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             int slot = cb->var_slots[i];
             VMValue *dst = &locals[slot];
             if (VM_IS_PTR(*dst) && VM_PTR_TYPE(*dst) == VM_OBJ_CELL) dst = &VM_AS_CELL(*dst)->val;
-            int is_fh = (VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_FILEHANDLE);
-            if (is_fh) vm_fh_sync_from_sv(orig_vars[i]);
-            if (is_fh && sv_vars[i] == orig_sv[i]) {
-                *dst = orig_vars[i];
-                if (sv_vars[i]) strada_decref(sv_vars[i]);
-            } else {
-                *dst = sv_to_vm(sv_vars[i]);
-                if (sv_vars[i]) strada_decref(sv_vars[i]);
+            if (VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_FILEHANDLE) {
+                vm_fh_sync_from_sv(orig_vars[i]);
+                if (sv_vars[i] == orig_sv[i]) {
+                    *dst = orig_vars[i];
+                    if (sv_vars[i]) strada_decref(sv_vars[i]);
+                    continue;
+                }
             }
+            if (VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_TIED_SCALAR) {
+                *dst = orig_vars[i];
+                if (sv_vars[i] != orig_sv[i]) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    VMValue newv = sv_to_vm(sv_vars[i]);
+                    if (sv_vars[i]) { strada_decref(sv_vars[i]); sv_vars[i] = NULL; }
+                    vm_tied_scalar_store(vm, orig_vars[i], newv);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        for (int k = i + 1; k < cb->var_count; k++) {
+                            if (sv_vars[k]) strada_decref(sv_vars[k]);
+                        }
+                        if (orig_vars != orig_buf) { free(orig_vars); free(sv_vars); free(orig_sv); }
+                        VM_CHECK_EXC();
+                    }
+                } else {
+                    if (sv_vars[i]) strada_decref(sv_vars[i]);
+                }
+                continue;
+            }
+            if (sv_vars[i] == orig_sv[i] &&
+                VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_ARRAY &&
+                sv_vars[i] && !STRADA_IS_TAGGED_INT(sv_vars[i]) && sv_vars[i]->type == STRADA_ARRAY) {
+                VMArray *va = VM_AS_ARRAY(orig_vars[i]);
+                StradaArray *sav = sv_vars[i]->value.av;
+                int n = sav ? (int)sav->size : 0;
+                if (n > va->cap) {
+                    int ncap = va->cap < 8 ? 8 : va->cap;
+                    while (ncap < n) ncap *= 2;
+                    va->items = realloc(va->items, (size_t)ncap * sizeof(VMValue));
+                    if (va->holes) va->holes = realloc(va->holes, (size_t)ncap);
+                    va->cap = ncap;
+                }
+                va->size = n;
+                if (va->holes && n > 0) memset(va->holes, 0, (size_t)n);
+                for (int k = 0; k < n; k++) {
+                    va->items[k] = sv_to_vm(strada_array_get(sav, (int64_t)k));
+                }
+                *dst = orig_vars[i];
+                strada_decref(sv_vars[i]);
+                continue;
+            }
+            if (sv_vars[i] == orig_sv[i] &&
+                VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_HASH &&
+                sv_vars[i] && !STRADA_IS_TAGGED_INT(sv_vars[i]) && sv_vars[i]->type == STRADA_HASH) {
+                VMHash *vh = VM_AS_HASH(orig_vars[i]);
+                StradaHash *shv = sv_vars[i]->value.hv;
+                for (int k = 0; k < vh->capacity; k++) {
+                    if (vh->entries[k].occupied == 1) {
+                        key_free(vh->entries[k].key);
+                        vm_val_free(&vh->entries[k].value);
+                    }
+                }
+                memset(vh->entries, 0, (size_t)vh->capacity * sizeof(VMHashEntry));
+                vh->size = 0;
+                vh->iter_pos = 0;
+                if (shv && shv->entries) {
+                    for (size_t k = 0; k < shv->next_slot; k++) {
+                        if (!shv->entries[k].key) continue;
+                        vm_hash_set_n(vh, shv->entries[k].key->data, shv->entries[k].key->len,
+                                      sv_to_vm(shv->entries[k].value));
+                    }
+                }
+                const char *bpkg = strada_blessed_name_cstr(sv_vars[i]);
+                if (bpkg && (!vh->class_name || strcmp(vh->class_name, bpkg) != 0)) {
+                    free(vh->class_name);
+                    vh->class_name = strdup(bpkg);
+                } else if (!bpkg && vh->class_name) {
+                    free(vh->class_name);
+                    vh->class_name = NULL;
+                }
+                *dst = orig_vars[i];
+                strada_decref(sv_vars[i]);
+                continue;
+            }
+            *dst = sv_to_vm(sv_vars[i]);
+            if (sv_vars[i]) strada_decref(sv_vars[i]);
         }
         if (orig_vars != orig_buf) { free(orig_vars); free(sv_vars); free(orig_sv); }
 
@@ -9765,6 +10299,13 @@ void vm_export_globals(VM *vm, StradaValue *hash_sv) {
     for (int i = 0; i < g->capacity; i++) {
         if (g->entries[i].occupied == 1 && g->entries[i].key) {
             StradaValue *sv = vm_to_sv(g->entries[i].value);
+            if (vm->has_pending_exc) {
+                vm->has_pending_exc = 0;
+                vm_temp_free(&vm->pending_exc);
+                vm->pending_exc = VM_UNDEF_VAL;
+                if (sv) strada_decref(sv);
+                continue;
+            }
             strada_hash_set_take(hash_sv->value.hv, g->entries[i].key, sv);
         }
     }

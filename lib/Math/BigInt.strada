@@ -232,9 +232,6 @@ func new(str $val) scalar {
 }
 
 func from_int(int $val) scalar {
-    if ($val < 0) {
-        return BigInt::new("-" . (0 - $val));
-    }
     return BigInt::new("" . $val);
 }
 

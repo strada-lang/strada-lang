@@ -1,0 +1,90 @@
+use lib "lib";
+use YAML;
+use Forma;
+use Math::BigInt;
+use LWP;
+use LWP_SSL;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # Bug #41: YAML inline # comments before nested blocks
+    my str $y_doc = "map_key: # inline comment\n"
+                  . "  sub: 12\n"
+                  . "arr:\n"
+                  . "  - # seq item comment\n"
+                  . "    nested: ok\n"
+                  . "  - item_k: # item hash key comment\n"
+                  . "      deep: ok_deep\n"
+                  . "keep: \"a # b\" # strip me\n";
+    my scalar $yd = YAML::Load($y_doc);
+    check(defined($yd) && $yd->{"map_key"}->{"sub"} == 12, "Bug #41 YAML mapping inline # before nested block");
+    check($yd->{"arr"}->[0]->{"nested"} eq "ok", "Bug #41 YAML seq dash inline # before nested block");
+    check($yd->{"arr"}->[1]->{"item_k"}->{"deep"} eq "ok_deep", "Bug #41 YAML seq item key inline # before nested block");
+    check($yd->{"keep"} eq "a # b", "Bug #41 YAML keeps # inside quotes and strips outside");
+
+    # Bug #42: YAML::Dump/Load NUL & control characters round-trip
+    my str $nul_val = "a" . chr(0) . chr(8) . chr(12) . chr(1) . chr(31) . chr(127) . "z";
+    my str $nul_key = "k" . chr(0) . chr(7);
+    my hash %ctrl = ();
+    $ctrl{"v"} = $nul_val;
+    $ctrl{$nul_key} = "ok";
+    my str $dumped = YAML::Dump(\%ctrl);
+    my scalar $loaded = YAML::Load($dumped);
+    check(core::byte_length($loaded->{"v"}) == core::byte_length($nul_val) && $loaded->{"v"} eq $nul_val,
+          "Bug #42 YAML Dump/Load lossless round-trip of NUL and control bytes");
+    check($loaded->{$nul_key} eq "ok", "Bug #42 YAML Dump/Load lossless round-trip of control bytes in keys");
+
+    my scalar $hx = YAML::Load("\"\\x41\\x00\\x7f\"");
+    check(core::byte_length($hx) == 3 && core::get_byte($hx, 0) == 65 && core::get_byte($hx, 1) == 0 && core::get_byte($hx, 2) == 127,
+          "Bug #42 YAML::Load decodes \\xHH including \\x00 and \\x7f");
+
+    # Bug #43: Forma quoted partial argument vs context variable resolution
+    my str $fdir = "/tmp/r7_forma_" . core::getpid();
+    core::mkdir($fdir, 493);
+    my str $ppath = $fdir . "/part.html";
+    my scalar $fh = core::open($ppath, "w");
+    say($fh, "[{{label}}]");
+    core::close($fh);
+    Forma::init($fdir);
+    Forma::set_cache(0);
+    my str $fout = Forma::render_string("{{> part.html label=\"title\"}}|{{> part.html label=title}}", {"title" => "CTX_VAL"});
+    $fout =~ s/\r?\n//g;
+    check($fout eq "[title]|[CTX_VAL]", "Bug #43 Forma quoted partial arg not resolved as context var got=" . $fout);
+    core::unlink($ppath);
+    core::rmdir($fdir);
+
+    # Bug #44: BigInt::from_int(INT64_MIN)
+    my int $imin = -9223372036854775807 - 1;
+    my scalar $bi = BigInt::from_int($imin);
+    check($bi->to_str() eq "-9223372036854775808", "Bug #44 BigInt::from_int(INT64_MIN) got=" . $bi->to_str());
+
+    # Bug #45: LWP & LWP_SSL chunked framing checks
+    check(LWP::_parse_hex_len("5") == 5 && LWP::_parse_hex_len("5;ext=1") == 5 && LWP::_parse_hex_len(" 5 \t") == 5, "Bug #45 LWP valid hex chunk lengths");
+    check(LWP::_parse_hex_len("5ZZZ") == -1 && LWP::_parse_hex_len("5 6") == -1 && LWP::_parse_hex_len("ZZZZ") == -1, "Bug #45 LWP rejects malformed hex chunk lengths");
+    my str $hdr = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    check(LWP::_response_complete($hdr . "ZZZZ\r\n", "GET") == 1, "Bug #45 LWP _response_complete stops on malformed chunk");
+    check(LWP::_check_framing_truncation($hdr . "ZZZZ\r\n", "GET") eq "Malformed chunked HTTP response", "Bug #45 LWP reports malformed chunked");
+    check(LWP::_check_framing_truncation($hdr . "5\r\nhelloXX0\r\n\r\n", "GET") eq "Malformed chunked HTTP response", "Bug #45 LWP catches bad chunk CRLF");
+    check(LWP::_check_framing_truncation($hdr . "5\r\nhel", "GET") eq "Truncated chunked HTTP response", "Bug #45 LWP distinguishes truncated chunked");
+    check(LWP::_check_framing_truncation($hdr . "5\r\nhello\r\n0\r\n\r\n", "GET") eq "", "Bug #45 LWP accepts complete valid chunked");
+
+    check(LWP_SSL::_parse_hex_len("a;x=1") == 10 && LWP_SSL::_parse_hex_len("5ZZZ") == -1 && LWP_SSL::_parse_hex_len("5 6") == -1, "Bug #45 LWP_SSL hex chunk length checks");
+    check(LWP_SSL::_response_complete($hdr . "ZZZZ\r\n", "GET") == 1, "Bug #45 LWP_SSL _response_complete stops on malformed chunk");
+    check(LWP_SSL::_check_framing_truncation($hdr . "ZZZZ\r\n", "GET") eq "Malformed chunked HTTP response", "Bug #45 LWP_SSL reports malformed chunked");
+    check(LWP_SSL::_check_framing_truncation($hdr . "5\r\nhello\r\n0\r\n\r\n", "GET") eq "", "Bug #45 LWP_SSL accepts complete valid chunked");
+
+    if ($g_fail > 0) {
+        say("R7_STDLIB_TOOLS_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R7_STDLIB_TOOLS_OK");
+    return 0;
+}

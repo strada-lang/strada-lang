@@ -1,0 +1,176 @@
+#!/usr/bin/env strada
+use lib "../lib";
+use lib "lib";
+
+package R7VThrowDestroy;
+func new(str $tag) scalar {
+    my hash %self = ("tag" => $tag, "pad" => ("v" x 64));
+    return bless(\%self, "R7VThrowDestroy");
+}
+func DESTROY(scalar $self) void {
+    die("r7v_destroy:" . $self->{"tag"});
+}
+
+package R7VBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R7VBase");
+}
+func combine(scalar $self, str ...@args) str {
+    return $self->{"v"} . ":" . join(",", @args);
+}
+
+package R7VChild;
+extends R7VBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R7VChild");
+}
+func combine(scalar $self, str $a, str $b) str {
+    return SUPER::combine($self, $a, $b);
+}
+
+package R7VTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %s = ("a" => ["x0", "x1", "x2"]);
+    return bless(\%s, "R7VTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void {}
+
+package R7VTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("d" => {"a" => "1", "b" => "2"});
+    return bless(\%s, "R7VTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $old;
+}
+func FIRSTKEY(scalar $self) scalar {
+    my array @ks = keys(%{$self->{"d"}});
+    return size(@ks) > 0 ? $ks[0] : undef;
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my array @ks = keys(%{$self->{"d"}});
+    for (my int $i = 0; $i < size(@ks) - 1; $i = $i + 1) {
+        if ($ks[$i] eq $last) { return $ks[$i + 1]; }
+    }
+    return undef;
+}
+
+package R7VTieScalar;
+func TIESCALAR(scalar ...@args) scalar {
+    my hash %s = ("v" => $args[1]);
+    return bless(\%s, "R7VTieScalar");
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package main;
+
+func helper_main_fn(int $x) int {
+    return $x + 5;
+}
+
+func run_iter(int $iter) int {
+    # main:: fallback
+    my int $mres = main::helper_main_fn($iter);
+    if ($mres != $iter + 5) { return 1; }
+
+    # SUPER:: and dynamic method call
+    my scalar $ch = R7VChild::new(9);
+    my str $dm = "combine";
+    if ($ch->combine("p", "q") ne "9:p,q" || $ch->$dm("r", "s") ne "9:r,s") { return 2; }
+
+    # Throwing DESTROY during local restore and hash delete
+    my hash %hl = ("k" => "orig");
+    try { local $hl{"k"} = R7VThrowDestroy::new("loc_" . $iter); } catch ($e) {}
+    if ($hl{"k"} ne "orig") { return 3; }
+
+    my hash %hd = ("a" => R7VThrowDestroy::new("del_" . $iter));
+    try { delete($hd{"a"}); } catch ($e) {}
+    if (exists($hd{"a"})) { return 4; }
+
+    # 64-bit boxed ints outside 63-bit tagged range
+    my int $big = 4611686018427387904; # 2^62
+    my int $b1 = $big + $iter;
+    my int $b2 = $b1 + 1;
+    if (!($b2 > $b1) || ($b2 <=> $b1) != 1) { return 5; }
+
+    # div/mod by zero throws cleanly in try/catch
+    my int $d0 = 0;
+    my int $m0 = 0;
+    try { my scalar $x = 1 / 0; } catch ($e) { $d0 = 1; }
+    try { my int $y = 1 % 0; } catch ($e) { $m0 = 1; }
+    if ($d0 != 1 || $m0 != 1) { return 6; }
+
+    # sort { return }, lexical capture in sort, nested map/grep
+    my array @nums = (3, 1, 2);
+    my array @s_ret = sort { return $a <=> $b; } @nums;
+    my int $dir = -1;
+    my array @s_cap = sort { $dir * ($a <=> $b); } @nums;
+    my array @nested_m = map {
+        my array @g = grep { $_ > 1; } (0, 2);
+        $_ . ":" . join(",", @g);
+    } (10, 20);
+    if ($s_ret[0] != 1 || $s_cap[0] != 3 || size(@nested_m) != 2) { return 7; }
+
+    # Tied array: reverse, sort, closure spread
+    my array @ta = ();
+    tie(@ta, "R7VTieArr");
+    my array @r_ta = reverse(@ta);
+    my array @s_ta = sort(@ta);
+    my scalar $cl = func(str $x, str $y, str $z) str { return $x . "-" . $y . "-" . $z; };
+    if (size(@r_ta) != 3 || $s_ta[0] ne "x0" || $cl->(...@ta) ne "x0-x1-x2") { return 8; }
+
+    # Tied hash: reverse, keys, values, each
+    my hash %th = ();
+    tie(%th, "R7VTieHash");
+    my array @rev = reverse(%th);
+    my array @tk = keys(%th);
+    my array @tv = values(%th);
+    my int $ek_cnt = 0;
+    while (1) {
+        my array @kv = each(%th);
+        if (size(@kv) == 0) { last; }
+        $ek_cnt = $ek_cnt + 1;
+    }
+    if (size(@rev) != 4 || size(@tk) != 2 || size(@tv) != 2 || $ek_cnt != 2) { return 9; }
+    untie(@ta);
+    untie(%th);
+
+    # Tied scalar & postfix ++ / deref++
+    my scalar $ts = "";
+    tie($ts, "R7VTieScalar", 10);
+    my scalar $tr = \$ts;
+    my int $p1 = $ts++;
+    my int $p2 = $$tr++;
+    if ($p1 != 10 || $p2 != 11 || $ts != 12) { return 10; }
+    untie($ts);
+
+    # Regex s///g
+    my str $s = "ab12cd34";
+    $s =~ s/(\d+)/[$1]/g;
+    if ($s ne "ab[12]cd[34]") { return 11; }
+
+    return 0;
+}
+
+func main() int {
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        my int $rc = run_iter($i);
+        if ($rc != 0) {
+            say("FAIL rc=" . $rc);
+            return $rc;
+        }
+    }
+    say("R7_VM_LEAKS_OK");
+    return 0;
+}

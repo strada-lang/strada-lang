@@ -257,6 +257,14 @@ func is_empty_or_comment(str $line) int {
     return 0;
 }
 
+func hex_val(str $ch) int {
+    my int $o = ord($ch);
+    if ($o >= 48 && $o <= 57) { return $o - 48; } # '0'-'9'
+    if ($o >= 97 && $o <= 102) { return $o - 97 + 10; } # 'a'-'f'
+    if ($o >= 65 && $o <= 70) { return $o - 65 + 10; } # 'A'-'F'
+    return -1;
+}
+
 # Process escape sequences in double-quoted strings
 func process_escapes(str $s) str {
     my str $result = "";
@@ -298,6 +306,16 @@ func process_escapes(str $s) str {
                 # Form feed - ASCII 12
                 $result = $result . chr(12);
                 $i = $i + 2;
+            } elsif ($next eq "x" && $i + 3 < $len) {
+                my int $h1 = YAML::hex_val(substr($s, $i + 2, 1));
+                my int $h2 = YAML::hex_val(substr($s, $i + 3, 1));
+                if ($h1 >= 0 && $h2 >= 0) {
+                    $result = $result . chr($h1 * 16 + $h2);
+                    $i = $i + 4;
+                } else {
+                    $result = $result . $ch;
+                    $i = $i + 1;
+                }
             } else {
                 # Unknown escape, keep as-is
                 $result = $result . $ch;
@@ -916,7 +934,7 @@ func parse_hash(scalar $state, int $base_indent) scalar {
         if ($colon_pos + 1 < length($content)) {
             $after_colon = substr($content, $colon_pos + 1, length($content) - $colon_pos - 1);
         }
-        $after_colon = YAML::trim($after_colon);
+        $after_colon = YAML::strip_comment($after_colon);
 
         $state->{"pos"} = $state->{"pos"} + 1;
 
@@ -996,7 +1014,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
                 $after_dash = substr($after_dash, 1, length($after_dash) - 1);
             }
         }
-        $after_dash = YAML::trim($after_dash);
+        $after_dash = YAML::strip_comment($after_dash);
 
         $state->{"pos"} = $state->{"pos"} + 1;
 
@@ -1005,7 +1023,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
             my int $colon_pos = YAML::find_mapping_colon($after_dash);
             if (substr($after_dash, 0, 1) eq "{") {
                 # Inline hash
-                push($result, YAML::parse_inline_hash(YAML::strip_comment($after_dash)));
+                push($result, YAML::parse_inline_hash($after_dash));
             } elsif ($colon_pos > 0) {
                 # This is a hash entry starting on the - line
                 # Parse as nested hash
@@ -1013,7 +1031,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
                 my str $key = YAML::unquote_key(substr($after_dash, 0, $colon_pos));
                 my str $val_str = "";
                 if ($colon_pos + 1 < length($after_dash)) {
-                    $val_str = YAML::trim(substr($after_dash, $colon_pos + 1, length($after_dash) - $colon_pos - 1));
+                    $val_str = YAML::strip_comment(substr($after_dash, $colon_pos + 1, length($after_dash) - $colon_pos - 1));
                 }
 
                 if (length($val_str) > 0) {
@@ -1059,7 +1077,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
                                 my str $next_key = YAML::unquote_key(substr($next_content, 0, $next_colon));
                                 my str $next_val_str = "";
                                 if ($next_colon + 1 < length($next_content)) {
-                                    $next_val_str = YAML::trim(substr($next_content, $next_colon + 1, length($next_content) - $next_colon - 1));
+                                    $next_val_str = YAML::strip_comment(substr($next_content, $next_colon + 1, length($next_content) - $next_colon - 1));
                                 }
 
                                 $state->{"pos"} = $state->{"pos"} + 1;
@@ -1295,8 +1313,8 @@ func dump_value(scalar $value, int $indent) str {
         return $str_val;
     }
 
-    # Strings containing control characters (\n, \r, \t) use double-quoted escapes
-    if (index($str_val, "\n") >= 0 || index($str_val, "\r") >= 0 || index($str_val, "\t") >= 0) {
+    # Strings containing control characters use double-quoted escapes
+    if (YAML::has_control_char($str_val)) {
         return "\"" . YAML::escape_double_quote($str_val) . "\"";
     }
 
@@ -1308,27 +1326,59 @@ func dump_value(scalar $value, int $indent) str {
     return $str_val;
 }
 
+func has_control_char(str $s) int {
+    my int $blen = core::byte_length($s);
+    my int $i = 0;
+    while ($i < $blen) {
+        my int $b = core::get_byte($s, $i);
+        if ($b < 32 || $b == 127) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # Escape double-quoted YAML strings
 func escape_double_quote(str $s) str {
     my str $result = "";
-    my int $len = length($s);
+    my str $hex = "0123456789abcdef";
+    my int $blen = core::byte_length($s);
+    my int $start = 0;
     my int $i = 0;
-    while ($i < $len) {
-        my str $ch = substr($s, $i, 1);
-        if ($ch eq "\\") {
-            $result = $result . "\\\\";
-        } elsif ($ch eq "\"") {
-            $result = $result . "\\\"";
-        } elsif ($ch eq "\n") {
-            $result = $result . "\\n";
-        } elsif ($ch eq "\r") {
-            $result = $result . "\\r";
-        } elsif ($ch eq "\t") {
-            $result = $result . "\\t";
-        } else {
-            $result = $result . $ch;
+    while ($i < $blen) {
+        my int $b = core::get_byte($s, $i);
+        my str $esc = "";
+        if ($b == 92) { # '\\'
+            $esc = "\\\\";
+        } elsif ($b == 34) { # '"'
+            $esc = "\\\"";
+        } elsif ($b == 0) { # '\0'
+            $esc = "\\0";
+        } elsif ($b == 8) { # '\b'
+            $esc = "\\b";
+        } elsif ($b == 9) { # '\t'
+            $esc = "\\t";
+        } elsif ($b == 10) { # '\n'
+            $esc = "\\n";
+        } elsif ($b == 12) { # '\f'
+            $esc = "\\f";
+        } elsif ($b == 13) { # '\r'
+            $esc = "\\r";
+        } elsif ($b < 32 || $b == 127) {
+            $esc = "\\x" . substr($hex, ($b >> 4) & 15, 1) . substr($hex, $b & 15, 1);
+        }
+        if (length($esc) > 0) {
+            if ($i > $start) {
+                $result = $result . core::byte_substr($s, $start, $i - $start);
+            }
+            $result = $result . $esc;
+            $start = $i + 1;
         }
         $i = $i + 1;
+    }
+    if ($start < $blen) {
+        $result = $result . core::byte_substr($s, $start, $blen - $start);
     }
     return $result;
 }
@@ -1398,18 +1448,7 @@ func escape_single_quote(str $s) str {
 }
 
 func format_key(str $k) str {
-    my int $kl = length($k);
-    my int $i = 0;
-    my int $has_ctrl = 0;
-    while ($i < $kl) {
-        my int $c = ord(substr($k, $i, 1));
-        if ($c < 32 || $c == 127) {
-            $has_ctrl = 1;
-            last;
-        }
-        $i = $i + 1;
-    }
-    if ($has_ctrl == 1) {
+    if (YAML::has_control_char($k)) {
         return "\"" . YAML::escape_double_quote($k) . "\"";
     }
     if (YAML::needs_quote($k) == 1) {

@@ -1,0 +1,228 @@
+#!/usr/bin/env strada
+use lib "lib";
+use YAML;
+use Forma;
+use Math::BigInt;
+
+our scalar $r7l_tie_g = "init";
+our scalar $r7l_our_w = undef;
+
+package R7LThrowStr;
+func new(str $tag) scalar {
+    my hash %self = ("tag" => $tag);
+    return bless(\%self, "R7LThrowStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("r7l_to_str:" . $self->{"tag"});
+}
+use overload '""' => "to_str";
+
+package R7LThrowDestroy;
+func new(str $tag) scalar {
+    my hash %self = ("tag" => $tag, "pad" => ("x" x 80));
+    return bless(\%self, "R7LThrowDestroy");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("r7l_to_str:" . $self->{"tag"});
+}
+use overload '""' => "to_str";
+func DESTROY(scalar $self) void {
+    die("r7l_destroy:" . $self->{"tag"});
+}
+
+package R7LDirectHashDestroy;
+has ro int $id = 1;
+has ro int $tag = 2;
+func DESTROY(scalar $self) void {
+    if ($self->{"tag"} == 1) {
+        die("r7l_direct_destroy:" . $self->{"id"});
+    }
+}
+
+package R7LTieScalar;
+func TIESCALAR(scalar ...@args) scalar {
+    my hash %s = ("v" => ("init_" . ($args[0] // "")));
+    return bless(\%s, "R7LTieScalar");
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $val) void { $self->{"v"} = $val; }
+func DESTROY(scalar $self) void {
+    die("r7l_tie_destroy");
+}
+
+package R7LTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %s = ("a" => ["ta0", "ta1", "ta2"]);
+    return bless(\%s, "R7LTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void {}
+
+package R7LTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("d" => {"k1" => "v1", "k2" => "v2"});
+    return bless(\%s, "R7LTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $old;
+}
+func FIRSTKEY(scalar $self) scalar {
+    my array @ks = keys(%{$self->{"d"}});
+    return size(@ks) > 0 ? $ks[0] : undef;
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my array @ks = keys(%{$self->{"d"}});
+    for (my int $i = 0; $i < size(@ks) - 1; $i = $i + 1) {
+        if ($ks[$i] eq $last) { return $ks[$i + 1]; }
+    }
+    return undef;
+}
+
+package main;
+
+func r7l_ret_slot(int $sel, scalar $sref) scalar {
+    if ($sel == 0) {
+        return $sref;
+    }
+    my array @a = ("p", "q");
+    return \@a;
+}
+
+func run_iter(int $iter) int {
+    # Throwing DESTROY on delete, local, array overwrite
+    my hash %h1 = ();
+    $h1{"k1"} = R7LThrowDestroy::new("d1_" . $iter);
+    try { delete($h1{"k1"}); } catch ($e) {}
+    my str $dk = "k2_" . $iter;
+    $h1{$dk} = R7LThrowDestroy::new("d2");
+    try { delete($h1{$dk}); } catch ($e) {}
+    $h1{"pfx_3"} = R7LThrowDestroy::new("d3");
+    my str $sfx = "3";
+    try { delete($h1{"pfx_" . $sfx}); } catch ($e) {}
+    $h1{"loc"} = "orig";
+    try { local $h1{"loc"} = R7LThrowDestroy::new("loc"); } catch ($e) {}
+    if ($h1{"loc"} ne "orig") { return 1; }
+
+    my array @ao = (R7LThrowDestroy::new("arr0"), "mid");
+    try { $ao[0] = "newv"; } catch ($e) {}
+    if ($ao[0] ne "newv") { return 2; }
+
+    # Tie global scalar re-tie + untie with throwing DESTROY
+    try { tie($r7l_tie_g, "R7LTieScalar", "a" . $iter); } catch ($e) {}
+    $r7l_tie_g = "val_" . $iter;
+    try { tie($r7l_tie_g, "R7LTieScalar", "b" . $iter); } catch ($e) {}
+    try { untie($r7l_tie_g); } catch ($e) {}
+
+    # Weaken on captured lexical and our global
+    my int $cap_done = 0;
+    {
+        my hash %wh = ("iter" => $iter);
+        my scalar $cap_r = \%wh;
+        my scalar $fn = func() int { return defined($cap_r) ? 1 : 0; };
+        core::weaken($cap_r);
+        $cap_done = $fn->();
+    }
+    if ($cap_done != 1) { return 3; }
+
+    {
+        my hash %og = ("g" => $iter);
+        $r7l_our_w = \%og;
+        core::weaken($r7l_our_w);
+    }
+    if (defined($r7l_our_w)) { return 4; }
+    $r7l_our_w = undef;
+
+    # Concat >63B, UV, tied array, tied hash, s///ge throw
+    my str $long_a = ("0123456789" x 8) . $iter;
+    my str $long_b = ("abcdefghij" x 7) . $iter;
+    my str $cat1 = $long_a . ":" . $long_b;
+    my str $cat2 = "";
+    $cat2 .= $long_a;
+    $cat2 .= $long_b;
+    if (length($cat1) < 150 || length($cat2) < 150) { return 5; }
+
+    my scalar $imin = -9223372036854775807 - 1;
+    my scalar $uv = $imin / -1;
+    my hash %uvh = ();
+    $uvh{"uv_" . $uv} = "ok_" . $iter;
+    my str $uv_s = "u=" . $uv;
+    if ($uv_s ne "u=9223372036854775808" || $uvh{"uv_9223372036854775808"} ne "ok_" . $iter) { return 6; }
+
+    my array @ta = ();
+    tie(@ta, "R7LTieArr");
+    my hash %th = ();
+    tie(%th, "R7LTieHash");
+    my str $tcat = "a=" . @ta . ";h=" . %th . ";e";
+    $tcat .= @ta;
+    my array @rev = reverse(%th);
+    my array @r_ta = reverse(@ta);
+    my array @one = ();
+    push(@one, 1);
+    my array @mapped = map { @ta; } @one;
+    if (size(@mapped) != 3 || size(@rev) != 4 || size(@r_ta) != 3 || index($tcat, "a=3;") != 0) { return 7; }
+    untie(@ta);
+    untie(%th);
+
+    my int $vx = 42;
+    my array @refs = map { \$vx; } (1, 2);
+    my array @wslot = r7l_ret_slot(0, \$vx);
+    if (size(@refs) != 2 || size(@wslot) != 1 || ${$wslot[0]} != 42) { return 8; }
+
+    my str $rstr = "hello";
+    my scalar $tobj = R7LThrowStr::new("sge");
+    try { $rstr =~ s/l/$tobj/ge; } catch ($e) {}
+    if ($rstr ne "hello") { return 9; }
+
+    # YAML, Forma, Math::BigInt
+    my str $yml = "# c\nname: alice # inline\nitems: [1, 2, 3]\nnote: |\n  line1\n  line2\n";
+    my scalar $ydoc = YAML::Load($yml);
+    my str $ydump = YAML::Dump($ydoc);
+    if (length($ydump) == 0) { return 10; }
+
+    my hash %fv = ("who" => "Bob", "rows" => [{"k" => "x"}, {"k" => "y"}]);
+    my str $fout = Forma::render_string("Hi {{who}} {{#rows}}{{k}}{{/rows}}", \%fv);
+    if (index($fout, "Bob") < 0) { return 11; }
+
+    my scalar $bi0 = BigInt::new("-0");
+    my scalar $bi1 = BigInt::new("100000000000000000001");
+    my scalar $bi2 = BigInt::new("7");
+    my scalar $q = $bi1->div($bi2);
+    my scalar $rem = $bi1->mod($bi2);
+    if ($bi0->to_str() ne "0" || length($q->to_str()) == 0 || length($rem->to_str()) == 0) { return 12; }
+
+    return 0;
+}
+
+func main() int {
+    # Construct 2-int-attr directly-blessed hash before any try in main()
+    my hash %avh = ();
+    $avh{"slot"} = R7LDirectHashDestroy::new("id" => 7, "tag" => 1);
+    my int $caught = 0;
+    try {
+        $avh{"slot"}->[0] = 99;
+    } catch ($e) {
+        $caught = 1;
+    }
+    if ($caught != 1 || reftype($avh{"slot"}) ne "ARRAY") {
+        say("FAIL avh");
+        return 1;
+    }
+
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        my int $rc = run_iter($i);
+        if ($rc != 0) {
+            say("FAIL rc=" . $rc);
+            return $rc;
+        }
+    }
+
+    say("R7_LEAKS_OK");
+    return 0;
+}

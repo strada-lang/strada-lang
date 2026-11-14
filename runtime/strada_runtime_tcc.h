@@ -187,6 +187,10 @@ struct StradaValue {
     StradaMetadata *meta;    /* NULL for most values */
 };
 
+#ifndef SV_BLESSED
+#define SV_BLESSED(sv) ((!STRADA_IS_TAGGED_INT(sv) && (sv)->meta) ? (sv)->meta->blessed_package : NULL)
+#endif
+
 /* Array structure - like Perl's AV */
 struct StradaArray {
     StradaValue **elements;
@@ -448,7 +452,7 @@ int strada_ord_byte(StradaValue *sv);
 int strada_get_byte(StradaValue *sv, int pos);
 StradaValue* strada_set_byte(StradaValue *sv, int pos, int val);
 int strada_byte_length(StradaValue *sv);
-StradaValue* strada_byte_substr(StradaValue *sv, int start, int len);
+StradaValue* strada_byte_substr(StradaValue *sv, int64_t start, int64_t len);
 StradaValue* strada_pack(const char *fmt, StradaValue *args);
 StradaValue* strada_unpack(const char *fmt, StradaValue *data);
 StradaValue* strada_base64_encode(StradaValue *sv);
@@ -2003,6 +2007,33 @@ static inline int64_t strada_av_fetchsize_sv(StradaValue *sv) {
 }
 static inline int64_t strada_av_size_sv(StradaValue *sv) {
     return strada_av_fetchsize_sv(sv);
+}
+static inline int strada_sv_is_array_or_aref(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (sv->type == STRADA_ARRAY) return 1;
+    if (sv->type == STRADA_REF && !strada_is_slot_ref(sv)
+        && sv->value.rv && !STRADA_IS_TAGGED_INT(sv->value.rv)
+        && sv->value.rv->type == STRADA_ARRAY) {
+        return 1;
+    }
+    return 0;
+}
+static inline void strada_av_append_all(StradaArray *dst, StradaValue *src) {
+    if (!dst || !src || STRADA_IS_TAGGED_INT(src)) return;
+    StradaValue *tsv = strada_av_unwrap_tied(src);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        int64_t n = strada_tied_array_fetchsize(tsv);
+        for (int64_t i = 0; i < n; i++) {
+            strada_array_push_take(dst, strada_tied_array_fetch(tsv, i));
+        }
+        return;
+    }
+    StradaArray *av = strada_deref_array(src);
+    if (av) {
+        for (size_t i = 0; i < av->size; i++) {
+            strada_array_push(dst, av->elements[av->head + i]);
+        }
+    }
 }
 static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
     StradaValue *tsv = strada_av_unwrap_tied(sv);

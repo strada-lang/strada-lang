@@ -290,9 +290,12 @@ func key_is_hashable_ascii(str $s) int {
 func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $needs_cleanup) void {
     my int $ascii = key_is_hashable_ascii($key_val);
     if ($needs_cleanup == 1) {
+        my int $hl_push = cleanup_push_useful($cg);
         emit($cg, "({ StradaValue *__hl_tmp = ");
         gen_expression($cg, $hash_expr);
-        emit($cg, "; StradaValue *__hl_res = ");
+        emit($cg, "; ");
+        if ($hl_push == 1) { emit($cg, "strada_cleanup_push(__hl_tmp); "); }
+        emit($cg, "StradaValue *__hl_res = ");
         if ($ascii == 1) {
             emit($cg, "strada_hv_fetch_owned_ph(__hl_tmp, ");
             gen_str_literal_c($cg, $key_val);
@@ -302,7 +305,11 @@ func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $n
             gen_str_literal_c($cg, $key_val);
             emit($cg, ")");
         }
-        emit($cg, "; strada_decref(__hl_tmp); __hl_res; })");
+        if ($hl_push == 1) {
+            emit($cg, "; strada_cleanup_pop_decref(__hl_tmp); __hl_res; })");
+        } else {
+            emit($cg, "; strada_decref(__hl_tmp); __hl_res; })");
+        }
     } else {
         if ($ascii == 1) {
             emit($cg, "strada_hv_fetch_owned_ph(");
@@ -1496,23 +1503,44 @@ func gen_oop_helper_decl(scalar $sb) void {
     sb_append($sb, "}\n\n");
 }
 
+# Ensure an OOP package has an entry in pkg_methods / pkg_list
+func codegen_ensure_oop_pkg(scalar $cg, str $pkg) void {
+    if (length($pkg) == 0 || $pkg eq "main") { return; }
+    my str $pkg_marker = "|" . $pkg . "|";
+    my str $seen = $cg->{"pkg_seen"};
+    my int $found_idx = index($seen, $pkg_marker);
+    if ($found_idx < 0) {
+        my hash %pkg_info = ();
+        my array @new_arr = ();
+        $pkg_info{"methods"} = \@new_arr;
+        $pkg_info{"count"} = 0;
+        my scalar $pkg_methods = $cg->{"pkg_methods"};
+        $pkg_methods->{$pkg} = \%pkg_info;
+        my int $pkg_idx = $cg->{"pkg_count"};
+        $cg->{"pkg_list"}->[$pkg_idx] = $pkg;
+        $cg->{"pkg_count"} = $pkg_idx + 1;
+        $cg->{"pkg_seen"} = $seen . $pkg . "|";
+    }
+}
+
 # Track a method for OOP registration (per-package)
 func codegen_track_method(scalar $cg, scalar $fn, str $pkg) void {
     my str $name = sanitize_name($fn->{"name"});
 
-    # Skip main, extern functions, and functions starting with underscore
+    # Skip main, extern functions, and compiler-internal "__..." helpers
     if ($name eq "main") { return; }
     if ($fn->{"type"} == NODE_EXTERN_FUNC()) { return; }
-    if (substr($name, 0, 1) eq "_") { return; }
+    my str $prefix = sanitize_name($pkg) . "_";
+    if (length($name) >= 2 && substr($name, 0, 2) eq "__") {
+        if (!(length($prefix) >= 2 && substr($prefix, 0, 2) eq "__")) {
+            return;
+        }
+    }
 
-    # Methods must have at least one parameter (self)
-    # Functions with 0 params are class init functions, not methods
     my int $param_count = $fn->{"param_count"};
-    if ($param_count == 0) { return; }
 
     # Check if function name starts with package prefix (e.g., Cannoli_)
     # Sanitize package name for packages with :: (e.g., Nesso::Record -> Nesso_Record)
-    my str $prefix = sanitize_name($pkg) . "_";
     my int $prefix_len = length($prefix);
     if (length($name) <= $prefix_len) { return; }
     if (substr($name, 0, $prefix_len) ne $prefix) { return; }
@@ -1698,7 +1726,20 @@ func wrapper_has_any_default(scalar $m) int {
 func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_info, int $has_overloads, scalar $overloads, scalar $method_modifiers, int $method_modifier_count) void {
     my int $method_count = $pkg_info->{"count"};
     my scalar $methods = $pkg_info->{"methods"};
-    if ($method_count == 0) { return; }
+    my int $has_pkg_ol = 0;
+    if ($has_overloads == 1 && length("" . $overloads->{$pkg}) > 0) { $has_pkg_ol = 1; }
+    my int $has_pkg_mod = 0;
+    my int $mi_chk = 0;
+    while ($mi_chk < $method_modifier_count) {
+        if ($method_modifiers->[$mi_chk]->{"package"} eq $pkg) {
+            $has_pkg_mod = 1;
+            last;
+        }
+        $mi_chk = $mi_chk + 1;
+    }
+    if ($method_count == 0 && $has_pkg_ol == 0 && $has_pkg_mod == 0) {
+        # Emit empty init stub because __<pkg>_oop_init is declared/called for every pkg in pkg_list
+    }
 
     my int $saved_w_in_main = $cg->{"in_main"};
     my int $saved_w_cleanup = $cg->{"cleanup_enabled"};
@@ -1755,8 +1796,18 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
                 }
                 sb_append($wsb, "    return __r;\n");
             }
-        } elsif ($param_count <= 1) {
-            # 0 or 1 param (just self)
+        } elsif ($param_count == 0) {
+            # 0-param method/function or 0-param modifier
+            sb_append($wsb, "    (void)self;\n");
+            sb_append($wsb, "    (void)args;\n");
+            if ($is_void == 1) {
+                sb_append($wsb, "    " . $func_name . "();\n");
+                sb_append($wsb, "    return strada_undef_static();\n");
+            } else {
+                sb_append($wsb, "    return " . $func_name . "();\n");
+            }
+        } elsif ($param_count == 1) {
+            # 1 param (just self)
             sb_append($wsb, "    (void)args;\n");
             if ($is_void == 1) {
                 sb_append($wsb, "    " . $func_name . "(self);\n");
@@ -4137,6 +4188,7 @@ func emit_sq_char_cmp(scalar $cg, scalar $left, scalar $right, str $op, int $wra
         $peer_owned = 1;
     }
     my int $use_push = cleanup_push_useful($cg);
+    my int $may_ov = check_overload_binary($cg, $left, $right, $op);
     my str $char_code = "" . $lit->{"value"};
     my str $sq_num = sq_char_str_num("" . $lit->{"from_sq_str"});
 
@@ -4145,6 +4197,52 @@ func emit_sq_char_cmp(scalar $cg, scalar $left, scalar $right, str $op, int $wra
     emit($cg, "; ");
     if ($peer_owned == 1 && $use_push == 1) {
         emit($cg, "strada_cleanup_push(__sq_p); ");
+    }
+    if ($may_ov == 1) {
+        emit($cg, "StradaValue *__sq_ov = NULL; ");
+        emit($cg, "if (__sq_p && !STRADA_IS_TAGGED_INT(__sq_p) && SV_BLESSED(__sq_p)) { ");
+        emit($cg, "StradaValue *__sq_lit = strada_new_str(" . c_str_lit("" . $lit->{"from_sq_str"}) . "); ");
+        if ($use_push == 1) {
+            emit($cg, "strada_cleanup_push(__sq_lit); ");
+        }
+        if ($left_is_sq == 1) {
+            emit($cg, "__sq_ov = strada_overload_binary(__sq_lit, __sq_p, " . c_str_lit($op) . "); ");
+        } else {
+            emit($cg, "__sq_ov = strada_overload_binary(__sq_p, __sq_lit, " . c_str_lit($op) . "); ");
+        }
+        if ($use_push == 1) {
+            emit($cg, "strada_cleanup_pop_decref(__sq_lit); ");
+        } else {
+            emit($cg, "strada_decref(__sq_lit); ");
+        }
+        emit($cg, "} ");
+        if ($wrap_sv == 1) {
+            emit($cg, "StradaValue *__sq_res; ");
+        } else {
+            emit($cg, "int __sq_res; ");
+        }
+        emit($cg, "if (__sq_ov) { ");
+        if ($peer_owned == 1) {
+            if ($use_push == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__sq_p); ");
+            } else {
+                emit($cg, "strada_decref(__sq_p); ");
+            }
+        }
+        if ($wrap_sv == 1) {
+            emit($cg, "__sq_res = __sq_ov; ");
+        } else {
+            if ($use_push == 1) {
+                emit($cg, "strada_cleanup_push(__sq_ov); ");
+            }
+            emit($cg, "__sq_res = strada_to_bool(__sq_ov); ");
+            if ($use_push == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__sq_ov); ");
+            } else {
+                emit($cg, "strada_decref(__sq_ov); ");
+            }
+        }
+        emit($cg, "} else { ");
     }
     emit($cg, "double __sq_pv = strada_to_num(__sq_p); ");
     emit($cg, "double __sq_cv = strada_sq_num_val(__sq_p, (int64_t)" . $char_code . ", " . $sq_num . "); ");
@@ -4162,17 +4260,33 @@ func emit_sq_char_cmp(scalar $cg, scalar $left, scalar $right, str $op, int $wra
     }
     if ($op eq "<=>") {
         emit($cg, "int64_t __sq_cmp = 0; if (__sq_l < __sq_r) { __sq_cmp = -1; } else if (__sq_l > __sq_r) { __sq_cmp = 1; } ");
-        if ($wrap_sv == 1) {
-            emit($cg, "strada_new_int(__sq_cmp); })");
+        if ($may_ov == 1) {
+            if ($wrap_sv == 1) {
+                emit($cg, "__sq_res = strada_new_int(__sq_cmp); } __sq_res; })");
+            } else {
+                emit($cg, "__sq_res = (int)(__sq_cmp != 0); } __sq_res; })");
+            }
         } else {
-            emit($cg, "(int)(__sq_cmp != 0); })");
+            if ($wrap_sv == 1) {
+                emit($cg, "strada_new_int(__sq_cmp); })");
+            } else {
+                emit($cg, "(int)(__sq_cmp != 0); })");
+            }
         }
     } else {
         emit($cg, "int __sq_cmp = (__sq_l " . $op . " __sq_r) ? 1 : 0; ");
-        if ($wrap_sv == 1) {
-            emit($cg, "strada_new_int((int64_t)__sq_cmp); })");
+        if ($may_ov == 1) {
+            if ($wrap_sv == 1) {
+                emit($cg, "__sq_res = strada_new_int((int64_t)__sq_cmp); } __sq_res; })");
+            } else {
+                emit($cg, "__sq_res = __sq_cmp; } __sq_res; })");
+            }
         } else {
-            emit($cg, "__sq_cmp; })");
+            if ($wrap_sv == 1) {
+                emit($cg, "strada_new_int((int64_t)__sq_cmp); })");
+            } else {
+                emit($cg, "__sq_cmp; })");
+            }
         }
     }
 }
@@ -5440,11 +5554,11 @@ func emit_condition(scalar $cg, scalar $expr) void {
 
         # Comparison operators: emit raw C comparison ONLY when not overloaded
         if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
+            if (has_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}) == 1) {
+                emit_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}, $op, 0);
+                return;
+            }
             if ($cg->{"has_overloads"} == 0 || check_overload_binary($cg, $expr->{"left"}, $expr->{"right"}, $op) == 0) {
-                if (has_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}) == 1) {
-                    emit_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}, $op, 0);
-                    return;
-                }
                 # Use int64_t path when both sides are int-typed (preserves full 64-bit precision!)
                 if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
                     emit($cg, "(");

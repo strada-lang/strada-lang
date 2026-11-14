@@ -225,6 +225,8 @@ func ast_new_program() scalar {
     # Operator overloading: overloads->{package}->{op} = method_name
     my hash %overloads = ();
     $node->{"overloads"} = \%overloads;
+    my array @overload_pkg_list = ();
+    $node->{"overload_pkg_list"} = \@overload_pkg_list;
     $node->{"has_overloads"} = 0;
     my hash %overloaded_ops = ();
     $node->{"overloaded_ops"} = \%overloaded_ops;

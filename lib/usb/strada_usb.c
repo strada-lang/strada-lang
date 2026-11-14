@@ -487,14 +487,14 @@ StradaValue* strada_usb_get_device_descriptor(StradaValue *handle_sv) {
 /* Get string descriptor */
 StradaValue* strada_usb_get_string_descriptor(StradaValue *handle_sv, StradaValue *index_sv) {
     libusb_device_handle *handle = (libusb_device_handle *)(intptr_t)strada_to_int(handle_sv);
-    int index = (int)strada_to_int(index_sv);
+    int64_t index = strada_to_int(index_sv);
 
-    if (!handle || index == 0) {
+    if (!handle || index <= 0 || index > 255) {
         return strada_new_str("");
     }
 
     unsigned char buffer[256];
-    int ret = libusb_get_string_descriptor_ascii(handle, index, buffer, sizeof(buffer));
+    int ret = libusb_get_string_descriptor_ascii(handle, (uint8_t)index, buffer, sizeof(buffer));
 
     if (ret < 0) {
         return strada_new_str("");
@@ -1005,9 +1005,9 @@ int strada_usb_desc_serial_idx_raw(void) { return desc_cache_valid ? desc_cache.
 
 /* Get string descriptor */
 char* strada_usb_get_string_descriptor_raw(void *handle, int idx) {
-    if (!handle || idx == 0) return strdup("");
+    if (!handle || idx <= 0 || idx > 255) return strdup("");
     unsigned char buffer[256];
-    int ret = libusb_get_string_descriptor_ascii((libusb_device_handle *)handle, idx, buffer, sizeof(buffer));
+    int ret = libusb_get_string_descriptor_ascii((libusb_device_handle *)handle, (uint8_t)idx, buffer, sizeof(buffer));
     if (ret < 0) return strdup("");
     return strdup((char *)buffer);
 }

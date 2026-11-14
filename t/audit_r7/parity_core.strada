@@ -1,0 +1,246 @@
+# Cycle 7 compiled / tree-walk / bytecode --vm parity suite (Bugs #15, #22-#36)
+
+our str $r7p_mod = "";
+func append_mod(str $s) void { $r7p_mod = $r7p_mod . $s; }
+
+package R7PTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["c", "a", "b"]);
+    return bless(\%self, "R7PTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void { }
+
+package R7PTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("order" => ["k1", "k2"], "d" => {"k1" => "v1", "k2" => "v2"}, "idx" => 0);
+    return bless(\%self, "R7PTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void {
+    if (!exists($self->{"d"}->{$k})) {
+        push(@{$self->{"order"}}, $k);
+    }
+    $self->{"d"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $old;
+}
+func FIRSTKEY(scalar $self) scalar {
+    $self->{"idx"} = 0;
+    my scalar $ord = $self->{"order"};
+    while ($self->{"idx"} < size(@$ord)) {
+        my str $k = $ord->[$self->{"idx"}];
+        $self->{"idx"} = $self->{"idx"} + 1;
+        if (exists($self->{"d"}->{$k})) { return $k; }
+    }
+    return undef;
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my scalar $ord = $self->{"order"};
+    while ($self->{"idx"} < size(@$ord)) {
+        my str $k = $ord->[$self->{"idx"}];
+        $self->{"idx"} = $self->{"idx"} + 1;
+        if (exists($self->{"d"}->{$k})) { return $k; }
+    }
+    return undef;
+}
+
+package R7PTieHash1;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("k" => "only", "v" => "oval", "done" => 0);
+    return bless(\%self, "R7PTieHash1");
+}
+func FETCH(scalar $self, str $k) scalar {
+    return ($k eq $self->{"k"}) ? $self->{"v"} : undef;
+}
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"v"} = $v; }
+func EXISTS(scalar $self, str $k) int { return ($k eq $self->{"k"}) ? 1 : 0; }
+func FIRSTKEY(scalar $self) scalar { $self->{"done"} = 1; return $self->{"k"}; }
+func NEXTKEY(scalar $self, str $last) scalar { return undef; }
+
+package R7PTieScalar;
+our int $fcount = 0;
+our int $scount = 0;
+func reset_fcount() void { $fcount = 0; }
+func get_fcount() int { return $fcount; }
+func TIESCALAR(str $cls, scalar $init) scalar {
+    my hash %self = ("v" => $init);
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar {
+    $fcount = $fcount + 1;
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void {
+    $scount = $scount + 1;
+    $self->{"v"} = $v;
+}
+
+package R7PInline2;
+has ro str $name (required);
+has ro int $age = 21;
+
+package R7PDynBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R7PDynBase");
+}
+func m(scalar $self, str $s) str {
+    return "base:" . $s . ":" . $self->{"v"};
+}
+func join_args(scalar $self, str ...@args) str {
+    return join("+", @args);
+}
+
+package R7PDynChild;
+extends R7PDynBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R7PDynChild");
+}
+before "m" func(scalar $self, str $s) void {
+    main::append_mod("B");
+};
+after "m" func(scalar $self, str $s) void {
+    main::append_mod("A");
+};
+
+package R7PInhBase;
+func new() scalar { my hash %s = (); return bless(\%s, "R7PInhBase"); }
+func who(scalar $self) str { return "BASE"; }
+
+package R7PInhTop;
+func new() scalar { my hash %s = (); return bless(\%s, "R7PInhTop"); }
+func who(scalar $self) str { return "TOP"; }
+
+package R7PInhMid;
+func new() scalar { my hash %s = (); return bless(\%s, "R7PInhMid"); }
+
+package R7PInhGrand;
+func new() scalar { my hash %s = (); return bless(\%s, "R7PInhGrand"); }
+
+package main;
+
+func p_variadic(str ...@args) str {
+    return join(",", @args);
+}
+
+func main() int {
+    # R7P01: Bug #22 (64-bit ints outside 63-bit tagged range) & Bug #23 (shift bounds)
+    my int $big = 4611686018427387904; # 2^62
+    my int $b1 = $big + 1;
+    my int $b2 = $big + 2;
+    my int $negb = -$big - 5;
+    my int $truth = ($big * 2) ? 1 : 0; # INT64_MIN != 0 -> 1
+    my int $sh63 = (1 << 63) < 0 ? 1 : 0;
+    my int $sh64 = (1 << 64);
+    my int $shneg = (1 << -1);
+    my int $rsh64 = (100 >> 64);
+    my int $rshneg = (100 >> -1);
+    say("R7P01:" . ($big + 5) . "," . $negb . "|" . ($b2 > $b1) . "," . ($b1 == $b2) . "," . ($b2 <=> $b1) . "," . $truth . "|" . $sh63 . "," . $sh64 . "," . $shneg . "," . $rsh64 . "," . $rshneg);
+
+    # R7P02: Bug #24 (64-bit array index), #25 (math::floor/ceil), #26 (div/mod 0 throws)
+    my array @arr24 = ("z");
+    my int $idx64 = 4294967296;
+    my scalar $at64 = $arr24[$idx64];
+    my int $fl_t = (typeof(math::floor(1.5)) eq "num") ? 1 : 0;
+    my int $ce_t = (typeof(math::ceil(1.5)) eq "num") ? 1 : 0;
+    my int $fl_big = (math::floor(1e20) > 1e19) ? 1 : 0;
+    my int $d0 = 0;
+    my int $m0 = 0;
+    try { my scalar $x = 1 / 0; } catch ($e) { $d0 = 1; }
+    try { my int $y = 1 % 0; } catch ($e) { $m0 = 1; }
+    my int $imin = -9223372036854775807 - 1;
+    my int $mod_min = $imin % -1;
+    say("R7P02:" . defined($at64) . "," . $arr24[0] . "|" . math::floor(1.8) . "," . math::ceil(1.2) . "," . $fl_t . "," . $ce_t . "," . $fl_big . "|" . $d0 . "," . $m0 . "," . $mod_min);
+
+    # R7P03: Bug #27 (reverse on int, undef, array, tied array, hash, tied hash)
+    my array @r_arr = ("x", "y");
+    my array @r_rev = reverse(@r_arr);
+    my array @ta3 = ();
+    tie(@ta3, "R7PTieArr");
+    my array @r_tarev = reverse(@ta3);
+    my hash %h1 = ("single" => "sval");
+    my array @r_h1 = reverse(%h1);
+    my hash %th1 = ();
+    tie(%th1, "R7PTieHash1");
+    my array @r_th1 = reverse(%th1);
+    say("R7P03:" . reverse(12345) . "|" . length(reverse(undef)) . "|" . join(",", @r_rev) . "|" . join(",", @r_tarev) . "|" . join(":", @r_h1) . "|" . join(":", @r_th1));
+
+    # R7P04: Bug #29 (sort { return }), Bug #30 (sort capturing outer lexical), Bug #31 (nested map/grep)
+    my array @nums = (3, 1, 4, 2);
+    my array @s_ret = sort { return $a <=> $b; } @nums;
+    my int $dir = -1;
+    my array @s_cap = sort { $dir * ($a <=> $b); } @nums;
+    my array @nested_m = map {
+        my array @g = grep { $_ > 1; } (0, 2);
+        $_ . ":" . join(",", @g);
+    } (10, 20);
+    my array @nested_g = grep {
+        my array @m = map { $_ * 2; } (1);
+        $_ > 5;
+    } (3, 7);
+    say("R7P04:" . join(",", @s_ret) . "|" . join(",", @s_cap) . "|" . join(";", @nested_m) . "|" . join(",", @nested_g));
+
+    # R7P05: Bug #32 (tied array in sort & spreads)
+    my array @ta5 = ();
+    tie(@ta5, "R7PTieArr");
+    my array @ta_desc = sort { $b cmp $a; } @ta5;
+    my array @ta_def = sort(@ta5);
+    my scalar $dc5 = R7PDynChild::new(5);
+    my scalar $cl5 = func(str $x, str $y, str $z) str { return $x . "-" . $y . "-" . $z; };
+    say("R7P05:" . join(",", @ta_desc) . "|" . join(",", @ta_def) . "|" . p_variadic(@ta5) . "|" . p_variadic(...@ta5) . "|" . $dc5->join_args(...@ta5) . "|" . $cl5->(...@ta5));
+
+    # R7P06: Bug #33 (tied hash keys, values, each)
+    my hash %th6 = ();
+    tie(%th6, "R7PTieHash");
+    my array @tk = keys(%th6);
+    my array @tv = values(%th6);
+    my array @te = ();
+    while (1) {
+        my array @kv = each(%th6);
+        if (size(@kv) == 0) { last; }
+        push(@te, $kv[0] . "=" . $kv[1]);
+    }
+    say("R7P06:" . join(",", @tk) . "|" . join(",", @tv) . "|" . join(",", @te));
+
+    # R7P07: Bug #34 ($$tied_scalar_ref & single-FETCH postfix $ts++)
+    my scalar $ts = "";
+    tie($ts, "R7PTieScalar", 10);
+    my scalar $tr = \$ts;
+    my int $dr_v = $$tr;
+    R7PTieScalar::reset_fcount();
+    my int $p1 = $ts++;
+    my int $fc1 = R7PTieScalar::get_fcount();
+    my int $p2 = $ts--;
+    R7PTieScalar::reset_fcount();
+    my int $p3 = $$tr++;
+    my int $fc2 = R7PTieScalar::get_fcount();
+    say("R7P07:" . $dr_v . "|" . $p1 . "," . $fc1 . "," . $p2 . "|" . $p3 . "," . $fc2 . "," . $ts);
+
+    # R7P08: Bug #15 (2-attr inline ctor), #35 (dynamic method call + modifiers/isa/can), #36 (inherit invalidation)
+    my scalar $in2 = R7PInline2::new("name" => "Bob");
+    my str $dm = "m";
+    my str $isa_m = "isa";
+    my str $can_m = "can";
+    $r7p_mod = "";
+    my str $dm_res = $dc5->$dm("hi");
+    my int $dm_isa = $dc5->$isa_m("R7PDynBase");
+    my int $dm_can = defined($dc5->$can_m("m")) ? 1 : 0;
+    inherit("R7PInhGrand", "R7PInhMid");
+    inherit("R7PInhGrand", "R7PInhTop");
+    my scalar $ic = R7PInhGrand::new();
+    my str $who1 = $ic->who();
+    inherit("R7PInhMid", "R7PInhBase");
+    my str $who2 = $ic->who();
+    say("R7P08:" . is_ref($in2) . "," . is_refto($in2, "HASH") . "|" . $dm_res . "," . $r7p_mod . "," . $dm_isa . "," . $dm_can . "|" . $who1 . "->" . $who2);
+
+    say("R7_PARITY_OK");
+    return 0;
+}

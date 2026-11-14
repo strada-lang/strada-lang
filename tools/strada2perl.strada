@@ -601,14 +601,10 @@ func convert_line(str $line) str {
     }
 
     # --- ::func() and .::func() -> func() (current-package shorthand) ---
-    $result = replace($result, "\\.::([a-zA-Z_])", "$1");
-    if (match($result, "([\\s(=,;])::([a-zA-Z_])")) {
-        $result = replace($result, "([\\s(=,;])::([a-zA-Z_])", "$1$2");
-    }
+    $result =~ s/\.::([a-zA-Z_])/$1/g;
+    $result =~ s/([\s(=,;])::([a-zA-Z_])/$1$2/g;
     # Leading :: at start of line
-    if (match($result, "^(\\s*)::([a-zA-Z_])")) {
-        $result = replace($result, "^(\\s*)::([a-zA-Z_])", "$1$2");
-    }
+    $result =~ s/^(\s*)::([a-zA-Z_])/$1$2/;
 
     # --- say/print to filehandle: say($fh, "msg") -> say $fh "msg" ---
     if (match($result, "\\bsay\\([$]\\w+,\\s*")) {

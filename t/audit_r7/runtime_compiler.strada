@@ -1,0 +1,597 @@
+# Cycle 7 Audit regression tests: Bugs #1-#21 (Runtime/GC + Compiler/CodeGen)
+
+our int $g_fail = 0;
+
+our scalar $r7_hash_ref = undef;
+our scalar $r7_arr_ref = undef;
+our str $r7_our_s = "init";
+our scalar $r7_dref_holder = undef;
+our int $r7_destroy_count = 0;
+our int $r7_weak_cell_dead = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func inc_destroy(int $n) void { $r7_destroy_count = $r7_destroy_count + $n; }
+func inc_weak_dead() void { $r7_weak_cell_dead = $r7_weak_cell_dead + 1; }
+func get_hash_ref() scalar { return $r7_hash_ref; }
+func get_arr_ref() scalar { return $r7_arr_ref; }
+func get_our_s() str { return $r7_our_s; }
+func untie_our_s() void { untie($r7_our_s); }
+func clear_dref_holder() void { $r7_dref_holder = undef; }
+
+# ============================================================
+# Helpers for DESTROY unwind / re-entrant mutation tests (#1-#6)
+# ============================================================
+package R7ThrowDestroy;
+func new(str $msg) scalar {
+    my hash %s = ("msg" => $msg);
+    return bless(\%s, "R7ThrowDestroy");
+}
+func DESTROY(scalar $self) void {
+    main::inc_destroy(1);
+    die($self->{"msg"});
+}
+
+package R7DirectHashDestroy;
+has ro int $id (required);
+has ro int $tag (required);
+func DESTROY(scalar $self) void {
+    main::inc_destroy(1);
+    die("autoviv_" . $self->{"id"});
+}
+
+package R7RehashDestroy;
+func new() scalar {
+    my hash %s = ("ok" => 1);
+    return bless(\%s, "R7RehashDestroy");
+}
+func DESTROY(scalar $self) void {
+    my scalar $hr = main::get_hash_ref();
+    if (defined($hr)) {
+        my int $i = 0;
+        while ($i < 200) {
+            $hr->{"grow_" . $i} = $i;
+            $i = $i + 1;
+        }
+    }
+}
+
+package R7ArrMutDestroy;
+func new() scalar {
+    my hash %s = ("a" => 1);
+    return bless(\%s, "R7ArrMutDestroy");
+}
+func DESTROY(scalar $self) void {
+    my scalar $ar = main::get_arr_ref();
+    if (defined($ar)) {
+        push(@{$ar}, "extra");
+    }
+    die("arr_destroy_throw");
+}
+
+package R7UntieOnDestroy;
+func new() scalar {
+    my hash %s = ("u" => 1);
+    return bless(\%s, "R7UntieOnDestroy");
+}
+func DESTROY(scalar $self) void {
+    main::untie_our_s();
+}
+
+package R7TieScalar;
+func TIESCALAR(str $cls, scalar $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar {
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void {
+    $self->{"v"} = $v;
+}
+
+package R7MutexDestroy;
+func new() scalar {
+    my hash %s = ("x" => 1);
+    return bless(\%s, "R7MutexDestroy");
+}
+func DESTROY(scalar $self) void {
+    my str $cur = "" . main::get_our_s();
+    main::inc_destroy(length($cur));
+}
+
+package R7ClearHolderDestroy;
+func new() scalar {
+    my hash %s = ("c" => 1);
+    return bless(\%s, "R7ClearHolderDestroy");
+}
+func DESTROY(scalar $self) void {
+    main::clear_dref_holder();
+}
+
+package R7CellTarget;
+func new() scalar {
+    my hash %s = ("v" => 1);
+    return bless(\%s, "R7CellTarget");
+}
+func DESTROY(scalar $self) void {
+    main::inc_weak_dead();
+}
+
+package R7ThrowStrObj;
+func new() scalar {
+    my hash %s = ("s" => 1);
+    return bless(\%s, "R7ThrowStrObj");
+}
+func to_str(scalar $self, scalar $o, int $r) str {
+    die("stringify_throw");
+    return "x";
+}
+use overload '""' => "to_str";
+
+package R7LongPkgName123456789012345678901234567890123456789012345678901234567890;
+func new() scalar {
+    my hash %s = ("k" => 1);
+    return bless(\%s, "R7LongPkgName123456789012345678901234567890123456789012345678901234567890");
+}
+
+package R7TieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %s = ("a" => ["ta0", "ta1", "ta2"]);
+    return bless(\%s, "R7TieArr");
+}
+func FETCHSIZE(scalar $self) int {
+    return size(@{$self->{"a"}});
+}
+func FETCH(scalar $self, int $i) scalar {
+    return $self->{"a"}->[$i];
+}
+func STORE(scalar $self, int $i, scalar $v) void {
+    $self->{"a"}->[$i] = $v;
+}
+func STORESIZE(scalar $self, int $n) void {
+}
+
+package R7TieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("d" => {"k1" => "v1"});
+    return bless(\%s, "R7TieHash");
+}
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"d"}->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    $self->{"d"}->{$k} = $v;
+}
+
+package R7Person2;
+has ro str $name (required);
+has ro int $age = 30;
+
+package R7Person3;
+has ro str $name (required);
+has ro int $age = 30;
+has ro str $role = "dev";
+
+package R7CmpOver;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R7CmpOver");
+}
+func cmp_op(scalar $self, scalar $other, int $rev) int {
+    my int $a = $rev ? ($other + 0) : $self->{"v"};
+    my int $b = $rev ? $self->{"v"} : ($other + 0);
+    return $a <=> $b;
+}
+func num_eq(scalar $self, scalar $other, int $rev) int {
+    return $self->{"v"} == ($other + 0) ? 1 : 0;
+}
+use overload "<=>" => "cmp_op", "==" => "num_eq";
+
+package _R7Hidden;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "_R7Hidden");
+}
+func ping(scalar $self) str {
+    return "hidden_" . $self->{"v"};
+}
+
+package R7OvBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R7OvBase");
+}
+func get_v(scalar $self) int {
+    return $self->{"v"};
+}
+
+package R7OvOnlyChild;
+extends R7OvBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R7OvOnlyChild");
+}
+func to_str(scalar $self, scalar $o, int $r) str {
+    return "OvChild:" . $self->{"v"};
+}
+use overload '""' => "to_str";
+
+package R7ModZero;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R7ModZero");
+}
+func ping() str {
+    return "base_ping";
+}
+func get_v(scalar $self) int {
+    return $self->{"v"};
+}
+before "ping" func() void {
+    main::inc_destroy(10);
+};
+
+package R7SuperBase;
+func new() scalar {
+    my hash %s = ("x" => 1);
+    return bless(\%s, "R7SuperBase");
+}
+func collect(scalar $self, str ...@args) str {
+    return join(",", @args);
+}
+
+package R7SuperChild;
+extends R7SuperBase;
+func new() scalar {
+    my hash %s = ("x" => 1);
+    return bless(\%s, "R7SuperChild");
+}
+func collect(scalar $self, scalar $ta) str {
+    return SUPER::collect($self, ...@$ta);
+}
+func mcall(scalar $self, str ...@args) str {
+    return join("|", @args);
+}
+
+package main;
+
+func take_variadic(str ...@args) str {
+    return join(":", @args);
+}
+
+func throw_key() str {
+    die("key_threw");
+    return "k";
+}
+
+func throw_idx() int {
+    die("idx_threw");
+    return 0;
+}
+
+async func r7_fail_async() int {
+    throw "async_fail";
+    return 0;
+}
+
+func ret_slot_helper(int $sel, scalar $sref) scalar {
+    if ($sel == 0) {
+        return $sref;
+    }
+    my array @arr = ("p", "q");
+    return \@arr;
+}
+
+func test_runtime_bugs_1_to_14() void {
+    # Bug #1: throwing DESTROY on void delete & local $h{k}
+    my hash %h1 = ();
+    $h1{"k1"} = R7ThrowDestroy::new("del_void");
+    my int $caught = 0;
+    try {
+        delete($h1{"k1"});
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && !exists($h1{"k1"}), "Bug #1 void literal hash delete after DESTROY throw");
+
+    my str $dk = "k2";
+    $h1{$dk} = R7ThrowDestroy::new("del_sv");
+    $caught = 0;
+    try {
+        delete($h1{$dk});
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && !exists($h1{$dk}), "Bug #1 void sv hash delete after DESTROY throw");
+
+    $h1{"pfx_3"} = R7ThrowDestroy::new("del_concat");
+    my str $sfx = "3";
+    $caught = 0;
+    try {
+        delete($h1{"pfx_" . $sfx});
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && !exists($h1{"pfx_3"}), "Bug #1 void concat hash delete after DESTROY throw");
+
+    $h1{"loc"} = "orig";
+    $caught = 0;
+    try {
+        local $h1{"loc"} = R7ThrowDestroy::new("del_loc");
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && exists($h1{"loc"}) && $h1{"loc"} eq "orig", "Bug #1 local hash restore keeps key cleanly on throw");
+
+    $caught = 0;
+    try {
+        local $h1{"loc_new"} = R7ThrowDestroy::new("del_loc2");
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && !exists($h1{"loc_new"}), "Bug #1 local hash restore deletes new key cleanly on throw");
+
+    # Bug #2: re-entrant hash growth during DESTROY on overwrite & array overwrite throw
+    my hash %hgrow = ();
+    $r7_hash_ref = \%hgrow;
+    $hgrow{"target"} = R7RehashDestroy::new();
+    $hgrow{"target"} = "replaced";
+    $r7_hash_ref = undef;
+    check($hgrow{"target"} eq "replaced" && exists($hgrow{"grow_199"}), "Bug #2 re-entrant hash growth during overwrite DESTROY");
+
+    my array @agrow = (R7ArrMutDestroy::new(), "keep");
+    $r7_arr_ref = \@agrow;
+    $caught = 0;
+    try {
+        $agrow[0] = "updated";
+    } catch ($e) {
+        $caught = 1;
+    }
+    $r7_arr_ref = undef;
+    check($caught == 1 && $agrow[0] eq "updated" && size(@agrow) == 3, "Bug #2 array overwrite DESTROY throws cleanly");
+
+    # Bug #3: strada_tie_global_scalar when previous DESTROY unties
+    $r7_our_s = R7UntieOnDestroy::new();
+    my scalar $tied_ret = tie($r7_our_s, "R7TieScalar", "tval");
+    check(defined($tied_ret) && $r7_our_s eq "tval", "Bug #3 tie global scalar survives DESTROY untie");
+    untie($r7_our_s);
+
+    # Bug #4: strada_global_weaken_cstr with active threading + tombstone lookup
+    my scalar $mt = R7MutexDestroy::new();
+    $r7_our_s = $mt;
+    $mt = undef;
+    my scalar $th = thread::create(func() int { return 1; });
+    thread::join($th);
+    my int $before_d = $r7_destroy_count;
+    core::weaken($r7_our_s);
+    check(!defined($r7_our_s) && $r7_destroy_count > $before_d, "Bug #4 weaken global under threading triggers DESTROY without deadlock");
+    $r7_our_s = "init";
+
+    # Tombstone lookup in weaken hash entry
+    my hash %tomb = ("d1" => 1, "d2" => 2, "keep" => R7MutexDestroy::new());
+    delete($tomb{"d1"});
+    delete($tomb{"d2"});
+    core::weaken($tomb{"keep"});
+    check(!defined($tomb{"keep"}), "Bug #4 weaken hash entry finds slot across tombstones");
+
+    # Bug #5: global set with throwing DESTROY
+    $r7_our_s = R7ThrowDestroy::new("our_set");
+    $caught = 0;
+    try {
+        $r7_our_s = "after_our_throw";
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && $r7_our_s eq "after_our_throw", "Bug #5 global set after DESTROY throw");
+
+    # Bug #6: deref_set when old referent's DESTROY clears holder or throws
+    $r7_dref_holder = R7ClearHolderDestroy::new();
+    my scalar $dr = \$r7_dref_holder;
+    my scalar $ds_out = ($$dr = "fresh_val");
+    check($ds_out eq "fresh_val", "Bug #6 deref_set survives DESTROY clearing holder");
+
+    my scalar $thr_cell = R7ThrowDestroy::new("dref_throw");
+    my scalar $thr_ref = \$thr_cell;
+    $caught = 0;
+    try {
+        $$thr_ref = "safe_new";
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && $thr_cell eq "safe_new", "Bug #6 deref_set slot-ref throw preserves new value");
+
+    # Bug #7: core::weaken(\$captured) & core::weaken(\$our_var)
+    $r7_weak_cell_dead = 0;
+    my scalar $wcap = undef;
+    {
+        my scalar $cap = R7CellTarget::new();
+        my scalar $fn = func() scalar { return $cap; };
+        $wcap = \$cap;
+        core::weaken($wcap);
+        check(defined($$wcap) && defined($wcap), "Bug #7 weak cell ref alive while strong cell exists");
+        $cap = undef;
+        check(!defined($$wcap) && $r7_weak_cell_dead == 1, "Bug #7 weak cell ref clears on target reassignment");
+        my scalar $dummy = $fn->();
+    }
+    check(!defined($wcap) && $r7_weak_cell_dead == 1, "Bug #7 weak cell ref undefs when PerlaCell freed");
+
+    {
+        $r7_weak_cell_dead = 0;
+        my scalar $keep = R7CellTarget::new();
+        $r7_our_s = $keep;
+        my scalar $wour = \$r7_our_s;
+        core::weaken($wour);
+        core::weaken($r7_our_s);
+        check(defined($r7_our_s) && defined($$wour), "Bug #7 weak cell ref over our var alive while $keep holds it");
+        $keep = undef;
+        check(!defined($r7_our_s) && !defined($$wour) && $r7_weak_cell_dead == 1, "Bug #7 weak cell ref over our var clears when strong ref drops");
+        $r7_our_s = "init";
+    }
+
+    # Bug #9: build_concat_key_buf with STRADA_UV_FLAG and >63-byte blessed pkg name
+    my int $imin = -9223372036854775807 - 1;
+    my scalar $uv = $imin / -1;
+    my hash %uvh = ();
+    $uvh{"uv_" . $uv} = "ok_uv";
+    check($uvh{"uv_9223372036854775808"} eq "ok_uv", "Bug #9 concat hash key formats STRADA_UV_FLAG unsigned");
+
+    my scalar $longobj = R7LongPkgName123456789012345678901234567890123456789012345678901234567890::new();
+    my hash %lh = ();
+    $lh{"p_" . $longobj} = "ok_long";
+    check(exists($lh{"p_" . $longobj}) && length("" . $longobj) > 70, "Bug #9 concat key does not truncate >63B blessed string");
+
+    # Bug #10: concat on tied array & tied hash
+    my array @ta10 = ();
+    tie(@ta10, "R7TieArr");
+    my hash %th10 = ();
+    tie(%th10, "R7TieHash");
+    my str $cat_a = "n=" . @ta10;
+    my str $cat_h = "h=" . %th10;
+    my str $cat_mh = "a=" . %th10 . ":b";
+    my str $cat_ip = "p=";
+    $cat_ip .= @ta10;
+    check($cat_a eq "n=3", "Bug #10 concat tied array invokes FETCHSIZE got=" . $cat_a);
+    check(index($cat_h, "h=HASH(") == 0, "Bug #10 concat tied hash formats HASH(...) got=" . $cat_h);
+    check(index($cat_mh, "a=HASH(") == 0 && index($cat_mh, ":b") > 7, "Bug #10 multi concat hash formats HASH(...) got=" . $cat_mh);
+    check($cat_ip eq "p=3", "Bug #10 inplace concat tied array invokes FETCHSIZE got=" . $cat_ip);
+
+    # Bug #11: core::vec_set on array ref & ASCII flag clear on >127 byte
+    my scalar $va = [1, 2, 3];
+    core::vec_set($va, 0, 8, 90); # 'Z'
+    check(substr($va, 0, 6) eq "ZRRAY(", "Bug #11 core::vec_set on non-str array ref");
+
+    my str $vu = "abc";
+    utf8::decode($vu);
+    core::vec_set($vu, 0, 8, 195); # 0xC3
+    core::vec_set($vu, 1, 8, 169); # 0xA9 ('e' acute in UTF-8)
+    check(length($vu) == 2 && core::byte_length($vu) == 3, "Bug #11 vec_set clears STRADA_ASCII_FLAG on UTF-8 string");
+
+    # Bug #12: UTF-8 index with embedded NUL
+    my str $u_nul = "é\0abc";
+    utf8::decode($u_nul);
+    my int $uidx = index($u_nul, "abc");
+    check($uidx == 2, "Bug #12 index on UTF-8 with embedded NUL got=" . $uidx);
+
+    # Bug #13: substr_bytes with INT64_MAX length
+    my str $sb = core::byte_substr("abcdef", 1, 9223372036854775807);
+    check($sb eq "bcdef", "Bug #13 substr_bytes with INT64_MAX length");
+
+    # Bug #14: s///ge throwing stringify inside try/catch
+    my str $rstr = "hello";
+    my scalar $tobj = R7ThrowStrObj::new();
+    $caught = 0;
+    try {
+        $rstr =~ s/l/$tobj/ge;
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && $rstr eq "hello", "Bug #14 s///ge throw leaves original string intact");
+}
+
+func test_compiler_bugs_15_to_20() void {
+    # Bug #15: is_ref and is_refto on 2-attr and 3-attr inline constructors
+    my scalar $p2 = R7Person2::new("name" => "Alice");
+    my scalar $p3 = R7Person3::new("name" => "Bob");
+    check(is_ref($p2) == 1 && is_refto($p2, "HASH") == 1, "Bug #15 2-attr inline ctor is_ref/is_refto");
+    check(is_ref($p3) == 1 && is_refto($p3, "HASH") == 1, "Bug #15 3-attr inline ctor is_ref/is_refto");
+
+    # Bug #16: single-char 'x' comparison vs overload & plain scalar
+    my scalar $c5 = R7CmpOver::new(5);
+    check(('5' == $c5) == 1, "Bug #16 '5' == overloaded obj invokes == overload");
+    check(($c5 <=> '5') == 0 && ('4' <=> $c5) == -1 && ('6' <=> $c5) == 1, "Bug #16 <=> with 'x' invokes <=> overload");
+    check(('5' == '5') == 1 && ('a' < 'b') == 1, "Bug #16 'x' == 'x' & 'a' < 'b' plain comparisons");
+    my int $num_a = 97;
+    check(('a' == $num_a) == 1, "Bug #16 'a' == 97");
+
+    # Bug #17: tied array spread & flattening everywhere
+    my array @ta = ();
+    tie(@ta, "R7TieArr");
+    my array @list_ctx = ("head", @ta, "tail");
+    check(join(",", @list_ctx) eq "head,ta0,ta1,ta2,tail", "Bug #17 (@ta) spread");
+    my scalar $aref = [@ta];
+    check(join(",", @$aref) eq "ta0,ta1,ta2", "Bug #17 [ @ta ] spread");
+    my array @one = ();
+    push(@one, 1);
+    my array @mapped = map { @ta; } @one;
+    check(join(",", @mapped) eq "ta0,ta1,ta2", "Bug #17 map flattening @ta");
+    my array @sp_dst = ("a", "b", "c");
+    splice(@sp_dst, 1, 1, @ta);
+    check(join(",", @sp_dst) eq "a,ta0,ta1,ta2,c", "Bug #17 splice with tied array");
+    check(take_variadic(@ta) eq "ta0:ta1:ta2" && take_variadic(...@ta) eq "ta0:ta1:ta2", "Bug #17 variadic func spread @ta");
+    my scalar $sc = R7SuperChild::new();
+    check($sc->mcall(...@ta) eq "ta0|ta1|ta2", "Bug #17 method spread ...@ta");
+    my scalar $cl = func(str $x, str $y, str $z) str { return $x . "+" . $y . "+" . $z; };
+    check($cl->(...@ta) eq "ta0+ta1+ta2", "Bug #17 closure spread ...@ta");
+    check($sc->collect(\@ta) eq "ta0,ta1,ta2", "Bug #17 SUPER:: spread");
+
+    # Bug #18: map { \$x } and my array @w = ret_slot()
+    my int $vx = 42;
+    my array @refs = map { \$vx; } (1, 2);
+    check(size(@refs) == 2 && ${$refs[0]} == 42 && ${$refs[1]} == 42, "Bug #18 map { \\$x } does not flatten scalar ref");
+    my int $vslot = 77;
+    my array @wslot = ret_slot_helper(0, \$vslot);
+    check(size(@wslot) == 1 && ${$wslot[0]} == 77, "Bug #18 my array @w = ret_slot() keeps scalar ref as element");
+    my array @warr = ret_slot_helper(1, \$vslot);
+    check(size(@warr) == 2 && $warr[1] eq "q", "Bug #18 my array @w = ret_arr() unpacks array ref");
+
+    # Bug #19: _Hidden pkg, Child with overload-only, 0-param modifier
+    my scalar $hd = _R7Hidden::new(88);
+    check($hd->ping() eq "hidden_88", "Bug #19 _Hidden package OOP method");
+    my scalar $ovc = R7OvOnlyChild::new(9);
+    check(("" . $ovc) eq "OvChild:9" && $ovc->get_v() == 9, "Bug #19 overload-only child package + inherited method");
+    $r7_destroy_count = 0;
+    my scalar $mz = R7ModZero::new(1);
+    check($mz->ping() eq "base_ping" && $r7_destroy_count == 10, "Bug #19 0-param method + 0-param modifier");
+
+    # Bug #20: await failed future & throwing index/key/inherit/isa in try/catch
+    my int $caught = 0;
+    try {
+        my int $v = await r7_fail_async();
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1, "Bug #20 await rejected future throws cleanly");
+
+    my array @tmpa = ("x", "y");
+    my hash %tmph = ("k" => "v");
+    my scalar $tmpar = \@tmpa;
+    my scalar $tmphr = \%tmph;
+    my int $ok20 = 0;
+    try { my scalar $x = $tmpa[throw_idx()]; } catch ($e) { $ok20 = $ok20 + 1; }
+    try { my scalar $x = $tmpar->[throw_idx()]; } catch ($e) { $ok20 = $ok20 + 1; }
+    try { my scalar $x = $tmph{throw_key()}; } catch ($e) { $ok20 = $ok20 + 1; }
+    try { my scalar $x = $tmphr->{throw_key()}; } catch ($e) { $ok20 = $ok20 + 1; }
+    try { inherit(throw_key(), "R7OvBase"); } catch ($e) { $ok20 = $ok20 + 1; }
+    try { my int $r = isa($ovc, throw_key()); } catch ($e) { $ok20 = $ok20 + 1; }
+    check($ok20 == 6, "Bug #20 throwing subexpressions in subscript/hash/inherit/isa");
+}
+
+func main() int {
+    # Construct R7DirectHashDestroy before any try in main() so cleanup_push_useful is 0
+    # and codegen emits strada_new_blessed_2attr_hv_take (directly-blessed STRADA_HASH).
+    my hash %avh = ();
+    my str $avk = "slot";
+    $avh{$avk} = R7DirectHashDestroy::new("id" => 7, "tag" => 1);
+    my int $caught = 0;
+    try {
+        $avh{$avk}->[0] = 99;
+    } catch ($e) {
+        $caught = 1;
+    }
+    check($caught == 1 && reftype($avh{$avk}) eq "ARRAY" && size(@{$avh{$avk}}) == 0, "Bug #2 autoviv overwrite throwing DESTROY");
+
+    test_runtime_bugs_1_to_14();
+    test_compiler_bugs_15_to_20();
+    if ($g_fail > 0) {
+        say("R7_RUNTIME_COMPILER_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R7_RUNTIME_COMPILER_OK");
+    return 0;
+}

@@ -701,14 +701,8 @@ func extract_title(str $html, str $filename) str {
             return strip_html_tags(substr($html, $h1_start + 4, $h1_end - $h1_start - 4));
         }
     }
-    # Use filename without extension
+    # Remove directory path first so dots in directory names do not break extension stripping
     my str $title = $filename;
-    # Remove .md extension
-    my int $dot = index($title, ".md");
-    if ($dot > 0) {
-        $title = substr($title, 0, $dot);
-    }
-    # Remove directory path
     my int $slash = 0;
     my int $last_slash = -1;
     while ($slash >= 0) {
@@ -719,6 +713,10 @@ func extract_title(str $html, str $filename) str {
     }
     if ($last_slash >= 0) {
         $title = substr($title, $last_slash + 1, length($title) - $last_slash - 1);
+    }
+    # Remove trailing .md extension
+    if (length($title) > 3 && substr($title, length($title) - 3, 3) eq ".md") {
+        $title = substr($title, 0, length($title) - 3);
     }
     return $title;
 }

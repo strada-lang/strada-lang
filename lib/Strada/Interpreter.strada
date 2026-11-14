@@ -1541,11 +1541,17 @@ func interp_get_func(scalar $interp, str $name) scalar {
     if (exists($interp->{"functions"}, $name)) {
         return $interp->{"functions"}->{$name};
     }
-    # Try sanitized name (:: -> _)
+    # Try sanitized name (:: -> _) and strip explicit main:: prefix
     if (index($name, "::") >= 0) {
         my str $sanitized = sanitize_name($name);
         if (exists($interp->{"functions"}, $sanitized)) {
             return $interp->{"functions"}->{$sanitized};
+        }
+        if (index($name, "main::") == 0 && length($name) > 6) {
+            my str $short = substr($name, 6, length($name) - 6);
+            if (exists($interp->{"functions"}, $short)) {
+                return $interp->{"functions"}->{$short};
+            }
         }
     }
     return undef;
@@ -1729,7 +1735,13 @@ func interp_merge(scalar $arr, int $left, int $mid, int $right, scalar $interp, 
             $cmp_vars->{"a"} = $la[$i];
             $cmp_vars->{"b"} = $ra[$j];
             my scalar $cmp_result = eval_block($interp, $block, $cmp_env);
-            if ($interp->{"signal"} != SIG::NONE) { return; }
+            if ($interp->{"signal"} == SIG::RETURN) {
+                $cmp_result = $interp->{"signal_value"};
+                $interp->{"signal"} = SIG::NONE;
+                $interp->{"signal_value"} = undef;
+            } elsif ($interp->{"signal"} != SIG::NONE) {
+                return;
+            }
             if ($cmp_result <= 0) { $take_left = 1; }
         } else {
             if ($la[$i] . "" le $ra[$j] . "") { $take_left = 1; }
@@ -3184,6 +3196,247 @@ func interp_resolve_obj_pkg(scalar $obj) str {
     return $pkg;
 }
 
+func interp_invoke_method_call(scalar $interp, scalar $obj, str $method, scalar $args_ref, scalar $env, int $is_dyn) scalar {
+    # Get object's class
+    my str $pkg = interp_resolve_obj_pkg($obj);
+    my int $argc = size($args_ref) - 1;
+
+    # Handle isa() special method
+    if ($method eq "isa") {
+        if (length($pkg) > 0 && $argc >= 1) {
+            my str $target_class = $args_ref->[1];
+            return interp_isa($interp, $pkg, $target_class) ? 1 : 0;
+        }
+        return 0;
+    }
+
+    # Handle can() special method
+    if ($method eq "can") {
+        if (length($pkg) > 0 && $argc >= 1) {
+            my str $target_method = $args_ref->[1];
+            if ($target_method eq "isa" || $target_method eq "can") {
+                return 1;
+            }
+            my scalar $found = interp_resolve_method($interp, $pkg, $target_method);
+            return defined($found) ? 1 : 0;
+        }
+        return 0;
+    }
+
+    # ---- BigInt method overrides (C-backed) ----
+    if ($pkg eq "BigInt") {
+        if ($method eq "add") {
+            my scalar $other = $args_ref->[1];
+            my int $sa = $obj->{"s"};
+            my int $sb = $other->{"s"};
+            my str $va = $obj->{"v"};
+            my str $vb = $other->{"v"};
+            my hash %r = ();
+            if ($sa == $sb) {
+                $r{"s"} = $sa;
+                $r{"v"} = call_builtin($interp, "BigInt::_bi_add", [$va, $vb], $env);
+            } else {
+                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$va, $vb], $env);
+                if ($mc == 0) {
+                    $r{"s"} = 1; $r{"v"} = "0";
+                } elsif ($mc > 0) {
+                    $r{"s"} = $sa;
+                    $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$va, $vb], $env);
+                } else {
+                    $r{"s"} = $sb;
+                    $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$vb, $va], $env);
+                }
+            }
+            if ($r{"v"} eq "0") { $r{"s"} = 1; }
+            return bless(\%r, "BigInt");
+        }
+        if ($method eq "compare") {
+            my scalar $other = $args_ref->[1];
+            my int $sa = $obj->{"s"};
+            my int $sb = $other->{"s"};
+            if ($obj->{"v"} eq "0" && $other->{"v"} eq "0") { return 0; }
+            if ($sa > 0 && $sb < 0) { return 1; }
+            if ($sa < 0 && $sb > 0) { return -1; }
+            my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$obj->{"v"}, $other->{"v"}], $env);
+            if ($sa > 0) { return $mc; }
+            return 0 - $mc;
+        }
+        if ($method eq "mul") {
+            my scalar $other = $args_ref->[1];
+            my str $va = $obj->{"v"};
+            my str $vb = $other->{"v"};
+            my hash %r = ();
+            if ($va eq "0" || $vb eq "0") {
+                $r{"s"} = 1; $r{"v"} = "0";
+            } else {
+                $r{"v"} = call_builtin($interp, "BigInt::_bi_mul", [$va, $vb], $env);
+                $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
+            }
+            return bless(\%r, "BigInt");
+        }
+        if ($method eq "div") {
+            my scalar $other = $args_ref->[1];
+            my str $va = $obj->{"v"};
+            my str $vb = $other->{"v"};
+            if ($vb eq "0") { die("BigInt: division by zero"); }
+            my hash %r = ();
+            if ($va eq "0") { $r{"s"} = 1; $r{"v"} = "0"; }
+            else {
+                $r{"v"} = call_builtin($interp, "BigInt::_bi_divmod", [$va, $vb], $env);
+                $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"v"} ne "0") ? -1 : 1;
+            }
+            return bless(\%r, "BigInt");
+        }
+        if ($method eq "mod") {
+            my scalar $other = $args_ref->[1];
+            my str $va = $obj->{"v"};
+            my str $vb = $other->{"v"};
+            if ($vb eq "0") { die("BigInt: modulo by zero"); }
+            my hash %r = ();
+            my scalar $dr = call_builtin($interp, "BigInt::_bi_divmod_rem", [$va, $vb], $env);
+            $r{"v"} = $dr->[1];
+            $r{"s"} = $obj->{"s"};
+            if ($r{"v"} eq "0") { $r{"s"} = 1; }
+            return bless(\%r, "BigInt");
+        }
+    }
+
+    # ---- BigFloat method overrides (C-backed) ----
+    if ($pkg eq "BigFloat") {
+        if ($method eq "add") {
+            my scalar $other = $args_ref->[1];
+            my int $sa = $obj->{"s"};
+            my int $sb = $other->{"s"};
+            my str $ma = $obj->{"m"};
+            my str $mb = $other->{"m"};
+            my int $sca = $obj->{"e"};
+            my int $scb = $other->{"e"};
+            if ($sca > $scb) {
+                $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
+                $scb = $sca;
+            } elsif ($scb > $sca) {
+                $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
+                $sca = $scb;
+            }
+            my hash %r = ();
+            my int $rscale = $sca;
+            if ($sa == $sb) {
+                $r{"s"} = $sa;
+                $r{"m"} = call_builtin($interp, "BigInt::_bi_add", [$ma, $mb], $env);
+            } else {
+                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
+                if ($mc == 0) { $r{"s"} = 1; $r{"m"} = "0"; }
+                elsif ($mc > 0) {
+                    $r{"s"} = $sa;
+                    $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$ma, $mb], $env);
+                } else {
+                    $r{"s"} = $sb;
+                    $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$mb, $ma], $env);
+                }
+            }
+            my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$r{"m"}, $rscale], $env);
+            $r{"m"} = $norm->[0];
+            $r{"e"} = $norm->[1];
+            if ($r{"m"} eq "0") { $r{"s"} = 1; }
+            return bless(\%r, "BigFloat");
+        }
+        if ($method eq "mul") {
+            my scalar $other = $args_ref->[1];
+            my str $ma = $obj->{"m"};
+            my str $mb = $other->{"m"};
+            my hash %r = ();
+            if ($ma eq "0" || $mb eq "0") {
+                $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
+            } else {
+                my str $rm = call_builtin($interp, "BigInt::_bi_mul", [$ma, $mb], $env);
+                my int $rscale = $obj->{"e"} + $other->{"e"};
+                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$rm, $rscale], $env);
+                $r{"m"} = $norm->[0];
+                $r{"e"} = $norm->[1];
+                $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
+            }
+            return bless(\%r, "BigFloat");
+        }
+        if ($method eq "div" || $method eq "div_precision") {
+            my scalar $other = $args_ref->[1];
+            my int $precision = 20;
+            if ($method eq "div_precision" && size($args_ref) > 2) {
+                $precision = $args_ref->[2];
+            }
+            my str $ma = $obj->{"m"};
+            my str $mb = $other->{"m"};
+            if ($mb eq "0") { die("BigFloat: division by zero"); }
+            my hash %r = ();
+            if ($ma eq "0") {
+                $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
+            } else {
+                my int $extra = $precision + $other->{"e"} - $obj->{"e"};
+                my str $scaled_a = $ma;
+                if ($extra > 0) {
+                    $scaled_a = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $extra], $env);
+                }
+                my str $q = call_builtin($interp, "BigInt::_bi_divmod", [$scaled_a, $mb], $env);
+                my int $rscale = $precision;
+                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$q, $rscale], $env);
+                $r{"m"} = $norm->[0];
+                $r{"e"} = $norm->[1];
+                $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"m"} ne "0") ? -1 : 1;
+            }
+            return bless(\%r, "BigFloat");
+        }
+        if ($method eq "compare") {
+            my int $sa = $obj->{"s"};
+            my int $sb = $args_ref->[1]->{"s"};
+            if ($obj->{"m"} eq "0" && $args_ref->[1]->{"m"} eq "0") { return 0; }
+            if ($sa > 0 && $sb < 0) { return 1; }
+            if ($sa < 0 && $sb > 0) { return -1; }
+            my str $ma = $obj->{"m"};
+            my str $mb = $args_ref->[1]->{"m"};
+            my int $sca = $obj->{"e"};
+            my int $scb = $args_ref->[1]->{"e"};
+            if ($sca > $scb) {
+                $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
+            } elsif ($scb > $sca) {
+                $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
+            }
+            my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
+            if ($sa > 0) { return $mc; }
+            return 0 - $mc;
+        }
+        if ($method eq "round") {
+            my int $places = $args_ref->[1];
+            my str $m = $obj->{"m"};
+            my int $scale = $obj->{"e"};
+            if ($scale <= $places) {
+                my hash %c = ();
+                $c{"s"} = $obj->{"s"}; $c{"m"} = "" . $m; $c{"e"} = $scale;
+                return bless(\%c, "BigFloat");
+            }
+            my int $trim = $scale - $places;
+            my int $mlen = length($m);
+            if ($trim >= $mlen) {
+                return call_builtin($interp, "BigFloat::new", ["0"], $env);
+            }
+            my str $kept = substr($m, 0, $mlen - $trim);
+            my str $digit_str = substr($m, $mlen - $trim, 1);
+            my int $round_digit = cast_int($digit_str);
+            if ($round_digit >= 5) {
+                $kept = call_builtin($interp, "BigInt::_bi_add", [$kept, "1"], $env);
+            }
+            my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$kept, $places], $env);
+            my hash %r = ();
+            $r{"s"} = $obj->{"s"};
+            $r{"m"} = $norm->[0];
+            $r{"e"} = $norm->[1];
+            if ($r{"m"} eq "0") { $r{"s"} = 1; }
+            return bless(\%r, "BigFloat");
+        }
+    }
+
+    my str $err_prefix = ($is_dyn == 1) ? "Undefined dynamic method: " : "Undefined method: ";
+    return interp_dispatch_method($interp, $obj, $pkg, $method, $args_ref, 0, $err_prefix);
+}
+
 func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, scalar $args, int $allow_hash_field, str $err_prefix) scalar {
     my scalar $func_info = undef;
     if (length($pkg) > 0) {
@@ -3450,9 +3703,31 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
     }
 
     # Arithmetic
-    if ($oid == OP::ADD) { return $left + $right; }
-    if ($oid == OP::SUB) { return $left - $right; }
-    if ($oid == OP::MUL) { return $left * $right; }
+    if ($oid == OP::ADD || $oid == OP::SUB || $oid == OP::MUL) {
+        my int $akind = 3;
+        if ($oid == OP::ADD) { $akind = 1; }
+        elsif ($oid == OP::SUB) { $akind = 2; }
+        my scalar $int_res = undef;
+        my int $int_ok = 0;
+        __C__ {
+            int l_int = (STRADA_IS_TAGGED_INT(left) || (left && left->type == STRADA_INT && !STRADA_INT_IS_UV(left)));
+            int r_int = (STRADA_IS_TAGGED_INT(right) || (right && right->type == STRADA_INT && !STRADA_INT_IS_UV(right)));
+            if (l_int && r_int) {
+                uint64_t lv = (uint64_t)strada_to_int(left);
+                uint64_t rv = (uint64_t)strada_to_int(right);
+                int64_t ak = strada_to_int(akind);
+                int64_t out_v = (ak == 1) ? (int64_t)(lv + rv) : ((ak == 2) ? (int64_t)(lv - rv) : (int64_t)(lv * rv));
+                strada_decref(int_res);
+                int_res = strada_new_int(out_v);
+                strada_decref(int_ok);
+                int_ok = STRADA_MAKE_TAGGED_INT(1);
+            }
+        }
+        if ($int_ok == 1) { return $int_res; }
+        if ($akind == 1) { return $left + $right; }
+        if ($akind == 2) { return $left - $right; }
+        return $left * $right;
+    }
     if ($oid == OP::DIV) { return $left / $right; }
     if ($oid == OP::MOD) { return $left % $right; }
     if ($oid == OP::POW) {
@@ -3503,6 +3778,38 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
             my str $rt = typeof($right);
             if ($rt eq "num" || $rt eq "str") { $left = $node->{"left"}->{"from_sq_str"}; }
         }
+        my int $cmp_int_ok = 0;
+        my int $cmp_int_res = 0;
+        my int $cmp_kind = 0;
+        if ($oid == OP::NUM_EQ) { $cmp_kind = 1; }
+        elsif ($oid == OP::NUM_NE) { $cmp_kind = 2; }
+        elsif ($oid == OP::NUM_LT) { $cmp_kind = 3; }
+        elsif ($oid == OP::NUM_GT) { $cmp_kind = 4; }
+        elsif ($oid == OP::NUM_LE) { $cmp_kind = 5; }
+        elsif ($oid == OP::NUM_GE) { $cmp_kind = 6; }
+        elsif ($oid == OP::SPACESHIP) { $cmp_kind = 7; }
+        __C__ {
+            int l_int = (STRADA_IS_TAGGED_INT(left) || (left && left->type == STRADA_INT && !STRADA_INT_IS_UV(left)));
+            int r_int = (STRADA_IS_TAGGED_INT(right) || (right && right->type == STRADA_INT && !STRADA_INT_IS_UV(right)));
+            if (l_int && r_int) {
+                int64_t lv = strada_to_int(left);
+                int64_t rv = strada_to_int(right);
+                int64_t ck = strada_to_int(cmp_kind);
+                int64_t cr = 0;
+                if (ck == 1) cr = (lv == rv) ? 1 : 0;
+                else if (ck == 2) cr = (lv != rv) ? 1 : 0;
+                else if (ck == 3) cr = (lv < rv) ? 1 : 0;
+                else if (ck == 4) cr = (lv > rv) ? 1 : 0;
+                else if (ck == 5) cr = (lv <= rv) ? 1 : 0;
+                else if (ck == 6) cr = (lv >= rv) ? 1 : 0;
+                else if (ck == 7) cr = (lv < rv) ? -1 : ((lv > rv) ? 1 : 0);
+                strada_decref(cmp_int_res);
+                cmp_int_res = strada_new_int(cr);
+                strada_decref(cmp_int_ok);
+                cmp_int_ok = STRADA_MAKE_TAGGED_INT(1);
+            }
+        }
+        if ($cmp_int_ok == 1) { return $cmp_int_res; }
         if ($oid == OP::NUM_EQ) { return ($left == $right) ? 1 : 0; }
         if ($oid == OP::NUM_NE) { return ($left != $right) ? 1 : 0; }
         if ($oid == OP::NUM_LT) { return ($left < $right) ? 1 : 0; }
@@ -3574,7 +3881,11 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
             int64_t lv = strada_to_int(li);
             int64_t rv = strada_to_int(ri);
             strada_decref(result);
-            result = strada_new_int(lv << rv);
+            if (rv < 0 || rv >= 64) {
+                result = strada_new_int(0);
+            } else {
+                result = strada_new_int((int64_t)((uint64_t)lv << (int)rv));
+            }
         }
         return $result;
     }
@@ -3586,7 +3897,11 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
             int64_t lv = strada_to_int(li);
             int64_t rv = strada_to_int(ri);
             strada_decref(result);
-            result = strada_new_int(lv >> rv);
+            if (rv < 0 || rv >= 64) {
+                result = strada_new_int(0);
+            } else {
+                result = strada_new_int(lv >> (int)rv);
+            }
         }
         return $result;
     }
@@ -3905,6 +4220,19 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
                 }
                 return \@rev;
             }
+        } elsif (ref($ra) eq "HASH" && exists($ra, "__tied__")) {
+            my scalar $tobj = $ra->{"__tied__"};
+            my scalar $tkeys = interp_tied_hash_keys($interp, $tobj);
+            my scalar $ffn = interp_tied_find_method($interp, $tobj, "FETCH");
+            my array @rev = ();
+            my int $ri = size($tkeys) - 1;
+            while ($ri >= 0) {
+                my str $rk = $tkeys->[$ri];
+                push(@rev, defined($ffn) ? interp_tied_call($interp, $ffn, $tobj, [$rk]) : undef);
+                push(@rev, $rk);
+                $ri = $ri - 1;
+            }
+            return \@rev;
         }
         return reverse($ra);
     }
@@ -4102,6 +4430,8 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my scalar $hv = $args->[0];
         if (ref($hv) eq "HASH") {
             if (exists($hv, "__tied__")) {
+                $hv->{"__tied_each_started__"} = 0;
+                $hv->{"__tied_each_key__"} = undef;
                 return interp_tied_hash_keys($interp, $hv->{"__tied__"});
             }
             return interp_hash_keys_clean($hv);
@@ -4112,6 +4442,8 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my scalar $hv = $args->[0];
         if (ref($hv) eq "HASH") {
             if (exists($hv, "__tied__")) {
+                $hv->{"__tied_each_started__"} = 0;
+                $hv->{"__tied_each_key__"} = undef;
                 my scalar $tobj = $hv->{"__tied__"};
                 my scalar $tkeys = interp_tied_hash_keys($interp, $tobj);
                 my scalar $ffn = interp_tied_find_method($interp, $tobj, "FETCH");
@@ -4147,7 +4479,38 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return interp_hash_delete($interp, $args->[0], $args->[1]);
     }
     if ($bid == BI::EACH) {
-        return each($args->[0]);
+        my scalar $hv = $args->[0];
+        if (ref($hv) eq "HASH" && exists($hv, "__tied__")) {
+            my scalar $tobj = $hv->{"__tied__"};
+            my scalar $tk = undef;
+            if (($hv->{"__tied_each_started__"} + 0) == 1) {
+                my scalar $nk = interp_tied_find_method($interp, $tobj, "NEXTKEY");
+                if (defined($nk)) {
+                    $tk = interp_tied_call($interp, $nk, $tobj, [$hv->{"__tied_each_key__"}]);
+                }
+            } else {
+                $hv->{"__tied_each_started__"} = 1;
+                my scalar $fk = interp_tied_find_method($interp, $tobj, "FIRSTKEY");
+                if (defined($fk)) {
+                    $tk = interp_tied_call($interp, $fk, $tobj, undef);
+                }
+            }
+            if (!defined($tk)) {
+                $hv->{"__tied_each_started__"} = 0;
+                $hv->{"__tied_each_key__"} = undef;
+                my array @empty = ();
+                return \@empty;
+            }
+            my str $ks = "" . $tk;
+            $hv->{"__tied_each_key__"} = $ks;
+            my scalar $ffn = interp_tied_find_method($interp, $tobj, "FETCH");
+            my scalar $val = defined($ffn) ? interp_tied_call($interp, $ffn, $tobj, [$ks]) : undef;
+            my array @pair = ();
+            push(@pair, $ks);
+            push(@pair, $val);
+            return \@pair;
+        }
+        return each($hv);
     }
 
     # ---- Type functions ----
@@ -4448,11 +4811,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::NSORT) {
         my scalar $arr = $args->[0];
-        my int $arr_len = size($arr);
+        my int $arr_len = interp_arr_len($interp, $arr);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my array @sorted = ();
         my int $si = 0;
         while ($si < $arr_len) {
-            push(@sorted, $arr->[$si]);
+            push(@sorted, interp_arr_get($interp, $arr, $si));
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
             $si = $si + 1;
         }
         # Insertion sort by numeric value
@@ -4466,6 +4831,22 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
             }
             $sorted[$oj + 1] = $key_val;
             $oi = $oi + 1;
+        }
+        return \@sorted;
+    }
+    if ($bid == BI::SORT_FN) {
+        my scalar $arr = $args->[0];
+        my int $arr_len = interp_arr_len($interp, $arr);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
+        my array @sorted = ();
+        my int $si = 0;
+        while ($si < $arr_len) {
+            push(@sorted, interp_arr_get($interp, $arr, $si));
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            $si = $si + 1;
+        }
+        if ($arr_len > 1) {
+            interp_mergesort(\@sorted, 0, $arr_len - 1, $interp, undef, 0, undef, undef);
         }
         return \@sorted;
     }
@@ -4514,13 +4895,31 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::IS_REFTO) {
         my scalar $rv = $args->[0];
-        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return 1; }
-        return (ref($rv) ne "" && ref($rv) ne "0") ? 1 : 0;
+        my int $is_r = 0;
+        my str $rt = "";
+        if (ref($rv) eq "Closure") {
+            $rt = "CODE";
+            $is_r = 1;
+        } elsif (reftype($rv) eq "HASH" && exists($rv, "__scalar_ref__")) {
+            $rt = "SCALAR";
+            $is_r = 1;
+        } else {
+            my str $raw_rt = reftype($rv);
+            if ($raw_rt ne "" && $raw_rt ne "0") {
+                $rt = $raw_rt;
+                $is_r = 1;
+            }
+        }
+        if ($argc >= 2) {
+            return ($is_r == 1 && $rt eq $args->[1]) ? 1 : 0;
+        }
+        return $is_r;
     }
     if ($bid == BI::REFTYPE) {
         my scalar $rv = $args->[0];
-        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return "SCALAR"; }
-        return ref($rv);
+        if (ref($rv) eq "Closure") { return "CODE"; }
+        if (reftype($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return "SCALAR"; }
+        return reftype($rv);
     }
     if ($bid == BI::DEREF) {
         my scalar $rv = $args->[0];
@@ -4575,6 +4974,19 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
             $interp->{"inherits"}->{$child_pkg} = \@parents;
         }
         push($interp->{"inherits"}->{$child_pkg}, $parent_pkg);
+        my hash %new_mro = ();
+        my scalar $inh_keys = keys($interp->{"inherits"});
+        my int $iki = 0;
+        while ($iki < size($inh_keys)) {
+            my str $cls = $inh_keys->[$iki];
+            my array @mro = ();
+            interp_build_mro($interp, $cls, \@mro);
+            $new_mro{$cls} = \@mro;
+            $iki = $iki + 1;
+        }
+        $interp->{"mro"} = \%new_mro;
+        my hash %new_mc = ();
+        $interp->{"method_cache"} = \%new_mc;
         return undef;
     }
     if ($bid == BI::HASH_NEW) {
@@ -6310,9 +6722,23 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my array @args = ();
         my int $ai = 0;
         while ($ai < $argc) {
-            my scalar $av = eval_node($interp, $raw_args->[$ai], $env);
-            if ($interp->{"signal"} != SIG::NONE) { return undef; }
-            push(@args, $av);
+            my scalar $arg_node = $raw_args->[$ai];
+            if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
+                my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                my int $slen = interp_arr_len($interp, $spread_val);
+                my int $si = 0;
+                while ($si < $slen) {
+                    my scalar $se = interp_arr_get($interp, $spread_val, $si);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    push(@args, $se);
+                    $si = $si + 1;
+                }
+            } else {
+                my scalar $av = eval_node($interp, $arg_node, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                push(@args, $av);
+            }
             $ai = $ai + 1;
         }
 
@@ -6473,16 +6899,19 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- Sort ---
     if ($type == NI::SORT) {
         my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $srt_has_blk = 0;
         if (defined($block) && $block != 0) { $srt_has_blk = 1; }
-        my int $arr_len = size($arr);
+        my int $arr_len = interp_arr_len($interp, $arr);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
 
         # Copy array for sorting
         my array @sorted = ();
         my int $si = 0;
         while ($si < $arr_len) {
-            push(@sorted, $arr->[$si]);
+            push(@sorted, interp_arr_get($interp, $arr, $si));
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
             $si = $si + 1;
         }
 
@@ -6819,7 +7248,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             $dm_node = $node->{"object"};
         }
         my scalar $obj = eval_node($interp, $dm_node, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my str $method = eval_node($interp, $node->{"method_expr"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $raw_args = $node->{"args"};
         my int $argc = $node->{"arg_count"};
 
@@ -6835,7 +7266,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                     my int $slen = interp_arr_len($interp, $spread_val);
                     my int $si = 0;
                     while ($si < $slen) {
-                        push(@args, interp_arr_get($interp, $spread_val, $si));
+                        my scalar $se = interp_arr_get($interp, $spread_val, $si);
+                        if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                        push(@args, $se);
                         $si = $si + 1;
                     }
                 } else {
@@ -6847,53 +7280,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             }
         }
 
-        my str $pkg = get_obj_class($obj);
-        if (length($pkg) == 0) {
-            my str $ref_type = ref($obj);
-            if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
-                $pkg = $ref_type;
-            }
-        }
-        if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
-            $pkg = "" . $obj;
-        }
-
-        my scalar $func_info = undef;
-        if (length($pkg) > 0) {
-            $func_info = interp_resolve_method($interp, $pkg, $method);
-        }
-        if (!defined($func_info) && $pkg eq "main") {
-            $func_info = interp_get_func($interp, $method);
-        }
-
-        if (!defined($func_info) && length($pkg) > 0) {
-            my str $native_name = $pkg . "_" . $method;
-            if (exists($interp->{"native_funcs"}, $native_name)) {
-                my scalar $nf = $interp->{"native_funcs"}->{$native_name};
-                return call_native($interp, $nf, \@args);
-            }
-        }
-
-        if (!defined($func_info) && length($pkg) > 0) {
-            my scalar $al_func = interp_find_autoload($interp, $pkg);
-            if (defined($al_func)) {
-                my array @al_args = ();
-                push(@al_args, $obj);
-                push(@al_args, $method);
-                my int $ali = 1;
-                while ($ali < size(\@args)) {
-                    push(@al_args, $args[$ali]);
-                    $ali = $ali + 1;
-                }
-                return call_user_func($interp, $al_func, \@al_args);
-            }
-        }
-
-        if (defined($func_info)) {
-            return call_user_func($interp, $func_info, \@args);
-        }
-
-        die("Undefined dynamic method: " . $method);
+        return interp_invoke_method_call($interp, $obj, $method, \@args, $env, 1);
     }
 
     # --- TR (transliteration $str =~ tr/from/to/) ---
@@ -7419,6 +7806,18 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 push(@neg_args, $val);
                 return call_user_func($interp, $neg_ovl, \@neg_args);
             }
+            my scalar $neg_res = undef;
+            my int $neg_ok = 0;
+            __C__ {
+                if (STRADA_IS_TAGGED_INT(val) || (val && val->type == STRADA_INT && !STRADA_INT_IS_UV(val))) {
+                    int64_t nv = (int64_t)(0ULL - (uint64_t)strada_to_int(val));
+                    strada_decref(neg_res);
+                    neg_res = strada_new_int(nv);
+                    strada_decref(neg_ok);
+                    neg_ok = STRADA_MAKE_TAGGED_INT(1);
+                }
+            }
+            if ($neg_ok == 1) { return $neg_res; }
             return 0 - $val;
         }
         if ($op eq "!" || $op eq "not") {
@@ -7809,7 +8208,8 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
-        # Evaluate arguments (handle spread)
+        # Evaluate arguments (handle spread and variadic @arr flattening)
+        my scalar $va_fi = is_builtin($interp, $name) ? undef : interp_get_func($interp, $name);
         my array @args = ();
         my int $ai = 0;
         while ($ai < $argc) {
@@ -7822,6 +8222,18 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 my int $si = 0;
                 while ($si < $slen) {
                     my scalar $se = interp_arr_get($interp, $spread_val, $si);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    push(@args, $se);
+                    $si = $si + 1;
+                }
+            } elsif (defined($va_fi) && $va_fi->{"is_variadic"} == 1 && $ai >= ($va_fi->{"param_count"} - 1)
+                     && defined($arg_node) && $arg_node->{"type"} == NI::VARIABLE && $arg_node->{"sigil"} eq "@") {
+                my scalar $av = eval_node($interp, $arg_node, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                my int $slen = interp_arr_len($interp, $av);
+                my int $si = 0;
+                while ($si < $slen) {
+                    my scalar $se = interp_arr_get($interp, $av, $si);
                     if ($interp->{"signal"} != SIG::NONE) { return undef; }
                     push(@args, $se);
                     $si = $si + 1;
@@ -7940,251 +8352,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
-        # Get object's class
-        my str $pkg = interp_resolve_obj_pkg($obj);
-
-        # Handle isa() special method
-        if ($method eq "isa") {
-            if (length($pkg) > 0 && $argc >= 1) {
-                my str $target_class = $args[1];
-                return interp_isa($interp, $pkg, $target_class) ? 1 : 0;
-            }
-            return 0;
-        }
-
-        # Handle can() special method
-        if ($method eq "can") {
-            if (length($pkg) > 0 && $argc >= 1) {
-                my str $target_method = $args[1];
-                if ($target_method eq "isa" || $target_method eq "can") {
-                    return 1;
-                }
-                my scalar $found = interp_resolve_method($interp, $pkg, $target_method);
-                return defined($found) ? 1 : 0;
-            }
-            return 0;
-        }
-
-        # ---- BigInt method overrides (C-backed) ----
-        if ($pkg eq "BigInt") {
-            if ($method eq "add") {
-                my scalar $other = $args[1];
-                my int $sa = $obj->{"s"};
-                my int $sb = $other->{"s"};
-                my str $va = $obj->{"v"};
-                my str $vb = $other->{"v"};
-                my hash %r = ();
-                if ($sa == $sb) {
-                    $r{"s"} = $sa;
-                    $r{"v"} = call_builtin($interp, "BigInt::_bi_add", [$va, $vb], $env);
-                } else {
-                    my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$va, $vb], $env);
-                    if ($mc == 0) {
-                        $r{"s"} = 1; $r{"v"} = "0";
-                    } elsif ($mc > 0) {
-                        $r{"s"} = $sa;
-                        $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$va, $vb], $env);
-                    } else {
-                        $r{"s"} = $sb;
-                        $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$vb, $va], $env);
-                    }
-                }
-                if ($r{"v"} eq "0") { $r{"s"} = 1; }
-                return bless(\%r, "BigInt");
-            }
-            # sub/neg/pow/etc. - fall through to user-defined functions
-            # (sub calls neg+add, pow calls mul - all intercepted above)
-            if ($method eq "compare") {
-                my scalar $other = $args[1];
-                my int $sa = $obj->{"s"};
-                my int $sb = $other->{"s"};
-                if ($obj->{"v"} eq "0" && $other->{"v"} eq "0") { return 0; }
-                if ($sa > 0 && $sb < 0) { return 1; }
-                if ($sa < 0 && $sb > 0) { return -1; }
-                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$obj->{"v"}, $other->{"v"}], $env);
-                if ($sa > 0) { return $mc; }
-                return 0 - $mc;
-            }
-            if ($method eq "mul") {
-                my scalar $other = $args[1];
-                my str $va = $obj->{"v"};
-                my str $vb = $other->{"v"};
-                my hash %r = ();
-                if ($va eq "0" || $vb eq "0") {
-                    $r{"s"} = 1; $r{"v"} = "0";
-                } else {
-                    $r{"v"} = call_builtin($interp, "BigInt::_bi_mul", [$va, $vb], $env);
-                    $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
-                }
-                return bless(\%r, "BigInt");
-            }
-            if ($method eq "div") {
-                my scalar $other = $args[1];
-                my str $va = $obj->{"v"};
-                my str $vb = $other->{"v"};
-                if ($vb eq "0") { die("BigInt: division by zero"); }
-                my hash %r = ();
-                if ($va eq "0") { $r{"s"} = 1; $r{"v"} = "0"; }
-                else {
-                    $r{"v"} = call_builtin($interp, "BigInt::_bi_divmod", [$va, $vb], $env);
-                    $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"v"} ne "0") ? -1 : 1;
-                }
-                return bless(\%r, "BigInt");
-            }
-            if ($method eq "mod") {
-                my scalar $other = $args[1];
-                my str $va = $obj->{"v"};
-                my str $vb = $other->{"v"};
-                if ($vb eq "0") { die("BigInt: modulo by zero"); }
-                my hash %r = ();
-                my scalar $dr = call_builtin($interp, "BigInt::_bi_divmod_rem", [$va, $vb], $env);
-                $r{"v"} = $dr->[1];
-                $r{"s"} = $obj->{"s"};
-                if ($r{"v"} eq "0") { $r{"s"} = 1; }
-                return bless(\%r, "BigInt");
-            }
-        }
-
-        # ---- BigFloat method overrides (C-backed) ----
-        if ($pkg eq "BigFloat") {
-            if ($method eq "add") {
-                my scalar $other = $args[1];
-                my int $sa = $obj->{"s"};
-                my int $sb = $other->{"s"};
-                my str $ma = $obj->{"m"};
-                my str $mb = $other->{"m"};
-                my int $sca = $obj->{"e"};
-                my int $scb = $other->{"e"};
-                # Align scales
-                if ($sca > $scb) {
-                    $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
-                    $scb = $sca;
-                } elsif ($scb > $sca) {
-                    $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
-                    $sca = $scb;
-                }
-                my hash %r = ();
-                my int $rscale = $sca;
-                if ($sa == $sb) {
-                    $r{"s"} = $sa;
-                    $r{"m"} = call_builtin($interp, "BigInt::_bi_add", [$ma, $mb], $env);
-                } else {
-                    my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
-                    if ($mc == 0) { $r{"s"} = 1; $r{"m"} = "0"; }
-                    elsif ($mc > 0) {
-                        $r{"s"} = $sa;
-                        $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$ma, $mb], $env);
-                    } else {
-                        $r{"s"} = $sb;
-                        $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$mb, $ma], $env);
-                    }
-                }
-                # Normalize
-                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$r{"m"}, $rscale], $env);
-                $r{"m"} = $norm->[0];
-                $r{"e"} = $norm->[1];
-                if ($r{"m"} eq "0") { $r{"s"} = 1; }
-                return bless(\%r, "BigFloat");
-            }
-            if ($method eq "mul") {
-                my scalar $other = $args[1];
-                my str $ma = $obj->{"m"};
-                my str $mb = $other->{"m"};
-                my hash %r = ();
-                if ($ma eq "0" || $mb eq "0") {
-                    $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
-                } else {
-                    my str $rm = call_builtin($interp, "BigInt::_bi_mul", [$ma, $mb], $env);
-                    my int $rscale = $obj->{"e"} + $other->{"e"};
-                    my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$rm, $rscale], $env);
-                    $r{"m"} = $norm->[0];
-                    $r{"e"} = $norm->[1];
-                    $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
-                }
-                return bless(\%r, "BigFloat");
-            }
-            if ($method eq "div" || $method eq "div_precision") {
-                my scalar $other = $args[1];
-                my int $precision = 20;
-                if ($method eq "div_precision" && size(\@args) > 2) {
-                    $precision = $args[2];
-                }
-                my str $ma = $obj->{"m"};
-                my str $mb = $other->{"m"};
-                if ($mb eq "0") { die("BigFloat: division by zero"); }
-                my hash %r = ();
-                if ($ma eq "0") {
-                    $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
-                } else {
-                    # Scale dividend for precision
-                    my int $extra = $precision + $other->{"e"} - $obj->{"e"};
-                    my str $scaled_a = $ma;
-                    if ($extra > 0) {
-                        $scaled_a = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $extra], $env);
-                    }
-                    my str $q = call_builtin($interp, "BigInt::_bi_divmod", [$scaled_a, $mb], $env);
-                    my int $rscale = $precision;
-                    my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$q, $rscale], $env);
-                    $r{"m"} = $norm->[0];
-                    $r{"e"} = $norm->[1];
-                    $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"m"} ne "0") ? -1 : 1;
-                }
-                return bless(\%r, "BigFloat");
-            }
-            if ($method eq "compare") {
-                my scalar $other = $args[1];
-                my int $sa = $obj->{"s"};
-                my int $sb = $other->{"s"};
-                if ($obj->{"m"} eq "0" && $other->{"m"} eq "0") { return 0; }
-                if ($sa > 0 && $sb < 0) { return 1; }
-                if ($sa < 0 && $sb > 0) { return -1; }
-                # Align scales for comparison
-                my str $ma = $obj->{"m"};
-                my str $mb = $other->{"m"};
-                my int $sca = $obj->{"e"};
-                my int $scb = $other->{"e"};
-                if ($sca > $scb) {
-                    $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
-                } elsif ($scb > $sca) {
-                    $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
-                }
-                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
-                if ($sa > 0) { return $mc; }
-                return 0 - $mc;
-            }
-            if ($method eq "round") {
-                my int $places = $args[1];
-                my str $m = $obj->{"m"};
-                my int $scale = $obj->{"e"};
-                if ($scale <= $places) {
-                    # Clone
-                    my hash %c = ();
-                    $c{"s"} = $obj->{"s"}; $c{"m"} = "" . $m; $c{"e"} = $scale;
-                    return bless(\%c, "BigFloat");
-                }
-                my int $trim = $scale - $places;
-                my int $mlen = length($m);
-                if ($trim >= $mlen) {
-                    return call_builtin($interp, "BigFloat::new", ["0"], $env);
-                }
-                my str $kept = substr($m, 0, $mlen - $trim);
-                my str $digit_str = substr($m, $mlen - $trim, 1);
-                my int $round_digit = cast_int($digit_str);
-                if ($round_digit >= 5) {
-                    $kept = call_builtin($interp, "BigInt::_bi_add", [$kept, "1"], $env);
-                }
-                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$kept, $places], $env);
-                my hash %r = ();
-                $r{"s"} = $obj->{"s"};
-                $r{"m"} = $norm->[0];
-                $r{"e"} = $norm->[1];
-                if ($r{"m"} eq "0") { $r{"s"} = 1; }
-                return bless(\%r, "BigFloat");
-            }
-            # sub/neg/abs/etc. - fall through to user-defined functions
-        }
-
-        return interp_dispatch_method($interp, $obj, $pkg, $method, \@args, 0, "Undefined method: ");
+        return interp_invoke_method_call($interp, $obj, $method, \@args, $env, 0);
     }
 
     # --- Array Subscript ---
@@ -9178,6 +9346,9 @@ func eval_string_vm(str $code) scalar {
     my str $body_src = $units->{"body"};
 
     my str $source = $g_eval_vm_decls;
+    if (length($g_eval_vm_decls) > 0) {
+        $source = $source . "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n";
+    }
     if (length($body_src) > 0) {
         $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
     } else {
@@ -9221,6 +9392,8 @@ func eval_string_vm(str $code) scalar {
     my scalar $pfuncs = $program->{"functions"};
     my int $pfcount = $program->{"function_count"};
     my str $eval_entry_name = "__eval__";
+    my int $seen_top_start = (length($g_eval_vm_decls) == 0) ? 1 : 0;
+    my int $has_new_main = 0;
     my int $pfi = 0;
     while ($pfi < $pfcount) {
         my scalar $pfn = $pfuncs->[$pfi];
@@ -9308,8 +9481,15 @@ func eval_string_vm(str $code) scalar {
                     $body->{"statement_count"} = 1;
                 }
             }
+        } elsif ((defined($pfn->{"bare_name"}) && $pfn->{"bare_name"} eq "__strada_eval_top_start__") || $pfn->{"name"} eq "__strada_eval_sep____strada_eval_top_start__") {
+            $seen_top_start = 1;
+        } elsif ($seen_top_start == 1 && $pfn->{"name"} eq "main") {
+            $has_new_main = 1;
         }
         $pfi = $pfi + 1;
+    }
+    if (length($body_src) == 0 && $has_new_main == 1) {
+        $eval_entry_name = "main";
     }
 
     # Compile to bytecode and execute
@@ -9326,11 +9506,10 @@ func eval_string_vm(str $code) scalar {
             strada_decref(compiled_ok);
             compiled_ok = STRADA_MAKE_TAGGED_INT(1);
             char *ebuf = strada_to_str(eval_entry_name);
-            const char *entry = "main";
-            if (vm_program_find_func(vprog, "main") < 0) {
-                entry = (ebuf && ebuf[0]) ? ebuf : "__eval__";
-                if (vm_program_find_func(vprog, entry) < 0) entry = NULL;
-            }
+            const char *req_entry = (ebuf && ebuf[0]) ? ebuf : "__eval__";
+            const char *entry = NULL;
+            if (vm_program_find_func(vprog, req_entry) >= 0) entry = req_entry;
+            else if (vm_program_find_func(vprog, "main") >= 0) entry = "main";
             if (entry) {
                 VM *vvm = vm_new(vprog);
                 vvm->trap_uncaught = 1;

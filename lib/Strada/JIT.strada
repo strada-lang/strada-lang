@@ -429,12 +429,52 @@ private func register_function(str $func_def) int {
     return 0;
 }
 
+# Advance past a /regex/ or comment in JIT extract_function_def
+private func jit_can_regex_after(str $c) int {
+    if ($c eq ")" || $c eq "]" || $c eq "\"" || $c eq "'" || $c eq "_") { return 0; }
+    if (($c ge "0" && $c le "9") || ($c ge "A" && $c le "Z") || ($c ge "a" && $c le "z")) { return 0; }
+    return 1;
+}
+
+private func jit_skip_slash_token(str $input, int $pos, int $len, int $can_regex) int {
+    if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "*") {
+        my int $j = $pos + 2;
+        while ($j + 1 < $len && !(substr($input, $j, 1) eq "*" && substr($input, $j + 1, 1) eq "/")) {
+            $j = $j + 1;
+        }
+        if ($j + 1 < $len) { return $j + 2; }
+        return $len;
+    }
+    if ($can_regex == 1) {
+        if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "/") {
+            my int $j = $pos + 2;
+            while ($j < $len && substr($input, $j, 1) ne "\n") {
+                $j = $j + 1;
+            }
+            return $j;
+        }
+        my int $j = $pos + 1;
+        my int $in_cc = 0;
+        while ($j < $len) {
+            my str $rc = substr($input, $j, 1);
+            if ($rc eq "\n") { last; }
+            if ($rc eq "\\" && $j + 1 < $len) { $j = $j + 2; next; }
+            if ($rc eq "[" && $in_cc == 0) { $in_cc = 1; }
+            elsif ($rc eq "]" && $in_cc == 1) { $in_cc = 0; }
+            elsif ($rc eq "/" && $in_cc == 0) { return $j + 1; }
+            $j = $j + 1;
+        }
+    }
+    return $pos + 1;
+}
+
 # Extract function definition from input, returns array: [func_def, remainder]
 private func extract_function_def(str $input) array {
     my array @result = ("", "");
     my int $len = length($input);
     my int $in_str = 0;
     my int $in_cmt = 0;
+    my int $can_regex = 1;
     my int $brace_pos = -1;
     my int $scan = 0;
 
@@ -447,20 +487,34 @@ private func extract_function_def(str $input) array {
         }
         if ($in_str == 1) {
             if ($c eq "\\" && $scan + 1 < $len) { $scan = $scan + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
+            if ($c eq "\"") { $in_str = 0; $can_regex = 0; }
             $scan = $scan + 1;
             next;
         }
         if ($in_str == 2) {
             if ($c eq "\\" && $scan + 1 < $len) { $scan = $scan + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
+            if ($c eq "'") { $in_str = 0; $can_regex = 0; }
             $scan = $scan + 1;
             next;
         }
         if ($c eq "\"") { $in_str = 1; $scan = $scan + 1; next; }
         if ($c eq "'") { $in_str = 2; $scan = $scan + 1; next; }
         if ($c eq "#") { $in_cmt = 1; $scan = $scan + 1; next; }
+        if ($c eq "/") {
+            my int $next_scan = jit_skip_slash_token($input, $scan, $len, $can_regex);
+            if ($next_scan > $scan + 1) {
+                $can_regex = 0;
+                $scan = $next_scan;
+                next;
+            }
+            $can_regex = 1;
+            $scan = $scan + 1;
+            next;
+        }
         if ($c eq "{") { $brace_pos = $scan; last; }
+        if ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
+            $can_regex = jit_can_regex_after($c);
+        }
         $scan = $scan + 1;
     }
 
@@ -473,6 +527,7 @@ private func extract_function_def(str $input) array {
     my int $i = $brace_pos;
     $in_str = 0;
     $in_cmt = 0;
+    $can_regex = 1;
     my int $end_pos = -1;
 
     while ($i < $len) {
@@ -485,13 +540,13 @@ private func extract_function_def(str $input) array {
         }
         if ($in_str == 1) {
             if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
+            if ($c eq "\"") { $in_str = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
         if ($in_str == 2) {
             if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
+            if ($c eq "'") { $in_str = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
@@ -499,15 +554,30 @@ private func extract_function_def(str $input) array {
         if ($c eq "\"") { $in_str = 1; $i = $i + 1; next; }
         if ($c eq "'") { $in_str = 2; $i = $i + 1; next; }
         if ($c eq "#") { $in_cmt = 1; $i = $i + 1; next; }
+        if ($c eq "/") {
+            my int $next_i = jit_skip_slash_token($input, $i, $len, $can_regex);
+            if ($next_i > $i + 1) {
+                $can_regex = 0;
+                $i = $next_i;
+                next;
+            }
+            $can_regex = 1;
+            $i = $i + 1;
+            next;
+        }
 
         if ($c eq "{") {
             $depth = $depth + 1;
+            $can_regex = 1;
         } elsif ($c eq "}") {
             $depth = $depth - 1;
+            $can_regex = 1;
             if ($depth == 0) {
                 $end_pos = $i;
                 last;
             }
+        } elsif ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
+            $can_regex = jit_can_regex_after($c);
         }
 
         $i = $i + 1;
@@ -1331,6 +1401,46 @@ private func strip_toplevel_my(str $input) str {
     return $result;
 }
 
+# Find matching closer (e.g. ')' or '}') starting at $open_pos; return index or -1
+private func jit_find_matching(str $s, int $open_pos, str $open_ch, str $close_ch) int {
+    my int $len = length($s);
+    my int $depth = 0;
+    my int $in_str = 0;
+    my int $i = $open_pos;
+    while ($i < $len) {
+        my str $c = substr($s, $i, 1);
+        if ($in_str == 1) {
+            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
+            if ($c eq "\"") { $in_str = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($in_str == 2) {
+            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
+            if ($c eq "'") { $in_str = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "\"") { $in_str = 1; }
+        elsif ($c eq "'") { $in_str = 2; }
+        elsif ($c eq $open_ch) { $depth = $depth + 1; }
+        elsif ($c eq $close_ch) {
+            $depth = $depth - 1;
+            if ($depth == 0) { return $i; }
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+private func jit_is_complete_call(str $trimmed, int $open_pos) int {
+    my int $close_pos = jit_find_matching($trimmed, $open_pos, "(", ")");
+    if ($close_pos < 0) { return 0; }
+    my str $tail = substr($trimmed, $close_pos + 1, length($trimmed) - $close_pos - 1);
+    if ($tail =~ /^\s*;?\s*$/) { return 1; }
+    return 0;
+}
+
 # Generate Strada source wrapping user code
 private func generate_source(str $input) str {
     my str $src = "";
@@ -1440,10 +1550,13 @@ private func generate_source(str $input) str {
     $trimmed =~ s/^\s+//;
     $trimmed =~ s/\s+$//;
 
-    # Check if this is a void function call (prints output, returns nothing useful)
+    # Check if this is a standalone void function call (not part of a larger expression like my_void() // 42)
     my int $is_void_call = 0;
     if ($trimmed =~ /^(say|print|warn|die|push|unshift)\(/) {
-        $is_void_call = 1;
+        my int $op_pos = index($trimmed, "(");
+        if ($op_pos >= 0 && jit_is_complete_call($trimmed, $op_pos) == 1) {
+            $is_void_call = 1;
+        }
     }
     foreach my str $fndef (@g_functions) {
         if ($fndef =~ /\)\s*void\s*\{/) {
@@ -1453,9 +1566,14 @@ private func generate_source(str $input) str {
                 my str $bare_fn = ($cpos >= 0) ? substr($vfn_name, $cpos + 2, length($vfn_name) - $cpos - 2) : $vfn_name;
                 my str $qprefix = $vfn_name . "(";
                 my str $bprefix = $bare_fn . "(";
-                if ((length($trimmed) >= length($qprefix) && substr($trimmed, 0, length($qprefix)) eq $qprefix) ||
-                    (length($trimmed) >= length($bprefix) && substr($trimmed, 0, length($bprefix)) eq $bprefix)) {
-                    $is_void_call = 1;
+                if (length($trimmed) >= length($qprefix) && substr($trimmed, 0, length($qprefix)) eq $qprefix) {
+                    if (jit_is_complete_call($trimmed, length($qprefix) - 1) == 1) {
+                        $is_void_call = 1;
+                    }
+                } elsif (length($trimmed) >= length($bprefix) && substr($trimmed, 0, length($bprefix)) eq $bprefix) {
+                    if (jit_is_complete_call($trimmed, length($bprefix) - 1) == 1) {
+                        $is_void_call = 1;
+                    }
                 }
             }
         }
@@ -1474,7 +1592,15 @@ private func generate_source(str $input) str {
     if ($trimmed =~ /^unless\s/) { $is_statement = 1; }
     if ($trimmed =~ /^while\s*\(/) { $is_statement = 1; }
     if ($trimmed =~ /^until\s*\(/) { $is_statement = 1; }
-    if ($trimmed =~ /^do\s*\{/) { $is_statement = 1; }
+    if ($trimmed =~ /^do\s*\{/) {
+        my int $ob_pos = index($trimmed, "{");
+        if ($ob_pos >= 0) {
+            my int $cb_pos = jit_find_matching($trimmed, $ob_pos, "{", "}");
+            if ($cb_pos >= 0 && substr($trimmed, $cb_pos + 1, length($trimmed) - $cb_pos - 1) =~ /^\s*while\s*\(/) {
+                $is_statement = 1;
+            }
+        }
+    }
     if ($trimmed =~ /^for\s/) { $is_statement = 1; }
     if ($trimmed =~ /^foreach\s/) { $is_statement = 1; }
     if ($trimmed =~ /^switch\s*\(/) { $is_statement = 1; }

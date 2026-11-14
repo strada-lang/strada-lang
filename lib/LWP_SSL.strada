@@ -441,20 +441,22 @@ func _parse_hex_len(str $line) int {
     my int $i = 0;
     my int $n = 0;
     my int $digits = 0;
+    my int $seen_trail_ws = 0;
     my int $len = length($line);
     while ($i < $len) {
         my str $ch = substr($line, $i, 1);
         if ($ch eq " " || $ch eq "\t") {
-            if ($digits > 0) { last; }
+            if ($digits > 0) { $seen_trail_ws = 1; }
             $i = $i + 1;
             next;
         }
+        if ($seen_trail_ws) { return -1; }
         my int $o = ord($ch);
         my int $d = -1;
         if ($o >= 48 && $o <= 57) { $d = $o - 48; }
         elsif ($o >= 97 && $o <= 102) { $d = $o - 97 + 10; }
         elsif ($o >= 65 && $o <= 70) { $d = $o - 65 + 10; }
-        else { last; }
+        else { return -1; }
         if ($n > 576460752303423487) { return -1; }
         $n = ($n * 16) + $d;
         $digits = $digits + 1;
@@ -495,15 +497,15 @@ func _decode_chunked(str $raw_body) str {
     return $out;
 }
 
-# Internal: return 1 when chunked response body has received its 0-length terminator
-func _chunked_complete(str $raw, int $pos) int {
+# Internal: return 1 when chunked response is complete, 0 when truncated/incomplete, -1 when malformed
+func _chunked_state(str $raw, int $pos) int {
     my int $total = core::byte_length($raw);
     while ($pos < $total) {
         my int $nl = core::byte_index($raw, "\r\n", $pos);
         if ($nl < 0) { return 0; }
         my str $size_line = core::byte_substr($raw, $pos, $nl - $pos);
         my int $chunk_len = LWP_SSL::_parse_hex_len($size_line);
-        if ($chunk_len < 0) { return 1; }
+        if ($chunk_len < 0) { return -1; }
         $pos = $nl + 2;
         if ($chunk_len == 0) {
             if ($pos + 2 <= $total && core::byte_substr($raw, $pos, 2) eq "\r\n") {
@@ -512,9 +514,15 @@ func _chunked_complete(str $raw, int $pos) int {
             return (core::byte_index($raw, "\r\n\r\n", $pos) >= 0) ? 1 : 0;
         }
         if ($pos + $chunk_len + 2 > $total) { return 0; }
+        if (core::byte_substr($raw, $pos + $chunk_len, 2) ne "\r\n") { return -1; }
         $pos = $pos + $chunk_len + 2;
     }
     return 0;
+}
+
+# Internal: return 1 when chunked response body has received its 0-length terminator
+func _chunked_complete(str $raw, int $pos) int {
+    return (LWP_SSL::_chunked_state($raw, $pos) == 1) ? 1 : 0;
 }
 
 # Internal: return 1 for interim 1xx status codes preceding a final response (100, 102..199; not 101)
@@ -646,7 +654,7 @@ func _response_complete(str $response, str $method) int {
     my scalar $te_val = LWP_SSL::_find_header_value($headers_part, "transfer-encoding:");
     if (defined($te_val)) {
         if (index($te_val, "chunked") >= 0) {
-            return LWP_SSL::_chunked_complete($response, $header_end + 4);
+            return (LWP_SSL::_chunked_state($response, $header_end + 4) != 0) ? 1 : 0;
         }
     }
 
@@ -1000,7 +1008,11 @@ func _check_framing_truncation(str $raw, str $method) str {
     }
     my scalar $te_val = LWP_SSL::_find_header_value($headers_part, "transfer-encoding:");
     if (defined($te_val) && index($te_val, "chunked") >= 0) {
-        if (!LWP_SSL::_chunked_complete($raw, $header_end + 4)) {
+        my int $cst = LWP_SSL::_chunked_state($raw, $header_end + 4);
+        if ($cst < 0) {
+            return "Malformed chunked HTTP response";
+        }
+        if ($cst == 0) {
             return "Truncated chunked HTTP response";
         }
         return "";
