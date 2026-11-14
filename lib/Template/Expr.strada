@@ -119,7 +119,7 @@ func lex(str $src) scalar {
 # --------------------------------------------------------------- expr parser ---
 func st_new(scalar $toks) scalar { my hash %s = (); $s{"toks"} = $toks; $s{"pos"} = 0; return \%s; }
 func cur(scalar $st) scalar { return $st->{"toks"}->[$st->{"pos"}]; }
-func adv(scalar $st) void { $st->{"pos"} = $st->{"pos"} + 1; }
+func adv(scalar $st) void { if ($st->{"pos"} + 1 < size($st->{"toks"})) { $st->{"pos"} = $st->{"pos"} + 1; } }
 func is_op(scalar $st, str $v) int { my scalar $t = cur($st); return ($t->{"t"} eq "op" && ("" . $t->{"v"}) eq $v) ? 1 : 0; }
 func is_punc(scalar $st, str $v) int { my scalar $t = cur($st); return ($t->{"t"} eq "punc" && ("" . $t->{"v"}) eq $v) ? 1 : 0; }
 

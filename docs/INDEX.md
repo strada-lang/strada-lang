@@ -33,6 +33,7 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [Event Loop](EVENT_LOOP.md) | `Async::Loop` event loop and green tasks (experimental) |
 | [Template Toolkit](TEMPLATE_TOOLKIT.md) | `lib/Template`: port of Perl's Template::Toolkit |
 | [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
+| [Audit Playbook](AUDIT_PLAYBOOK.md) | Repeatable 4-shard bug/leak audit & verification workflow |
 
 ## Compact References and Man Pages
 

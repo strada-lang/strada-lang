@@ -137,12 +137,23 @@ func list_vm(scalar $val, str $key, scalar $args) scalar {
     if ($key eq "list")    { return $val; }
     if ($key eq "first") {
         if (argc($args) == 0) { return ($n > 0) ? $val->[0] : undef; }
-        return list_slice_range($val, 0, arg_int($args, 0, 1) - 1);
+        my int $cnt = arg_int($args, 0, 1);
+        if ($cnt <= 0) {
+            my array @empty = ();
+            return \@empty;
+        }
+        return list_slice_range($val, 0, $cnt - 1);
     }
     if ($key eq "last") {
         if (argc($args) == 0) { return ($n > 0) ? $val->[$n - 1] : undef; }
         my int $cnt = arg_int($args, 0, 1);
-        return list_slice_range($val, $n - $cnt, $n - 1);
+        if ($cnt <= 0) {
+            my array @empty = ();
+            return \@empty;
+        }
+        my int $start = $n - $cnt;
+        if ($start < 0) { $start = 0; }
+        return list_slice_range($val, $start, $n - 1);
     }
     if ($key eq "join")    { return list_join($val, (argc($args) >= 1) ? arg_str($args, 0, " ") : " "); }
     if ($key eq "reverse") { return list_reverse($val); }

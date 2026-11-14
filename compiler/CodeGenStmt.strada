@@ -38,7 +38,22 @@ func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) v
             return;
         }
     }
-    gen_expression($cg, $init);
+    if ($is_array_target == 1 && $it == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
+        my int $ogi_cl = needs_temp_cleanup($cg, $init);
+        emit($cg, "({ StradaValue *__ogi_src = ");
+        gen_expression($cg, $init);
+        emit($cg, "; StradaArray *__ogi_av = strada_deref_array(__ogi_src); StradaValue *__ogi_na = strada_new_array(); if (__ogi_av) { for (size_t __ogi_i = 0; __ogi_i < __ogi_av->size; __ogi_i++) strada_array_push_take(__ogi_na->value.av, strada_copy_scalar_il(strada_array_get(__ogi_av, __ogi_i))); } ");
+        if ($ogi_cl == 1) { emit($cg, "strada_decref(__ogi_src); "); }
+        emit($cg, "__ogi_na; })");
+        return;
+    }
+    if (needs_temp_cleanup($cg, $init) == 0) {
+        emit($cg, "strada_copy_scalar_il(");
+        gen_expression($cg, $init);
+        emit($cg, ")");
+    } else {
+        gen_expression($cg, $init);
+    }
 }
 
 # A bare block or an if/elsif/else block: `local` inside it is undone when the
@@ -774,26 +789,33 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, " = ");
                 emit_our_global_init($cg, $init, $sigil, $stmt->{"var_type"});
                 emit($cg, ";\n");
-                emit_indent($cg);
-                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . ");\n");
+                scope_track_var($cg, $c_name);
+                if (cleanup_push_useful($cg) == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                } else {
+                    scope_mark_no_push($cg, $c_name);
+                }
                 emit_indent($cg);
                 emit($cg, "strada_incref(" . $c_name . ");\n");
+                emit_indent($cg);
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . ");\n");
             } else {
                 emit_indent($cg);
                 emit_sv_ptr_decl($cg, $c_name);
                 emit($cg, " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
+                scope_track_var($cg, $c_name);
+                if (cleanup_push_useful($cg) == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                } else {
+                    scope_mark_no_push($cg, $c_name);
+                }
                 emit_indent($cg);
-                emit($cg, "if (" . $c_name . "->type == STRADA_UNDEF) { strada_decref(" . $c_name . "); ");
+                emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $c_name . ") && " . $c_name . "->type == STRADA_UNDEF) { strada_decref(" . $c_name . "); ");
                 emit($cg, $c_name . " = " . $new_func . "; ");
-                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . "); ");
-                emit($cg, "strada_incref(" . $c_name . "); }\n");
-            }
-            scope_track_var($cg, $c_name);
-            if (cleanup_push_useful($cg) == 1) {
-                emit_indent($cg);
-                emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-            } else {
-                scope_mark_no_push($cg, $c_name);
+                emit($cg, "strada_incref(" . $c_name . "); ");
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . "); }\n");
             }
             return;
         }
@@ -806,7 +828,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($stmt->{"init"}) {
             emit_indent($cg);
             emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", ");
-            gen_expression($cg, $stmt->{"init"});
+            if (needs_temp_cleanup($cg, $stmt->{"init"}) == 0) {
+                emit($cg, "strada_copy_scalar_il(");
+                gen_expression($cg, $stmt->{"init"});
+                emit($cg, ")");
+            } else {
+                gen_expression($cg, $stmt->{"init"});
+            }
             emit($cg, ");\n");
         }
         # No scope_track_var - our scalar variables are not locally owned
@@ -851,9 +879,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # Check for hash element localization: local $hash{key}
         if ($stmt->{"is_hash_elem"} == 1) {
             my scalar $key_expr = $stmt->{"hash_key"};
-            my str $hash_expr = $c_name;
+            my str $hash_expr = "";
             if ($is_global_hash == 1) {
                 $hash_expr = "strada_global_get_cstr(" . c_str_lit($our_key) . ")";
+            } else {
+                $hash_expr = scalar_var_c_ref($cg, $var_name, $c_name);
             }
             my int $lp = cleanup_push_useful($cg);
             emit_indent($cg);
@@ -1706,6 +1736,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             scope_push($cg);
 
             emit_indent($cg);
+            my int $fr_always_tagged = 0;
+            if (expr_is_always_tagged_int($cg, $array_expr->{"start"}) == 1 &&
+                expr_is_always_tagged_int($cg, $array_expr->{"end"}) == 1) {
+                $fr_always_tagged = 1;
+            }
             if (!$var_decl) {
                 if (length($fe_our_key) > 0) {
                     emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", strada_new_int_il(__fr_i_" . $foreach_id . "));\n");
@@ -1730,7 +1765,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 }
             } else {
                 emit($cg, $var_name . " = strada_new_int_il(__fr_i_" . $foreach_id . ");\n");
-                if ($cg->{"cleanup_enabled"} == 1 && (node_writes_var($body, $stmt->{"var_name"}) == 1 || node_is_leaf_safe($cg, $body) == 0)) {
+                if ($cg->{"cleanup_enabled"} == 1 && ($fr_always_tagged == 0 || node_writes_var($body, $stmt->{"var_name"}) == 1 || node_is_leaf_safe($cg, $body) == 0)) {
                     scope_track_var($cg, $var_name);
                     if (cleanup_push_useful($cg) == 1) {
                         emit_indent($cg);
@@ -1786,6 +1821,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 local_mark_pop($cg);
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(__local_iter_mark_" . $fr_local_id . ");\n");
+            }
+            if ($cg->{"cleanup_enabled"} == 0 && $var_decl && $fr_box == 0 && $fr_always_tagged == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $var_name . ");\n");
             }
             scope_pop($cg);
             dedent($cg);
@@ -3805,9 +3844,10 @@ func gen_function(scalar $cg, scalar $fn) void {
                     }
                 } else {
                     $cg->{"active_boxed_vars"}->{$c_param_name} = 0;
-                    # Skip wrap ONLY when param is int or body is leaf-safe AND param is NOT mutated!
+                    # Skip wrap ONLY when body is leaf-safe AND param is NOT mutated
+                    # (int params can still hold >62-bit heap STRADA_INTs across non-leaf calls).
                     my int $skip_wrap = 0;
-                    if (($is_int_param == 1 || $is_leaf_body == 1) && node_writes_var($fn->{"body"}, $param->{"name"}) == 0) {
+                    if ($is_leaf_body == 1 && node_writes_var($fn->{"body"}, $param->{"name"}) == 0) {
                         $skip_wrap = 1;
                     } elsif (cleanup_push_useful($cg) == 0) {
                         $skip_wrap = 2;

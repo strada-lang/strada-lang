@@ -724,6 +724,61 @@ STRADA_HOT_INLINE void strada_break_self_cycle(StradaValue *sv) {
 }
 #endif
 
+static inline int strada_sv_is_signed_int_val(StradaValue *sv, int64_t *out) {
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        *out = STRADA_TAGGED_INT_VAL(sv);
+        return 1;
+    }
+    if (sv && sv->type == STRADA_INT && !(sv->struct_size & STRADA_UV_FLAG) && (!sv->meta || !sv->meta->is_tied)) {
+        *out = sv->value.iv;
+        return 1;
+    }
+    return 0;
+}
+
+static inline StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
+            return strada_new_num((double)a + (double)b);
+        }
+        return strada_new_int_il(a + b);
+    }
+    return strada_new_num(strada_to_num(l) + strada_to_num(r));
+}
+
+static inline StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
+            return strada_new_num((double)a - (double)b);
+        }
+        return strada_new_int_il(a - b);
+    }
+    return strada_new_num(strada_to_num(l) - strada_to_num(r));
+}
+
+static inline StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if (a >= -2147483648LL && a <= 2147483647LL && b >= -2147483648LL && b <= 2147483647LL) {
+            return strada_new_int_il(a * b);
+        }
+        if (a == 0 || b == 0) return strada_new_int_il(0);
+        int neg = (a < 0) ^ (b < 0);
+        uint64_t ua = (a < 0) ? (uint64_t)(-(a + 1)) + 1ULL : (uint64_t)a;
+        uint64_t ub = (b < 0) ? (uint64_t)(-(b + 1)) + 1ULL : (uint64_t)b;
+        uint64_t limit = neg ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)INT64_MAX;
+        if (ua <= limit / ub) {
+            uint64_t prod = ua * ub;
+            int64_t res = neg ? (prod == ((uint64_t)INT64_MAX + 1ULL) ? INT64_MIN : -(int64_t)prod) : (int64_t)prod;
+            return strada_new_int_il(res);
+        }
+        return strada_new_num((double)a * (double)b);
+    }
+    return strada_new_num(strada_to_num(l) * strada_to_num(r));
+}
+
 /* Stack-allocated 1-element array for fast method calls.
  * Usage: STRADA_STACK_ARGS1(args, self_val);
  *        method_func(&args.sv);
@@ -866,6 +921,8 @@ char* strada_concat_free(char *a, char *b);  /* Concat and free inputs (avoids l
 StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b);  /* Fast concat on StradaValues */
 StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b);  /* In-place concat: consumes a, borrows b */
 StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b);  /* In-place concat with C string literal */
+StradaValue* strada_concat_slot_inplace(StradaValue **slot, StradaValue *b);  /* Slot-aware in-place concat: consumes *slot only after hook-safe eval */
+StradaValue* strada_concat_slot_inplace_cstr(StradaValue **slot, const char *str_b, size_t len_b);  /* Slot-aware in-place concat with C string literal */
 size_t strada_length(const char *s);      /* Returns character count (UTF-8 codepoints) */
 size_t strada_length_chars_sv(StradaValue *sv);  /* Binary-safe UTF-8 char count */
 size_t strada_length_sv(StradaValue *sv); /* Binary-safe length using struct_size */

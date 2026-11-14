@@ -54,6 +54,9 @@ typedef struct {
         int depth;              // Current scope depth
         int max_depth;          // Allocated scope slots
     } scope_stack;
+
+    int try_depth;              // Current nested try-block depth in function
+    int loop_try_depth;         // try_depth at entry to innermost enclosing loop
 } CodeGen;
 
 /* Code generator functions */

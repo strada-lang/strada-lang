@@ -1,0 +1,123 @@
+#!/usr/bin/env strada
+use lib "../lib";
+use lib "lib";
+
+our str $r8v_loc = "root";
+our scalar $r8v_our_w = undef;
+our int $r8v_d = 0;
+
+package R8VLWeakTarget;
+func new(str $t) scalar {
+    my hash %s = ("t" => $t, "buf" => ("w" x 48));
+    return bless(\%s, "R8VLWeakTarget");
+}
+func DESTROY(scalar $self) void {
+    main::inc_v_d();
+}
+
+package R8VLBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R8VLBase");
+}
+func step(scalar $self, int $x) int { return $self->{"v"} + $x; }
+before "step" func(scalar $self, int $x) void { my int $z = 1; };
+around "step" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x + 1);
+}
+after "step" func(scalar $self, int $x) void { my int $z = 2; };
+
+package R8VLTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %s = ("a" => ["x0", "x1", "x2"]);
+    return bless(\%s, "R8VLTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void {}
+func UNTIE(scalar $self) void { my int $u = 1; }
+
+package R8VLTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("order" => ["k1", "k2"], "d" => {"k1" => "v1", "k2" => "v2"}, "idx" => 0);
+    return bless(\%s, "R8VLTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar { my scalar $o = $self->{"d"}->{$k}; delete($self->{"d"}->{$k}); return $o; }
+func FIRSTKEY(scalar $self) scalar { $self->{"idx"} = 1; return "k1"; }
+func NEXTKEY(scalar $self, str $l) scalar {
+    if ($self->{"idx"} == 1) { $self->{"idx"} = 2; return "k2"; }
+    return undef;
+}
+func SCALAR(scalar $self) scalar { return 2; }
+func UNTIE(scalar $self) void { my int $u = 1; }
+
+package main;
+
+func inc_v_d() void {
+    $r8v_d = $r8v_d + 1;
+}
+
+func helper_loop(int $m) int {
+    my int $s = 0;
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        if ($m == 1 && $i == 2) { next; }
+        if ($m == 2 && $i == 2) { last; }
+        $s = $s + $i;
+    }
+    return $s;
+}
+
+func main() int {
+    for (my int $iter = 0; $iter < 3; $iter = $iter + 1) {
+        my str $d = do { local $r8v_loc = "do_" . $iter; $r8v_loc; };
+        my array @m = map { local $r8v_loc = "m" . $_; $r8v_loc; } (1, 2);
+        my array @g = grep { local $r8v_loc = "g" . $_; $_ == 2; } (1, 2);
+
+        my scalar $o = R8VLBase::new(10);
+        my int $rv = $o->step(2);
+        my int $lv = helper_loop($iter);
+
+        my scalar $w = undef;
+        my hash %wh = ();
+        my array @wa = ();
+        {
+            my scalar $t1 = R8VLWeakTarget::new("l");
+            my scalar $t2 = R8VLWeakTarget::new("h");
+            my scalar $t3 = R8VLWeakTarget::new("a");
+            my scalar $t4 = R8VLWeakTarget::new("g");
+            $w = $t1;
+            $wh{"k"} = $t2;
+            $wa[0] = $t3;
+            $r8v_our_w = $t4;
+            core::weaken($w);
+            core::weaken($wh{"k"});
+            core::weaken($wa[0]);
+            sys::weaken($r8v_our_w);
+        }
+        $w = "clear";
+        $wh{"k"} = 1;
+        $wa[0] = 2;
+        $r8v_our_w = undef;
+
+        my array @ta = ();
+        tie(@ta, "R8VLTieArr");
+        my array @tsl = @ta[0, 2];
+        my array @tmp = map { $_ . "!"; } @ta;
+        my array @tgp = grep { $_ ne "x1"; } @ta;
+        my str $tsp = sprintf("%s|%d", \@ta, \@ta);
+        untie(@ta);
+
+        my hash %th = ();
+        tie(%th, "R8VLTieHash");
+        my int $tb = %th ? 1 : 0;
+        my hash %tc = %th;
+        my array @thsl = @th{"k1", "k2"};
+        untie(%th);
+    }
+    say("R8_VM_LEAKS_OK:" . $r8v_d);
+    return 0;
+}

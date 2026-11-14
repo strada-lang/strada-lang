@@ -35,6 +35,8 @@ CodeGen* codegen_new(FILE *output) {
     cg->output = output;
     cg->indent_level = 0;
     cg->current_func_is_extern = 0;
+    cg->try_depth = 0;
+    cg->loop_try_depth = 0;
     
     // Initialize package support
     cg->current_package = NULL;
@@ -274,14 +276,57 @@ static void gen_as_num(CodeGen *cg, ASTNode *expr) {
 static int str_is_safe_literal(const char *s) {
     if (!s) return 0;
     for (const char *p = s; *p; p++) {
-        if (*p == '\\' || *p == '"' || *p == '\n' || *p == '\r' || *p == '\t' || *p == '\0') return 0;
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7f || c == '\\' || c == '\"') return 0;
     }
     return 1;
 }
 
+static int node_is_safe_str_literal(ASTNode *expr) {
+    if (!expr || expr->type != NODE_STR_LITERAL || !expr->data.str_val) return 0;
+    if (expr->has_str_len && expr->str_len != strlen(expr->data.str_val)) return 0;
+    return str_is_safe_literal(expr->data.str_val);
+}
+
+static void emit_c_quoted_bytes(CodeGen *cg, const char *s, size_t len) {
+    emit(cg, "\"");
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '\n': emit(cg, "\\n"); break;
+            case '\t': emit(cg, "\\t"); break;
+            case '\r': emit(cg, "\\r"); break;
+            case '\"': emit(cg, "\\\""); break;
+            case '\\': emit(cg, "\\\\"); break;
+            default:
+                if (c < 0x20 || c == 0x7f) {
+                    emit(cg, "\\%03o", (unsigned int)c);
+                } else {
+                    emit(cg, "%c", (char)c);
+                }
+                break;
+        }
+    }
+    emit(cg, "\"");
+}
+
+static void emit_str_literal_sv(CodeGen *cg, ASTNode *node) {
+    const char *s = node->data.str_val ? node->data.str_val : "";
+    size_t slen = node->has_str_len ? node->str_len : strlen(s);
+    if (slen > 0 && memchr(s, '\0', slen) != NULL) {
+        emit(cg, "strada_new_str_len(");
+        emit_c_quoted_bytes(cg, s, slen);
+        emit(cg, ", %zu)", slen);
+    } else {
+        emit(cg, "strada_new_str(");
+        emit_c_quoted_bytes(cg, s, slen);
+        emit(cg, ")");
+    }
+}
+
 /* Emit an expression as a string, optimizing safe string literals */
 static void gen_as_str(CodeGen *cg, ASTNode *expr) {
-    if (expr->type == NODE_STR_LITERAL && str_is_safe_literal(expr->data.str_val)) {
+    if (node_is_safe_str_literal(expr)) {
         emit(cg, "\"%s\"", expr->data.str_val);
     } else {
         emit(cg, "strada_to_str(");
@@ -292,8 +337,8 @@ static void gen_as_str(CodeGen *cg, ASTNode *expr) {
 
 /* Emit a string comparison with proper cleanup of strada_to_str() allocations */
 static void gen_str_cmp(CodeGen *cg, ASTNode *left, ASTNode *right, const char *cmp_op) {
-    int left_lit = (left->type == NODE_STR_LITERAL && str_is_safe_literal(left->data.str_val));
-    int right_lit = (right->type == NODE_STR_LITERAL && str_is_safe_literal(right->data.str_val));
+    int left_lit = node_is_safe_str_literal(left);
+    int right_lit = node_is_safe_str_literal(right);
 
     int left_owned = !left_lit && expr_is_owned(left);
     int right_owned = !right_lit && expr_is_owned(right);
@@ -453,6 +498,25 @@ static void scope_track_var(CodeGen *cg, const char *name, int is_struct) {
     cg->scope_stack.names[d][c] = strdup(name);
     cg->scope_stack.is_struct[d][c] = is_struct;
     cg->scope_stack.counts[d] = c + 1;
+}
+
+static int scope_is_tracked(CodeGen *cg, const char *name) {
+    if (!name || cg->current_func_is_extern) return 0;
+    for (int d = cg->scope_stack.depth - 1; d >= 0; d--) {
+        for (int i = 0; i < cg->scope_stack.counts[d]; i++) {
+            if (strcmp(cg->scope_stack.names[d][i], name) == 0 && !cg->scope_stack.is_struct[d][i]) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void emit_try_pops(CodeGen *cg, int count) {
+    for (int i = 0; i < count; i++) {
+        emit_indent(cg);
+        emit(cg, "STRADA_TRY_POP();\n");
+    }
 }
 
 /* Reset all scope tracking (call at start of each function) */
@@ -944,6 +1008,8 @@ static void gen_function(CodeGen *cg, ASTNode *func) {
     int is_main = (strcmp(func->data.function.name, "main") == 0);
     cg->current_func_is_extern = is_extern;  // Track for expressions/returns
     cg->current_func_is_main = is_main;      // Track if this is main
+    cg->try_depth = 0;
+    cg->loop_try_depth = 0;
 
     // Reset and push function-level scope for variable tracking
     scope_reset(cg);
@@ -1060,26 +1126,27 @@ static void gen_function(CodeGen *cg, ASTNode *func) {
     for (int i = 0; i < func->data.function.param_count; i++) {
         ASTNode *param = func->data.function.params[i];
         if (param->data.param.is_optional && param->data.param.default_value && !func->data.function.is_variadic) {
-            // Generate check: if parameter is undef/null, use default
+            const char *pname = param->data.param.name;
+            // Generate check: if parameter is undef/null (without dereferencing tagged ints), use default
             emit_indent(cg);
-            emit(cg, "if (%s == NULL || %s->type == STRADA_UNDEF) {\n", 
-                 param->data.param.name, param->data.param.name);
+            emit(cg, "if (%s == NULL || (!STRADA_IS_TAGGED_INT(%s) && %s->type == STRADA_UNDEF)) {\n",
+                 pname, pname, pname);
             cg->indent_level++;
             emit_indent(cg);
             
             // Generate default value assignment
             if (param->data.param.default_value->type == NODE_INT_LITERAL) {
-                emit(cg, "%s = strada_new_int(%ld);\n", 
-                     param->data.param.name,
-                     param->data.param.default_value->data.int_val);
+                emit(cg, "%s = strada_new_int(%lldLL);\n",
+                     pname,
+                     (long long)param->data.param.default_value->data.int_val);
             } else if (param->data.param.default_value->type == NODE_NUM_LITERAL) {
                 emit(cg, "%s = strada_new_num(%f);\n",
-                     param->data.param.name,
+                     pname,
                      param->data.param.default_value->data.num_val);
             } else if (param->data.param.default_value->type == NODE_STR_LITERAL) {
-                emit(cg, "%s = strada_new_str(\"%s\");\n",
-                     param->data.param.name,
-                     param->data.param.default_value->data.str_val);
+                emit(cg, "%s = ", pname);
+                emit_str_literal_sv(cg, param->data.param.default_value);
+                emit(cg, ";\n");
             }
             
             cg->indent_level--;
@@ -1228,16 +1295,22 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             break;
         }
         
-        case NODE_WHILE_STMT:
+        case NODE_WHILE_STMT: {
+            int saved_ltd = cg->loop_try_depth;
+            cg->loop_try_depth = cg->try_depth;
             emit_indent(cg);
             emit(cg, "while (");
             gen_condition(cg, stmt->data.while_stmt.condition);
             emit(cg, ") ");
             gen_block(cg, stmt->data.while_stmt.body);
             emit(cg, "\n");
+            cg->loop_try_depth = saved_ltd;
             break;
+        }
             
-        case NODE_FOR_STMT:
+        case NODE_FOR_STMT: {
+            int saved_ltd = cg->loop_try_depth;
+            cg->loop_try_depth = cg->try_depth;
             emit_indent(cg);
             emit(cg, "for (");
             
@@ -1271,7 +1344,9 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             emit(cg, ") ");
             gen_block(cg, stmt->data.for_stmt.body);
             emit(cg, "\n");
+            cg->loop_try_depth = saved_ltd;
             break;
+        }
 
         case NODE_FOREACH_STMT: {
             // foreach my $var (@arr) { ... }
@@ -1281,6 +1356,8 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             //                strada_incref(VAR); BODY; strada_decref(VAR); } }
             static int foreach_id = 0;
             int fid = foreach_id++;
+            int saved_ltd = cg->loop_try_depth;
+            cg->loop_try_depth = cg->try_depth;
             emit_indent(cg);
             emit(cg, "{ StradaValue *__fe_arr_%d = ", fid);
             gen_expression(cg, stmt->data.foreach_stmt.array);
@@ -1305,6 +1382,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             cg->indent_level--;
             emit_indent(cg);
             emit(cg, "} }\n");
+            cg->loop_try_depth = saved_ltd;
             break;
         }
 
@@ -1313,6 +1391,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 if (cg->current_func_is_main || cg->current_func_is_extern) {
                     // main/extern: emit cleanup, then return raw value
                     scope_emit_all_cleanup(cg, NULL);
+                    emit_try_pops(cg, cg->try_depth);
                     emit_indent(cg);
                     emit(cg, "return ");
                     if (stmt->data.return_stmt.value->type == NODE_INT_LITERAL) {
@@ -1329,6 +1408,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                     }
                     if (skip_var) {
                         scope_emit_all_cleanup(cg, skip_var);
+                        emit_try_pops(cg, cg->try_depth);
                         emit_indent(cg);
                         emit(cg, "return %s;\n", skip_var);
                     } else {
@@ -1338,6 +1418,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                         emit(cg, ";\n");
                         cg->indent_level++;
                         scope_emit_all_cleanup(cg, NULL);
+                        emit_try_pops(cg, cg->try_depth);
                         emit_indent(cg);
                         emit(cg, "return __retval; }\n");
                         cg->indent_level--;
@@ -1346,6 +1427,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             } else {
                 // void return - cleanup all scopes
                 scope_emit_all_cleanup(cg, NULL);
+                emit_try_pops(cg, cg->try_depth);
                 emit_indent(cg);
                 emit(cg, "return;\n");
             }
@@ -1364,24 +1446,50 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             break;
             
         case NODE_LAST_STMT:
-            emit_indent(cg);
-            emit(cg, "break;\n");
+            if (cg->try_depth > cg->loop_try_depth) {
+                emit_indent(cg);
+                emit(cg, "{\n");
+                cg->indent_level++;
+                emit_try_pops(cg, cg->try_depth - cg->loop_try_depth);
+                emit_indent(cg);
+                emit(cg, "break;\n");
+                cg->indent_level--;
+                emit_indent(cg);
+                emit(cg, "}\n");
+            } else {
+                emit_indent(cg);
+                emit(cg, "break;\n");
+            }
             break;
             
         case NODE_NEXT_STMT:
-            emit_indent(cg);
-            emit(cg, "continue;\n");
+            if (cg->try_depth > cg->loop_try_depth) {
+                emit_indent(cg);
+                emit(cg, "{\n");
+                cg->indent_level++;
+                emit_try_pops(cg, cg->try_depth - cg->loop_try_depth);
+                emit_indent(cg);
+                emit(cg, "continue;\n");
+                cg->indent_level--;
+                emit_indent(cg);
+                emit(cg, "}\n");
+            } else {
+                emit_indent(cg);
+                emit(cg, "continue;\n");
+            }
             break;
 
         case NODE_TRY_CATCH: {
             emit_indent(cg);
             emit(cg, "if (setjmp(*STRADA_TRY_PUSH()) == 0) {\n");
             cg->indent_level++;
+            cg->try_depth++;
             // Generate try block statements
             ASTNode *try_block = stmt->data.try_catch.try_block;
             for (int i = 0; i < try_block->data.block.statement_count; i++) {
                 gen_statement(cg, try_block->data.block.statements[i]);
             }
+            cg->try_depth--;
             emit_indent(cg);
             emit(cg, "STRADA_TRY_POP();\n");
             cg->indent_level--;
@@ -1444,31 +1552,11 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             
         case NODE_STR_LITERAL: {
             if (cg->current_func_is_extern) {
-                emit(cg, "\"");
-                for (const char *p = expr->data.str_val; *p; p++) {
-                    switch (*p) {
-                        case '\n': emit(cg, "\\n"); break;
-                        case '\t': emit(cg, "\\t"); break;
-                        case '\r': emit(cg, "\\r"); break;
-                        case '\"': emit(cg, "\\\""); break;
-                        case '\\': emit(cg, "\\\\"); break;
-                        default: emit(cg, "%c", *p); break;
-                    }
-                }
-                emit(cg, "\"");
+                const char *s = expr->data.str_val ? expr->data.str_val : "";
+                size_t slen = expr->has_str_len ? expr->str_len : strlen(s);
+                emit_c_quoted_bytes(cg, s, slen);
             } else {
-                emit(cg, "strada_new_str(\"");
-                for (const char *p = expr->data.str_val; *p; p++) {
-                    switch (*p) {
-                        case '\n': emit(cg, "\\n"); break;
-                        case '\t': emit(cg, "\\t"); break;
-                        case '\r': emit(cg, "\\r"); break;
-                        case '\"': emit(cg, "\\\""); break;
-                        case '\\': emit(cg, "\\\\"); break;
-                        default: emit(cg, "%c", *p); break;
-                    }
-                }
-                emit(cg, "\")");
+                emit_str_literal_sv(cg, expr);
             }
             break;
         }
@@ -1813,92 +1901,171 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                             break;
                     }
                 }
-            } else if (expr->data.assign.target->type == NODE_HASH_ACCESS) {
-                // Hash element assignment: $hash{key} = value
-                ASTNode *ha = expr->data.assign.target;
-                if (ha->data.subscript.index->type == NODE_STR_LITERAL &&
-                    str_is_safe_literal(ha->data.subscript.index->data.str_val)) {
-                    emit(cg, "strada_hash_set(");
-                    gen_expression(cg, ha->data.subscript.array);
-                    emit(cg, "->value.hv, \"%s\", ", ha->data.subscript.index->data.str_val);
+            } else if (expr->data.assign.target->type == NODE_HASH_ACCESS ||
+                       expr->data.assign.target->type == NODE_DEREF_HASH) {
+                // Hash / hash-ref element assignment: $hash{key} OP= val or $ref->{key} OP= val
+                int is_deref = (expr->data.assign.target->type == NODE_DEREF_HASH);
+                ASTNode *cont = is_deref ? expr->data.assign.target->data.deref_hash.ref
+                                         : expr->data.assign.target->data.subscript.array;
+                ASTNode *key_node = is_deref ? expr->data.assign.target->data.deref_hash.key
+                                             : expr->data.assign.target->data.subscript.index;
+                if (strcmp(expr->data.assign.op, "=") == 0) {
+                    if (node_is_safe_str_literal(key_node)) {
+                        emit(cg, "strada_hash_set(");
+                        if (is_deref) {
+                            emit(cg, "strada_deref_hash(");
+                            gen_expression(cg, cont);
+                            emit(cg, ")");
+                        } else {
+                            gen_expression(cg, cont);
+                            emit(cg, "->value.hv");
+                        }
+                        emit(cg, ", \"%s\", ", key_node->data.str_val);
+                        gen_expression(cg, expr->data.assign.value);
+                        emit(cg, ")");
+                    } else {
+                        emit(cg, "({ char *__k = strada_to_str(");
+                        gen_expression(cg, key_node);
+                        emit(cg, "); strada_hash_set(");
+                        if (is_deref) {
+                            emit(cg, "strada_deref_hash(");
+                            gen_expression(cg, cont);
+                            emit(cg, ")");
+                        } else {
+                            gen_expression(cg, cont);
+                            emit(cg, "->value.hv");
+                        }
+                        emit(cg, ", __k, ");
+                        gen_expression(cg, expr->data.assign.value);
+                        emit(cg, "); free(__k); })");
+                    }
+                } else {
+                    int lit_key = node_is_safe_str_literal(key_node);
+                    emit(cg, "({ StradaValue *__ca_h = ");
+                    gen_expression(cg, cont);
+                    emit(cg, "; StradaHash *__ca_hv = %s; ",
+                         is_deref ? "strada_deref_hash(__ca_h)" : "__ca_h->value.hv");
+                    if (lit_key) {
+                        emit(cg, "const char *__ca_k = \"%s\"; ", key_node->data.str_val);
+                    } else {
+                        emit(cg, "StradaValue *__ca_kv = ");
+                        gen_expression(cg, key_node);
+                        emit(cg, "; char *__ca_k = strada_to_str(__ca_kv); ");
+                        if (expr_is_owned(key_node)) {
+                            emit(cg, "strada_decref(__ca_kv); ");
+                        }
+                    }
+                    emit(cg, "StradaValue *__ca_rhs = ");
+                    gen_expression(cg, expr->data.assign.value);
+                    emit(cg, "; StradaValue *__ca_old = strada_hash_get(__ca_hv, __ca_k); StradaValue *__ca_res = ");
+                    if (strcmp(expr->data.assign.op, "+=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) + strada_to_num(__ca_rhs))");
+                    } else if (strcmp(expr->data.assign.op, "-=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) - strada_to_num(__ca_rhs))");
+                    } else {
+                        emit(cg, "strada_concat_sv(__ca_old, __ca_rhs)");
+                    }
+                    emit(cg, "; ");
+                    if (expr_is_owned(expr->data.assign.value)) {
+                        emit(cg, "strada_decref(__ca_rhs); ");
+                    }
+                    emit(cg, "strada_hash_set(__ca_hv, __ca_k, __ca_res); strada_decref(__ca_res); ");
+                    emit(cg, "StradaValue *__ca_ret = strada_hash_get(__ca_hv, __ca_k); ");
+                    if (!lit_key) {
+                        emit(cg, "free(__ca_k); ");
+                    }
+                    if (expr_is_owned(cont)) {
+                        emit(cg, "strada_decref(__ca_h); ");
+                    }
+                    emit(cg, "__ca_ret; })");
+                }
+            } else if (expr->data.assign.target->type == NODE_SUBSCRIPT ||
+                       expr->data.assign.target->type == NODE_DEREF_ARRAY) {
+                // Array / array-ref element assignment: $arr[idx] OP= val or $ref->[idx] OP= val
+                int is_deref = (expr->data.assign.target->type == NODE_DEREF_ARRAY);
+                ASTNode *cont = is_deref ? expr->data.assign.target->data.deref_array.ref
+                                         : expr->data.assign.target->data.subscript.array;
+                ASTNode *idx_node = is_deref ? expr->data.assign.target->data.deref_array.index
+                                             : expr->data.assign.target->data.subscript.index;
+                if (strcmp(expr->data.assign.op, "=") == 0) {
+                    emit(cg, "strada_array_set(");
+                    if (is_deref) {
+                        emit(cg, "strada_deref_array(");
+                        gen_expression(cg, cont);
+                        emit(cg, ")");
+                    } else {
+                        gen_expression(cg, cont);
+                        emit(cg, "->value.av");
+                    }
+                    emit(cg, ", strada_to_int(");
+                    gen_expression(cg, idx_node);
+                    emit(cg, "), ");
                     gen_expression(cg, expr->data.assign.value);
                     emit(cg, ")");
                 } else {
-                    // Dynamic key: capture strada_to_str result and free after use
-                    emit(cg, "({ char *__k = strada_to_str(");
-                    gen_expression(cg, ha->data.subscript.index);
-                    emit(cg, "); strada_hash_set(");
-                    gen_expression(cg, ha->data.subscript.array);
-                    emit(cg, "->value.hv, __k, ");
+                    emit(cg, "({ StradaValue *__ca_a = ");
+                    gen_expression(cg, cont);
+                    emit(cg, "; StradaArray *__ca_av = %s; StradaValue *__ca_iv = ",
+                         is_deref ? "strada_deref_array(__ca_a)" : "__ca_a->value.av");
+                    gen_expression(cg, idx_node);
+                    emit(cg, "; int64_t __ca_idx = strada_to_int(__ca_iv); ");
+                    if (expr_is_owned(idx_node)) {
+                        emit(cg, "strada_decref(__ca_iv); ");
+                    }
+                    emit(cg, "StradaValue *__ca_rhs = ");
                     gen_expression(cg, expr->data.assign.value);
-                    emit(cg, "); free(__k); })");
+                    emit(cg, "; StradaValue *__ca_old = strada_array_get(__ca_av, __ca_idx); StradaValue *__ca_res = ");
+                    if (strcmp(expr->data.assign.op, "+=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) + strada_to_num(__ca_rhs))");
+                    } else if (strcmp(expr->data.assign.op, "-=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) - strada_to_num(__ca_rhs))");
+                    } else {
+                        emit(cg, "strada_concat_sv(__ca_old, __ca_rhs)");
+                    }
+                    emit(cg, "; ");
+                    if (expr_is_owned(expr->data.assign.value)) {
+                        emit(cg, "strada_decref(__ca_rhs); ");
+                    }
+                    emit(cg, "strada_array_set(__ca_av, __ca_idx, __ca_res); strada_decref(__ca_res); ");
+                    emit(cg, "StradaValue *__ca_ret = strada_array_get(__ca_av, __ca_idx); ");
+                    if (expr_is_owned(cont)) {
+                        emit(cg, "strada_decref(__ca_a); ");
+                    }
+                    emit(cg, "__ca_ret; })");
                 }
-            } else if (expr->data.assign.target->type == NODE_SUBSCRIPT) {
-                // Array element assignment: $array[index] = value
-                ASTNode *sub = expr->data.assign.target;
-                emit(cg, "strada_array_set(");
-                gen_expression(cg, sub->data.subscript.array);
-                emit(cg, "->value.av, strada_to_int(");
-                gen_expression(cg, sub->data.subscript.index);
-                emit(cg, "), ");
-                gen_expression(cg, expr->data.assign.value);
-                emit(cg, ")");
-            } else if (expr->data.assign.target->type == NODE_DEREF_HASH) {
-                // $ref->{key} = value
-                ASTNode *dh = expr->data.assign.target;
-                if (dh->data.deref_hash.key->type == NODE_STR_LITERAL &&
-                    str_is_safe_literal(dh->data.deref_hash.key->data.str_val)) {
-                    emit(cg, "strada_hash_set(strada_deref_hash(");
-                    gen_expression(cg, dh->data.deref_hash.ref);
-                    emit(cg, "), \"%s\", ", dh->data.deref_hash.key->data.str_val);
-                    gen_expression(cg, expr->data.assign.value);
-                    emit(cg, ")");
-                } else {
-                    // Dynamic key: capture and free
-                    emit(cg, "({ char *__k = strada_to_str(");
-                    gen_expression(cg, dh->data.deref_hash.key);
-                    emit(cg, "); strada_hash_set(strada_deref_hash(");
-                    gen_expression(cg, dh->data.deref_hash.ref);
-                    emit(cg, "), __k, ");
-                    gen_expression(cg, expr->data.assign.value);
-                    emit(cg, "); free(__k); })");
-                }
-            } else if (expr->data.assign.target->type == NODE_DEREF_ARRAY) {
-                // $ref->[index] = value
-                ASTNode *da = expr->data.assign.target;
-                emit(cg, "strada_array_set(strada_deref_array(");
-                gen_expression(cg, da->data.deref_array.ref);
-                emit(cg, "), strada_to_int(");
-                gen_expression(cg, da->data.deref_array.index);
-                emit(cg, "), ");
-                gen_expression(cg, expr->data.assign.value);
-                emit(cg, ")");
             } else {
                 // Regular variable assignment
-                gen_expression(cg, expr->data.assign.target);
-                emit(cg, " = ");
-
                 if (strcmp(expr->data.assign.op, "=") == 0) {
-                    gen_expression(cg, expr->data.assign.value);
-                } else if (strcmp(expr->data.assign.op, "+=") == 0) {
-                    emit(cg, "strada_new_num(strada_to_num(");
                     gen_expression(cg, expr->data.assign.target);
-                    emit(cg, ") + strada_to_num(");
+                    emit(cg, " = ");
                     gen_expression(cg, expr->data.assign.value);
-                    emit(cg, "))");
-                } else if (strcmp(expr->data.assign.op, "-=") == 0) {
-                    emit(cg, "strada_new_num(strada_to_num(");
+                } else {
+                    const char *vname = (expr->data.assign.target->type == NODE_VARIABLE)
+                        ? expr->data.assign.target->data.variable.name
+                        : NULL;
+                    int tracked = scope_is_tracked(cg, vname);
+                    emit(cg, "({ StradaValue *__ca_rhs = ");
+                    gen_expression(cg, expr->data.assign.value);
+                    emit(cg, "; StradaValue *__ca_old = ");
                     gen_expression(cg, expr->data.assign.target);
-                    emit(cg, ") - strada_to_num(");
-                    gen_expression(cg, expr->data.assign.value);
-                    emit(cg, "))");
-                } else if (strcmp(expr->data.assign.op, ".=") == 0) {
-                    /* Fast concat directly on StradaValues */
-                    emit(cg, "strada_concat_sv(");
+                    emit(cg, "; StradaValue *__ca_res = ");
+                    if (strcmp(expr->data.assign.op, "+=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) + strada_to_num(__ca_rhs))");
+                    } else if (strcmp(expr->data.assign.op, "-=") == 0) {
+                        emit(cg, "strada_new_num(strada_to_num(__ca_old) - strada_to_num(__ca_rhs))");
+                    } else {
+                        emit(cg, "strada_concat_sv(__ca_old, __ca_rhs)");
+                    }
+                    emit(cg, "; ");
+                    if (expr_is_owned(expr->data.assign.value)) {
+                        emit(cg, "strada_decref(__ca_rhs); ");
+                    }
                     gen_expression(cg, expr->data.assign.target);
-                    emit(cg, ", ");
-                    gen_expression(cg, expr->data.assign.value);
-                    emit(cg, ")");
+                    emit(cg, " = __ca_res; ");
+                    if (tracked) {
+                        emit(cg, "strada_decref(__ca_old); ");
+                    }
+                    emit(cg, "__ca_res; })");
                 }
             }
             break;
@@ -2013,13 +2180,40 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, "strada_new_int(strada_array_length(strada_deref_array(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ")))");
-            } else if (strcmp(expr->data.call.name, "push") == 0) {
-                // Handle both direct arrays and references to arrays
-                emit(cg, "(strada_array_push(strada_deref_array(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "), ");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "), strada_new_undef())");
+            } else if (strcmp(expr->data.call.name, "push") == 0 ||
+                       strcmp(expr->data.call.name, "unshift") == 0) {
+                int is_push = (strcmp(expr->data.call.name, "push") == 0);
+                if (expr->data.call.arg_count < 1) {
+                    emit(cg, "strada_undef_static()");
+                } else {
+                    emit(cg, "({ StradaValue *__bs_pa = ");
+                    gen_expression(cg, expr->data.call.args[0]);
+                    emit(cg, "; ");
+                    for (int i = 1; i < expr->data.call.arg_count; i++) {
+                        emit(cg, "StradaValue *__bs_pv_%d = ", i);
+                        gen_expression(cg, expr->data.call.args[i]);
+                        emit(cg, "; ");
+                    }
+                    emit(cg, "StradaArray *__bs_av = strada_deref_array(__bs_pa); ");
+                    if (is_push) {
+                        for (int i = 1; i < expr->data.call.arg_count; i++) {
+                            emit(cg, "strada_array_push(__bs_av, __bs_pv_%d); ", i);
+                        }
+                    } else {
+                        for (int i = expr->data.call.arg_count - 1; i >= 1; i--) {
+                            emit(cg, "strada_array_unshift(__bs_av, __bs_pv_%d); ", i);
+                        }
+                    }
+                    for (int i = 1; i < expr->data.call.arg_count; i++) {
+                        if (expr_is_owned(expr->data.call.args[i])) {
+                            emit(cg, "strada_decref(__bs_pv_%d); ", i);
+                        }
+                    }
+                    if (expr_is_owned(expr->data.call.args[0])) {
+                        emit(cg, "strada_decref(__bs_pa); ");
+                    }
+                    emit(cg, "strada_undef_static(); })");
+                }
             } else if (strcmp(expr->data.call.name, "pop") == 0) {
                 emit(cg, "strada_array_pop(strada_deref_array(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2028,12 +2222,6 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, "strada_array_shift(strada_deref_array(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, "))");
-            } else if (strcmp(expr->data.call.name, "unshift") == 0) {
-                emit(cg, "(strada_array_unshift(strada_deref_array(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "), ");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "), strada_new_undef())");
             } else if (strcmp(expr->data.call.name, "die") == 0) {
                 // die doesn't return, but free for correctness
                 emit(cg, "({ char *__s = strada_to_str(");
@@ -2623,8 +2811,7 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
         
         case NODE_HASH_ACCESS:
             // Hash access: $hash{key} -> strada_hash_get(hash->value.hv, key)
-            if (expr->data.subscript.index->type == NODE_STR_LITERAL &&
-                str_is_safe_literal(expr->data.subscript.index->data.str_val)) {
+            if (node_is_safe_str_literal(expr->data.subscript.index)) {
                 emit(cg, "strada_hash_get(");
                 gen_expression(cg, expr->data.subscript.array);
                 emit(cg, "->value.hv, \"%s\")", expr->data.subscript.index->data.str_val);
@@ -2669,8 +2856,7 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
         
         case NODE_DEREF_HASH:
             // $ref->{key} - dereference hash reference
-            if (expr->data.deref_hash.key->type == NODE_STR_LITERAL &&
-                str_is_safe_literal(expr->data.deref_hash.key->data.str_val)) {
+            if (node_is_safe_str_literal(expr->data.deref_hash.key)) {
                 emit(cg, "strada_hash_get(strada_deref_hash(");
                 gen_expression(cg, expr->data.deref_hash.ref);
                 emit(cg, "), \"%s\")", expr->data.deref_hash.key->data.str_val);

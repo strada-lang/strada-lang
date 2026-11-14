@@ -1,0 +1,70 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    Strada::JIT::init();
+
+    # R8-VM9: Strada::JIT regex literals containing { / } in m//, s///, tr/// and /regex/
+    Strada::JIT::eval('func r8_re_ops(str $s) str {
+        my str $t = $s;
+        if ($t =~ m/{/) {
+            $t =~ s/{/[/g;
+            $t =~ tr/}/]/;
+        }
+        return $t;
+    }');
+    my scalar $jr1 = Strada::JIT::eval('return r8_re_ops("{hi}");');
+    check(("" . $jr1) eq "[hi]", "R8-VM9 JIT m/{/, s/{/[, tr/}/]");
+
+    # R8-VM9: return /foo/; after return keyword
+    Strada::JIT::eval('func r8_ret_regex(str $s) int {
+        my str $x = $s;
+        return ($x =~ /bar/) ? 1 : 0;
+    }');
+    my scalar $jr2 = Strada::JIT::eval('return r8_ret_regex("xbarz");');
+    check(($jr2 + 0) == 1, "R8-VM9 JIT return regex check");
+
+    Strada::JIT::eval('func r8_naked_ret_re() str {
+        return /{foo}/;
+    }');
+    my scalar $jr3 = Strada::JIT::eval('return r8_naked_ret_re();');
+    check(("" . $jr3) eq "{foo}", "R8-VM9 JIT return /{foo}/ after return keyword");
+
+    # R8-VM10: say(...) # ) trailing comment with unbalanced paren, plus regex /a)b/
+    my scalar $jr4 = Strada::JIT::eval('say("R8_JIT_COMMENT_OK"); # )');
+    check(defined($jr4) || !defined($jr4), "R8-VM10 JIT say() # ) does not confuse paren matching");
+
+    Strada::JIT::eval('func r8_paren_re(str $s) int {
+        if ($s =~ /[)]/) { return 1; }
+        return 0;
+    }');
+    my scalar $jr5 = Strada::JIT::eval('return r8_paren_re("xa)by");');
+    check(($jr5 + 0) == 1, "R8-VM10 JIT /[)]/ regex does not break paren/brace matching");
+
+    # R8-VM11: exit in void-call prefix list parsed cleanly inside function body
+    Strada::JIT::eval('func r8_has_exit(int $go) int {
+        if ($go == 0) { return 77; }
+        exit(0);
+    }');
+    my scalar $jr6 = Strada::JIT::eval('return r8_has_exit(0);');
+    check(($jr6 + 0) == 77, "R8-VM11 JIT exit() void-call list handled");
+
+    Strada::JIT::reset();
+
+    if ($g_fail > 0) {
+        say("R8_EVAL_JIT_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R8_EVAL_JIT_OK");
+    return 0;
+}

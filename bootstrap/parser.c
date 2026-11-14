@@ -392,14 +392,31 @@ static ASTNode* parse_function(Parser *p) {
             found_optional = 1;
             
             // Parse default value (must be a literal)
+            int neg = 0;
+            if (p->current->type == TOK_MINUS) {
+                neg = 1;
+                advance(p);
+            }
             if (p->current->type == TOK_INT_LITERAL) {
-                param->data.param.default_value = ast_new_int_literal(atoi(p->current->lexeme));
+                int64_t ival;
+                if (neg) {
+                    uint64_t uval = strtoull(p->current->lexeme, NULL, 0);
+                    ival = (int64_t)(0ULL - uval);
+                } else {
+                    ival = (int64_t)strtoll(p->current->lexeme, NULL, 0);
+                }
+                param->data.param.default_value = ast_new_int_literal(ival);
                 advance(p);
             } else if (p->current->type == TOK_NUM_LITERAL) {
-                param->data.param.default_value = ast_new_num_literal(atof(p->current->lexeme));
+                double dval = atof(p->current->lexeme);
+                param->data.param.default_value = ast_new_num_literal(neg ? -dval : dval);
                 advance(p);
-            } else if (p->current->type == TOK_STR_LITERAL) {
-                param->data.param.default_value = ast_new_str_literal(p->current->lexeme);
+            } else if (!neg && p->current->type == TOK_STR_LITERAL) {
+                if (p->current->has_str_len) {
+                    param->data.param.default_value = ast_new_str_literal_len(p->current->value.str_val, p->current->str_len);
+                } else {
+                    param->data.param.default_value = ast_new_str_literal(p->current->value.str_val);
+                }
                 advance(p);
             } else {
                 parser_error(p, "Expected literal default value");
@@ -972,7 +989,9 @@ static ASTNode* parse_primary(Parser *p) {
         }
         
         case TOK_STR_LITERAL: {
-            ASTNode *node = ast_new_str_literal(p->current->value.str_val);
+            ASTNode *node = p->current->has_str_len
+                ? ast_new_str_literal_len(p->current->value.str_val, p->current->str_len)
+                : ast_new_str_literal(p->current->value.str_val);
             node->char_code = p->current->char_code;
             advance(p);
             return node;

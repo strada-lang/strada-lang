@@ -11,7 +11,7 @@ package Template::Lexer;
 func is_ws(str $ch) int {
     return ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") ? 1 : 0;
 }
-func is_inline_ws(str $ch) int { return ($ch eq " " || $ch eq "\t" || $ch eq "\r") ? 1 : 0; }
+func is_inline_ws(str $ch) int { return ($ch eq " " || $ch eq "\t") ? 1 : 0; }
 
 # Chomp flag char -> level (0 none, 1 one+newline, 2 collapse-to-space, 3 greedy),
 # or -1 if $ch is not a chomp flag.
@@ -31,10 +31,13 @@ func pre_chomp(str $text, int $level) str {
     if ($e == $n) { return $text; }                    # no trailing whitespace
     if ($level == 3) { return substr($text, 0, $e); }  # greedy: drop it all
     if ($level == 2) { return substr($text, 0, $e) . " "; }  # collapse to one space
-    # level 1 (ONE): drop trailing inline ws + a single newline
+    # level 1 (ONE): drop trailing inline ws + a single newline (LF or CRLF)
     my int $j = $n;
     while ($j > 0 && is_inline_ws(substr($text, $j - 1, 1)) == 1) { $j = $j - 1; }
-    if ($j > 0 && substr($text, $j - 1, 1) eq "\n") { $j = $j - 1; }
+    if ($j > 0 && substr($text, $j - 1, 1) eq "\n") {
+        $j = $j - 1;
+        if ($j > 0 && substr($text, $j - 1, 1) eq "\r") { $j = $j - 1; }
+    }
     return substr($text, 0, $j);
 }
 
@@ -47,10 +50,14 @@ func post_chomp(str $text, int $level) str {
     if ($s == 0) { return $text; }                     # no leading whitespace
     if ($level == 3) { return substr($text, $s, $n - $s); }
     if ($level == 2) { return " " . substr($text, $s, $n - $s); }
-    # level 1 (ONE): drop leading inline ws + a single newline
+    # level 1 (ONE): drop leading inline ws + a single newline (LF or CRLF)
     my int $j = 0;
     while ($j < $n && is_inline_ws(substr($text, $j, 1)) == 1) { $j = $j + 1; }
-    if ($j < $n && substr($text, $j, 1) eq "\n") { $j = $j + 1; }
+    if ($j < $n && substr($text, $j, 1) eq "\r" && $j + 1 < $n && substr($text, $j + 1, 1) eq "\n") {
+        $j = $j + 2;
+    } elsif ($j < $n && substr($text, $j, 1) eq "\n") {
+        $j = $j + 1;
+    }
     return substr($text, $j, $n - $j);
 }
 

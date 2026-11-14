@@ -3736,25 +3736,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
 
     # String
     if ($oid == OP::CONCAT) {
-        # Check for stringify overload on left/right
-        if ($interp->{"has_overloads"} == 1) {
-            my scalar $l_str_ovl = check_overload($interp, $left, "\"\"");
-            my scalar $r_str_ovl = check_overload($interp, $right, "\"\"");
-            my scalar $concat_left = $left;
-            my scalar $concat_right = $right;
-            if (defined($l_str_ovl)) {
-                my array @sa = ();
-                push(@sa, $left);
-                $concat_left = call_user_func($interp, $l_str_ovl, \@sa);
-            }
-            if (defined($r_str_ovl)) {
-                my array @sa = ();
-                push(@sa, $right);
-                $concat_right = call_user_func($interp, $r_str_ovl, \@sa);
-            }
-            return $concat_left . $concat_right;
-        }
-        return $left . $right;
+        return interp_stringify_val($interp, $left) . interp_stringify_val($interp, $right);
     }
     if ($oid == OP::REPEAT) {
         my str $s = $left;
@@ -3935,16 +3917,100 @@ func is_builtin(scalar $interp, str $name) int {
     return 0;
 }
 
+# Coerce overloaded objects ("") and unblessed/tied arrays to string form
+func interp_stringify_val(scalar $interp, scalar $v) scalar {
+    if (!defined($v)) { return $v; }
+    if ($interp->{"has_overloads"} == 1) {
+        my scalar $ovl = check_overload($interp, $v, "\"\"");
+        if (defined($ovl)) {
+            my array @sargs = ($v);
+            return call_user_func($interp, $ovl, \@sargs);
+        }
+    }
+    if (ref($v) eq "ARRAY") {
+        return "" . interp_arr_len($interp, $v);
+    }
+    return $v;
+}
+
+# Read hash element with tied hash FETCH dispatch
+func interp_hash_get(scalar $interp, scalar $hash_val, str $key) scalar {
+    if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
+        my scalar $tie_obj = $hash_val->{"__tied__"};
+        my str $tie_pkg = $tie_obj->{"__class__"};
+        if (length($tie_pkg) > 0) {
+            my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
+            if (defined($fetch_fn)) {
+                my array @fetch_args = ($tie_obj, $key);
+                return call_user_func($interp, $fetch_fn, \@fetch_args);
+            }
+        }
+    }
+    return $hash_val->{$key};
+}
+
 # Helper: format sprintf/printf across arbitrary arg counts using runtime C helper
-func interp_sprintf_arr(scalar $args, int $argc) str {
+func interp_sprintf_arr(scalar $interp, scalar $args, int $argc) str {
     if ($argc <= 0) {
         return "";
     }
-    my scalar $fmt = $args->[0];
-    my array @rest = ();
+    my str $fmt = "" . interp_stringify_val($interp, $args->[0]);
+    my int $flen = length($fmt);
+    my int $fi = 0;
     my int $si = 1;
+    my array @rest = ();
+    while ($fi < $flen) {
+        if (substr($fmt, $fi, 1) eq "%" && $fi + 1 < $flen) {
+            $fi = $fi + 1;
+            my str $nc = substr($fmt, $fi, 1);
+            if ($nc eq "%") {
+                $fi = $fi + 1;
+                next;
+            }
+            while ($fi < $flen && index("-+ #0", substr($fmt, $fi, 1)) >= 0) { $fi = $fi + 1; }
+            while ($fi < $flen) {
+                my str $dc = substr($fmt, $fi, 1);
+                if ($dc ge "0" && $dc le "9") { $fi = $fi + 1; } else { last; }
+            }
+            if ($fi < $flen && substr($fmt, $fi, 1) eq ".") {
+                $fi = $fi + 1;
+                while ($fi < $flen) {
+                    my str $pc = substr($fmt, $fi, 1);
+                    if ($pc ge "0" && $pc le "9") { $fi = $fi + 1; } else { last; }
+                }
+            }
+            while ($fi < $flen && (substr($fmt, $fi, 1) eq "l" || substr($fmt, $fi, 1) eq "h")) { $fi = $fi + 1; }
+            if ($fi >= $flen) { last; }
+            my str $conv = substr($fmt, $fi, 1);
+            $fi = $fi + 1;
+            if ($si < $argc) {
+                my scalar $arg = $args->[$si];
+                $si = $si + 1;
+                if (defined($arg) && ref($arg) eq "ARRAY") {
+                    $arg = interp_arr_len($interp, $arg);
+                } elsif ($conv eq "s") {
+                    $arg = interp_stringify_val($interp, $arg);
+                } elsif ($interp->{"has_overloads"} == 1 &&
+                         ($conv eq "d" || $conv eq "i" || $conv eq "u" || $conv eq "x" || $conv eq "X" ||
+                          $conv eq "o" || $conv eq "f" || $conv eq "e" || $conv eq "E" || $conv eq "g" || $conv eq "G")) {
+                    my scalar $novl = check_overload($interp, $arg, "0+");
+                    if (defined($novl)) {
+                        my array @nargs = ($arg);
+                        $arg = call_user_func($interp, $novl, \@nargs);
+                    }
+                }
+                push(@rest, $arg);
+            }
+        } else {
+            $fi = $fi + 1;
+        }
+    }
     while ($si < $argc) {
-        push(@rest, $args->[$si]);
+        my scalar $arg = $args->[$si];
+        if (defined($arg) && ref($arg) eq "ARRAY") {
+            $arg = interp_arr_len($interp, $arg);
+        }
+        push(@rest, $arg);
         $si = $si + 1;
     }
     my scalar $rest_ref = \@rest;
@@ -3968,58 +4034,43 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     my int $bid = $interp->{"builtin_ids"}->{$name};
 
     # ---- I/O ----
-    if ($bid == BI::SAY) {
+    if ($bid == BI::SAY || $bid == BI::PRINT) {
+        my int $is_say = ($bid == BI::SAY) ? 1 : 0;
+        my scalar $sfh = $interp->{"select_fh"};
         if ($argc == 0) {
-            my scalar $sfh0 = $interp->{"select_fh"};
-            if (defined($sfh0)) { say($sfh0, ""); }
-            else { say(""); }
+            if ($is_say) {
+                if (defined($sfh)) { say($sfh, ""); }
+                else { say(""); }
+            }
         } elsif ($argc == 1) {
-            my scalar $v = $args->[0];
-            # Check for stringify overload
-            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
-            if (defined($str_ovl)) {
-                my array @sargs = ();
-                push(@sargs, $v);
-                $v = call_user_func($interp, $str_ovl, \@sargs);
+            my scalar $v = interp_stringify_val($interp, $args->[0]);
+            if ($is_say) {
+                if (defined($sfh)) { say($sfh, $v); }
+                else { say($v); }
+            } else {
+                if (defined($sfh)) { print($sfh, $v); }
+                else { print($v); }
             }
-            my scalar $sfh = $interp->{"select_fh"};
-            if (defined($sfh)) { say($sfh, $v); }
-            else { say($v); }
         } elsif ($argc == 2) {
-            my scalar $v = $args->[1];
-            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
-            if (defined($str_ovl)) {
-                my array @sargs = ();
-                push(@sargs, $v);
-                $v = call_user_func($interp, $str_ovl, \@sargs);
+            my scalar $v = interp_stringify_val($interp, $args->[1]);
+            if ($is_say) { say($args->[0], $v); }
+            else { print($args->[0], $v); }
+        } else {
+            my int $ai = 0;
+            while ($ai < $argc - 1) {
+                my scalar $v = interp_stringify_val($interp, $args->[$ai]);
+                if (defined($sfh)) { print($sfh, $v); }
+                else { print($v); }
+                $ai++;
             }
-            say($args->[0], $v);
-        }
-        return undef;
-    }
-    if ($bid == BI::PRINT) {
-        if ($argc == 0) {
-            return undef;
-        } elsif ($argc == 1) {
-            my scalar $v = $args->[0];
-            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
-            if (defined($str_ovl)) {
-                my array @sargs = ();
-                push(@sargs, $v);
-                $v = call_user_func($interp, $str_ovl, \@sargs);
+            my scalar $vlast = interp_stringify_val($interp, $args->[$argc - 1]);
+            if ($is_say) {
+                if (defined($sfh)) { say($sfh, $vlast); }
+                else { say($vlast); }
+            } else {
+                if (defined($sfh)) { print($sfh, $vlast); }
+                else { print($vlast); }
             }
-            my scalar $sfh = $interp->{"select_fh"};
-            if (defined($sfh)) { print($sfh, $v); }
-            else { print($v); }
-        } elsif ($argc == 2) {
-            my scalar $v = $args->[1];
-            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
-            if (defined($str_ovl)) {
-                my array @sargs = ();
-                push(@sargs, $v);
-                $v = call_user_func($interp, $str_ovl, \@sargs);
-            }
-            print($args->[0], $v);
         }
         return undef;
     }
@@ -4329,7 +4380,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return lc($args->[0]);
     }
     if ($bid == BI::SPRINTF_FN) {
-        return interp_sprintf_arr($args, $argc);
+        return interp_sprintf_arr($interp, $args, $argc);
     }
     if ($bid == BI::MATCH_FN) {
         return match($args->[0], $args->[1]);
@@ -5082,7 +5133,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::PRINTF) {
         if ($argc >= 1) {
-            print(interp_sprintf_arr($args, $argc));
+            print(interp_sprintf_arr($interp, $args, $argc));
         }
         return undef;
     }
@@ -6389,6 +6440,11 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
         $interp->{"signal"} = SIG::NONE;
         $interp->{"signal_value"} = undef;
         $interp->{"had_explicit_return"} = 1;
+    } elsif ($sig == SIG::NEXT || $sig == SIG::LAST || $sig == SIG::REDO) {
+        $interp->{"signal"} = SIG::NONE;
+        $interp->{"signal_value"} = undef;
+        $interp->{"signal_label"} = "";
+        $interp->{"had_explicit_return"} = 0;
     } else {
         $interp->{"had_explicit_return"} = 0;
     }
@@ -6811,7 +6867,8 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $arr = eval_node($interp, $node->{"array"}, $env);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
-        my int $arr_len = size($arr);
+        my int $arr_len = interp_arr_len($interp, $arr);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my array @result = ();
         my int $mi = 0;
 
@@ -6819,7 +6876,8 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $map_env = env_new($env);
         try {
             while ($mi < $arr_len) {
-                $map_env->{"vars"}->{"_"} = $arr->[$mi];
+                $map_env->{"vars"}->{"_"} = interp_arr_get($interp, $arr, $mi);
+                if ($interp->{"signal"} != SIG::NONE) { last; }
                 my scalar $val = eval_block($interp, $block, $map_env);
                 if ($interp->{"signal"} != SIG::NONE) {
                     my int $msig = $interp->{"signal"};
@@ -6855,7 +6913,8 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $arr = eval_node($interp, $node->{"array"}, $env);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
-        my int $arr_len = size($arr);
+        my int $arr_len = interp_arr_len($interp, $arr);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my array @result = ();
         my int $gi = 0;
 
@@ -6863,7 +6922,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $grep_env = env_new($env);
         try {
             while ($gi < $arr_len) {
-                $grep_env->{"vars"}->{"_"} = $arr->[$gi];
+                my scalar $elem = interp_arr_get($interp, $arr, $gi);
+                if ($interp->{"signal"} != SIG::NONE) { last; }
+                $grep_env->{"vars"}->{"_"} = $elem;
                 my scalar $val = eval_block($interp, $block, $grep_env);
                 if ($interp->{"signal"} != SIG::NONE) {
                     my int $gsig = $interp->{"signal"};
@@ -6883,7 +6944,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                     }
                 }
                 if ($val) {
-                    push(@result, $arr->[$gi]);
+                    push(@result, $elem);
                 }
                 $gi = $gi + 1;
             }
@@ -7093,13 +7154,17 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     # --- Hash Slice ---
     if ($type == NI::HASH_SLICE) {
         my scalar $source = eval_node($interp, $node->{"source"}, $env);
+        if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $items = $node->{"items"};
         my int $item_count = $node->{"item_count"};
         my array @result = ();
         my int $si = 0;
         while ($si < $item_count) {
             my str $key = eval_node($interp, $items->[$si], $env);
-            push(@result, $source->{$key});
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            my scalar $val = interp_hash_get($interp, $source, $key);
+            if ($interp->{"signal"} != SIG::NONE) { return undef; }
+            push(@result, $val);
             $si = $si + 1;
         }
         return \@result;
@@ -8103,6 +8168,94 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
+        # Special handling for core::weaken / sys::weaken / core::isweak / sys::isweak
+        if (($name eq "core::weaken" || $name eq "sys::weaken" ||
+             $name eq "core::isweak" || $name eq "sys::isweak") && $argc == 1) {
+            my int $is_w_op = ($name eq "core::weaken" || $name eq "sys::weaken") ? 1 : 0;
+            my scalar $w_arg = $raw_args->[0];
+            my scalar $wh = undef;
+            my str $wk = "";
+            my int $has_hslot = 0;
+            if (defined($w_arg) && $w_arg->{"type"} == NI::VARIABLE && $w_arg->{"sigil"} eq "\$") {
+                my scalar $wslot = interp_find_var_slot($interp, $env, $w_arg->{"name"});
+                if (defined($wslot)) {
+                    $wh = $wslot->[0]->{"vars"};
+                    $wk = $wslot->[1];
+                    $has_hslot = 1;
+                }
+            } elsif (defined($w_arg) && ($w_arg->{"type"} == NI::HASH_ACCESS || $w_arg->{"type"} == NI::DEREF_HASH)) {
+                my scalar $wc_node = ($w_arg->{"type"} == NI::HASH_ACCESS) ? $w_arg->{"hash"} : $w_arg->{"ref"};
+                if (!defined($wc_node)) { $wc_node = $w_arg->{"target"}; }
+                my scalar $wcont = eval_node($interp, $wc_node, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                my str $wkey = "" . eval_node($interp, $w_arg->{"key"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                if (ref($wcont) eq "HASH" && !exists($wcont, "__tied__")) {
+                    $wh = $wcont;
+                    $wk = $wkey;
+                    $has_hslot = 1;
+                }
+            } elsif (defined($w_arg) && ($w_arg->{"type"} == NI::SUBSCRIPT || $w_arg->{"type"} == NI::DEREF_ARRAY)) {
+                my scalar $wa_node = ($w_arg->{"type"} == NI::SUBSCRIPT) ? $w_arg->{"array"} : $w_arg->{"ref"};
+                if (!defined($wa_node)) { $wa_node = $w_arg->{"target"}; }
+                my scalar $wa = eval_node($interp, $wa_node, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                my int $widx = eval_node($interp, $w_arg->{"index"}, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                if (ref($wa) eq "ARRAY" && !defined(interp_get_tied_array($interp, $wa))) {
+                    if ($is_w_op) {
+                        __C__ {
+                            strada_array_weaken_elem(wa, (int64_t)strada_to_int(widx));
+                        }
+                        return undef;
+                    } else {
+                        my int $aiw = 0;
+                        __C__ {
+                            StradaArray *av = strada_deref_array(wa);
+                            int64_t aii = (int64_t)strada_to_int(widx);
+                            int wres = 0;
+                            if (av) {
+                                if (aii < 0) aii += (int64_t)av->size;
+                                if (aii >= 0 && (size_t)aii < av->size) {
+                                    wres = strada_isweak(av->elements[av->head + (size_t)aii]);
+                                }
+                            }
+                            strada_decref(aiw);
+                            aiw = strada_new_int(wres);
+                        }
+                        return $aiw;
+                    }
+                }
+                return $is_w_op ? undef : 0;
+            } else {
+                eval_node($interp, $w_arg, $env);
+                if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                return $is_w_op ? undef : 0;
+            }
+            if ($has_hslot) {
+                if ($is_w_op) {
+                    __C__ {
+                        char *ks = strada_to_str(wk);
+                        strada_weaken_hv_entry(strada_deref_hash(wh), ks ? ks : "");
+                        free(ks);
+                    }
+                    return undef;
+                } else {
+                    my int $hiw = 0;
+                    __C__ {
+                        char *ks = strada_to_str(wk);
+                        StradaValue *ev = strada_hash_get(strada_deref_hash(wh), ks ? ks : "");
+                        free(ks);
+                        int wres = strada_isweak(ev);
+                        strada_decref(hiw);
+                        hiw = strada_new_int(wres);
+                    }
+                    return $hiw;
+                }
+            }
+            return $is_w_op ? undef : 0;
+        }
+
         # Special handling for tie($var, ...), untie($var), tied($var)
         if (($name eq "tie" || $name eq "untie" || $name eq "tied") && $argc >= 1) {
             my scalar $t_arg0 = $raw_args->[0];
@@ -8368,41 +8521,14 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     if ($type == NI::HASH_ACCESS) {
         my scalar $hash_val = eval_node($interp, $node->{"hash"}, $env);
         my str $key = eval_node($interp, $node->{"key"}, $env);
-        # Check for tied hash FETCH
-        if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
-            my scalar $tie_obj = $hash_val->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
-            if (length($tie_pkg) > 0) {
-                my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
-                if (defined($fetch_fn)) {
-                    my array @fetch_args = ();
-                    push(@fetch_args, $tie_obj);
-                    push(@fetch_args, $key);
-                    return call_user_func($interp, $fetch_fn, \@fetch_args);
-                }
-            }
-        }
-        return $hash_val->{$key};
+        return interp_hash_get($interp, $hash_val, $key);
     }
 
     # --- Deref Hash ($ref->{key}) ---
     if ($type == NI::DEREF_HASH) {
         my scalar $ref_val = eval_node($interp, $node->{"ref"}, $env);
         my str $key = eval_node($interp, $node->{"key"}, $env);
-        if (ref($ref_val) eq "HASH" && exists($ref_val, "__tied__")) {
-            my scalar $tie_obj = $ref_val->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
-            if (length($tie_pkg) > 0) {
-                my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
-                if (defined($fetch_fn)) {
-                    my array @fetch_args = ();
-                    push(@fetch_args, $tie_obj);
-                    push(@fetch_args, $key);
-                    return call_user_func($interp, $fetch_fn, \@fetch_args);
-                }
-            }
-        }
-        return $ref_val->{$key};
+        return interp_hash_get($interp, $ref_val, $key);
     }
 
     # --- Deref Array ($ref->[idx]) ---

@@ -436,6 +436,142 @@ private func jit_can_regex_after(str $c) int {
     return 1;
 }
 
+private func jit_is_ident_ch(str $c) int {
+    if ($c eq "_") { return 1; }
+    if (($c ge "0" && $c le "9") || ($c ge "A" && $c le "Z") || ($c ge "a" && $c le "z")) { return 1; }
+    return 0;
+}
+
+private func jit_kw_allows_regex(str $w) int {
+    if ($w eq "return" || $w eq "if" || $w eq "elsif" || $w eq "while" || $w eq "until" ||
+        $w eq "unless" || $w eq "and" || $w eq "or" || $w eq "not" ||
+        $w eq "eq" || $w eq "ne" || $w eq "lt" || $w eq "gt" || $w eq "le" || $w eq "ge" ||
+        $w eq "cmp") {
+        return 1;
+    }
+    return 0;
+}
+
+private func jit_skip_delimited_section(str $s, int $pos, int $len) int {
+    if ($pos >= $len) { return $len; }
+    my str $open = substr($s, $pos, 1);
+    my str $close = $open;
+    my int $paired = 0;
+    if ($open eq "{") { $close = "}"; $paired = 1; }
+    elsif ($open eq "(") { $close = ")"; $paired = 1; }
+    elsif ($open eq "[") { $close = "]"; $paired = 1; }
+    elsif ($open eq "<") { $close = ">"; $paired = 1; }
+    my int $depth = 1;
+    my int $j = $pos + 1;
+    while ($j < $len) {
+        my str $ch = substr($s, $j, 1);
+        if ($ch eq "\\" && $j + 1 < $len) { $j = $j + 2; next; }
+        if ($paired == 1) {
+            if ($ch eq $open) { $depth = $depth + 1; }
+            elsif ($ch eq $close) {
+                $depth = $depth - 1;
+                if ($depth == 0) { return $j + 1; }
+            }
+        } else {
+            if ($ch eq $open) { return $j + 1; }
+        }
+        $j = $j + 1;
+    }
+    return $len;
+}
+
+private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
+    if ($pos > 0) {
+        my str $prev = substr($s, $pos - 1, 1);
+        if (jit_is_ident_ch($prev) == 1 || $prev eq "\$" || $prev eq "@" || $prev eq "%") {
+            return -1;
+        }
+    }
+    if ($pos >= 2) {
+        my str $p2back = substr($s, $pos - 2, 2);
+        if ($p2back eq "->" || $p2back eq "::") { return -1; }
+    }
+    my int $op_len = 0;
+    my int $two_part = 0;
+    if ($pos + 2 < $len) {
+        my str $p2 = substr($s, $pos, 2);
+        if ($p2 eq "qr" || $p2 eq "qq" || $p2 eq "qw" || $p2 eq "qx") {
+            $op_len = 2;
+        } elsif ($p2 eq "tr") {
+            $op_len = 2;
+            $two_part = 1;
+        }
+    }
+    if ($op_len == 0 && $pos < $len) {
+        my str $p1 = substr($s, $pos, 1);
+        if ($p1 eq "s" || $p1 eq "y") {
+            $op_len = 1;
+            $two_part = 1;
+        } elsif ($p1 eq "m" || $p1 eq "q") {
+            $op_len = 1;
+        } else {
+            return -1;
+        }
+    }
+    my int $dpos = $pos + $op_len;
+    if ($dpos >= $len) { return -1; }
+    my str $dc0 = substr($s, $dpos, 1);
+    if (jit_is_ident_ch($dc0) == 1) { return -1; }
+    my int $had_ws = 0;
+    while ($dpos < $len) {
+        my str $ws = substr($s, $dpos, 1);
+        if ($ws eq " " || $ws eq "\t" || $ws eq "\r" || $ws eq "\n") {
+            $had_ws = 1;
+            $dpos = $dpos + 1;
+        } else {
+            last;
+        }
+    }
+    if ($dpos >= $len) { return -1; }
+    my str $delim = substr($s, $dpos, 1);
+    if (jit_is_ident_ch($delim) == 1 || $delim eq "#") { return -1; }
+    if ($delim eq ";" || $delim eq "," || $delim eq ")" || $delim eq "]" || $delim eq "}" || $delim eq "=") {
+        return -1;
+    }
+    if ($had_ws == 1 && ($delim eq "+" || $delim eq "-" || $delim eq "*" || $delim eq "%" ||
+                          $delim eq "&" || $delim eq "|" || $delim eq "^" || $delim eq "?" ||
+                          $delim eq ":" || $delim eq "." || $delim eq ">" || $delim eq "<")) {
+        return -1;
+    }
+    my int $is_paired = ($delim eq "{" || $delim eq "(" || $delim eq "[" || $delim eq "<") ? 1 : 0;
+    my int $end1 = jit_skip_delimited_section($s, $dpos, $len);
+    my int $fin = $end1;
+    if ($two_part == 1) {
+        if ($is_paired == 1) {
+            my int $p2pos = $end1;
+            while ($p2pos < $len) {
+                my str $w2 = substr($s, $p2pos, 1);
+                if ($w2 eq " " || $w2 eq "\t" || $w2 eq "\r" || $w2 eq "\n") {
+                    $p2pos = $p2pos + 1;
+                } else {
+                    last;
+                }
+            }
+            if ($p2pos < $len) {
+                $fin = jit_skip_delimited_section($s, $p2pos, $len);
+            }
+        } else {
+            if ($end1 > $dpos + 1) {
+                $fin = jit_skip_delimited_section($s, $end1 - 1, $len);
+            }
+        }
+    }
+    while ($fin < $len) {
+        my str $mc = substr($s, $fin, 1);
+        if (($mc ge "a" && $mc le "z") || ($mc ge "A" && $mc le "Z")) {
+            $fin = $fin + 1;
+        } else {
+            last;
+        }
+    }
+    return $fin;
+}
+
 private func jit_skip_slash_token(str $input, int $pos, int $len, int $can_regex) int {
     if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "*") {
         my int $j = $pos + 2;
@@ -512,6 +648,21 @@ private func extract_function_def(str $input) array {
             next;
         }
         if ($c eq "{") { $brace_pos = $scan; last; }
+        my int $qend = jit_try_skip_quote_op($input, $scan, $len);
+        if ($qend > $scan) {
+            $can_regex = 0;
+            $scan = $qend;
+            next;
+        }
+        if (jit_is_ident_ch($c) == 1) {
+            my int $ws = $scan;
+            while ($ws < $len && jit_is_ident_ch(substr($input, $ws, 1)) == 1) {
+                $ws = $ws + 1;
+            }
+            $can_regex = jit_kw_allows_regex(substr($input, $scan, $ws - $scan));
+            $scan = $ws;
+            next;
+        }
         if ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
             $can_regex = jit_can_regex_after($c);
         }
@@ -576,8 +727,25 @@ private func extract_function_def(str $input) array {
                 $end_pos = $i;
                 last;
             }
-        } elsif ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
-            $can_regex = jit_can_regex_after($c);
+        } else {
+            my int $qend2 = jit_try_skip_quote_op($input, $i, $len);
+            if ($qend2 > $i) {
+                $can_regex = 0;
+                $i = $qend2;
+                next;
+            }
+            if (jit_is_ident_ch($c) == 1) {
+                my int $wi = $i;
+                while ($wi < $len && jit_is_ident_ch(substr($input, $wi, 1)) == 1) {
+                    $wi = $wi + 1;
+                }
+                $can_regex = jit_kw_allows_regex(substr($input, $i, $wi - $i));
+                $i = $wi;
+                next;
+            }
+            if ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
+                $can_regex = jit_can_regex_after($c);
+            }
         }
 
         $i = $i + 1;
@@ -1406,27 +1574,73 @@ private func jit_find_matching(str $s, int $open_pos, str $open_ch, str $close_c
     my int $len = length($s);
     my int $depth = 0;
     my int $in_str = 0;
+    my int $in_cmt = 0;
+    my int $can_regex = 1;
     my int $i = $open_pos;
     while ($i < $len) {
         my str $c = substr($s, $i, 1);
+        if ($in_cmt == 1) {
+            if ($c eq "\n") { $in_cmt = 0; }
+            $i = $i + 1;
+            next;
+        }
         if ($in_str == 1) {
             if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
+            if ($c eq "\"") { $in_str = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
         if ($in_str == 2) {
             if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
+            if ($c eq "'") { $in_str = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
-        if ($c eq "\"") { $in_str = 1; }
-        elsif ($c eq "'") { $in_str = 2; }
-        elsif ($c eq $open_ch) { $depth = $depth + 1; }
-        elsif ($c eq $close_ch) {
+        if ($c eq "\"") { $in_str = 1; $i = $i + 1; next; }
+        if ($c eq "'") { $in_str = 2; $i = $i + 1; next; }
+        if ($c eq "#") { $in_cmt = 1; $i = $i + 1; next; }
+        if ($c eq $open_ch) {
+            $depth = $depth + 1;
+            $can_regex = 1;
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq $close_ch) {
             $depth = $depth - 1;
+            $can_regex = 0;
             if ($depth == 0) { return $i; }
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "/") {
+            my int $next_i = jit_skip_slash_token($s, $i, $len, $can_regex);
+            if ($next_i > $i + 1) {
+                $can_regex = 0;
+                $i = $next_i;
+                next;
+            }
+            $can_regex = 1;
+            $i = $i + 1;
+            next;
+        }
+        my int $qend = jit_try_skip_quote_op($s, $i, $len);
+        if ($qend > $i) {
+            $can_regex = 0;
+            $i = $qend;
+            next;
+        }
+        if (jit_is_ident_ch($c) == 1) {
+            my int $wi = $i;
+            while ($wi < $len && jit_is_ident_ch(substr($s, $wi, 1)) == 1) {
+                $wi = $wi + 1;
+            }
+            $can_regex = jit_kw_allows_regex(substr($s, $i, $wi - $i));
+            $i = $wi;
+            next;
+        }
+        if ($c ne " " && $c ne "\t" && $c ne "\r" && $c ne "\n") {
+            if ($c eq "(" || $c eq "[" || $c eq "{") { $can_regex = 1; }
+            else { $can_regex = jit_can_regex_after($c); }
         }
         $i = $i + 1;
     }
@@ -1437,7 +1651,7 @@ private func jit_is_complete_call(str $trimmed, int $open_pos) int {
     my int $close_pos = jit_find_matching($trimmed, $open_pos, "(", ")");
     if ($close_pos < 0) { return 0; }
     my str $tail = substr($trimmed, $close_pos + 1, length($trimmed) - $close_pos - 1);
-    if ($tail =~ /^\s*;?\s*$/) { return 1; }
+    if ($tail =~ /^\s*;?\s*(?:#.*)?$/) { return 1; }
     return 0;
 }
 
@@ -1552,7 +1766,7 @@ private func generate_source(str $input) str {
 
     # Check if this is a standalone void function call (not part of a larger expression like my_void() // 42)
     my int $is_void_call = 0;
-    if ($trimmed =~ /^(say|print|warn|die|push|unshift)\(/) {
+    if ($trimmed =~ /^(say|print|warn|die|push|unshift|exit)\(/) {
         my int $op_pos = index($trimmed, "(");
         if ($op_pos >= 0 && jit_is_complete_call($trimmed, $op_pos) == 1) {
             $is_void_call = 1;

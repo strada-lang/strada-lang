@@ -1,0 +1,161 @@
+#!/usr/bin/env strada
+# Cycle 8 Valgrind leak regression suite: R8-RT1..R8-RT6 + R8-C1..R8-C10
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+our int $r8l_destroy_cnt = 0;
+our int $r8l_int64_g = 0;
+our str $r8l_target = "abcdef";
+our scalar $r8l_shared = undef;
+
+func inc_d() void { $r8l_destroy_cnt = $r8l_destroy_cnt + 1; }
+func clear_g() int { $r8l_int64_g = 0; return 1; }
+func r8l_sub_throw() str { die("s_throw"); return "X"; }
+
+package R8LThrowStr;
+func new(str $tag) scalar {
+    my hash %s = ("tag" => $tag, "pad" => ("x" x 64));
+    return bless(\%s, "R8LThrowStr");
+}
+func to_str(scalar $self, scalar $o, int $r) str {
+    die("r8l_str:" . $self->{"tag"});
+}
+use overload '""' => "to_str";
+
+package R8LCycleTarget;
+func new() scalar {
+    my hash %s = ("v" => 1, "buf" => ("y" x 64));
+    return bless(\%s, "R8LCycleTarget");
+}
+func DESTROY(scalar $self) void {
+    main::inc_d();
+}
+
+package R8LTieScalar;
+func TIESCALAR(str $cls, str $v) scalar {
+    my hash %s = ("v" => $v, "fail" => 0);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar {
+    if ($self->{"fail"} == 1) { die("r8l_fetch"); }
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R8LTieHash;
+func TIEHASH(str $cls) scalar {
+    my hash %s = ("d" => {"k" => "root"}, "throw_store" => 0);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void {
+    if ($self->{"throw_store"} == 1 && $v ne "root") { die("r8l_tie_store"); }
+    $self->{"d"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $o = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $o;
+}
+
+package R8LPair;
+has ro int $a = 0;
+has ro int $val = 0;
+
+struct R8LStruct {
+    int flags;
+    int val;
+}
+
+package main;
+
+func make_cycle_with_destroy() void {
+    my scalar $obj = R8LCycleTarget::new();
+    my scalar $fn = undef;
+    $fn = func(int $n) scalar {
+        if ($n == 0) { return $obj; }
+        return $fn->($n - 1);
+    };
+    $fn->(1);
+}
+
+func take_int64_nl(int $x) int {
+    clear_g();
+    return $x + 1;
+}
+
+func main() int {
+    # 1. R8-RT1: . and .= throw cleanup, self .=, large .= growth
+    my int $i = 0;
+    while ($i < 4) {
+        my str $s = "hdr_" . ("z" x 40);
+        my scalar $ov = R8LThrowStr::new("c");
+        try { my str $b = $s . $ov; } catch ($e) {}
+        try { $s .= $ov; } catch ($e) {}
+        $s .= $s;
+        $s .= ("q" x 300);
+        $i = $i + 1;
+    }
+
+    # 2. R8-RT2 & R8-RT3 & R8-C10: join throw, s///e throw, substr= throw, tied substr=
+    my scalar $ts = "foobar";
+    tie($ts, "R8LTieScalar", "foobar");
+    substr($ts, 3, 3) = ("Z" x 20);
+    tied($ts)->{"fail"} = 1;
+    try { my str $j = join(",", ("a", R8LThrowStr::new("j"), "b")); } catch ($e) {}
+    try { my str $x = "alpha beta"; $x =~ s/alpha/r8l_sub_throw()/e; } catch ($e) {}
+    try { my str $x2 = "hello_world"; substr($x2, 0, 5) = R8LThrowStr::new("sub"); } catch ($e) {}
+    untie($ts);
+
+    # 3. R8-RT4: Async::Loop coroutine local() tied hash throwing STORE
+    my hash %cth = ();
+    tie(%cth, "R8LTieHash");
+    my scalar $cth_obj = tied(%cth);
+    my scalar $loop = Async::Loop::new();
+    $loop->spawn(func () void {
+        local $cth{"k"} = "c1_" . ("x" x 32);
+        Async::Task::sleep(10);
+    });
+    $loop->spawn(func () void {
+        try {
+            $cth_obj->{"throw_store"} = 1;
+            local $cth{"k"} = "c2_" . ("y" x 32);
+        } catch ($e) {
+            $cth_obj->{"throw_store"} = 0;
+        }
+    });
+    $loop->run();
+    untie(%cth);
+
+    # 4. R8-RT5: closure cycle with DESTROY target reclaimed by cycle GC
+    $r8l_destroy_cnt = 0;
+    make_cycle_with_destroy();
+    __C__ { strada_gc_collect(); }
+    if ($r8l_destroy_cnt != 1) { die("cycle destroy failed"); }
+
+    # 5. R8-C1..C9 leak checks: 64-bit inline ctor, 64-bit range map/grep, self-slice, struct, unshift throw
+    my int $big = 4611686018427387909;
+    my scalar $p = R8LPair::new("a", 1, "val", $big);
+    $r8l_int64_g = $big;
+    my int $g2 = take_int64_nl($r8l_int64_g);
+    my array @rm = map { $_ - $big; } ($big .. ($big + 2));
+    my array @rg = grep { ($_ % 2) == 1; } ($big .. ($big + 2));
+    my array @sa = ("A" x 20, "B" x 20, "C" x 20);
+    @sa[1, 0] = @sa;
+    my R8LStruct $st;
+    $st->flags = 6;
+    $st->flags |= 8;
+    $st->flags //= 99;
+    my array @ua = ("t");
+    try { unshift(@ua, "x" x 20, "" . R8LThrowStr::new("u")); } catch ($e) {}
+    my array @dst = (1, 2);
+    my int $da = 0;
+    my int $db = 0;
+    ($da, $db) = @dst if 1;
+
+    say("R8_LEAKS_OK:" . ($g2 > $big) . "," . size(@rm) . "," . size(@rg) . "," . $st->flags . "," . $da . "," . $db);
+    return 0;
+}

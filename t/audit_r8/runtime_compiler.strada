@@ -1,0 +1,556 @@
+#!/usr/bin/env strada
+# Cycle 8 Audit regression tests: R8-RT1..R8-RT6 + R8-C1..R8-C10
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+our int $g_fail = 0;
+our int $r8_destroy_count = 0;
+our array @r8_shared_arr = ();
+our str $r8_str_target = "abcdef";
+our scalar $r8_coro_tie = undef;
+our str $r8_coro_log = "";
+our int $r8_int64_cleared = 0;
+our array @r8_sub_arr = ();
+our array @r8_slice_arr = ();
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func clear_shared_arr() void { @r8_shared_arr = (); }
+func mutate_str_target() void { $r8_str_target = "REPLACED_TARGET_LONG_STRING"; }
+func inc_r8_destroy() void { $r8_destroy_count = $r8_destroy_count + 1; }
+func sub_eval_throw() str {
+    die("r8_subst_rhs");
+    return "Z";
+}
+
+func clear_r8_int64() int {
+    $r8_int64_cleared = 0;
+    return 1;
+}
+
+func sub_realloc_idx() int {
+    my int $i = 0;
+    while ($i < 40) {
+        push(@r8_sub_arr, "pad_" . $i);
+        $i = $i + 1;
+    }
+    return 1;
+}
+
+func get_sub_arr_ref(scalar $aref) scalar {
+    return $aref;
+}
+
+func idx_mutate_arr(scalar $aref) int {
+    my int $i = 0;
+    while ($i < 40) {
+        push(@{$aref}, "x" . $i);
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func slice_lo_mut() int {
+    push(@r8_slice_arr, "mutA");
+    return 1;
+}
+
+func slice_hi_mut() int {
+    push(@r8_slice_arr, "mutB");
+    return 2;
+}
+
+func order_push(str $tag, scalar $log_ref) str {
+    push(@{$log_ref}, $tag);
+    return $tag;
+}
+
+func order_throw(scalar $log_ref) str {
+    push(@{$log_ref}, "throw_arg");
+    die("r8_arg_boom");
+}
+
+# ---- Packages & helpers ----
+
+package R8ThrowStr;
+func new(str $tag) scalar {
+    my hash %s = ("tag" => $tag);
+    return bless(\%s, "R8ThrowStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("r8_str_throw:" . $self->{"tag"});
+}
+use overload '""' => "to_str";
+
+package R8JoinMutStr;
+func new(str $label) scalar {
+    my hash %s = ("label" => $label);
+    return bless(\%s, "R8JoinMutStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    main::clear_shared_arr();
+    return $self->{"label"};
+}
+use overload '""' => "to_str";
+
+package R8TieScalarThrow;
+func TIESCALAR(str $cls, str $init) scalar {
+    my hash %s = ("v" => $init, "fail_fetch" => 0, "fail_store" => 0);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar {
+    if ($self->{"fail_fetch"} == 1) {
+        die("r8_tie_fetch_boom");
+    }
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void {
+    if ($self->{"fail_store"} == 1) {
+        die("r8_tie_store_boom");
+    }
+    $self->{"v"} = $v;
+}
+
+package R8TieHashCoro;
+func TIEHASH(str $cls) scalar {
+    my hash %s = ("d" => {"k" => "root"}, "throw_store" => 0);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"d"}->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    if ($self->{"throw_store"} == 1 && $v ne "root") {
+        die("r8_coro_tie_store_boom");
+    }
+    $self->{"d"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $old;
+}
+
+package R8SubstrMut;
+func new(str $rep) scalar {
+    my hash %s = ("rep" => $rep);
+    return bless(\%s, "R8SubstrMut");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    main::mutate_str_target();
+    return $self->{"rep"};
+}
+use overload '""' => "to_str";
+
+package R8CycleTarget;
+func new() scalar {
+    my hash %s = ("x" => 1);
+    return bless(\%s, "R8CycleTarget");
+}
+func DESTROY(scalar $self) void {
+    main::inc_r8_destroy();
+}
+
+package R8PairA;
+has ro int $a = 0;
+has ro int $val = 0;
+
+package R8PairB;
+has ro int $tag = 0;
+has ro int $val = 0;
+
+struct R8BitStruct {
+    int flags;
+    int val;
+    str label;
+}
+
+package R8RTieCopyArr;
+func TIEARRAY(str $cls) scalar {
+    my hash %s = ("a" => ["xa", "xb", "xc"]);
+    return bless(\%s, $cls);
+}
+func FETCHSIZE(scalar $self) int { return size($self->{"a"}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+
+package R8RTieCopyHash;
+func TIEHASH(str $cls) scalar {
+    my hash %s = ("d" => {"m" => "10", "n" => "20"}, "keys" => [], "idx" => 0);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func FIRSTKEY(scalar $self) scalar {
+    my array @ks = sort { $a cmp $b; } keys($self->{"d"});
+    $self->{"keys"} = \@ks;
+    $self->{"idx"} = 0;
+    if (size(@ks) == 0) { return undef; }
+    $self->{"idx"} = 1;
+    return $ks[0];
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my int $i = $self->{"idx"};
+    my scalar $ks = $self->{"keys"};
+    if ($i >= size($ks)) { return undef; }
+    $self->{"idx"} = $i + 1;
+    return $ks->[$i];
+}
+
+package main;
+
+func take_int64_nonleaf(int $x) int {
+    clear_r8_int64();
+    my array @tmp = (1, 2, 3);
+    return $x + size(@tmp);
+}
+
+func trigger_cycle_gc() void {
+    __C__ { strada_gc_collect(); }
+}
+
+func make_closure_cycle_with_destroy() void {
+    my scalar $obj = R8CycleTarget::new();
+    my scalar $fn = undef;
+    $fn = func(int $n) scalar {
+        if ($n == 0) {
+            return $obj;
+        }
+        return $fn->($n - 1);
+    };
+    $fn->(1);
+}
+
+func run_our_body_init() int {
+    my scalar $loc = "local_ok";
+    my array @loc_a = ("x", "y");
+    our str $r8_body_our = $loc;
+    our array @r8_body_arr = @loc_a;
+    if ($r8_body_our ne "local_ok" || join(",", @r8_body_arr) ne "x,y") {
+        return 0;
+    }
+    return 1;
+}
+
+# R8-C2 top-level our initialized from global / constant expression
+our str $r8_top_base = "base_top";
+our str $r8_top_copy = $r8_top_base . "_2";
+
+func main() int {
+    # ------------------------------------------------------------
+    # R8-RT1: . and .= throw cleanup, self .=, large .= growth
+    # ------------------------------------------------------------
+    my str $s1 = "prefix_";
+    my scalar $ts_ov = R8ThrowStr::new("rt1_ov");
+    my int $caught = 0;
+    try {
+        my str $bad = $s1 . $ts_ov;
+    } catch ($e) {
+        $caught = ($e =~ /r8_str_throw:rt1_ov/) ? 1 : 0;
+    }
+    check($caught == 1 && $s1 eq "prefix_", "R8-RT1 . throw leaves operand intact");
+
+    $caught = 0;
+    try {
+        $s1 .= $ts_ov;
+    } catch ($e) {
+        $caught = ($e =~ /r8_str_throw:rt1_ov/) ? 1 : 0;
+    }
+    check($caught == 1 && $s1 eq "prefix_", "R8-RT1 .= throw preserves LHS");
+
+    my scalar $tie_s = "";
+    tie($tie_s, "R8TieScalarThrow", "tval");
+    tied($tie_s)->{"fail_fetch"} = 1;
+    $caught = 0;
+    try {
+        $s1 .= $tie_s;
+    } catch ($e) {
+        $caught = ($e =~ /r8_tie_fetch_boom/) ? 1 : 0;
+    }
+    check($caught == 1 && $s1 eq "prefix_", "R8-RT1 .= tied FETCH throw preserves LHS");
+    untie($tie_s);
+
+    my str $self_c = "ab";
+    $self_c .= $self_c;
+    $self_c .= $self_c;
+    check($self_c eq "abababab", "R8-RT1 self-concat .= aliasing");
+
+    my str $big_c = "";
+    my int $gi = 0;
+    while ($gi < 300) {
+        $big_c .= "0123456789abcdef";
+        $gi = $gi + 1;
+    }
+    check(length($big_c) == 4800 && substr($big_c, 0, 16) eq "0123456789abcdef", "R8-RT1 large .= growth");
+
+    # ------------------------------------------------------------
+    # R8-RT2: join() element overload mutation/throw & $arr[0] .=
+    # ------------------------------------------------------------
+    @r8_shared_arr = (R8JoinMutStr::new("first"), "second", "third");
+    my str $j_mut = join("-", @r8_shared_arr);
+    check(index($j_mut, "first") == 0, "R8-RT2 join survives element clearing source array");
+
+    my array @j_throw = ("ok", R8ThrowStr::new("rt2_join"));
+    $caught = 0;
+    try {
+        my str $jx = join(":", @j_throw);
+    } catch ($e) {
+        $caught = ($e =~ /r8_str_throw:rt2_join/) ? 1 : 0;
+    }
+    check($caught == 1, "R8-RT2 join element overload throw unwinds cleanly");
+
+    my array @arr_concat = ("hel");
+    $arr_concat[0] .= "lo";
+    $arr_concat[0] .= $arr_concat[0];
+    check($arr_concat[0] eq "helloh" . "ello", "R8-RT2 array elem .= and self-concat");
+
+    # ------------------------------------------------------------
+    # R8-RT3 & R8-C10: s/// and substr()= RHS mutation/throw + tied substr=
+    # ------------------------------------------------------------
+    $r8_str_target = "hello_world";
+    my scalar $sm = R8SubstrMut::new("XYZ");
+    my str $rep_res = (substr($r8_str_target, 0, 5) = $sm);
+    check($rep_res eq "XYZ", "R8-RT3 substr= succeeds when RHS overload mutates target");
+
+    my str $s_err = "keep_me";
+    $caught = 0;
+    try {
+        substr($s_err, 0, 4) = R8ThrowStr::new("rt3_sub");
+    } catch ($e) {
+        $caught = ($e =~ /r8_str_throw:rt3_sub/) ? 1 : 0;
+    }
+    check($caught == 1 && $s_err eq "keep_me", "R8-RT3 substr= throw preserves target string");
+
+    my str $sub_re = "alpha beta";
+    $caught = 0;
+    try {
+        $sub_re =~ s/alpha/sub_eval_throw()/e;
+    } catch ($e) {
+        $caught = ($e =~ /r8_subst_rhs/) ? 1 : 0;
+    }
+    check($caught == 1 && $sub_re eq "alpha beta", "R8-RT3 s///e throw preserves target string");
+
+    my scalar $tie_sub = "foobar";
+    tie($tie_sub, "R8TieScalarThrow", "foobar");
+    my str $sub_ret = (substr($tie_sub, 3, 3) = "BAZ");
+    check($tie_sub eq "fooBAZ" && $sub_ret eq "BAZ", "R8-C10 substr(\$tied, off, len) = repl");
+    untie($tie_sub);
+
+    # ------------------------------------------------------------
+    # R8-RT4: Async::Loop coroutine local() with tied hash + throwing STORE
+    # ------------------------------------------------------------
+    my hash %coro_th = ();
+    tie(%coro_th, "R8TieHashCoro");
+    my scalar $coro_tied_obj = tied(%coro_th);
+    my scalar $loop = Async::Loop::new();
+    my str $coro_a_val = "";
+    my str $coro_b_err = "";
+    $loop->spawn(func () void {
+        local $coro_th{"k"} = "from_a";
+        Async::Task::sleep(15);
+        $coro_a_val = $coro_th{"k"};
+    });
+    $loop->spawn(func () void {
+        try {
+            $coro_tied_obj->{"throw_store"} = 1;
+            local $coro_th{"k"} = "from_b";
+        } catch ($e) {
+            $coro_b_err = "" . $e;
+            $coro_tied_obj->{"throw_store"} = 0;
+        }
+    });
+    $loop->run();
+    check($coro_a_val eq "from_a" && ($coro_b_err =~ /r8_coro_tie_store_boom/) && $coro_th{"k"} eq "root",
+          "R8-RT4 coroutine local() tied hash STORE throw + restore");
+    untie(%coro_th);
+
+    # ------------------------------------------------------------
+    # R8-RT5: Cycle GC collects closure cycle capturing boxed cell with DESTROY
+    # ------------------------------------------------------------
+    $r8_destroy_count = 0;
+    make_closure_cycle_with_destroy();
+    trigger_cycle_gc();
+    check($r8_destroy_count == 1, "R8-RT5 cycle GC collects closure cycle capturing DESTROY target");
+
+    # ------------------------------------------------------------
+    # R8-RT6: reverse() on valid and malformed UTF-8
+    # ------------------------------------------------------------
+    my str $u_ok = "a\x{E9}\x{1D11E}z"; # "a é 𝄞 z"
+    my str $u_rev = reverse($u_ok);
+    check(length($u_rev) == 4 && substr($u_rev, 0, 1) eq "z" && substr($u_rev, 3, 1) eq "a",
+          "R8-RT6 reverse valid multi-byte UTF-8");
+    my str $u_bad = core::byte(0xFF) . core::byte(0xFE) . "abc";
+    my str $u_bad_rev = reverse($u_bad);
+    check(core::byte_length($u_bad_rev) == 5, "R8-RT6 reverse malformed UTF-8 keeps length safe");
+
+    # ------------------------------------------------------------
+    # R8-C1: 2-attr has int class holding >2^62 + same inline accessor name
+    # ------------------------------------------------------------
+    my int $big62 = 4611686018427387909; # 2^62 + 5
+    my scalar $pa = R8PairA::new("a", 7, "val", $big62);
+    my scalar $pb = R8PairB::new("tag", 9, "val", -4611686018427387911);
+    check($pa->val() == $big62 && $pb->val() == -4611686018427387911,
+          "R8-C1 2-attr has int >2^62 and distinct classes with same accessor name");
+
+    # ------------------------------------------------------------
+    # R8-C2: our initializers top-level and function-body
+    # ------------------------------------------------------------
+    check($r8_top_copy eq "base_top_2" && run_our_body_init() == 1,
+          "R8-C2 our initializers top-level and function-body");
+
+    # ------------------------------------------------------------
+    # R8-C3: map/grep mutation/throw + >2^62 integer range
+    # ------------------------------------------------------------
+    my array @mg_src = (1, 2, 3);
+    my array @mg_m = map {
+        if ($_ == 1) { push(@mg_src, 99); }
+        $_ * 10;
+    } @mg_src;
+    check(size(@mg_m) == 3 && $mg_m[0] == 10 && $mg_m[2] == 30,
+          "R8-C3 map snapshots source array against push");
+
+    $caught = 0;
+    try {
+        my array @mg_err = grep {
+            if ($_ == 2) { die("r8_grep_boom"); }
+            1;
+        } (1, 2, 3);
+    } catch ($e) {
+        $caught = ($e =~ /r8_grep_boom/) ? 1 : 0;
+    }
+    check($caught == 1, "R8-C3 grep exception unwinds safely");
+
+    my int $r_lo = 4611686018427387905; # 2^62 + 1
+    my int $r_hi = 4611686018427387907; # 2^62 + 3
+    my array @r_mapped = map { $_ - $r_lo; } ($r_lo .. $r_hi);
+    my array @r_grepped = grep { ($_ % 2) == 1; } ($r_lo .. $r_hi);
+    my int $r_sum = 0;
+    foreach my int $rv ($r_lo .. $r_hi) {
+        $r_sum = $r_sum + ($rv - $r_lo);
+    }
+    check(join(",", @r_mapped) eq "0,1,2" && size(@r_grepped) == 2 && $r_sum == 3,
+          "R8-C3 >2^62 integer range in map/grep/foreach");
+
+    # ------------------------------------------------------------
+    # R8-C4: non-leaf int arg >2^62 not clobbered when source cleared
+    # ------------------------------------------------------------
+    my int $src64 = 4611686018427387920; # 2^62 + 16
+    $r8_int64_cleared = $src64;
+    my int $got64 = take_int64_nonleaf($r8_int64_cleared);
+    check($got64 == 4611686018427387923, "R8-C4 non-leaf int64 arg preserved across mutation");
+
+    # ------------------------------------------------------------
+    # R8-C5: array subscript receiver surviving callee reallocation
+    # ------------------------------------------------------------
+    @r8_sub_arr = ("zero", "one");
+    my str $sub_v1 = $r8_sub_arr[sub_realloc_idx()];
+    my array @local_dyn = ("first_el");
+    my str $sub_v2 = get_sub_arr_ref(\@local_dyn)->[idx_mutate_arr(\@local_dyn)];
+    check($sub_v1 eq "one" && $sub_v2 eq "first_el",
+          "R8-C5 subscript receiver preserved when index expr reallocs array");
+
+    # ------------------------------------------------------------
+    # R8-C6: self-slice @a[1,0] = @a, mutating range slice bounds, throwing slice
+    # ------------------------------------------------------------
+    my array @sa = ("A", "B", "C");
+    @sa[1, 0] = @sa;
+    check(join(",", @sa) eq "B,A,C", "R8-C6 @a[1,0] = @a self-slice");
+
+    @r8_slice_arr = ("s0", "s1", "s2", "s3");
+    my array @sl_res = @r8_slice_arr[slice_lo_mut() .. slice_hi_mut()];
+    check(join(",", @sl_res) eq "s1,s2", "R8-C6 range slice with mutating bounds");
+
+    $caught = 0;
+    my array @sl_lhs = ("p", "q");
+    try {
+        @sl_lhs[0, 1] = ("ok", "" . R8ThrowStr::new("r8_slice"));
+    } catch ($e) {
+        $caught = ($e =~ /r8_slice/) ? 1 : 0;
+    }
+    check($caught == 1, "R8-C6 throwing element during slice assignment");
+
+    # ------------------------------------------------------------
+    # R8-C7: C struct field bitwise/shift/defined-or compound assignments
+    # ------------------------------------------------------------
+    my R8BitStruct $cs;
+    $cs->flags = 6;   # 0110
+    $cs->flags &= 3;  # 0010 = 2
+    $cs->flags |= 8;  # 1010 = 10
+    $cs->flags ^= 15; # 0101 = 5
+    $cs->flags <<= 2; # 20
+    $cs->flags >>= 1; # 10
+    $cs->val = 0;
+    $cs->val //= 99;  # 0 is defined so remains 0
+    check($cs->flags == 10 && $cs->val == 0, "R8-C7 C struct &= |= ^= <<= >>= //=");
+
+    # ------------------------------------------------------------
+    # R8-C8: unshift and 2-arg say/print arg eval order & throw
+    # ------------------------------------------------------------
+    my array @olog = ();
+    my array @u_target = ("tail");
+    unshift(@u_target, order_push("U1", \@olog), order_push("U2", \@olog));
+    check(join(",", @olog) eq "U1,U2" && join(",", @u_target) eq "U1,U2,tail",
+          "R8-C8 unshift left-to-right arg eval order");
+
+    @olog = ();
+    $caught = 0;
+    try {
+        unshift(@u_target, order_push("PRE", \@olog), order_throw(\@olog));
+    } catch ($e) {
+        $caught = ($e =~ /r8_arg_boom/) ? 1 : 0;
+    }
+    check($caught == 1 && join(",", @olog) eq "PRE,throw_arg", "R8-C8 unshift arg throw unwinds cleanly");
+
+    my str $buf = "";
+    my scalar $bfh = core::open(\$buf, "w");
+    @olog = ();
+    say(do { push(@olog, "FH_SAY"); $bfh; }, order_push("MSG_SAY", \@olog));
+    print(do { push(@olog, "FH_PRINT"); $bfh; }, order_push("MSG_PRINT", \@olog));
+    core::close($bfh);
+    check(join(",", @olog) eq "FH_SAY,MSG_SAY,FH_PRINT,MSG_PRINT" && $buf eq "MSG_SAY\nMSG_PRINT",
+          "R8-C8 2-arg say/print fh-before-msg eval order");
+
+    # ------------------------------------------------------------
+    # R8-C9: destructuring assignment with trailing if/unless modifier
+    # ------------------------------------------------------------
+    my int $da = 10;
+    my int $db = 20;
+    my array @dsrc = (100, 200);
+    ($da, $db) = @dsrc if 0;
+    check($da == 10 && $db == 20, "R8-C9 destructuring assignment skipped on false trailing if");
+    ($da, $db) = @dsrc if 1;
+    check($da == 100 && $db == 200, "R8-C9 destructuring assignment runs on true trailing if");
+
+    # ------------------------------------------------------------
+    # R8-RT7: shallow copy and print of tied arrays and hashes
+    # ------------------------------------------------------------
+    my array @ta_tied = ();
+    tie(@ta_tied, "R8RTieCopyArr");
+    my array @ta_cp = @ta_tied;
+    my hash %th_tied = ();
+    tie(%th_tied, "R8RTieCopyHash");
+    my hash %th_cp = %th_tied;
+    my str $tbuf = "";
+    my scalar $tfh = core::open(\$tbuf, "w");
+    print($tfh, @ta_tied);
+    core::close($tfh);
+    untie(@ta_tied);
+    untie(%th_tied);
+    check(size(@ta_cp) == 3 && join(",", @ta_cp) eq "xa,xb,xc" && $tbuf eq "xaxbxc",
+          "R8-RT7 tied array shallow copy and print");
+    check($th_cp{"m"} eq "10" && $th_cp{"n"} eq "20",
+          "R8-RT7 tied hash shallow copy");
+
+    if ($g_fail > 0) {
+        say("R8_RUNTIME_COMPILER_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R8_RUNTIME_COMPILER_OK");
+    return 0;
+}

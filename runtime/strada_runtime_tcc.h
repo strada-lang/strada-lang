@@ -298,7 +298,7 @@ extern int (*strada_die_continue_hook)(void);
  * internal to the runtime now; push/pop are functions (declared below) so a
  * tcc-built program calls into the gcc runtime instead of touching the __thread
  * storage directly (tcc can't express __thread). */
-#define STRADA_MAX_PENDING_CLEANUP 4096
+#define STRADA_MAX_PENDING_CLEANUP 16384
 
 #define STRADA_TRY_PUSH() strada_try_push_slot()
 #define STRADA_TRY_POP()   strada_try_pop_slot()
@@ -358,6 +358,61 @@ double strada_to_num(StradaValue *sv);
 char* strada_to_str(StradaValue *sv);  /* Returns malloc'd string - caller must free */
 const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* Non-allocating variant */
 int strada_to_bool(StradaValue *sv);
+
+static inline int strada_sv_is_signed_int_val(StradaValue *sv, int64_t *out) {
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        *out = STRADA_TAGGED_INT_VAL(sv);
+        return 1;
+    }
+    if (sv && sv->type == STRADA_INT && !(sv->struct_size & STRADA_UV_FLAG) && (!sv->meta || !sv->meta->is_tied)) {
+        *out = sv->value.iv;
+        return 1;
+    }
+    return 0;
+}
+
+static inline StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
+            return strada_new_num((double)a + (double)b);
+        }
+        return strada_new_int_il(a + b);
+    }
+    return strada_new_num(strada_to_num(l) + strada_to_num(r));
+}
+
+static inline StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
+            return strada_new_num((double)a - (double)b);
+        }
+        return strada_new_int_il(a - b);
+    }
+    return strada_new_num(strada_to_num(l) - strada_to_num(r));
+}
+
+static inline StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
+    int64_t a, b;
+    if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
+        if (a >= -2147483648LL && a <= 2147483647LL && b >= -2147483648LL && b <= 2147483647LL) {
+            return strada_new_int_il(a * b);
+        }
+        if (a == 0 || b == 0) return strada_new_int_il(0);
+        int neg = (a < 0) ^ (b < 0);
+        uint64_t ua = (a < 0) ? (uint64_t)(-(a + 1)) + 1ULL : (uint64_t)a;
+        uint64_t ub = (b < 0) ? (uint64_t)(-(b + 1)) + 1ULL : (uint64_t)b;
+        uint64_t limit = neg ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)INT64_MAX;
+        if (ua <= limit / ub) {
+            uint64_t prod = ua * ub;
+            int64_t res = neg ? (prod == ((uint64_t)INT64_MAX + 1ULL) ? INT64_MIN : -(int64_t)prod) : (int64_t)prod;
+            return strada_new_int_il(res);
+        }
+        return strada_new_num((double)a * (double)b);
+    }
+    return strada_new_num(strada_to_num(l) * strada_to_num(r));
+}
 
 /* C type conversions */
 int8_t strada_to_int8(StradaValue *sv);
@@ -421,6 +476,8 @@ char* strada_concat(const char *a, const char *b);
 char* strada_concat_free(char *a, char *b);
 StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b);
 StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b);
+StradaValue* strada_concat_slot_inplace(StradaValue **slot, StradaValue *b);
+StradaValue* strada_concat_slot_inplace_cstr(StradaValue **slot, const char *str_b, size_t len_b);
 size_t strada_length(const char *s);
 size_t strada_length_sv(StradaValue *sv);
 size_t strada_bytes(const char *s);

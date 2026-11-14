@@ -1,0 +1,258 @@
+# Cycle 8 compiled / tree-walk / bytecode --vm parity suite (R8-VM1..5, R8-VM7..8)
+
+our str $r8_loc_v = "init";
+our str $r8_mod_log = "";
+our scalar $r8_our_weak = undef;
+
+func add_log(str $s) void {
+    $r8_mod_log = $r8_mod_log . $s;
+}
+
+package R8POverStr;
+func new(str $label) scalar {
+    my hash %s = ("label" => $label);
+    return bless(\%s, "R8POverStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "OV(" . $self->{"label"} . ")";
+}
+use overload '""' => "to_str";
+
+package R8PModBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R8PModBase");
+}
+func act(scalar $self, int $x) int {
+    main::add_log("[base:" . $x . "]");
+    return $self->{"v"} + $x;
+}
+before "act" func(scalar $self, int $x) void {
+    main::add_log("[B_before]");
+};
+around "act" func(scalar $orig, scalar $self, int $x) int {
+    main::add_log("[B_around_in]");
+    my int $r = $orig->($self, $x + 1);
+    main::add_log("[B_around_out]");
+    return $r;
+}
+after "act" func(scalar $self, int $x) void {
+    main::add_log("[B_after]");
+};
+
+package R8PModChild;
+extends R8PModBase;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R8PModChild");
+}
+before "act" func(scalar $self, int $x) void {
+    main::add_log("[C_before]");
+};
+around "act" func(scalar $orig, scalar $self, int $x) int {
+    main::add_log("[C_around_in]");
+    my int $r = $orig->($self, $x + 10);
+    main::add_log("[C_around_out]");
+    return $r;
+}
+after "act" func(scalar $self, int $x) void {
+    main::add_log("[C_after]");
+};
+
+package R8PWeakTarget;
+func new(str $id) scalar {
+    my hash %s = ("id" => $id);
+    return bless(\%s, "R8PWeakTarget");
+}
+
+package R8PTieArr;
+our int $untied_count = 0;
+func get_untied() int { return $untied_count; }
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %s = ("a" => ["ta0", "ta1", "ta2"]);
+    return bless(\%s, "R8PTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void {}
+func UNTIE(scalar $self) void { $untied_count = $untied_count + 1; }
+
+package R8PTieHash;
+our int $scalar_calls = 0;
+our int $firstkey_calls = 0;
+our int $untied_count = 0;
+func get_scalar_calls() int { return $scalar_calls; }
+func get_fk_calls() int { return $firstkey_calls; }
+func get_untied() int { return $untied_count; }
+func TIEHASH(scalar ...@args) scalar {
+    my hash %s = ("order" => ["a", "b"], "d" => {"a" => "10", "b" => "20"}, "idx" => 0);
+    return bless(\%s, "R8PTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void {
+    if (!exists($self->{"d"}->{$k})) { push(@{$self->{"order"}}, $k); }
+    $self->{"d"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $old = $self->{"d"}->{$k};
+    delete($self->{"d"}->{$k});
+    return $old;
+}
+func FIRSTKEY(scalar $self) scalar {
+    $firstkey_calls = $firstkey_calls + 1;
+    $self->{"idx"} = 0;
+    if (size(@{$self->{"order"}}) > 0) {
+        my str $k = $self->{"order"}->[0];
+        $self->{"idx"} = 1;
+        return $k;
+    }
+    return undef;
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my int $i = $self->{"idx"};
+    if ($i < size(@{$self->{"order"}})) {
+        $self->{"idx"} = $i + 1;
+        return $self->{"order"}->[$i];
+    }
+    return undef;
+}
+func SCALAR(scalar $self) scalar {
+    $scalar_calls = $scalar_calls + 1;
+    return size(@{$self->{"order"}});
+}
+func UNTIE(scalar $self) void { $untied_count = $untied_count + 1; }
+
+package main;
+
+func inner_loop_ctl(int $mode) str {
+    my str $res = "";
+    my int $i = 0;
+    while ($i < 3) {
+        $i = $i + 1;
+        if ($mode == 1 && $i == 2) { next; }
+        if ($mode == 2 && $i == 2) { last; }
+        $res = $res . $i;
+    }
+    return $res;
+}
+
+func make_closure_weak_pair() scalar {
+    my scalar $w = undef;
+    {
+        my scalar $strong = R8PWeakTarget::new("cl");
+        $w = $strong;
+        core::weaken($w);
+    }
+    return func() int {
+        return (core::isweak($w) ? 10 : 0) + (defined($w) ? 1 : 0);
+    };
+}
+
+func main() int {
+    # R8-VM1: local() inside do {}, map {}, grep {}
+    $r8_loc_v = "outer";
+    my str $do_v = do {
+        local $r8_loc_v = "in_do";
+        $r8_loc_v . "_ok";
+    };
+    my array @map_v = map {
+        local $r8_loc_v = "m" . $_;
+        $r8_loc_v;
+    } (1, 2);
+    my array @grep_v = grep {
+        local $r8_loc_v = "g" . $_;
+        $_ == 2;
+    } (1, 2, 3);
+    say("R8P01:" . $do_v . "|" . $r8_loc_v . "|" . join(",", @map_v) . "|" . join(",", @grep_v) . "|" . $r8_loc_v);
+
+    # R8-VM2: before / around / after MRO order (dynamic + static)
+    my scalar $cobj = R8PModChild::new(100);
+    $r8_mod_log = "";
+    my int $dyn_r = $cobj->act(5);
+    my str $dyn_log = $r8_mod_log;
+    $r8_mod_log = "";
+    my int $stat_r = R8PModBase::act($cobj, 5);
+    my str $stat_log = $r8_mod_log;
+    say("R8P02:" . $dyn_r . ":" . $dyn_log . "|" . $stat_r . ":" . $stat_log);
+
+    # R8-VM3 & R8-VM5: sprintf + concat + say + print with "" overload and tied/untied array
+    my scalar $ov = R8POverStr::new("hi");
+    my array @uarr = ("u0", "u1");
+    my array @tarr = ();
+    tie(@tarr, "R8PTieArr");
+    my str $sp = sprintf("%s|%d|%d", $ov, scalar(@uarr), scalar(@tarr));
+    say("R8P03:" . $sp . "|dot:" . @uarr . "," . @tarr);
+    say($ov);
+    print($ov);
+    print("\n");
+    say("R8P03_SAY:", $ov, "|", "tail");
+    print("R8P03_PRINT:", $ov, ",", scalar(@uarr), ",", scalar(@tarr), "\n");
+
+    # R8-VM4: call_user_func isolating next/last inside outer loop
+    my str $lres = "";
+    for (my int $outer = 1; $outer <= 2; $outer = $outer + 1) {
+        $lres = $lres . "O" . $outer . "=" . inner_loop_ctl($outer) . ";";
+    }
+    say("R8P04:" . $lres);
+
+    # R8-VM7: core::weaken & core::isweak across local, closure, our, hash, array
+    my scalar $w_loc = undef;
+    {
+        my scalar $s1 = R8PWeakTarget::new("loc");
+        $w_loc = $s1;
+        core::weaken($w_loc);
+        say("R8P07A:" . core::isweak($w_loc) . "," . defined($w_loc));
+    }
+    say("R8P07B:" . core::isweak($w_loc) . "," . defined($w_loc));
+    $w_loc = "reassigned";
+    say("R8P07C:" . core::isweak($w_loc) . "," . $w_loc);
+
+    my scalar $cl_fn = make_closure_weak_pair();
+    say("R8P07D:" . $cl_fn->());
+
+    {
+        my scalar $s2 = R8PWeakTarget::new("our");
+        $r8_our_weak = $s2;
+        sys::weaken($r8_our_weak);
+    }
+    say("R8P07E:" . sys::isweak($r8_our_weak) . "," . defined($r8_our_weak));
+    $r8_our_weak = undef;
+    say("R8P07F:" . sys::isweak($r8_our_weak));
+
+    my hash %wh = ();
+    my array @wa = ();
+    {
+        my scalar $sh = R8PWeakTarget::new("h");
+        my scalar $sa = R8PWeakTarget::new("a");
+        $wh{"k"} = $sh;
+        $wa[0] = $sa;
+        core::weaken($wh{"k"});
+        core::weaken($wa[0]);
+    }
+    say("R8P07G:" . core::isweak($wh{"k"}) . "," . defined($wh{"k"}) . "|" . core::isweak($wa[0]) . "," . defined($wa[0]));
+    $wh{"k"} = 42;
+    $wa[0] = 99;
+    say("R8P07H:" . core::isweak($wh{"k"}) . "," . core::isweak($wa[0]));
+
+    # R8-VM8: tied copy/slice/map/grep/UNTIE, tied hash copy/slice/SCALAR
+    my array @t_cp = @tarr;
+    my array @t_sl = @tarr[2, 0];
+    my array @t_mp = map { $_ . "!"; } @tarr;
+    my array @t_gp = grep { $_ ne "ta1"; } @tarr;
+    untie(@tarr);
+    say("R8P08A:" . join(",", @t_cp) . "|" . join(",", @t_sl) . "|" . join(",", @t_mp) . "|" . join(",", @t_gp) . "|untie=" . R8PTieArr::get_untied());
+
+    my hash %th = ();
+    tie(%th, "R8PTieHash");
+    my int $sc_before_fk = R8PTieHash::get_fk_calls();
+    my int $th_truth = %th ? 1 : 0;
+    my int $sc_used = (R8PTieHash::get_scalar_calls() >= 1 && R8PTieHash::get_fk_calls() == $sc_before_fk) ? 1 : 0;
+    my hash %th_copy = %th;
+    my array @th_slice = @th{"b", "a"};
+    untie(%th);
+    say("R8P08B:" . $th_truth . "," . $sc_used . "|" . $th_copy{"a"} . "," . $th_copy{"b"} . "|" . join(",", @th_slice) . "|untie=" . R8PTieHash::get_untied());
+
+    return 0;
+}

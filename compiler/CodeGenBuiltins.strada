@@ -360,43 +360,37 @@ func gen_chomp_chop(scalar $cg, scalar $arg0, str $rt_fn) void {
     emit($cg, "__ch_res; })");
 }
 
+func gen_io_fh_two_arg(scalar $cg, scalar $fh_arg, scalar $text_arg, str $rt_fn) void {
+    my int $fh_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fh_arg) == 1 && expr_is_always_tagged_int($cg, $fh_arg) == 0;
+    my int $tx_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $text_arg) == 1 && expr_is_always_tagged_int($cg, $text_arg) == 0;
+    my int $sp = cleanup_push_useful($cg);
+    emit($cg, "({ StradaValue *__io_fh = ");
+    gen_expression($cg, $fh_arg);
+    emit($cg, "; ");
+    if ($sp == 1 && $fh_cl == 1) { emit($cg, "strada_cleanup_push(__io_fh); "); }
+    emit($cg, "StradaValue *__io_tx = ");
+    gen_expression($cg, $text_arg);
+    emit($cg, "; ");
+    if ($sp == 1 && $tx_cl == 1) { emit($cg, "strada_cleanup_push(__io_tx); "); }
+    emit($cg, $rt_fn . "(__io_tx, __io_fh); ");
+    if ($tx_cl == 1) {
+        if ($sp == 1) { emit($cg, "strada_cleanup_pop_decref(__io_tx); "); }
+        else { emit($cg, "strada_decref(__io_tx); "); }
+    }
+    if ($fh_cl == 1) {
+        if ($sp == 1) { emit($cg, "strada_cleanup_pop_decref(__io_fh); "); }
+        else { emit($cg, "strada_decref(__io_fh); "); }
+    }
+    emit($cg, "STRADA_MAKE_TAGGED_INT(1); })");
+}
+
 func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "say") {
             my int $argc = $expr->{"arg_count"};
             my scalar $args = $expr->{"args"};
             if ($argc == 2) {
-                # say($fh, $text) - say to filehandle
-                my scalar $fh_arg = $args->[0];
-                my scalar $text_arg = $args->[1];
-                my int $fh_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fh_arg) == 1;
-                my int $tx_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $text_arg) == 1;
-                if ($fh_cl == 1 || $tx_cl == 1) {
-                    emit($cg, "({ ");
-                    if ($tx_cl == 1) {
-                        emit($cg, "StradaValue *__say_tmp = ");
-                        gen_expression($cg, $text_arg);
-                        emit($cg, "; ");
-                    }
-                    if ($fh_cl == 1) {
-                        emit($cg, "StradaValue *__say_fh = ");
-                        gen_expression($cg, $fh_arg);
-                        emit($cg, "; ");
-                    }
-                    emit($cg, "strada_say_fh(");
-                    if ($tx_cl == 1) { emit($cg, "__say_tmp"); } else { gen_expression($cg, $text_arg); }
-                    emit($cg, ", ");
-                    if ($fh_cl == 1) { emit($cg, "__say_fh"); } else { gen_expression($cg, $fh_arg); }
-                    emit($cg, "); ");
-                    if ($tx_cl == 1) { emit($cg, "strada_decref(__say_tmp); "); }
-                    if ($fh_cl == 1) { emit($cg, "strada_decref(__say_fh); "); }
-                    emit($cg, "STRADA_MAKE_TAGGED_INT(1); })");
-                } else {
-                    emit($cg, "({ strada_say_fh(");
-                    gen_expression($cg, $text_arg);
-                    emit($cg, ", ");
-                    gen_expression($cg, $fh_arg);
-                    emit($cg, "); STRADA_MAKE_TAGGED_INT(1); })");
-                }
+                # say($fh, $text) - evaluate $fh left-to-right before $text
+                gen_io_fh_two_arg($cg, $args->[0], $args->[1], "strada_say_fh");
             } elsif ($argc > 2) {
                 # Multi-arg say: print each arg in sequence then a newline.
                 # Previously only args[0] was emitted, so `say("a","b","c")`
@@ -439,38 +433,8 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my int $argc = $expr->{"arg_count"};
             my scalar $args = $expr->{"args"};
             if ($argc == 2) {
-                # print($fh, $text) - print to filehandle
-                my scalar $fh_arg = $args->[0];
-                my scalar $text_arg = $args->[1];
-                my int $fh_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fh_arg) == 1;
-                my int $tx_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $text_arg) == 1;
-                if ($fh_cl == 1 || $tx_cl == 1) {
-                    emit($cg, "({ ");
-                    if ($tx_cl == 1) {
-                        emit($cg, "StradaValue *__print_tmp = ");
-                        gen_expression($cg, $text_arg);
-                        emit($cg, "; ");
-                    }
-                    if ($fh_cl == 1) {
-                        emit($cg, "StradaValue *__print_fh = ");
-                        gen_expression($cg, $fh_arg);
-                        emit($cg, "; ");
-                    }
-                    emit($cg, "strada_print_fh(");
-                    if ($tx_cl == 1) { emit($cg, "__print_tmp"); } else { gen_expression($cg, $text_arg); }
-                    emit($cg, ", ");
-                    if ($fh_cl == 1) { emit($cg, "__print_fh"); } else { gen_expression($cg, $fh_arg); }
-                    emit($cg, "); ");
-                    if ($tx_cl == 1) { emit($cg, "strada_decref(__print_tmp); "); }
-                    if ($fh_cl == 1) { emit($cg, "strada_decref(__print_fh); "); }
-                    emit($cg, "STRADA_MAKE_TAGGED_INT(1); })");
-                } else {
-                    emit($cg, "({ strada_print_fh(");
-                    gen_expression($cg, $text_arg);
-                    emit($cg, ", ");
-                    gen_expression($cg, $fh_arg);
-                    emit($cg, "); STRADA_MAKE_TAGGED_INT(1); })");
-                }
+                # print($fh, $text) - evaluate $fh left-to-right before $text
+                gen_io_fh_two_arg($cg, $args->[0], $args->[1], "strada_print_fh");
             } elsif ($argc > 2) {
                 # Multi-arg print: emit each arg in sequence. Previously
                 # only args[0] was emitted, silently dropping later args.
@@ -863,11 +827,14 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "push") {
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
-            my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1;
+            my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1 && expr_is_always_tagged_int($cg, $args->[0]) == 0;
+            my int $push_p = 0;
+            if ($arr_cleanup == 1 && cleanup_push_useful($cg) == 1) { $push_p = 1; }
             if ($cg->{"uses_tie"} == 1) {
                 emit($cg, "({ StradaValue *__push_a = ");
                 gen_expression($cg, $args->[0]);
                 emit($cg, "; ");
+                if ($push_p == 1) { emit($cg, "strada_cleanup_push(__push_a); "); }
                 my int $tpi = 1;
                 while ($tpi < $argc) {
                     my scalar $tval = $args->[$tpi];
@@ -882,7 +849,9 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     }
                     $tpi = $tpi + 1;
                 }
-                if ($arr_cleanup == 1) {
+                if ($push_p == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(__push_a); ");
+                } elsif ($arr_cleanup == 1) {
                     emit($cg, "strada_decref(__push_a); ");
                 }
                 emit($cg, "strada_undef_static(); })");
@@ -892,7 +861,9 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             if ($arr_cleanup == 1) {
                 emit($cg, "StradaValue *__push_a = ");
                 gen_expression($cg, $args->[0]);
-                emit($cg, "; StradaArray *__push_av = strada_deref_array(__push_a); ");
+                emit($cg, "; ");
+                if ($push_p == 1) { emit($cg, "strada_cleanup_push(__push_a); "); }
+                emit($cg, "StradaArray *__push_av = strada_deref_array(__push_a); ");
             } else {
                 emit($cg, "StradaArray *__push_av = strada_deref_array(");
                 gen_expression($cg, $args->[0]);
@@ -912,7 +883,9 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 }
                 $pi = $pi + 1;
             }
-            if ($arr_cleanup == 1) {
+            if ($push_p == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__push_a); ");
+            } elsif ($arr_cleanup == 1) {
                 emit($cg, "strada_decref(__push_a); ");
             }
             emit($cg, "strada_undef_static(); })");
@@ -1010,57 +983,58 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "unshift") {
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
-            my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1;
-            if ($cg->{"uses_tie"} == 1) {
-                emit($cg, "({ StradaValue *__unsh_a = ");
-                gen_expression($cg, $args->[0]);
+            my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1 && expr_is_always_tagged_int($cg, $args->[0]) == 0;
+            my int $unsh_p = cleanup_push_useful($cg);
+            emit($cg, "({ StradaValue *__unsh_a = ");
+            gen_expression($cg, $args->[0]);
+            emit($cg, "; ");
+            if ($arr_cleanup == 1 && $unsh_p == 1) {
+                emit($cg, "strada_cleanup_push(__unsh_a); ");
+            }
+            if ($cg->{"uses_tie"} == 0) {
+                emit($cg, "StradaArray *__unsh_av = strada_deref_array(__unsh_a); ");
+            }
+            my array @unsh_cl = ();
+            push(@unsh_cl, $arr_cleanup);
+            my int $ui = 1;
+            while ($ui < $argc) {
+                my scalar $uval = $args->[$ui];
+                my int $ucl = 0;
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $uval) == 1 && expr_is_always_tagged_int($cg, $uval) == 0) {
+                    $ucl = 1;
+                }
+                push(@unsh_cl, $ucl);
+                emit($cg, "StradaValue *__unsh_v_" . $ui . " = ");
+                gen_expression($cg, $uval);
                 emit($cg, "; ");
-                my int $tui = $argc - 1;
-                while ($tui >= 1) {
-                    my scalar $tuval = $args->[$tui];
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tuval) == 1) {
-                        emit($cg, "{ StradaValue *__unsh_v = ");
-                        gen_expression($cg, $tuval);
-                        emit($cg, "; strada_av_unshift_sv(__unsh_a, __unsh_v); strada_decref(__unsh_v); } ");
-                    } else {
-                        emit($cg, "strada_av_unshift_sv(__unsh_a, ");
-                        gen_expression($cg, $tuval);
-                        emit($cg, "); ");
-                    }
-                    $tui = $tui - 1;
+                if ($ucl == 1 && $unsh_p == 1) {
+                    emit($cg, "strada_cleanup_push(__unsh_v_" . $ui . "); ");
                 }
-                if ($arr_cleanup == 1) {
-                    emit($cg, "strada_decref(__unsh_a); ");
-                }
-                emit($cg, "strada_undef_static(); })");
-                return 1;
+                $ui = $ui + 1;
             }
-            emit($cg, "({ ");
-            if ($arr_cleanup == 1) {
-                emit($cg, "StradaValue *__unsh_a = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; StradaArray *__unsh_av = strada_deref_array(__unsh_a); ");
-            } else {
-                emit($cg, "StradaArray *__unsh_av = strada_deref_array(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            my int $ui = $argc - 1;
+            $ui = $argc - 1;
             while ($ui >= 1) {
-                my scalar $val_arg = $args->[$ui];
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $val_arg) == 1) {
-                    emit($cg, "{ StradaValue *__unsh_v = ");
-                    gen_expression($cg, $val_arg);
-                    emit($cg, "; strada_array_unshift(__unsh_av, __unsh_v); strada_decref(__unsh_v); } ");
+                my int $ucl2 = $unsh_cl[$ui] + 0;
+                if ($cg->{"uses_tie"} == 1) {
+                    emit($cg, "strada_av_unshift_sv(__unsh_a, __unsh_v_" . $ui . "); ");
                 } else {
-                    emit($cg, "strada_array_unshift(__unsh_av, ");
-                    gen_expression($cg, $val_arg);
-                    emit($cg, "); ");
+                    emit($cg, "strada_array_unshift(__unsh_av, __unsh_v_" . $ui . "); ");
+                }
+                if ($ucl2 == 1) {
+                    if ($unsh_p == 1) {
+                        emit($cg, "strada_cleanup_pop_decref(__unsh_v_" . $ui . "); ");
+                    } else {
+                        emit($cg, "strada_decref(__unsh_v_" . $ui . "); ");
+                    }
                 }
                 $ui = $ui - 1;
             }
             if ($arr_cleanup == 1) {
-                emit($cg, "strada_decref(__unsh_a); ");
+                if ($unsh_p == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(__unsh_a); ");
+                } else {
+                    emit($cg, "strada_decref(__unsh_a); ");
+                }
             }
             emit($cg, "strada_undef_static(); })");
             return 1;
@@ -2034,10 +2008,10 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
         }
 
         if ($name eq "exit") {
-            emit($cg, "exit(strada_to_int(");
+            emit($cg, "(exit(strada_to_int(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
-            emit($cg, "))");
+            emit($cg, ")), strada_undef_static())");
             return 1;
         }
 
@@ -9279,7 +9253,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         my int $all_int_vals = 1;
                         my int $fvi = 1;
                         while ($fvi < $arg_count) {
-                            if (expr_is_int_typed($cg, $args->[$fvi]) != 1) {
+                            if (expr_is_always_tagged_int($cg, $args->[$fvi]) != 1) {
                                 $all_int_vals = 0;
                                 last;
                             }

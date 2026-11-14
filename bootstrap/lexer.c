@@ -197,6 +197,8 @@ static Token* make_token(TokenType type, const char *lexeme, int line, int colum
     tok->line = line;
     tok->column = column;
     tok->char_code = -1;
+    tok->str_len = 0;
+    tok->has_str_len = 0;
     return tok;
 }
 
@@ -336,20 +338,56 @@ static Token* read_string(Lexer *lex) {
                     lex_sb_putc(&buffer, &buf_len, &buf_cap, '\\');
                     lex_sb_putc(&buffer, &buf_len, &buf_cap, next);
                 }
+                lexer_advance(lex);
             } else {
-                char out;
-                switch (next) {
-                    case 'n':  out = '\n'; break;
-                    case 't':  out = '\t'; break;
-                    case 'r':  out = '\r'; break;
-                    case '\\': out = '\\'; break;
-                    case '\"': out = '\"'; break;
-                    case '\'': out = '\''; break;
-                    default:   out = next; break;
+                if (next == 'x' || next == 'X') {
+                    lexer_advance(lex);
+                    int val = 0;
+                    int digits = 0;
+                    while (digits < 2) {
+                        int d = parse_hex_digit(lexer_current(lex));
+                        if (d < 0) break;
+                        val = (val << 4) | d;
+                        digits++;
+                        lexer_advance(lex);
+                    }
+                    if (digits > 0) {
+                        lex_sb_putc(&buffer, &buf_len, &buf_cap, (char)val);
+                    } else {
+                        lex_sb_putc(&buffer, &buf_len, &buf_cap, next);
+                    }
+                } else if (next >= '0' && next <= '7') {
+                    int val = next - '0';
+                    int digits = 1;
+                    lexer_advance(lex);
+                    while (digits < 3 && lexer_current(lex) >= '0' && lexer_current(lex) <= '7') {
+                        int nval = (val << 3) | (lexer_current(lex) - '0');
+                        if (nval > 255) break;
+                        val = nval;
+                        digits++;
+                        lexer_advance(lex);
+                    }
+                    lex_sb_putc(&buffer, &buf_len, &buf_cap, (char)val);
+                } else {
+                    char out;
+                    switch (next) {
+                        case 'a':  out = '\a'; break;
+                        case 'b':  out = '\b'; break;
+                        case 'f':  out = '\f'; break;
+                        case 'n':  out = '\n'; break;
+                        case 'r':  out = '\r'; break;
+                        case 't':  out = '\t'; break;
+                        case 'v':  out = '\v'; break;
+                        case 'e':  out = 27; break;
+                        case '\\': out = '\\'; break;
+                        case '\"': out = '\"'; break;
+                        case '\'': out = '\''; break;
+                        default:   out = next; break;
+                    }
+                    lex_sb_putc(&buffer, &buf_len, &buf_cap, out);
+                    lexer_advance(lex);
                 }
-                lex_sb_putc(&buffer, &buf_len, &buf_cap, out);
             }
-            lexer_advance(lex);
         } else {
             lex_sb_putc(&buffer, &buf_len, &buf_cap, lexer_current(lex));
             lexer_advance(lex);
@@ -372,6 +410,8 @@ static Token* read_string(Lexer *lex) {
 
     Token *tok = make_token(TOK_STR_LITERAL, buffer, start_line, start_col);
     tok->value.str_val = buffer;  // ownership transferred
+    tok->str_len = buf_len;
+    tok->has_str_len = 1;
     if (quote == '\'' && closed && raw_end >= raw_start) {
         tok->char_code = parse_sq_char_code(lex->source + raw_start, raw_end - raw_start);
     }

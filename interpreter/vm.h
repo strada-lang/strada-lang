@@ -227,6 +227,9 @@ typedef enum {
     OP_SQ_COERCE,       /* u8 side (0=left, 1=right), u16 str_idx — restore 'x' str when peer is float/str */
     OP_POST_INCR,       /* u16 local_slot — push pre-increment value, increment local/tied scalar */
     OP_POST_DECR,       /* u16 local_slot — push pre-decrement value, decrement local/tied scalar */
+    OP_WEAKEN_SLOT,     /* u8 kind, u16 slot_or_str — weaken ref in slot/container, push undef */
+    OP_ISWEAK_SLOT,     /* u8 kind, u16 slot_or_str — push 1 if slot holds live weakref else 0 */
+    OP_CLEAR_LOCALS,    /* u16 from_slot, u16 to_slot — set frame->locals[from..to-1] = undef */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -562,6 +565,7 @@ enum VMObjType {
     VM_OBJ_SREF = 18,     /* live scalar reference */
     VM_OBJ_TIED_SCALAR = 20, /* TIESCALAR wrapper holding tied object */
     VM_OBJ_INT64 = 22,    /* boxed 64-bit integer outside 63-bit tagged range */
+    VM_OBJ_WEAKREF = 24,  /* weak reference wrapper; target cleared on GC when unmarked */
 };
 typedef struct VMObjHeader {
     enum VMObjType obj_type;
@@ -667,6 +671,13 @@ typedef struct {
     VMValue tied_obj;
 } VMTiedScalar;
 static inline VMTiedScalar *VM_AS_TIED_SCALAR(VMValue v) { return (VMTiedScalar*)VM_TO_PTR(v); }
+
+/* Weak reference wrapper (target is ignored during GC mark and cleared pre-sweep if unmarked) */
+typedef struct {
+    VMObjHeader hdr;
+    VMValue target;
+} VMWeakRef;
+static inline VMWeakRef *VM_AS_WEAKREF(VMValue v) { return (VMWeakRef*)VM_TO_PTR(v); }
 
 /* Convenience: create a VM string */
 static inline VMValue VM_MAKE_STR(const char *s) {
@@ -953,7 +964,7 @@ typedef struct VM {
     size_t gc_count;
     size_t gc_threshold;
     int gc_pause;
-    VMValue last_result;
+    int has_weakrefs;
     /* Re-entrant VM save/restore + exception trapping */
     size_t saved_locals_top;
     struct VM *saved_active_vm;

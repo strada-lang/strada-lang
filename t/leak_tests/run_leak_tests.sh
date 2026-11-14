@@ -163,6 +163,8 @@ TESTS=(
     "test_audit_r6_eval_jit_leaks"
     "test_audit_r7_leaks"
     "test_audit_r7_eval_jit_leaks"
+    "test_audit_r8_leaks"
+    "test_audit_r8_eval_jit_leaks"
 )
 
 FILTER="${1:-}"
@@ -201,10 +203,10 @@ for test in "${TESTS[@]}"; do
         test_audit_r5_stdlib_leaks)
             EXTRA_FLAGS="-lsqlite3"
             ;;
-        test_audit_r7_leaks)
+        test_audit_r7_leaks|test_audit_r8_leaks)
             EXTRA_FLAGS="-lpthread"
             ;;
-        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks)
+        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks|test_audit_r8_eval_jit_leaks)
             EXTRA_FLAGS="-O0 --no-use-artifacts -L lib -D HAVE_VM -I interpreter interpreter/vm.c interpreter/vm_compiler.c"
             ;;
         test_import_lib_devirt)

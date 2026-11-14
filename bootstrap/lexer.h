@@ -138,6 +138,8 @@ typedef struct {
         char *str_val;
     } value;
     int char_code;
+    size_t str_len;
+    int has_str_len;
 } Token;
 
 typedef struct {

@@ -1804,7 +1804,11 @@ static int64_t dbi_column_int(DbiStatement *sth, int idx) {
             PGresult *res = (PGresult*)sth->result;
             int row = sth->pg_cur_row;
             if (row >= PQntuples(res) || PQgetisnull(res, row, idx)) return 0;
-            return strtoll(PQgetvalue(res, row, idx), NULL, 10);
+            const char *val = PQgetvalue(res, row, idx);
+            if (!val) return 0;
+            if ((val[0] == 't' || val[0] == 'T') && val[1] == '\0') return 1;
+            if ((val[0] == 'f' || val[0] == 'F') && val[1] == '\0') return 0;
+            return strtoll(val, NULL, 10);
         }
 #endif
         default:

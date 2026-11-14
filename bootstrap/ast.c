@@ -231,6 +231,19 @@ ASTNode* ast_new_num_literal(double value) {
 ASTNode* ast_new_str_literal(const char *value) {
     ASTNode *node = ast_new_node(NODE_STR_LITERAL);
     node->data.str_val = strdup(value);
+    node->str_len = strlen(value);
+    return node;
+}
+
+ASTNode* ast_new_str_literal_len(const char *value, size_t len) {
+    ASTNode *node = ast_new_node(NODE_STR_LITERAL);
+    node->data.str_val = malloc(len + 1);
+    if (len > 0) {
+        memcpy(node->data.str_val, value, len);
+    }
+    node->data.str_val[len] = '\0';
+    node->str_len = len;
+    node->has_str_len = 1;
     return node;
 }
 

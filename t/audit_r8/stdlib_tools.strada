@@ -1,0 +1,87 @@
+#!/usr/bin/env strada
+# Cycle 8 Audit regression tests: R8-S1, R8-S3, R8-S4, R8-S5, R8-S6, R8-S7
+
+use lib "lib";
+use Template;
+use Forma;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    my scalar $tt = Template::new({});
+
+    # R8-S1: Template::Expr malformed array/hash literals do not hang/crash at EOF
+    my int $expr_ok = 1;
+    try {
+        my str $e1 = $tt->process_string("[% [1, %]", {});
+        my str $e2 = $tt->process_string("[% {a: %]", {});
+        my str $e3 = $tt->process_string("[% [1, 2] %]", {});
+        if (!defined($e1) || !defined($e2)) { $expr_ok = 0; }
+    } catch ($err) {
+        # Throwing a parse error cleanly without OOB/infinite loop is also valid
+        $expr_ok = 1;
+    }
+    check($expr_ok == 1, "R8-S1 Template::Expr handles unterminated [1, and {a: cleanly");
+
+    # R8-S3: Template list.first(n) / list.last(n) with n <= 0 or n > len
+    my scalar $vars3 = { "items" => ["a", "b", "c"] };
+    my str $f0 = $tt->process_string("[% items.first(0).join(',') %]", $vars3);
+    my str $fneg = $tt->process_string("[% items.first(-2).join(',') %]", $vars3);
+    my str $l0 = $tt->process_string("[% items.last(0).join(',') %]", $vars3);
+    my str $lneg = $tt->process_string("[% items.last(-1).join(',') %]", $vars3);
+    my str $lbig = $tt->process_string("[% items.last(10).join(',') %]", $vars3);
+    my str $f2 = $tt->process_string("[% items.first(2).join(',') %]", $vars3);
+    my str $l2 = $tt->process_string("[% items.last(2).join(',') %]", $vars3);
+    check($f0 eq "" && $fneg eq "" && $l0 eq "" && $lneg eq "" && $lbig eq "a,b,c" && $f2 eq "a,b" && $l2 eq "b,c",
+          "R8-S3 list.first/last handle <=0 and >size cleanly (got '$f0'|'$l0'|'$lbig')");
+
+    # R8-S4: Template pre_chomp / post_chomp level 1 on CRLF templates
+    my str $crlf1 = "alpha\r\n  [%- \"X\" -%]  \r\nbeta";
+    my str $c_out1 = $tt->process_string($crlf1, {});
+    check($c_out1 eq "alphaXbeta", "R8-S4 Template [%- -%] CRLF chomp single line got=" . $c_out1);
+
+    my str $crlf2 = "alpha\r\n\r\n[%- \"X\" -%]\r\n\r\nbeta";
+    my str $c_out2 = $tt->process_string($crlf2, {});
+    check($c_out2 eq "alpha\r\nX\r\nbeta", "R8-S4 Template [%- -%] CRLF chomp keeps extra CRLF");
+
+    # R8-S5: Forma::to_json strict RFC 8259 number vs quoted string distinction
+    check(Forma::to_json("0123") eq "\"0123\"", "R8-S5 to_json quotes leading-zero 0123");
+    check(Forma::to_json("+5") eq "\"+5\"", "R8-S5 to_json quotes +5");
+    check(Forma::to_json(".5") eq "\".5\"", "R8-S5 to_json quotes .5");
+    check(Forma::to_json("5.") eq "\"5.\"", "R8-S5 to_json quotes 5.");
+    check(Forma::to_json("123\n") eq "\"123\\n\"", "R8-S5 to_json quotes 123\\n");
+    check(Forma::to_json("123 ") eq "\"123 \"", "R8-S5 to_json quotes trailing space 123 ");
+    check(Forma::to_json("0") eq "0", "R8-S5 to_json unquoted 0");
+    check(Forma::to_json("-42") eq "-42", "R8-S5 to_json unquoted -42");
+    check(Forma::to_json("3.14") eq "3.14", "R8-S5 to_json unquoted 3.14");
+    check(Forma::to_json("1e-5") eq "1e-5", "R8-S5 to_json unquoted 1e-5");
+
+    # R8-S6: Forma quoted first arg in string helpers not resolved as $vars key
+    my scalar $fvars = { "name" => "OTHER", "txt" => "hello_name" };
+    my str $fh_rep = Forma::render_string("{{replace \"name\" \"am\" \"XX\"}}|{{replace txt \"hello\" \"hi\"}}", $fvars);
+    check($fh_rep eq "nXXe|hi_name", "R8-S6 helper_replace quoted literal vs var got=" . $fh_rep);
+
+    my str $fh_sub = Forma::render_string(
+        "{{contains \"name\" \"am\"}}|{{starts_with \"name\" \"na\"}}|{{ends_with \"name\" \"me\"}}|{{pad_left \"name\" 6 \"_\"}}|{{pad_right \"name\" 6 \"_\"}}",
+        $fvars
+    );
+    check($fh_sub eq "1|1|1|__name|name__", "R8-S6 Forma string helpers quoted 1st arg got=" . $fh_sub);
+
+    # R8-S7: Forma {{#range 5}} missing 2nd arg does not crash / treats cleanly
+    my str $fr_miss = Forma::render_string("A{{#range 5}}x{{/range}}B", {});
+    check($fr_miss eq "AB", "R8-S7 Forma {{#range 5}} missing 2nd arg got=" . $fr_miss);
+
+    if ($g_fail > 0) {
+        say("R8_STDLIB_TOOLS_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R8_STDLIB_TOOLS_OK");
+    return 0;
+}

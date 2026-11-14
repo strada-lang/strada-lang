@@ -4048,6 +4048,11 @@ func parse_statement(scalar $parser) scalar {
     # Expression statement (with optional statement modifiers)
     my scalar $expr = parse_expression($parser);
 
+    # List assignment to existing variables: `($a, $b) = (1, 2);`,
+    # `($p, $q) = ($q, $p);`. Compute before statement modifiers so
+    # `($a, $b) = @arr if $cond;` lowers to NODE_DESTRUCTURE too.
+    my scalar $la_stmt = list_assign_as_destructure($expr);
+
     # Check for statement modifiers: expr if/unless/while/until cond;
     my scalar $mod_tok = parser_current($parser);
     my str $mod_type = $mod_tok->{"type"};
@@ -4057,7 +4062,8 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        my scalar $expr_stmt = $la_stmt;
+        if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
@@ -4071,7 +4077,8 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        my scalar $expr_stmt = $la_stmt;
+        if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
@@ -4086,7 +4093,8 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        my scalar $expr_stmt = $la_stmt;
+        if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
@@ -4100,7 +4108,8 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        my scalar $expr_stmt = $la_stmt;
+        if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
@@ -4112,12 +4121,6 @@ func parse_statement(scalar $parser) scalar {
 
     parser_expect($parser, "SEMI");
 
-    # List assignment to existing variables: `($a, $b) = (1, 2);`,
-    # `($p, $q) = ($q, $p);`. The left side parses as a list literal, which is
-    # not assignable (a C "lvalue required" error). When every element is a
-    # plain variable it is the same operation as `my ($a, $b) = LIST;` without
-    # the declaration, so build that node.
-    my scalar $la_stmt = list_assign_as_destructure($expr);
     if ($la_stmt) {
         ast_set_line($la_stmt, $stmt_line);
         return $la_stmt;

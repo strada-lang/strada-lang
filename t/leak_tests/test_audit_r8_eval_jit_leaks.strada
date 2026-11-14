@@ -1,0 +1,43 @@
+#!/usr/bin/env strada
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        my scalar $v1 = Strada::Interpreter::eval_string_vm('
+            our str $r8_ev_loc = "init";
+            local $r8_ev_loc = "v" . ' . $i . ';
+            my hash %h = ("a" => "x");
+            my array @a = (1, 2, 3);
+            my str $s = sprintf("%s-%d", $h{"a"}, size(@a));
+            $s;
+        ');
+        if (("" . $v1) ne "x-3") { die("bad vm eval"); }
+
+        my scalar $tw1 = Strada::Interpreter::eval_string('
+            do {
+                my int $k = ' . $i . ' + 10;
+                $k * 2;
+            };
+        ');
+        if (($tw1 + 0) != (($i + 10) * 2)) { die("bad tw eval"); }
+        Strada::Interpreter::reset();
+    }
+
+    Strada::JIT::init();
+    Strada::JIT::eval('func r8l_jit_re(str $s) str {
+        my str $t = $s;
+        $t =~ s/{/[/g;
+        return $t;
+    }');
+    for (my int $j = 0; $j < 3; $j = $j + 1) {
+        my scalar $jr = Strada::JIT::eval('return r8l_jit_re("{val_' . $j . '");');
+        if (("" . $jr) ne "[val_" . $j . "") { die("bad jit eval"); }
+        Strada::JIT::eval('say("R8L_JIT_COMMENT"); # )');
+    }
+    Strada::JIT::reset();
+
+    say("R8_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

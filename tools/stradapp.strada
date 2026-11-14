@@ -812,7 +812,22 @@ func pp_is_pod_end(str $trimmed) int {
     return 0;
 }
 
-func pp_detect_heredoc_tag(str $line) str {
+func pp_c_directive_word(str $trimmed) str {
+    my int $len = length($trimmed);
+    my int $i = 1;
+    while ($i < $len && (substr($trimmed, $i, 1) eq " " || substr($trimmed, $i, 1) eq "\t")) {
+        $i++;
+    }
+    my int $s = $i;
+    while ($i < $len && is_ident_char(substr($trimmed, $i, 1)) == 1) {
+        $i++;
+    }
+    if ($i == $s) { return ""; }
+    return substr($trimmed, $s, $i - $s);
+}
+
+func pp_detect_heredoc_tags(str $line) scalar {
+    my array @tags = ();
     my int $len = length($line);
     my int $i = 0;
     my int $in_dq = 0;
@@ -835,9 +850,9 @@ func pp_detect_heredoc_tag(str $line) str {
         if ($ch eq " " || $ch eq "\t" || $ch eq "\r") { $i = $i + 1; next; }
         if ($ch eq "\"") { $in_dq = 1; $i = $i + 1; next; }
         if ($ch eq "'") { $in_sq = 1; $i = $i + 1; next; }
-        if ($ch eq "#") { return ""; }
+        if ($ch eq "#") { return \@tags; }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            if ($can_regex == 1) { return ""; }
+            if ($can_regex == 1) { return \@tags; }
             $i = $i + 2;
             $can_regex = 1;
             next;
@@ -853,7 +868,7 @@ func pp_detect_heredoc_tag(str $line) str {
                 }
                 $ci = $ci + 1;
             }
-            if ($c_closed == 0) { return ""; }
+            if ($c_closed == 0) { return \@tags; }
             next;
         }
         if ($ch eq "/" && $can_regex == 1) {
@@ -918,7 +933,11 @@ func pp_detect_heredoc_tag(str $line) str {
                         }
                     }
                     if ($q ne "" || ($is_shift == 0 && $tag =~ /^[A-Za-z_][A-Za-z0-9_]*$/)) {
-                        return $tag;
+                        push(@tags, $tag);
+                        $i = $j;
+                        if ($q ne "") { $i = $i + 1; }
+                        $can_regex = 0;
+                        next;
                     }
                 }
             }
@@ -941,7 +960,7 @@ func pp_detect_heredoc_tag(str $line) str {
         }
         $i = $i + 1;
     }
-    return "";
+    return \@tags;
 }
 
 func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref) void {
@@ -1046,8 +1065,10 @@ func preprocess(str $filename) str {
     my int $in_ml_dq = 0;
     my int $in_ml_sq = 0;
     my int $in_block_cmt = 0;
-    my str $heredoc_tag = "";
-    my str $pending_heredoc = "";
+    my array @heredoc_tags = ();
+    my array @pending_heredocs = ();
+    my array @c_pp_entry = ();
+    my array @c_pp_max = ();
 
     my int $i = 0;
     my int $num_lines = size(@lines);
@@ -1062,9 +1083,13 @@ func preprocess(str $filename) str {
 
         # Inside multiline POD / heredoc / quoted literal / C block comment:
         # never interpret `#...` as a preprocessor directive.
-        if (length($heredoc_tag) > 0) {
-            if ($trimmed eq $heredoc_tag) {
-                $heredoc_tag = "";
+        if (size(@heredoc_tags) > 0) {
+            my str $line_no_cr = $line;
+            if (length($line_no_cr) > 0 && substr($line_no_cr, length($line_no_cr) - 1, 1) eq "\r") {
+                $line_no_cr = substr($line_no_cr, 0, length($line_no_cr) - 1);
+            }
+            if ($line_no_cr eq $heredoc_tags[0]) {
+                shift(@heredoc_tags);
             }
             if ($active) {
                 $output = $output . $line . "\n";
@@ -1088,9 +1113,13 @@ func preprocess(str $filename) str {
         }
         if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
             pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
-            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && length($pending_heredoc) > 0) {
-                $heredoc_tag = $pending_heredoc;
-                $pending_heredoc = "";
+            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && size(@pending_heredocs) > 0) {
+                my int $pi = 0;
+                while ($pi < size(@pending_heredocs)) {
+                    push(@heredoc_tags, $pending_heredocs[$pi]);
+                    $pi++;
+                }
+                @pending_heredocs = ();
             }
             if ($active) {
                 $output = $output . $line . "\n";
@@ -1111,88 +1140,139 @@ func preprocess(str $filename) str {
             next;
         }
 
-        # Check for __C__ block start or continuation (even inside inactive branches)
-        my int $c_scan_from = -1;
-        if ($in_c_block != 0) {
-            $c_scan_from = 0;
-        } elsif (substr($trimmed, 0, 1) ne "#") {
-            my int $kw_pos = find_c_block_kw($line);
-            if ($kw_pos >= 0) {
-                $in_c_block = 2;
-                $c_block_depth = 0;
-                $c_in_block_cmt = 0;
-                $c_in_str = 0;
-                $c_in_chr = 0;
-                $c_scan_from = $kw_pos + 5;
-            }
-        }
+        my str $c_prefix = "";
+        my int $same_line_done = 0;
+        while ($same_line_done == 0) {
+            $same_line_done = 1;
 
-        if ($c_scan_from >= 0) {
-            my int $j = $c_scan_from;
-            my int $llen = length($line);
-            while ($j < $llen) {
-                my str $ch = substr($line, $j, 1);
-                if ($c_in_block_cmt == 1) {
-                    if ($ch eq "*" && $j + 1 < $llen && substr($line, $j + 1, 1) eq "/") {
-                        $c_in_block_cmt = 0;
-                        $j = $j + 2;
-                        next;
+            # Check for __C__ block start or continuation (even inside inactive branches)
+            my int $c_scan_from = -1;
+            if ($in_c_block != 0) {
+                $c_scan_from = 0;
+            } elsif (substr($trimmed, 0, 1) ne "#") {
+                my int $kw_pos = find_c_block_kw($line);
+                if ($kw_pos >= 0) {
+                    $in_c_block = 2;
+                    $c_block_depth = 0;
+                    $c_in_block_cmt = 0;
+                    $c_in_str = 0;
+                    $c_in_chr = 0;
+                    @c_pp_entry = ();
+                    @c_pp_max = ();
+                    $c_scan_from = $kw_pos + 5;
+                }
+            }
+
+            if ($c_scan_from >= 0) {
+                if ($in_c_block == 1 && $c_in_block_cmt == 0 && $c_in_str == 0 && $c_in_chr == 0 && substr($trimmed, 0, 1) eq "#") {
+                    my str $cpp_w = pp_c_directive_word($trimmed);
+                    if ($cpp_w eq "if" || $cpp_w eq "ifdef" || $cpp_w eq "ifndef") {
+                        push(@c_pp_entry, $c_block_depth);
+                        push(@c_pp_max, $c_block_depth);
+                    } elsif ($cpp_w eq "elif" || $cpp_w eq "else") {
+                        if (size(@c_pp_entry) > 0) {
+                            my int $ctop = size(@c_pp_entry) - 1;
+                            if ($c_block_depth > $c_pp_max[$ctop]) {
+                                $c_pp_max[$ctop] = $c_block_depth;
+                            }
+                            $c_block_depth = $c_pp_entry[$ctop];
+                        }
+                    } elsif ($cpp_w eq "endif") {
+                        if (size(@c_pp_entry) > 0) {
+                            my int $ctop = size(@c_pp_entry) - 1;
+                            my int $cm = $c_pp_max[$ctop];
+                            if ($c_block_depth > $cm) { $cm = $c_block_depth; }
+                            $c_block_depth = $cm;
+                            pop(@c_pp_entry);
+                            pop(@c_pp_max);
+                        }
                     }
-                    $j++;
-                    next;
-                }
-                if ($c_in_str == 1) {
-                    if ($ch eq "\\") { $j = $j + 2; next; }
-                    if ($ch eq "\"") { $c_in_str = 0; }
-                    $j++;
-                    next;
-                }
-                if ($c_in_chr == 1) {
-                    if ($ch eq "\\") { $j = $j + 2; next; }
-                    if ($ch eq "'") { $c_in_chr = 0; }
-                    $j++;
-                    next;
-                }
-                if ($ch eq "/" && $j + 1 < $llen) {
-                    my str $nch = substr($line, $j + 1, 1);
-                    if ($nch eq "/") {
-                        last;
-                    }
-                    if ($nch eq "*") {
-                        $c_in_block_cmt = 1;
-                        $j = $j + 2;
-                        next;
-                    }
-                }
-                if ($ch eq "\"") { $c_in_str = 1; $j++; next; }
-                if ($ch eq "'") { $c_in_chr = 1; $j++; next; }
-                if ($ch eq "{") {
-                    if ($in_c_block == 2) {
-                        $in_c_block = 1;
-                        $c_block_depth = 1;
+                    if ($active) {
+                        $output = $output . $c_prefix . $line . "\n";
                     } else {
-                        $c_block_depth++;
+                        $output = $output . "\n";
                     }
-                } elsif ($ch eq "}" && $in_c_block == 1) {
-                    $c_block_depth--;
-                    if ($c_block_depth == 0) {
-                        $in_c_block = 0;
-                        last;
-                    }
+                    last;
                 }
-                $j++;
-            }
-            # Pass through C code as-is
-            if ($active) {
-                $output = $output . $line . "\n";
-            } else {
-                $output = $output . "\n";
-            }
-            $i++;
-            next;
-        }
 
-        if (substr($trimmed, 0, 1) eq "#") {
+                my int $j = $c_scan_from;
+                my int $llen = length($line);
+                my int $reparse_tail = 0;
+                while ($j < $llen) {
+                    my str $ch = substr($line, $j, 1);
+                    if ($c_in_block_cmt == 1) {
+                        if ($ch eq "*" && $j + 1 < $llen && substr($line, $j + 1, 1) eq "/") {
+                            $c_in_block_cmt = 0;
+                            $j = $j + 2;
+                            next;
+                        }
+                        $j++;
+                        next;
+                    }
+                    if ($c_in_str == 1) {
+                        if ($ch eq "\\") { $j = $j + 2; next; }
+                        if ($ch eq "\"") { $c_in_str = 0; }
+                        $j++;
+                        next;
+                    }
+                    if ($c_in_chr == 1) {
+                        if ($ch eq "\\") { $j = $j + 2; next; }
+                        if ($ch eq "'") { $c_in_chr = 0; }
+                        $j++;
+                        next;
+                    }
+                    if ($ch eq "/" && $j + 1 < $llen) {
+                        my str $nch = substr($line, $j + 1, 1);
+                        if ($nch eq "/") {
+                            last;
+                        }
+                        if ($nch eq "*") {
+                            $c_in_block_cmt = 1;
+                            $j = $j + 2;
+                            next;
+                        }
+                    }
+                    if ($ch eq "\"") { $c_in_str = 1; $j++; next; }
+                    if ($ch eq "'") { $c_in_chr = 1; $j++; next; }
+                    if ($ch eq "{") {
+                        if ($in_c_block == 2) {
+                            $in_c_block = 1;
+                            $c_block_depth = 1;
+                        } else {
+                            $c_block_depth++;
+                        }
+                    } elsif ($ch eq "}" && $in_c_block == 1) {
+                        $c_block_depth--;
+                        if ($c_block_depth == 0) {
+                            $in_c_block = 0;
+                            @c_pp_entry = ();
+                            @c_pp_max = ();
+                            my str $after_c = substr($line, $j + 1);
+                            if (length(trim($after_c)) > 0 && substr(trim($after_c), 0, 1) ne "#") {
+                                $c_prefix = $c_prefix . substr($line, 0, $j + 1);
+                                $line = $after_c;
+                                $trimmed = trim($line);
+                                $reparse_tail = 1;
+                            }
+                            last;
+                        }
+                    }
+                    $j++;
+                }
+                if ($reparse_tail == 1) {
+                    $same_line_done = 0;
+                    next;
+                }
+                # Pass through C code as-is
+                if ($active) {
+                    $output = $output . $c_prefix . $line . "\n";
+                } else {
+                    $output = $output . "\n";
+                }
+                last;
+            }
+
+            if (substr($trimmed, 0, 1) eq "#" && length($c_prefix) == 0) {
             if ($i == 0 && starts_with($trimmed, "#!")) {
                 # Shebang (#!/usr/bin/env strada) on line 1: pass through untouched.
                 if ($active) {
@@ -1342,17 +1422,17 @@ func preprocess(str $filename) str {
                         $g_include_depth = $g_include_depth - 1;
                         $output = $output . $inc_content;
                     }
-                } elsif ($word eq "error" && starts_with($raw_rest, "\"")) {
+                } elsif ($word eq "error") {
                     if ($active) {
-                        my str $msg = strip_pp_comment($raw_rest);
+                        my str $msg = trim(strip_pp_comment($raw_rest));
                         if (length($msg) >= 2 && substr($msg, 0, 1) eq "\"" && substr($msg, length($msg) - 1, 1) eq "\"") {
                             $msg = substr($msg, 1, length($msg) - 2);
                         }
                         die("stradapp: " . $filename . ":" . ($i + 1) . ": error: " . $msg);
                     }
-                } elsif ($word eq "warning" && starts_with($raw_rest, "\"")) {
+                } elsif ($word eq "warning") {
                     if ($active) {
-                        my str $msg = strip_pp_comment($raw_rest);
+                        my str $msg = trim(strip_pp_comment($raw_rest));
                         if (length($msg) >= 2 && substr($msg, 0, 1) eq "\"" && substr($msg, length($msg) - 1, 1) eq "\"") {
                             $msg = substr($msg, 1, length($msg) - 2);
                         }
@@ -1363,16 +1443,25 @@ func preprocess(str $filename) str {
                 }
             }
         } else {
-            my str $hd = pp_detect_heredoc_tag($line);
+            my scalar $hd_list = pp_detect_heredoc_tags($line);
             pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
             if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
-                $pending_heredoc = $hd;
-            } elsif (length($hd) > 0) {
-                $heredoc_tag = $hd;
+                my int $hi = 0;
+                while ($hi < size($hd_list)) {
+                    push(@pending_heredocs, $hd_list->[$hi]);
+                    $hi++;
+                }
+            } elsif (size($hd_list) > 0) {
+                my int $hi = 0;
+                while ($hi < size($hd_list)) {
+                    push(@heredoc_tags, $hd_list->[$hi]);
+                    $hi++;
+                }
             }
             if ($active) {
-                $output = $output . $line . "\n";
+                $output = $output . $c_prefix . $line . "\n";
             }
+        }
         }
 
         if (length($output) == $before) { $output = $output . "\n"; }

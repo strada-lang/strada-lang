@@ -3,6 +3,7 @@
 #define AST_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef enum {
     NODE_PROGRAM,
@@ -106,6 +107,8 @@ struct ASTNode {
     NodeType type;
     int line;
     int char_code;
+    size_t str_len;
+    int has_str_len;
     
     union {
         // Program
@@ -425,6 +428,7 @@ ASTNode* ast_new_variable(const char *name, char sigil);
 ASTNode* ast_new_int_literal(int64_t value);
 ASTNode* ast_new_num_literal(double value);
 ASTNode* ast_new_str_literal(const char *value);
+ASTNode* ast_new_str_literal_len(const char *value, size_t len);
 ASTNode* ast_new_array_literal(void);
 ASTNode* ast_new_hash_literal(void);
 
