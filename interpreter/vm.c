@@ -1712,7 +1712,7 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
         case VM_OBJ_FLOAT: return strada_new_num(VM_AS_FLOAT(v)->val);
         case VM_OBJ_STR: {
             StradaValue *r = strada_new_str_len(VM_AS_STR(v)->data, VM_AS_STR(v)->len);
-            if (VM_AS_STR(v)->hdr.is_utf8) r->struct_size |= STRADA_UTF8_FLAG;
+            if (VM_AS_STR(v)->hdr.is_utf8) STRADA_SET_UTF8_FLAG(r);
             return r;
         }
         case VM_OBJ_ARRAY: {
@@ -1737,7 +1737,7 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
         }
         case VM_OBJ_STRBUF: {
             StradaValue *r = strada_new_str_len(VM_AS_STRBUF(v)->data, VM_AS_STRBUF(v)->len);
-            if (VM_AS_STRBUF(v)->hdr.is_utf8) r->struct_size |= STRADA_UTF8_FLAG;
+            if (VM_AS_STRBUF(v)->hdr.is_utf8) STRADA_SET_UTF8_FLAG(r);
             return r;
         }
         case VM_OBJ_NATIVE_SV: {
@@ -1811,7 +1811,7 @@ static VMValue sv_to_vm_depth(StradaValue *sv, int depth) {
     if (STRADA_IS_TAGGED_INT(sv)) return VM_MAKE_INT(STRADA_TAGGED_INT_VAL(sv));
     switch (sv->type) {
     case STRADA_INT:
-        if (sv->struct_size & STRADA_UV_FLAG) {
+        if (STRADA_INT_IS_UV(sv)) {
             uint64_t uv = (uint64_t)sv->value.iv;
             if (uv <= (uint64_t)INT64_MAX) return VM_MAKE_INT((int64_t)uv);
             return VM_MAKE_FLOAT((double)uv);

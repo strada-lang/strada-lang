@@ -3182,22 +3182,51 @@ func ast_any_try(scalar $n) int {
     return 0;
 }
 
-# Check if a statement/subtree contains an inline __C__ block (in this function)
-func stmt_has_c_block(scalar $n) int {
+# Scan raw C code for identifier tokens [A-Za-z_][A-Za-z0-9_]* so closure boxing
+# only unboxes variables actually referenced by inline __C__ blocks.
+func ast_scan_c_code_idents(str $code, scalar $out_idents) void {
+    my int $len = length($code);
+    my int $i = 0;
+    while ($i < $len) {
+        my int $ch = char_at($code, $i);
+        if (($ch >= 'A' && $ch <= 'Z') || ($ch >= 'a' && $ch <= 'z') || $ch == '_') {
+            my int $start = $i;
+            $i = $i + 1;
+            while ($i < $len) {
+                my int $ch2 = char_at($code, $i);
+                if (($ch2 >= 'A' && $ch2 <= 'Z') || ($ch2 >= 'a' && $ch2 <= 'z') || ($ch2 >= '0' && $ch2 <= '9') || $ch2 == '_') {
+                    $i = $i + 1;
+                } else {
+                    last;
+                }
+            }
+            my str $tok = substr($code, $start, $i - $start);
+            $out_idents->{$tok} = 1;
+        } else {
+            $i = $i + 1;
+        }
+    }
+}
+
+func ast_collect_c_block_idents(scalar $n, scalar $out_idents) void {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
         my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
-            if (stmt_has_c_block($n->[$i]) == 1) { return 1; }
+            ast_collect_c_block_idents($n->[$i], $out_idents);
             $i = $i + 1;
         }
-        return 0;
+        return;
     }
-    if ($rt ne "HASH") { return 0; }
+    if ($rt ne "HASH") { return; }
     my int $type = $n->{"type"} + 0;
-    if ($type == NODE_C_BLOCK()) { return 1; }
-    if (ast_is_leaf_node_type($type) == 1) { return 0; }
+    if ($type == NODE_C_BLOCK()) {
+        my str $code = $n->{"code"} . "";
+        ast_scan_c_code_idents($code, $out_idents);
+        return;
+    }
+    if (ast_is_leaf_node_type($type) == 1) { return; }
     my scalar $ks = keys(%{$n});
     my int $kn = size($ks);
     my int $k = 0;
@@ -3205,11 +3234,28 @@ func stmt_has_c_block(scalar $n) int {
         my scalar $v = $n->{$ks->[$k]};
         my str $vt = reftype($v);
         if ($vt eq "HASH" || $vt eq "ARRAY") {
-            if (stmt_has_c_block($v) == 1) { return 1; }
+            ast_collect_c_block_idents($v, $out_idents);
         }
         $k = $k + 1;
     }
-    return 0;
+}
+
+func collect_safe_boxed_vars(scalar $body, scalar $out_hash) void {
+    my hash %cand = ();
+    ast_collect_anon_var_refs($body, \%cand, 0);
+    my scalar $cand_ks = keys(%cand);
+    my int $n = size($cand_ks);
+    if ($n == 0) { return; }
+    my hash %c_idents = ();
+    ast_collect_c_block_idents($body, \%c_idents);
+    my int $i = 0;
+    while ($i < $n) {
+        my str $v = $cand_ks->[$i];
+        if (!defined($c_idents{$v})) {
+            $out_hash->{$v} = $cand{$v};
+        }
+        $i = $i + 1;
+    }
 }
 
 func ast_collect_regex_var_refs(str $pat, scalar $out_hash) void {
@@ -6833,35 +6879,33 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         return;
     }
 
-    # Evaluate all args strictly left-to-right with exception-safe cleanup
+    # Evaluate all args strictly left-to-right with exception-safe mortal stack
+    my int $has_mortal = 0;
+    $i = 0;
+    while ($i < $arg_count) {
+        if ($is_temp[$i] == 1 || ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1)) {
+            $has_mortal = 1;
+            last;
+        }
+        $i = $i + 1;
+    }
     emit($cg, "({ ");
-    my int $use_push = cleanup_push_useful($cg);
-    my int $pushed = 0;
-    my int $owned_count = 0;
-    my str $last_pushed = "";
+    my str $tm_var = "";
+    if ($has_mortal == 1) {
+        $tm_var = next_tmps_var($cg);
+        emit($cg, "size_t " . $tm_var . " = strada_tmps_mark(); ");
+    }
 
     $i = 0;
     while ($i < $arg_count) {
         if ($is_temp[$i] == 1) {
-            emit($cg, "StradaValue *__call_arg" . $i . " = ");
-            gen_expression($cg, $args->[$i]);
-            emit($cg, "; ");
-            $owned_count = $owned_count + 1;
-            if ($use_push == 1) {
-                emit($cg, "strada_cleanup_push(__call_arg" . $i . "); ");
-                $pushed = $pushed + 1;
-                $last_pushed = "__call_arg" . $i;
-            }
-        } elsif ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1) {
-            emit($cg, "StradaValue *__call_arg" . $i . " = strada_copy_scalar_il(");
+            emit($cg, "StradaValue *__call_arg" . $i . " = strada_mortal(");
             gen_expression($cg, $args->[$i]);
             emit($cg, "); ");
-            $owned_count = $owned_count + 1;
-            if ($use_push == 1) {
-                emit($cg, "strada_cleanup_push(__call_arg" . $i . "); ");
-                $pushed = $pushed + 1;
-                $last_pushed = "__call_arg" . $i;
-            }
+        } elsif ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1) {
+            emit($cg, "StradaValue *__call_arg" . $i . " = strada_mortal(strada_copy_scalar_il(");
+            gen_expression($cg, $args->[$i]);
+            emit($cg, ")); ");
         } else {
             emit($cg, "StradaValue *__call_arg" . $i . " = ");
             gen_expression($cg, $args->[$i]);
@@ -6882,23 +6926,19 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
     }
     emit($cg, "); ");
 
-    # Decref all owned arguments (popping cleanup stack if pushed)
-    if ($pushed == 1) {
-        emit($cg, "strada_cleanup_pop_decref(" . $last_pushed . "); ");
-    } elsif ($pushed > 1) {
-        emit($cg, "strada_cleanup_pop_decref_n(" . $pushed . "); ");
-    } elsif ($owned_count > 0) {
-        $i = $arg_count - 1;
-        while ($i >= 0) {
-            if ($is_temp[$i] == 1 || ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1)) {
-                emit($cg, "strada_decref(__call_arg" . $i . "); ");
-            }
-            $i = $i - 1;
-        }
+    if ($has_mortal == 1) {
+        emit($cg, "strada_tmps_free(" . $tm_var . "); ");
     }
 
     # Return the result
     emit($cg, "__call_result; })");
+}
+
+# Generate a unique C local name for strada_tmps_mark() so nested calls never shadow
+func next_tmps_var(scalar $cg) str {
+    my int $id = $cg->{"tmp_counter"} + 0;
+    $cg->{"tmp_counter"} = $id + 1;
+    return "__tm_" . $id;
 }
 
 # Compound assignment on hash element: $h{"k"} += expr, %=, **=, //=, x=, etc.

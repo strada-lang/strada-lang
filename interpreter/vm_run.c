@@ -23,11 +23,11 @@ extern void __Strada_Interpreter_oop_init(void);
 static void init_strada_runtime(const char *prog_name) {
     /* Standard I/O filehandles (immortal) */
     v_STDIN = strada_new_undef(); v_STDIN->type = STRADA_FILEHANDLE;
-    v_STDIN->refcount = 1000000001; v_STDIN->value.fh = stdin;
+    STRADA_MAKE_IMMORTAL_SV(v_STDIN); v_STDIN->value.fh = stdin;
     v_STDOUT = strada_new_undef(); v_STDOUT->type = STRADA_FILEHANDLE;
-    v_STDOUT->refcount = 1000000001; v_STDOUT->value.fh = stdout;
+    STRADA_MAKE_IMMORTAL_SV(v_STDOUT); v_STDOUT->value.fh = stdout;
     v_STDERR = strada_new_undef(); v_STDERR->type = STRADA_FILEHANDLE;
-    v_STDERR->refcount = 1000000001; v_STDERR->value.fh = stderr;
+    STRADA_MAKE_IMMORTAL_SV(v_STDERR); v_STDERR->value.fh = stderr;
 
     /* Global variables */
     ARGV = strada_new_array();

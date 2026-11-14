@@ -18,6 +18,24 @@
 #endif
 #endif
 
+/* Unified header support for TCC (--tcc, JIT-with-tcc, stage1 bootstrap) */
+#if (defined(__TINYC__) || defined(STRADA_TCC_MODE)) && !defined(STRADA_RUNTIME_IMPL)
+#define STRADA_TCC_COMPAT 1
+#endif
+
+#ifdef STRADA_TCC_COMPAT
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <setjmp.h>
+#include <ctype.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +60,29 @@
 #include <termios.h>
 #include <fcntl.h>
 #include <time.h>
+#endif
+
+#ifdef STRADA_TCC_COMPAT
+#ifndef _TIME_T_DEFINED
+#include <time.h>
+#endif
+typedef void regex_t;
+typedef void pcre2_code;
+#ifndef __FILE_defined
+# define __FILE_defined 1
+struct _IO_FILE;
+typedef struct _IO_FILE FILE;
+#endif
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+#endif
+
+#if defined(__OPTIMIZE__) && !defined(STRADA_TCC_COMPAT) && !defined(__TINYC__)
+#define STRADA_HOT_INLINE static inline __attribute__((always_inline))
+#else
+#define STRADA_HOT_INLINE static inline
+#endif
 
 /* Forward declarations */
 typedef struct StradaValue StradaValue;
@@ -65,7 +106,8 @@ typedef enum {
     STRADA_CLOSURE,    /* Anonymous function with captured environment */
     STRADA_FUTURE,     /* Async future for await */
     STRADA_CHANNEL,    /* Thread-safe communication channel */
-    STRADA_ATOMIC      /* Atomic integer for lock-free operations */
+    STRADA_ATOMIC,     /* Atomic integer for lock-free operations */
+    STRADA_CELL        /* Heap-allocated shared closure capture cell */
 } StradaType;
 
 /* ===== TAGGED INTEGER SUPPORT =====
@@ -102,40 +144,45 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
     return r;
 }
 
-/* ASCII string flag: bit 63 of struct_size. When set, the string is pure ASCII
- * and byte offset == char offset, making substr() O(1). */
-#define STRADA_ASCII_FLAG ((size_t)1 << 63)
-/* UTF-8 char-oriented flag: bit 62. When set, the string is a Perl-style
- * UTF-8 decoded string — length/substr/index operate on characters (counting
- * UTF-8 code points), not bytes. Mirrors Perl's SVf_UTF8.
- *   - Set by: Encode::decode("UTF-8", ...), chr(N) for N > 127, utf8::decode,
- *             utf8::upgrade, string ops that propagate flag from either operand,
- *             string literals from a `use utf8` source file with non-ASCII chars.
- *   - Cleared by: utf8::encode, utf8::downgrade (when downgrade is possible),
- *                 explicit byte-level operations (pack, read from binary FH).
- * ASCII-flagged strings are implicitly char-oriented too (every byte is one
- * codepoint); when both flags are 0 the string is byte-oriented Latin-1ish. */
-#define STRADA_UTF8_FLAG ((size_t)1 << 62)
-#define STRADA_STR_FLAGS_MASK (STRADA_ASCII_FLAG | STRADA_UTF8_FLAG)
-#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size & ~STRADA_STR_FLAGS_MASK)
-#define STRADA_STR_IS_ASCII(sv) (((sv)->struct_size & STRADA_ASCII_FLAG) != 0)
-#define STRADA_STR_IS_UTF8(sv) (((sv)->struct_size & STRADA_UTF8_FLAG) != 0)
-/* True if either flag implies "treat as chars" (ASCII or UTF-8). */
-#define STRADA_STR_IS_CHARS(sv) (((sv)->struct_size & STRADA_STR_FLAGS_MASK) != 0)
+/* StradaValue.flags bit definitions (uint16_t).
+ * Replaces both magic refcount sentinels (> 1000000000 / INT32_MAX / 2000000000)
+ * and bit-stuffing in struct_size so struct_size holds only pure length/size. */
+#define STRADA_SVf_IMMORTAL     ((uint16_t)(1u << 0))  /* static/immortal singleton; never rc-freed */
+#define STRADA_SVf_POOLED       ((uint16_t)(1u << 1))  /* parked in free pool / neutralized; stale decref is no-op */
+#define STRADA_SVf_ARENA        ((uint16_t)(1u << 2))  /* allocated from StradaArena bump block */
+#define STRADA_SVf_ASCII        ((uint16_t)(1u << 3))  /* STRADA_STR: 7-bit pure ASCII (char len == byte len) */
+#define STRADA_SVf_UTF8         ((uint16_t)(1u << 4))  /* STRADA_STR: character-oriented UTF-8 */
+#define STRADA_SVf_UV           ((uint16_t)(1u << 5))  /* STRADA_INT: unsigned uint64_t > INT64_MAX */
+#define STRADA_SVf_BOOL         ((uint16_t)(1u << 6))  /* STRADA_INT: canonical boolean (JSON true/false) */
+#define STRADA_SVf_MAY_SELF_REF ((uint16_t)(1u << 7))  /* ARRAY/HASH: may hold direct self-cycle */
+#define STRADA_SVf_CC_BUFFERED  ((uint16_t)(1u << 8))  /* Cycle GC purple root buffer membership */
+#define STRADA_SVf_SLOT_REF     ((uint16_t)(1u << 9))  /* STRADA_REF: stack StradaValue** slot reference */
+#define STRADA_SVf_CELL_REF     ((uint16_t)(1u << 10)) /* STRADA_REF: closure cell StradaValue** reference */
+#define STRADA_SVf_STR_MASK     ((uint16_t)(STRADA_SVf_ASCII | STRADA_SVf_UTF8))
 
-/* Unsigned-integer flag: bit 61 of struct_size, set ONLY on heap STRADA_INT
- * values whose magnitude exceeds INT64_MAX (i.e. live in (2^63, 2^64-1]).
- * value.iv holds the two's-complement bit pattern of the uint64_t. Mirrors
- * Perl's SVf_IVisUV: the value is still type STRADA_INT (so every existing
- * `type == STRADA_INT` check keeps working), but stringify / numify / compare
- * reinterpret value.iv as uint64_t. Never set on tagged ints (those are always
- * in signed tagged range) — only heap ints reach this. struct_size is otherwise
- * unused for INT, so this never collides with the string-length/flags use. */
-#define STRADA_UV_FLAG ((size_t)1 << 61)
-#define STRADA_BOOL_FLAG ((size_t)1 << 60)
-#define STRADA_MAY_SELF_REF ((size_t)1 << 59)
-#define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
-#define STRADA_INT_IS_BOOL(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_BOOL_FLAG) != 0))
+/* Live arena SVs (STRADA_SVf_ARENA alone) remain refcounted while the arena is active
+ * (only strada_free_value skips freeing them via ARENA_OWNS); only IMMORTAL and POOLED
+ * skip refcounting. Keep `|| (sv)->refcount > 1000000000` ONLY for frozen bootstrap/stradac
+ * compatibility (bootstrap/Combined.c emits `v_STDIN->refcount = 1000000001;` in stage1). */
+#define STRADA_SV_IS_NONRC(sv) \
+    ((((sv)->flags & (STRADA_SVf_IMMORTAL | STRADA_SVf_POOLED)) != 0) || ((sv)->refcount > 1000000000))
+
+/* Set refcount = 2 (never 1) on immortals/pooled SVs so COW / sole-owner checks
+ * treat singletons like __strada_undef_static as shared and never mutate in place. */
+#define STRADA_MAKE_IMMORTAL_SV(sv) \
+    do { (sv)->flags |= STRADA_SVf_IMMORTAL; (sv)->refcount = 2; } while (0)
+
+#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size)
+#define STRADA_STR_IS_ASCII(sv) (((sv)->flags & STRADA_SVf_ASCII) != 0)
+#define STRADA_STR_IS_UTF8(sv) (((sv)->flags & STRADA_SVf_UTF8) != 0)
+/* True if either flag implies "treat as chars" (ASCII or UTF-8). */
+#define STRADA_STR_IS_CHARS(sv) (((sv)->flags & STRADA_SVf_STR_MASK) != 0)
+#define STRADA_SET_UTF8_FLAG(sv) do { (sv)->flags |= STRADA_SVf_UTF8; } while (0)
+#define STRADA_CLEAR_UTF8_FLAG(sv) do { (sv)->flags &= (uint16_t)~STRADA_SVf_UTF8; } while (0)
+
+/* Unsigned-integer & bool flags in StradaValue.flags for heap STRADA_INT */
+#define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->flags & STRADA_SVf_UV) != 0))
+#define STRADA_INT_IS_BOOL(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->flags & STRADA_SVf_BOOL) != 0))
 
 /* Atomic load/store for lazily-populated static pointer caches in generated code.
  * TCC has no __atomic_* intrinsics, so keep a plain read/write fallback there. */
@@ -173,6 +220,16 @@ typedef struct StradaClosure {
     int fixed_params;          /* Fixed param count before trailing variadic array */
 } StradaClosure;
 
+#ifdef STRADA_TCC_COMPAT
+/* Opaque concurrency handles in TCC compat mode (avoids <pthread.h>) */
+typedef struct StradaThread StradaThread;
+typedef struct StradaMutex StradaMutex;
+typedef struct StradaCond StradaCond;
+typedef struct StradaFuture StradaFuture;
+typedef struct StradaTask StradaTask;
+typedef struct StradaThreadPool StradaThreadPool;
+typedef struct StradaChannel StradaChannel;
+#else
 /* Thread types - store pthread handles as opaque pointers */
 typedef struct StradaThread {
     pthread_t thread;
@@ -223,6 +280,7 @@ struct StradaThreadPool {
     pthread_cond_t queue_cond;      /* Workers wait on this */
     pthread_cond_t empty_cond;      /* For shutdown wait */
 };
+#endif /* STRADA_TCC_COMPAT */
 
 /* Future states */
 typedef enum {
@@ -233,6 +291,7 @@ typedef enum {
     FUTURE_TIMEOUT = 4
 } StradaFutureState;
 
+#ifndef STRADA_TCC_COMPAT
 /* Future/Promise for async operations */
 struct StradaFuture {
     pthread_mutex_t mutex;          /* Protects all fields */
@@ -250,6 +309,7 @@ struct StradaFuture {
     int has_deadline;
     int internal_refs;              /* Atomic internal refcount (SV + queued/running task) */
 };
+#endif
 
 /* Global thread pool */
 extern StradaThreadPool *strada_thread_pool;
@@ -285,6 +345,7 @@ typedef struct StradaChannelNode {
     struct StradaChannelNode *next;
 } StradaChannelNode;
 
+#ifndef STRADA_TCC_COMPAT
 /* Thread-safe channel for inter-thread communication */
 typedef struct StradaChannel {
     pthread_mutex_t mutex;          /* Protects all fields */
@@ -297,6 +358,7 @@ typedef struct StradaChannel {
     int capacity;                   /* Max items (0 = unbounded) */
     int closed;                     /* 1 if channel is closed */
 } StradaChannel;
+#endif
 
 /* Channel operations */
 StradaValue* strada_channel_new(int capacity);
@@ -417,7 +479,8 @@ typedef struct StradaMetadata {
 
 /* Main value structure - like Perl's SV (32 bytes) */
 struct StradaValue {
-    StradaType type;         /* 4B */
+    uint16_t type;           /* 2B - StradaType */
+    uint16_t flags;          /* 2B - STRADA_SVf_* flags */
     int refcount;            /* 4B */
     union {
         int64_t iv;      /* Integer value */
@@ -435,9 +498,10 @@ struct StradaValue {
         StradaSocketBuffer *sock;  /* Buffered socket */
         void *ptr;       /* Generic C pointer */
     } value;                 /* 8B */
-    size_t struct_size;      /* 8B - string length cache (hot path) */
+    size_t struct_size;      /* 8B - pure string byte length / struct size cache */
     StradaMetadata *meta;    /* 8B - NULL for most values */
 };
+typedef char strada_sv_size_assert[sizeof(StradaValue) == 32 ? 1 : -1];
 
 #ifndef SV_BLESSED
 #define SV_BLESSED(sv) ((!STRADA_IS_TAGGED_INT(sv) && (sv)->meta) ? (sv)->meta->blessed_package : NULL)
@@ -456,12 +520,9 @@ struct StradaArray {
  * Allows $$ref and $$ref = val to read/write the original variable.
  * Used for pass-by-reference patterns: func(\$var).
  * WARNING: The slot ref MUST NOT outlive the stack frame containing the variable. */
-#define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
-#define STRADA_CELL_REF_MARKER ((size_t)0xDEADCE11ULL)
 static inline int strada_is_slot_ref(StradaValue *sv) {
     return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
-           (sv->struct_size == STRADA_SLOT_REF_MARKER ||
-            sv->struct_size == STRADA_CELL_REF_MARKER);
+           (sv->flags & (STRADA_SVf_SLOT_REF | STRADA_SVf_CELL_REF)) != 0;
 }
 
 /* Refcounted string — single allocation for header + data.
@@ -491,7 +552,7 @@ extern int strada_threading_active;
  * Same shape as strada_incref/strada_decref: the runtime exports real
  * functions (for tcc-compiled code and .so ABI); other TUs get the
  * static-inline fast path. */
-#ifdef STRADA_RUNTIME_IMPL
+#if defined(STRADA_RUNTIME_IMPL) || defined(STRADA_TCC_COMPAT)
 void ss_incref(StradaString *ss);
 void ss_decref(StradaString *ss);
 #else
@@ -570,11 +631,15 @@ void strada_hash_mark_index_dirty(StradaHash *hv);
 StradaValue* strada_new_undef(void);
 StradaValue* strada_undef_static(void);  /* Static singleton for void returns */
 StradaValue* strada_new_int(int64_t i);
-static inline __attribute__((always_inline)) StradaValue* strada_new_int_il(int64_t i) {
+#ifdef STRADA_TCC_COMPAT
+#define strada_new_int_il strada_new_int
+#else
+STRADA_HOT_INLINE StradaValue* strada_new_int_il(int64_t i) {
     return __builtin_expect(i >= STRADA_TAGGED_INT_MIN && i <= STRADA_TAGGED_INT_MAX, 1)
         ? STRADA_MAKE_TAGGED_INT(i)
         : strada_new_int(i);
 }
+#endif
 /* Scratch buffer (n StradaValue* slots) wrapped in a freeable STRADA_CSTRUCT —
  * used by the inlined merge-sort so a throwing comparator can't leak it. */
 StradaValue* strada_sortbuf_new(int64_t n);
@@ -623,16 +688,22 @@ StradaValue* strada_new_filehandle(FILE *fh);
  * When STRADA_RUNTIME_IMPL is defined (in strada_runtime.c), these are regular
  * function declarations (exported for .so ABI). Otherwise, they're static inline
  * fast-path wrappers that call the _impl functions. */
-#ifdef STRADA_RUNTIME_IMPL
-/* Implementation file — declare as regular exported functions */
+#if defined(STRADA_RUNTIME_IMPL) || defined(STRADA_TCC_COMPAT)
+/* Implementation file or TCC compat mode — declare as regular exported functions */
 void strada_incref(StradaValue *sv);
 void strada_decref(StradaValue *sv);
-/* break_self_cycle: only the _impl is exported; user code calls the
- * inline wrapper from the non-IMPL branch below. Keeping the wrapper
- * static inline means there's no name collision between user TUs and
- * the runtime symbol — gcc can't get confused into using the impl as
- * a substitute for the wrapper. */
 void strada_break_self_cycle_impl(StradaValue *sv);
+#ifdef STRADA_TCC_COMPAT
+void strada_incref_impl(StradaValue *sv);
+void strada_decref_impl(StradaValue *sv);
+#define strada_break_self_cycle strada_break_self_cycle_impl
+void strada_rc_trace(StradaValue *sv, const char *op, void *ra);
+int64_t strada_to_int_impl(StradaValue *sv);
+double strada_to_num_impl(StradaValue *sv);
+int64_t strada_to_int_take_impl(StradaValue *sv);
+double strada_to_num_take_impl(StradaValue *sv);
+int strada_to_bool_take_impl(StradaValue *sv);
+#endif
 StradaValue* strada_deref_array_value_owned(StradaValue *ref);
 StradaValue* strada_deref_hash_value_owned(StradaValue *ref);
 int64_t strada_to_int(StradaValue *sv);
@@ -652,24 +723,12 @@ double strada_to_num_impl(StradaValue *sv);
 int64_t strada_to_int_take_impl(StradaValue *sv);
 double strada_to_num_take_impl(StradaValue *sv);
 int strada_to_bool_take_impl(StradaValue *sv);
-/* always_inline on these three is critical for OOP hot loops: the
- * tagged-int fast path is just a bit-test, and without forced inlining
- * gcc keeps the wrappers as out-of-line calls under -O3+LTO. Inlining
- * folds the tagged-int branch into the surrounding code and lets the
- * impl call disappear when the surrounding code already proves the
- * pointer is non-NULL / not a tagged int. */
 #ifdef STRADA_RC_TRACE
 extern StradaValue *strada_trace_sv;
 void strada_rc_trace(StradaValue *sv, const char *op, void *ra);
 #define STRADA_RC_HOOK(sv, op) do { if ((sv) == strada_trace_sv && strada_trace_sv) strada_rc_trace((sv), (op), __builtin_return_address(0)); } while (0)
 #else
 #define STRADA_RC_HOOK(sv, op) do {} while (0)
-#endif
-
-#ifdef __OPTIMIZE__
-#define STRADA_HOT_INLINE static inline __attribute__((always_inline))
-#else
-#define STRADA_HOT_INLINE static inline
 #endif
 
 STRADA_HOT_INLINE void strada_incref(StradaValue *sv) {
@@ -714,11 +773,10 @@ STRADA_HOT_INLINE int strada_to_bool_take(StradaValue *sv) {
 STRADA_HOT_INLINE void strada_break_self_cycle(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     /* Only live heap ARRAY (4), HASH (5), or REF (6) can participate in a
-     * direct self-cycle. Guard refcount <= 1e9 first so neutralized arena
-     * SVs and immortals exit before touching ->type. */
-    if ((unsigned int)sv->refcount <= 1000000000u
+     * direct self-cycle. Guard non-RC SVs before inspecting container fields. */
+    if (!STRADA_SV_IS_NONRC(sv)
         && (unsigned int)(sv->type - STRADA_ARRAY) <= (unsigned int)(STRADA_REF - STRADA_ARRAY)) {
-        if (sv->type != STRADA_REF && !(sv->struct_size & STRADA_MAY_SELF_REF)) return;
+        if (sv->type != STRADA_REF && !(sv->flags & STRADA_SVf_MAY_SELF_REF)) return;
         strada_break_self_cycle_impl(sv);
     }
 }
@@ -729,7 +787,7 @@ static inline int strada_sv_is_signed_int_val(StradaValue *sv, int64_t *out) {
         *out = STRADA_TAGGED_INT_VAL(sv);
         return 1;
     }
-    if (sv && sv->type == STRADA_INT && !(sv->struct_size & STRADA_UV_FLAG) && (!sv->meta || !sv->meta->is_tied)) {
+    if (sv && sv->type == STRADA_INT && !(sv->flags & STRADA_SVf_UV) && (!sv->meta || !sv->meta->is_tied)) {
         *out = sv->value.iv;
         return 1;
     }
@@ -797,8 +855,9 @@ static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *el
     sa->av.refcount = 2;  /* prevent freeing — StradaArray has no incref/decref API */
     sa->av.head = 0;
     sa->sv.type = STRADA_ARRAY;
+    sa->sv.flags = STRADA_SVf_IMMORTAL;
+    sa->sv.refcount = 2;
     sa->sv.value.av = &sa->av;
-    sa->sv.refcount = 2000000000;
     sa->sv.meta = NULL;
     sa->sv.struct_size = 0;
     strada_incref(elem);
@@ -1066,9 +1125,13 @@ typedef struct {
     int active;
     int cleanup_mark;   /* cleanup-stack depth when the try began (drained by the throw) */
     int stack_mark;     /* logical call depth when the try began (restored by the throw) */
+    size_t tmps_mark;   /* mortal temp-stack depth when the try began (freed by the throw) */
 } StradaTryContext;
 
-/* THREAD-LOCAL (see runtime): per-thread try frames + exception slots. */
+/* THREAD-LOCAL (see runtime): per-thread try frames + exception slots.
+ * tcc-compiled code uses strada_try_push_slot()/strada_try_pop_slot() and
+ * strada_get_exception()/strada_throw* rather than referencing __thread vars. */
+#ifndef STRADA_TCC_COMPAT
 #ifdef STRADA_NO_TLS
 extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern int strada_try_depth;
@@ -1076,15 +1139,18 @@ extern int strada_try_depth;
 extern __thread StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern __thread int strada_try_depth;
 #endif
+#endif
 jmp_buf *strada_try_push_slot(void);   /* tcc-callable macro twins */
 int strada_try_pop_slot(void);
 StradaValue* strada_exception_trace_get(void);  /* core::exception_trace */
+#ifndef STRADA_TCC_COMPAT
 #ifdef STRADA_NO_TLS
 extern char *strada_exception_msg;
 extern StradaValue *strada_exception_value;
 #else
 extern __thread char *strada_exception_msg;
 extern __thread StradaValue *strada_exception_value;
+#endif
 #endif
 /* Hook for `use overload '""' => sub { ... }`. Perla sets this in perla_init.
  * Returns a strdup'd string when an overload sub is installed for `sv`'s
@@ -1143,14 +1209,24 @@ void strada_cleanup_restore(int mark); /* Restore to depth (no decref) */
 void strada_cleanup_drain_to(int mark); /* Drain to depth (with decref) */
 void strada_inflight_push(StradaValue *sv);
 void strada_inflight_pop(void);
+StradaValue *strada_mortal(StradaValue *sv);
+StradaValue *strada_mortal_copy(StradaValue *sv);
+size_t strada_tmps_mark(void);
+void strada_tmps_free(size_t mark);
 
 /* Macros for try/catch - used by generated code */
+#ifdef STRADA_TCC_COMPAT
+#define STRADA_TRY_PUSH() strada_try_push_slot()
+#define STRADA_TRY_POP()  strada_try_pop_slot()
+#else
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, strada_try_stack[strada_try_depth].cleanup_mark = strada_cleanup_mark(), \
      strada_try_stack[strada_try_depth].stack_mark = strada_stack_mark(), \
+     strada_try_stack[strada_try_depth].tmps_mark = strada_tmps_mark(), \
      &strada_try_stack[strada_try_depth++].buf) : strada_try_push_slot())
 #define STRADA_TRY_POP() (strada_try_depth > 0 && strada_try_depth <= STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[--strada_try_depth].active = 0, 1) : strada_try_pop_slot())
+#endif
 
 /* Call stack for stack traces */
 #define STRADA_MAX_CALL_DEPTH 256
@@ -1166,6 +1242,7 @@ typedef struct {
  * THREAD-LOCAL: each thread tracks its own frames — a shared stack
  * interleaved pushes/pops across threads (garbled traces, and a racy
  * depth check could write one slot past the array). */
+#ifndef STRADA_TCC_COMPAT
 #ifdef STRADA_NO_TLS
 extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern int strada_call_depth;
@@ -1174,6 +1251,7 @@ extern int strada_call_overflow;
 extern __thread StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern __thread int strada_call_depth;
 extern __thread int strada_call_overflow;
+#endif
 #endif
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
@@ -1188,6 +1266,14 @@ void strada_stack_set_line(int line);
 int strada_stack_mark(void);          /* logical call depth, incl. calls too deep to record */
 void strada_stack_restore(int mark);  /* reset it (exception unwound to a try frame) */
 
+#ifdef STRADA_TCC_COMPAT
+#define strada_stack_push_il strada_stack_push
+#define strada_stack_pop_il  strada_stack_pop
+#define strada_depth_push_il strada_depth_push
+#define strada_depth_pop_il  strada_depth_pop
+#define strada_current_depth_il strada_current_depth
+#define strada_stack_line_il strada_stack_set_line
+#else
 /* Inline fast paths — emitted by the codegen at every function entry/exit
  * and call site, so they must not be out-of-line calls (profiled at ~4.5%
  * of a call-heavy workload). The out-of-line versions above remain the
@@ -1235,6 +1321,7 @@ static inline int strada_current_depth_il(void) {
 static inline void strada_stack_line_il(int line) {
     strada_call_stack[strada_call_depth].line = line;
 }
+#endif /* STRADA_TCC_COMPAT */
 StradaValue* strada_caller_info(StradaValue *level);
 void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);
@@ -1243,10 +1330,14 @@ int strada_get_recursion_limit(void);        /* Get current limit */
 
 /* Dynamic return type (wantarray) support */
 /* Context values: 0=scalar, 1=array, 2=hash */
+#ifdef STRADA_TCC_COMPAT
+#define strada_call_context (*strada_call_context_ptr())
+#else
 #ifdef STRADA_NO_TLS
 extern int strada_call_context;
 #else
 extern __thread int strada_call_context;
+#endif
 #endif
 void strada_set_call_context(int ctx);
 int *strada_call_context_ptr(void);
@@ -1468,11 +1559,7 @@ const char *strada_closure_get_prototype(StradaValue *closure);
  * Layout: the cell is a small header (refcount + slot). Code holds a pointer
  * to &header.slot; arithmetic recovers the header. Initial refcount is 1; the
  * SECOND, THIRD, ... closure sharing the cell calls strada_cell_incref. */
-typedef struct PerlaCell {
-    int refcount;
-    int _pad;
-    StradaValue *slot;
-} PerlaCell;
+#define STRADA_CELL_SV_FROM_SLOT(slot) ((StradaValue *)((char *)(slot) - offsetof(StradaValue, value.rv)))
 
 StradaValue **strada_cell_alloc(void);
 void strada_cell_incref(StradaValue **slot);
@@ -2166,12 +2253,16 @@ void strada_tied_hash_clear(StradaValue *sv);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
 StradaValue* strada_copy_scalar(StradaValue *sv);
-static inline __attribute__((always_inline)) StradaValue* strada_copy_scalar_il(StradaValue *sv) {
+#ifdef STRADA_TCC_COMPAT
+#define strada_copy_scalar_il strada_copy_scalar
+#else
+STRADA_HOT_INLINE StradaValue* strada_copy_scalar_il(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return sv;
     if (__builtin_expect(sv->meta != NULL, 0)) return strada_copy_scalar(sv);
     strada_incref(sv);
     return sv;
 }
+#endif
 int strada_tied_scalar_store(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int op, int want_result);
@@ -2370,14 +2461,14 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
  * lets gcc keep the whole `$self->x()` chain in registers under -O3+LTO.
  * Falls back to strada_hash_get_with_hash for collisions / tombstones /
  * dirty index, which is far slower but rare. */
-static inline __attribute__((always_inline)) int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
+STRADA_HOT_INLINE int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) {
-        StradaValue *r = strada_tied_hash_fetch(msv, key);
-        if (r) strada_cleanup_push(r);
+        size_t tm = strada_tmps_mark();
+        StradaValue *r = strada_mortal(strada_tied_hash_fetch(msv, key));
         int64_t v = strada_to_int(r);
-        if (r) strada_cleanup_pop_decref(r);
+        strada_tmps_free(tm);
         return v;
     }
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
@@ -2438,9 +2529,10 @@ static inline void strada_hv_store_take(StradaValue *sv, const char *key, Strada
     if (!sv || STRADA_IS_TAGGED_INT(sv)) { strada_decref(val); return; }
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) {
-        if (val) strada_cleanup_push(val);
+        size_t tm = strada_tmps_mark();
+        strada_mortal(val);
         strada_tied_hash_store(msv, key, val);
-        if (val) strada_cleanup_pop_decref(val);
+        strada_tmps_free(tm);
         return;
     }
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_hash_locked, 0)) {
@@ -2572,13 +2664,11 @@ static inline double strada_sq_num_val(StradaValue *peer, int64_t char_code, dou
  * undef compares as "", and other values compare byte contents against lit. */
 static inline int strada_case_eq_char(StradaValue *sw, const char *lit, size_t lit_len, int64_t char_code) {
     if (!lit) { lit = ""; lit_len = 0; }
-    StradaValue *fetched = NULL;
+    size_t tm = strada_tmps_mark();
     StradaValue *s = sw;
     if (s && !STRADA_IS_TAGGED_INT(s) && s->meta && s->meta->is_tied && s->meta->tied_obj
         && s->type != STRADA_HASH && s->type != STRADA_ARRAY) {
-        fetched = strada_tied_scalar_fetch(s);
-        s = fetched;
-        if (fetched) strada_cleanup_push(fetched);
+        s = strada_mortal(strada_tied_scalar_fetch(s));
     }
     int eq = 0;
     if (!s || (!STRADA_IS_TAGGED_INT(s) && s->type == STRADA_UNDEF)) {
@@ -2593,7 +2683,7 @@ static inline int strada_case_eq_char(StradaValue *sw, const char *lit, size_t l
         if (slen == 0 && pv[0] != '\0') slen = strlen(pv);
         eq = (slen == lit_len && memcmp(pv, lit, lit_len) == 0);
     } else {
-        StradaValue *sv = strada_to_str_sv(s);
+        StradaValue *sv = strada_mortal(strada_to_str_sv(s));
         const char *pv = (sv && !STRADA_IS_TAGGED_INT(sv) && sv->value.pv) ? sv->value.pv : "";
         size_t slen = 0;
         if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->value.pv) {
@@ -2601,9 +2691,8 @@ static inline int strada_case_eq_char(StradaValue *sw, const char *lit, size_t l
             if (slen == 0 && pv[0] != '\0') slen = strlen(pv);
         }
         eq = (slen == lit_len && memcmp(pv, lit, lit_len) == 0);
-        strada_decref(sv);
     }
-    if (fetched) strada_cleanup_pop_decref(fetched);
+    strada_tmps_free(tm);
     return eq;
 }
 
@@ -2638,5 +2727,168 @@ StradaValue* strada_socket_connect_check(StradaValue *sock);
 StradaValue* strada_socket_try_readline(StradaValue *sock);
 StradaValue* strada_socket_try_readline_max(StradaValue *sock, StradaValue *max_sv);
 StradaValue* strada_resolve_async(StradaValue *host);
+
+#ifdef STRADA_TCC_COMPAT
+/* Fallback POSIX / termios constants when <termios.h> is omitted in TCC mode */
+#ifndef O_RDONLY
+#define O_RDONLY   0x0
+#endif
+#ifndef O_WRONLY
+#define O_WRONLY   0x1
+#endif
+#ifndef O_RDWR
+#define O_RDWR     0x2
+#endif
+#ifndef O_CREAT
+#define O_CREAT    0x40
+#endif
+#ifndef O_EXCL
+#define O_EXCL     0x80
+#endif
+#ifndef O_NOCTTY
+#define O_NOCTTY   0x100
+#endif
+#ifndef O_TRUNC
+#define O_TRUNC    0x200
+#endif
+#ifndef O_APPEND
+#define O_APPEND   0x400
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0x800
+#endif
+#ifndef O_SYNC
+#define O_SYNC     0x101000
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC  0x80000
+#endif
+#ifndef B0
+#define B0       0x0
+#define B50      0x1
+#define B75      0x2
+#define B110     0x3
+#define B134     0x4
+#define B150     0x5
+#define B200     0x6
+#define B300     0x7
+#define B600     0x8
+#define B1200    0x9
+#define B1800    0xa
+#define B2400    0xb
+#define B4800    0xc
+#define B9600    0xd
+#define B19200   0xe
+#define B38400   0xf
+#define B57600   0x1001
+#define B115200  0x1002
+#define B230400  0x1003
+#define B460800  0x1004
+#define B500000  0x1005
+#define B576000  0x1006
+#define B921600  0x1007
+#define B1000000 0x1008
+#define B1152000 0x1009
+#define B1500000 0x100a
+#define B2000000 0x100b
+#endif
+#ifndef CSIZE
+#define CSIZE    0x30
+#define CS5      0x0
+#define CS6      0x10
+#define CS7      0x20
+#define CS8      0x30
+#define CSTOPB   0x40
+#define CREAD    0x80
+#define PARENB   0x100
+#define PARODD   0x200
+#define HUPCL    0x400
+#define CLOCAL   0x800
+#endif
+#ifndef CRTSCTS
+#define CRTSCTS  0x80000000u
+#endif
+#ifndef IGNBRK
+#define IGNBRK   0x1
+#define BRKINT   0x2
+#define IGNPAR   0x4
+#define PARMRK   0x8
+#define INPCK    0x10
+#define ISTRIP   0x20
+#define INLCR    0x40
+#define IGNCR    0x80
+#define ICRNL    0x100
+#define IXON     0x400
+#define IXANY    0x800
+#define IXOFF    0x1000
+#endif
+#ifndef OPOST
+#define OPOST    0x1
+#define ONLCR    0x4
+#define OCRNL    0x8
+#endif
+#ifndef ISIG
+#define ISIG     0x1
+#define ICANON   0x2
+#define ECHO     0x8
+#define ECHOE    0x10
+#define ECHOK    0x20
+#define ECHONL   0x40
+#define NOFLSH   0x80
+#define TOSTOP   0x100
+#define IEXTEN   0x8000
+#endif
+#ifndef TCSANOW
+#define TCSANOW   0
+#define TCSADRAIN 1
+#define TCSAFLUSH 2
+#endif
+#ifndef TCIFLUSH
+#define TCIFLUSH  0
+#define TCOFLUSH  1
+#define TCIOFLUSH 2
+#endif
+/* Legacy declarations kept for TCC compatibility */
+int getpid(void);
+int strada_is_true(StradaValue *sv);
+int strada_is_defined(StradaValue *sv);
+StradaValue* strada_new_array_with_capacity(size_t capacity);
+StradaValue* strada_new_hash_with_capacity(size_t capacity);
+int64_t strada_hash_size(StradaHash *hash);
+int strada_exists(StradaValue *hash, StradaValue *key);
+void strada_delete(StradaValue *hash, StradaValue *key);
+int strada_num_cmp(StradaValue *a, StradaValue *b);
+int strada_str_cmp(StradaValue *a, StradaValue *b);
+int strada_str_eq(StradaValue *a, StradaValue *b);
+int strada_str_ne(StradaValue *a, StradaValue *b);
+int strada_str_lt(StradaValue *a, StradaValue *b);
+int strada_str_gt(StradaValue *a, StradaValue *b);
+int strada_str_le(StradaValue *a, StradaValue *b);
+int strada_str_ge(StradaValue *a, StradaValue *b);
+void strada_register_method(const char *package, const char *name, void *func);
+StradaValue* strada_closure_call_method(StradaValue *closure, StradaValue *self, StradaValue *args);
+char* strada_replace_first(const char *str, const char *find, const char *replace);
+void strada_subst_sv(StradaValue **target_ptr, const char *find, const char *replace, int global);
+int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const char *replace, int global);
+StradaValue* strada_array_slice(StradaValue *arr, StradaValue *start, StradaValue *end);
+StradaValue* strada_array_splice(StradaValue *arr, StradaValue *offset, StradaValue *length, StradaValue *replacement);
+double strada_math_sin(double x);
+double strada_math_cos(double x);
+double strada_math_tan(double x);
+double strada_math_sqrt(double x);
+double strada_math_pow(double x, double y);
+double strada_math_log(double x);
+double strada_math_exp(double x);
+double strada_math_floor(double x);
+double strada_math_ceil(double x);
+double strada_math_abs(double x);
+int64_t strada_math_rand(void);
+void strada_math_srand(int64_t seed);
+char* strada_cstr_concat(const char *a, const char *b);
+char* strada_int_to_cstr(int64_t n);
+char* strada_num_to_cstr(double n);
+void strada_cstruct_set_string(StradaValue *sv, const char *field, size_t offset, const char *value);
+void strada_cstruct_set_double(StradaValue *sv, const char *field, size_t offset, double value);
+#endif /* STRADA_TCC_COMPAT */
 
 #endif /* STRADA_RUNTIME_H */

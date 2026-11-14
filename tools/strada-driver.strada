@@ -1134,8 +1134,17 @@ func main() int {
     @sc = (@sc, $cfile);
 
     # STRADA_GC=off: stradac is a one-shot batch — skip the cycle collector.
+    # Restore STRADA_GC immediately afterward so `-r` runs user binaries with
+    # the caller's environment instead of inheriting STRADA_GC=off.
+    my scalar $saved_strada_gc = core::getenv("STRADA_GC");
     core::setenv("STRADA_GC", "off");
-    if (run_argv(@sc) != 0) { error("Strada compilation failed"); }
+    my int $sc_rc = run_argv(@sc);
+    if (defined($saved_strada_gc)) {
+        core::setenv("STRADA_GC", "" . $saved_strada_gc);
+    } else {
+        core::unsetenv("STRADA_GC");
+    }
+    if ($sc_rc != 0) { error("Strada compilation failed"); }
 
     # ---- Extract link metadata markers from the generated C ----
     my str $gen = "";

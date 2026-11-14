@@ -3259,9 +3259,7 @@ func gen_function(scalar $cg, scalar $fn) void {
     }
 
     my hash %cand_boxed = ();
-    if (stmt_has_c_block($fn_body) == 0) {
-        ast_collect_anon_var_refs($fn_body, \%cand_boxed, 0);
-    }
+    collect_safe_boxed_vars($fn_body, \%cand_boxed);
     $cg->{"cand_boxed_vars"} = \%cand_boxed;
     $cg->{"active_boxed_vars"} = {};
     $cg->{"func_locals_seen"} = {};
@@ -3327,9 +3325,9 @@ func gen_function(scalar $cg, scalar $fn) void {
         emit($cg, "    __child_status = STRADA_MAKE_TAGGED_INT(0);\n");
         emit($cg, "    __program_name = strada_new_str(_argv[0]);\n\n");
         emit($cg, "    /* Initialize standard I/O filehandles (immortal — never closed) */\n");
-        emit($cg, "    v_STDIN = strada_new_undef(); v_STDIN->type = STRADA_FILEHANDLE; v_STDIN->refcount = 1000000001; v_STDIN->value.fh = stdin;\n");
-        emit($cg, "    v_STDOUT = strada_new_undef(); v_STDOUT->type = STRADA_FILEHANDLE; v_STDOUT->refcount = 1000000001; v_STDOUT->value.fh = stdout;\n");
-        emit($cg, "    v_STDERR = strada_new_undef(); v_STDERR->type = STRADA_FILEHANDLE; v_STDERR->refcount = 1000000001; v_STDERR->value.fh = stderr;\n");
+        emit($cg, "    v_STDIN = strada_new_undef(); v_STDIN->type = STRADA_FILEHANDLE; STRADA_MAKE_IMMORTAL_SV(v_STDIN); v_STDIN->value.fh = stdin;\n");
+        emit($cg, "    v_STDOUT = strada_new_undef(); v_STDOUT->type = STRADA_FILEHANDLE; STRADA_MAKE_IMMORTAL_SV(v_STDOUT); v_STDOUT->value.fh = stdout;\n");
+        emit($cg, "    v_STDERR = strada_new_undef(); v_STDERR->type = STRADA_FILEHANDLE; STRADA_MAKE_IMMORTAL_SV(v_STDERR); v_STDERR->value.fh = stderr;\n");
         emit($cg, "    atexit(__strada_cleanup_globals);\n\n");
 
         # Set package if declared at file level
@@ -4016,9 +4014,7 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     my int $saved_async_c_ret_is_sv = $cg->{"c_ret_is_sv"} + 0;
 
     my hash %async_cand_boxed = ();
-    if (stmt_has_c_block($async_body) == 0) {
-        ast_collect_anon_var_refs($async_body, \%async_cand_boxed, 0);
-    }
+    collect_safe_boxed_vars($async_body, \%async_cand_boxed);
 
     # Unpack captured parameters (deferred boxing/cleanup below inside inner scope)
     my int $i = 0;
@@ -5752,9 +5748,7 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"ret_is_int"} = 0;
                 $cg->{"ret_is_num"} = 0;
                 my hash %b_cand = ();
-                if (stmt_has_c_block($begin_body) == 0) {
-                    ast_collect_anon_var_refs($begin_body, \%b_cand, 0);
-                }
+                collect_safe_boxed_vars($begin_body, \%b_cand);
                 $cg->{"cand_boxed_vars"} = \%b_cand;
                 $cg->{"active_boxed_vars"} = {};
                 $cg->{"func_locals_seen"} = {};
@@ -5812,9 +5806,7 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"ret_is_int"} = 0;
                 $cg->{"ret_is_num"} = 0;
                 my hash %e_cand = ();
-                if (stmt_has_c_block($end_body) == 0) {
-                    ast_collect_anon_var_refs($end_body, \%e_cand, 0);
-                }
+                collect_safe_boxed_vars($end_body, \%e_cand);
                 $cg->{"cand_boxed_vars"} = \%e_cand;
                 $cg->{"active_boxed_vars"} = {};
                 $cg->{"func_locals_seen"} = {};

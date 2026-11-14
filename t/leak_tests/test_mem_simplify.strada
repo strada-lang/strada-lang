@@ -1,0 +1,313 @@
+#!/usr/bin/env strada
+# Stage 5 Valgrind leak regression suite for memory management simplification (Stages 1-4):
+# - flags + struct_size (UTF-8, cstruct_new, struct, bless, weaken, isweak, DESTROY)
+# - Per-variable __C__ vs closure cell boxing in the same function
+# - Closure-cell cycles + weak cell/object refs reclaimed by strada_gc_collect()
+# - TLS mortal temps across normal, method, SUPER::, closure (>16 & spread),
+#   variadic calls, nested try/catch unwinds, and Async::Loop coroutine suspend/resume
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+our int $msl_live_objs = 0;
+
+func inc_live() void { $msl_live_objs = $msl_live_objs + 1; }
+func dec_live() void { $msl_live_objs = $msl_live_objs - 1; }
+
+package MSLObj;
+
+func new(str $name) scalar {
+    my hash %self = ("name" => $name, "pad" => ("x" x 48));
+    main::inc_live();
+    return bless(\%self, "MSLObj");
+}
+
+func DESTROY(scalar $self) void {
+    main::dec_live();
+}
+
+func name(scalar $self) str {
+    return $self->{"name"};
+}
+
+package MSLBase;
+
+func s_combine(scalar $self, scalar $a, scalar $b, scalar $c) str {
+    return $a->name() . ":" . $b->name() . ":" . $c->name();
+}
+
+func m_spread(scalar $self, scalar ...@args) str {
+    return "cnt=" . scalar(@args);
+}
+
+package MSLChild;
+extends MSLBase;
+
+func s_combine(scalar $self, scalar $a, scalar $b, scalar $c) str {
+    return "child:" . SUPER::s_combine($self, $a, $b, $c);
+}
+
+func m_multi(scalar $self, scalar $a, scalar $b, scalar $c, scalar $d, scalar $e) str {
+    return $a->name() . "," . $b->name() . "," . $c->name() . "," . $d->name() . "," . $e->name();
+}
+
+package main;
+
+struct MSLBox {
+    int a;
+    num b;
+}
+
+func mk_obj(str $tag) scalar {
+    return MSLObj::new("tag_" . $tag);
+}
+
+func throw_obj(str $msg) scalar {
+    throw($msg);
+    return MSLObj::new("unreachable");
+}
+
+func combine5(scalar $a, scalar $b, scalar $c, scalar $d, scalar $e) str {
+    return $a->name() . "|" . $b->name() . "|" . $c->name() . "|" . $d->name() . "|" . $e->name();
+}
+
+func var_combine(scalar $first, scalar ...@rest) str {
+    return $first->name() . "+" . scalar(@rest);
+}
+
+func keep_outer(scalar $obj, str $inner_res) str {
+    return $obj->name() . "/" . $inner_res;
+}
+
+func run_c_and_closure(int $seed) int {
+    my int $x = $seed;
+    my int $c_only = $seed + 1;
+    my scalar $inc = func (int $d) int {
+        $x = $x + $d;
+        return $x;
+    };
+    __C__ {
+        int64_t v = strada_to_int(c_only);
+        strada_decref(c_only);
+        c_only = strada_new_int(v * 2);
+    }
+    my int $r1 = $inc->(3);
+    my int $r2 = $inc->(4);
+    if ($r1 != $seed + 3 || $r2 != $seed + 7 || $x != $seed + 7 || $c_only != ($seed + 1) * 2) {
+        return 0;
+    }
+    return 1;
+}
+
+func run_flags_and_weak(int $iter) int {
+    my str $u = "caf" . core::byte(195) . core::byte(169) . "_" . $iter;
+    if (utf8::decode($u) != 1 || utf8::is_utf8($u) != 1) {
+        return 0;
+    }
+    my MSLBox $bx;
+    $bx->a = $iter;
+    $bx->b = 1.5;
+    if ($bx->a != $iter) {
+        return 0;
+    }
+    my scalar $raw = core::cstruct_new(64);
+    core::cstruct_set_int($raw, 0, $iter + 1000);
+    my int $sz_ok = 0;
+    __C__ {
+        if (raw->struct_size == 64 && raw->flags == 0) {
+            strada_decref(sz_ok);
+            sz_ok = strada_new_int(1);
+        }
+    }
+    if ($sz_ok != 1 || core::cstruct_get_int($raw, 0) != $iter + 1000) {
+        return 0;
+    }
+    my hash %w = ();
+    my int $live_before = $msl_live_objs;
+    {
+        my scalar $o = MSLObj::new("w_" . $iter);
+        $w{"o"} = $o;
+        core::weaken($w{"o"});
+        if (!core::isweak($w{"o"}) || core::blessed($w{"o"}) ne "MSLObj") {
+            return 0;
+        }
+        if ($msl_live_objs != $live_before + 1) {
+            return 0;
+        }
+    }
+    if (defined($w{"o"}) || $msl_live_objs != $live_before) {
+        return 0;
+    }
+    return 1;
+}
+
+func make_cell_cycle(scalar $w, int $iter) int {
+    my scalar $tracked = MSLObj::new("cyc_" . $iter);
+    my scalar $f = undef;
+    $f = func () int {
+        if (defined($tracked) && defined($f)) {
+            return 1;
+        }
+        return 0;
+    };
+    if ($f->() != 1) {
+        return 0;
+    }
+    my scalar $cell_ref = \$tracked;
+    my scalar $fn_cell_ref = \$f;
+    $w->{"fn_cell"} = $fn_cell_ref;
+    $w->{"obj"} = $tracked;
+    $w->{"cell"} = $cell_ref;
+    core::weaken($w->{"fn_cell"});
+    core::weaken($w->{"obj"});
+    core::weaken($w->{"cell"});
+    if (!core::isweak($w->{"fn_cell"}) || !core::isweak($w->{"obj"}) || !core::isweak($w->{"cell"})) {
+        return 0;
+    }
+    return 1;
+}
+
+func inner_calls_and_throws(str $tag, scalar $child, scalar $cls16, scalar $cls_var20, scalar $cls_sp, scalar $arr_ref) str {
+    my array @arr = @{$arr_ref};
+    my str $out = "";
+
+    my str $ok1 = combine5(mk_obj("1"), mk_obj("2"), mk_obj("3"), mk_obj("4"), mk_obj("5"));
+    my str $ok2 = $child->m_multi(mk_obj("m1"), mk_obj("m2"), mk_obj("m3"), mk_obj("m4"), mk_obj("m5"));
+    my str $ok3 = $child->s_combine(mk_obj("s1"), mk_obj("s2"), mk_obj("s3"));
+    my str $ok4 = $child->m_spread(mk_obj("ms1"), ...@arr, mk_obj("ms4"));
+    my str $ok5 = $cls16->(
+        mk_obj("1"), mk_obj("2"), mk_obj("3"), mk_obj("4"), mk_obj("5"),
+        mk_obj("6"), mk_obj("7"), mk_obj("8"), mk_obj("9"), mk_obj("10"),
+        mk_obj("11"), mk_obj("12"), mk_obj("13"), mk_obj("14"), mk_obj("15"),
+        mk_obj("16")
+    );
+    my str $ok5v = $cls_var20->(
+        mk_obj("1"), mk_obj("2"), mk_obj("3"), mk_obj("4"), mk_obj("5"),
+        mk_obj("6"), mk_obj("7"), mk_obj("8"), mk_obj("9"), mk_obj("10"),
+        mk_obj("11"), mk_obj("12"), mk_obj("13"), mk_obj("14"), mk_obj("15"),
+        mk_obj("16"), mk_obj("17"), mk_obj("18"), mk_obj("19"), mk_obj("20")
+    );
+    my str $ok6 = $cls_sp->(mk_obj("c0"), ...@arr, mk_obj("c3"));
+    my str $ok7 = var_combine(mk_obj("v0"), ...@arr, mk_obj("v3"));
+    if ($ok1 ne "tag_1|tag_2|tag_3|tag_4|tag_5"
+        || $ok2 ne "tag_m1,tag_m2,tag_m3,tag_m4,tag_m5"
+        || $ok3 ne "child:tag_s1:tag_s2:tag_s3"
+        || $ok4 ne "cnt=4"
+        || $ok5 ne "tag_1-tag_16"
+        || $ok5v ne "tag_1+19"
+        || $ok6 ne "tag_c0:tag_ha:tag_hb:tag_c3"
+        || $ok7 ne "tag_v0+3") {
+        return "HAPPY_MISMATCH";
+    }
+
+    try { combine5(mk_obj("n1"), mk_obj("n2"), mk_obj("n3"), throw_obj("E1"), mk_obj("n5")); }
+    catch ($e1) { $out = $out . $e1; }
+    try { $child->m_multi(mk_obj("m1"), mk_obj("m2"), mk_obj("m3"), throw_obj("E2"), mk_obj("m5")); }
+    catch ($e2) { $out = $out . "," . $e2; }
+    try { $child->s_combine(mk_obj("s1"), mk_obj("s2"), throw_obj("E3")); }
+    catch ($e3) { $out = $out . "," . $e3; }
+    try { $child->m_spread(mk_obj("ms1"), ...@arr, throw_obj("E4")); }
+    catch ($e4) { $out = $out . "," . $e4; }
+    try {
+        $cls_var20->(
+            mk_obj("1"), mk_obj("2"), mk_obj("3"), mk_obj("4"), mk_obj("5"),
+            mk_obj("6"), mk_obj("7"), mk_obj("8"), mk_obj("9"), mk_obj("10"),
+            mk_obj("11"), mk_obj("12"), mk_obj("13"), mk_obj("14"), mk_obj("15"),
+            mk_obj("16"), mk_obj("17"), throw_obj("E5"), mk_obj("19"), mk_obj("20")
+        );
+    } catch ($e5) { $out = $out . "," . $e5; }
+    try { $cls_sp->(mk_obj("c1"), ...@arr, throw_obj("E6")); }
+    catch ($e6) { $out = $out . "," . $e6; }
+    try { var_combine(mk_obj("v1"), ...@arr, throw_obj("E7")); }
+    catch ($e7) { $out = $out . "," . $e7; }
+
+    return $tag . ":" . $out;
+}
+
+func coro_suspend_step(int $id) str {
+    try { combine5(mk_obj("ci1"), mk_obj("ci2"), mk_obj("ci3"), throw_obj("CE1_" . $id), mk_obj("ci5")); }
+    catch ($e) {}
+    Async::Task::sleep(1);
+    try { var_combine(mk_obj("cv1"), mk_obj("cv2"), throw_obj("CE2_" . $id)); }
+    catch ($e) {}
+    return "c" . $id;
+}
+
+func main() int {
+    say("Testing memory simplification (Stages 1-4)...");
+
+    my scalar $child = bless({}, "MSLChild");
+    my scalar $cls16 = func (
+        scalar $a1, scalar $a2, scalar $a3, scalar $a4, scalar $a5,
+        scalar $a6, scalar $a7, scalar $a8, scalar $a9, scalar $a10,
+        scalar $a11, scalar $a12, scalar $a13, scalar $a14, scalar $a15,
+        scalar $a16
+    ) str {
+        return $a1->name() . "-" . $a16->name();
+    };
+    my scalar $cls_var20 = \&var_combine;
+    my scalar $cls_sp = func (scalar $head, scalar $a, scalar $b, scalar $c) str {
+        return $head->name() . ":" . $a->name() . ":" . $b->name() . ":" . $c->name();
+    };
+    my array @arr = (mk_obj("ha"), mk_obj("hb"));
+
+    my int $i = 0;
+    while ($i < 100) {
+        if (run_flags_and_weak($i) != 1) {
+            say("  FAIL flags_and_weak at " . $i);
+            return 1;
+        }
+        if (run_c_and_closure($i) != 1) {
+            say("  FAIL c_and_closure at " . $i);
+            return 1;
+        }
+        my str $res = keep_outer(
+            mk_obj("out_" . $i),
+            inner_calls_and_throws("in_" . $i, $child, $cls16, $cls_var20, $cls_sp, \@arr)
+        );
+        if ($res ne ("tag_out_" . $i . "/in_" . $i . ":E1,E2,E3,E4,E5,E6,E7")) {
+            say("  FAIL inner_calls_and_throws at " . $i . ": " . $res);
+            return 1;
+        }
+
+        my hash %cw = ();
+        if (make_cell_cycle(\%cw, $i) != 1) {
+            say("  FAIL make_cell_cycle at " . $i);
+            return 1;
+        }
+        __C__ {
+            strada_gc_collect();
+        }
+        if (defined($cw{"fn_cell"}) || defined($cw{"obj"}) || defined($cw{"cell"})) {
+            say("  FAIL cycle weak not nullified at " . $i);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # Test Async::Loop coroutine suspend/resume across nested mortalized args & throws
+    my int $coro_ok = 0;
+    my scalar $loop = Async::Loop::new();
+    $loop->spawn(func () void {
+        my str $r = keep_outer(mk_obj("coroA"), coro_suspend_step(1));
+        if ($r eq "tag_coroA/c1") { $coro_ok = $coro_ok + 1; }
+    });
+    $loop->spawn(func () void {
+        my str $r = keep_outer(mk_obj("coroB"), coro_suspend_step(2));
+        if ($r eq "tag_coroB/c2") { $coro_ok = $coro_ok + 1; }
+    });
+    $loop->run();
+    if ($coro_ok != 2) {
+        say("  FAIL coro_ok=" . $coro_ok);
+        return 1;
+    }
+
+    @arr = ();
+    if ($msl_live_objs != 0) {
+        say("  FAIL msl_live_objs=" . $msl_live_objs);
+        return 1;
+    }
+    say("PASS");
+    return 0;
+}

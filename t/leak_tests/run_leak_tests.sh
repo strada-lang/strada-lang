@@ -165,6 +165,7 @@ TESTS=(
     "test_audit_r7_eval_jit_leaks"
     "test_audit_r8_leaks"
     "test_audit_r8_eval_jit_leaks"
+    "test_mem_simplify"
 )
 
 FILTER="${1:-}"
