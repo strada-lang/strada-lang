@@ -700,8 +700,14 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     # Restore original working directory
     core::chdir($saved_cwd);
 
-    # Run main
-    my int $result = Strada::Interpreter::interp_run_main($interp, $argv);
+    # Run main (guarantee END blocks run even if main throws)
+    my int $result = 0;
+    try {
+        $result = Strada::Interpreter::interp_run_main($interp, $argv);
+    } catch ($__main_err) {
+        Strada::Interpreter::interp_run_end_blocks($interp);
+        throw($__main_err);
+    }
 
     # Execute END blocks (LIFO order)
     Strada::Interpreter::interp_run_end_blocks($interp);

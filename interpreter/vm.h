@@ -536,6 +536,14 @@ enum {
     BUILTIN_IS_REF,
     BUILTIN_IS_REFTO,
     BUILTIN_REGEX_SUBST,
+    BUILTIN_ARRAY_DELETE,
+    BUILTIN_ARRAY_EXISTS,
+    BUILTIN_ARRAY_UNSHIFT_LIST,
+    BUILTIN_STR_INDEX_3,
+    BUILTIN_CASE_EQ_CHAR,
+    BUILTIN_UTF8_DECODE_WB,
+    BUILTIN_UTF8_DOWNGRADE_WB,
+    BUILTIN_UTF8_UPGRADE_WB,
 };
 
 /* Heap object type tag */
@@ -550,11 +558,13 @@ enum VMObjType {
     VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
     VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
     VM_OBJ_SREF = 18,     /* live scalar reference */
+    VM_OBJ_TIED_SCALAR = 20, /* TIESCALAR wrapper holding tied object */
 };
 typedef struct VMObjHeader {
     enum VMObjType obj_type;
     uint8_t gc_marked;
     uint8_t gc_immortal;
+    uint8_t is_utf8;
     struct VMObjHeader *gc_next;
 } VMObjHeader;
 void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type);
@@ -598,6 +608,7 @@ typedef struct {
 
 static inline int64_t VM_INT_VAL(VMValue v) { return (int64_t)v >> 1; }
 static inline VMValue VM_MAKE_INT(int64_t i) { return ((uint64_t)i << 1) | 1; }
+#define VM_INT_MAX (INT64_MAX >> 1)
 #define VM_UNDEF_VAL ((VMValue)0)
 static inline VMValue VM_MAKE_PTR(void *p) { return (VMValue)(uintptr_t)p; }
 static inline void *VM_TO_PTR(VMValue v) { return (void*)(uintptr_t)v; }
@@ -626,6 +637,13 @@ typedef struct {
     char *global_name; /* non-NULL when referencing an `our` global */
 } VMScalarRef;
 static inline VMScalarRef *VM_AS_SREF(VMValue v) { return (VMScalarRef*)VM_TO_PTR(v); }
+
+/* Tied scalar box */
+typedef struct {
+    VMObjHeader hdr;
+    VMValue tied_obj;
+} VMTiedScalar;
+static inline VMTiedScalar *VM_AS_TIED_SCALAR(VMValue v) { return (VMTiedScalar*)VM_TO_PTR(v); }
 
 /* Convenience: create a VM string */
 static inline VMValue VM_MAKE_STR(const char *s) {
@@ -667,8 +685,10 @@ static inline VMValue VM_MAKE_FLOAT(double d) {
 struct VMArray {
     VMObjHeader hdr;
     VMValue *items;
+    uint8_t *holes;     /* non-NULL only when sparse gaps / deleted holes exist (holes[i] == 1) */
     int size;
     int cap;
+    VMValue tied_obj;   /* TIEARRAY implementation object (0/undef = untied) */
 };
 
 /* Hash table (open addressing) */
@@ -727,6 +747,7 @@ typedef struct {
     int64_t *int_consts;
     size_t int_const_count;
     char **str_consts;
+    size_t *str_const_lens;
     size_t str_const_count;
     int local_count;
     int fixed_param_count;
@@ -933,6 +954,7 @@ void vm_chunk_emit_f64(VMChunk *chunk, double val);
 void vm_chunk_emit_u32(VMChunk *chunk, uint32_t val);
 size_t vm_chunk_add_int_const(VMChunk *chunk, int64_t val);
 size_t vm_chunk_add_str_const(VMChunk *chunk, const char *s);
+size_t vm_chunk_add_str_const_len(VMChunk *chunk, const char *s, size_t len);
 
 /* VM API */
 const char *vm_program_find_parent(VMProgram *prog, const char *class_name);

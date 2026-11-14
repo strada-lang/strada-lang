@@ -178,6 +178,8 @@ L<DBI>
 
 package crypt;
 
+link_lib "crypt";
+
 # C includes and static data
 __C__ {
 #define _GNU_SOURCE

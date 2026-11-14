@@ -940,7 +940,7 @@ char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int
 /* Control transfer write */
 int strada_usb_control_write_raw(void *handle, int request_type, int request,
                                   int value, int idx, const char *data, int length, int timeout) {
-    if (!handle || length < 0 || length > 65535) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || length > 65535 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
     return libusb_control_transfer((libusb_device_handle *)handle,
                                     (uint8_t)request_type, (uint8_t)request,
                                     (uint16_t)value, (uint16_t)idx,

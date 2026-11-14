@@ -1,0 +1,8 @@
+R6P01:del_v1|del_v2|LMIN|LOV|LA|0|adel_x1|u1
+R6P02:w1|loc,loc2|10,12,12,10,10|40,42
+R6P03:15,Base(10),-1|115,Child(10),0
+R6P04:outer,outer,outer|in_try_ret,outer|L0,L1
+R6P05:1,2,3:0|10,20:30,40,50|10,50:20,30,40|1,9,8,3:2|s2,s3:2
+R6P06:cdef|fé_xyz|bcde|0
+R6P07:4|-1,1|1,0
+R6_PARITY_OK

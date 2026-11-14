@@ -497,7 +497,6 @@ static ASTNode* parse_statement(Parser *p) {
         }
         case TOK_TRY: {
             advance(p);  // consume 'try'
-            parser_expect(p, TOK_LBRACE);
             ASTNode *try_block = parse_block(p);
 
             parser_expect(p, TOK_CATCH);
@@ -509,7 +508,6 @@ static ASTNode* parse_statement(Parser *p) {
             char *catch_var = strdup(p->current->lexeme);
             advance(p);
             parser_expect(p, TOK_RPAREN);
-            parser_expect(p, TOK_LBRACE);
             ASTNode *catch_block = parse_block(p);
 
             return ast_new_try_catch(try_block, catch_var, catch_block);
@@ -779,6 +777,7 @@ static ASTNode* parse_relational(Parser *p) {
     
     while (p->current->type == TOK_LT || p->current->type == TOK_GT ||
            p->current->type == TOK_LE || p->current->type == TOK_GE ||
+           p->current->type == TOK_SPACESHIP ||
            p->current->type == TOK_STR_LT || p->current->type == TOK_STR_GT ||
            p->current->type == TOK_STR_LE || p->current->type == TOK_STR_GE) {
         char *op = strdup(p->current->lexeme);

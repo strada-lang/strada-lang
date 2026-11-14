@@ -237,6 +237,8 @@ my array @g_so_files = ();
 my array @g_constants = ();
 my hash %g_constant_idx = ();
 my hash %g_oop_packages = ();
+my hash %g_ever_oop_packages = ();
+my int $g_did_oop_reset = 0;
 
 # Detect stradac path
 private func detect_stradac() str {
@@ -338,6 +340,7 @@ private func get_target_package() str {
 private func track_oop_package(str $pkg) void {
     if ($pkg ne "" && $pkg ne "main") {
         $g_oop_packages{$pkg} = 1;
+        $g_ever_oop_packages{$pkg} = 1;
     }
 }
 
@@ -1590,7 +1593,20 @@ private func generate_source(str $input) str {
         if ($prefix_stmts ne "") {
             $src = $src . "    " . $prefix_stmts . "\n";
         }
-        if ($is_return_stmt == 1 || $is_statement == 1) {
+        if ($is_return_stmt == 1) {
+            my str $ret_expr = substr($trimmed, 6, length($trimmed) - 6);
+            $ret_expr =~ s/^\s+//;
+            $ret_expr =~ s/\s+$//;
+            if (length($ret_expr) > 0 && substr($ret_expr, length($ret_expr) - 1, 1) eq ";") {
+                $ret_expr = substr($ret_expr, 0, length($ret_expr) - 1);
+                $ret_expr =~ s/\s+$//;
+            }
+            if ($ret_expr eq "") {
+                $src = $src . "    my scalar \$__result = undef;\n";
+            } else {
+                $src = $src . "    my scalar \$__result = " . $ret_expr . ";\n";
+            }
+        } elsif ($is_statement == 1) {
             my str $code_line = $tail;
             if ($last_char ne ";" && $last_char ne "}") {
                 $code_line = $tail . ";";
@@ -1824,6 +1840,9 @@ private func eval_one(str $input) scalar {
     my array @mod_pkgs = keys(%g_oop_packages);
     my int $mpi = 0;
     my int $mp_count = scalar(@mod_pkgs);
+    if ($mp_count > 0) {
+        $g_did_oop_reset = 1;
+    }
     while ($mpi < $mp_count) {
         my str $mpkg = $mod_pkgs[$mpi];
         __C__ {
@@ -1995,6 +2014,8 @@ private func restore_jit_state(scalar $snap) void {
     my scalar $funcs = $snap->{"functions"};
     my scalar $oops = $snap->{"oop_packages"};
     my scalar $op_keys = keys($oops);
+    my array @cur_vt_keys = keys(%g_var_types);
+    my array @cur_op_keys = keys(%g_oop_packages);
 
     # Clear global hashes/arrays before loops (avoids parser % modulo ambiguity)
     %g_var_types = ();
@@ -2003,6 +2024,29 @@ private func restore_jit_state(scalar $snap) void {
     @g_imports = ();
     @g_constants = ();
     @g_functions = ();
+
+    my int $cvi = 0;
+    while ($cvi < scalar(@cur_vt_keys)) {
+        my str $cvk = $cur_vt_keys[$cvi];
+        if (!exists($vt->{$cvk})) {
+            core::global_delete("repl::" . $cvk);
+        }
+        $cvi = $cvi + 1;
+    }
+    my int $copi = 0;
+    while ($copi < scalar(@cur_op_keys)) {
+        my str $cpk = $cur_op_keys[$copi];
+        if (!exists($oops->{$cpk})) {
+            __C__ {
+                char *p = strada_to_str(cpk);
+                if (p) {
+                    strada_oop_reset_package(p);
+                    free(p);
+                }
+            }
+        }
+        $copi = $copi + 1;
+    }
 
     my int $vi = 0;
     while ($vi < size($vt_keys)) {
@@ -2227,6 +2271,7 @@ func eval(str $code) scalar {
     my hash %flags = ();
     $flags{"did_compile"} = 0;
     $flags{"added_decl"} = 0;
+    $g_did_oop_reset = 0;
     my scalar $res = undef;
     try {
         $res = eval_inner($input, \%flags);
@@ -2235,8 +2280,15 @@ func eval(str $code) scalar {
         }
     } catch ($jit_err) {
         restore_jit_state($snap);
+        if ($g_did_oop_reset == 1 && scalar(keys(%g_oop_packages)) > 0) {
+            try {
+                eval_one("undef");
+            } catch ($__re) {}
+        }
+        $g_did_oop_reset = 0;
         throw $jit_err;
     }
+    $g_did_oop_reset = 0;
     return $res;
 }
 
@@ -2347,13 +2399,14 @@ func reset() void {
     my array @var_names = keys(%g_var_types);
     my int $vi = 0;
     my int $var_count = scalar(@var_names);
-    my array @oop_pkgs = keys(%g_oop_packages);
+    my array @oop_pkgs = keys(%g_ever_oop_packages);
     my int $opi = 0;
     my int $oop_pkg_count = scalar(@oop_pkgs);
 
     # Clear state hashes/arrays first (before any loops)
     %g_var_types = ();
     %g_oop_packages = ();
+    %g_ever_oop_packages = ();
     %g_constant_idx = ();
     @g_functions = ();
     @g_constants = ();

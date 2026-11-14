@@ -1,0 +1,62 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 3) {
+        my scalar $res = Strada::Interpreter::eval_string_vm('
+            package R6LBase;
+            func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6LBase"); }
+            func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other; }
+            use overload "+" => "add_op";
+            package R6LChild;
+            extends R6LBase;
+            func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6LChild"); }
+            func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other + 50; }
+            package main;
+            our str $g_r6 = "outer";
+            my str $fin = "";
+            try { local $g_r6 = "in_try"; } finally { $fin = $g_r6; }
+            my str $sa = "abcdef";
+            my str $su = "café_xyz";
+            utf8::decode($su);
+            my array @sp = (1, 2, 3, 4);
+            my array @sr = splice(@sp, 2);
+            our int $gn = 10;
+            my scalar $gr = \$gn;
+            my int $g0 = $$gr++;
+            my int $g1 = ++$$gr;
+            my scalar $c = R6LChild::new(5);
+            substr($sa, 2) . "|" . substr($su, 2) . "|" . join(",", @sp) . ":" . join(",", @sr) . "|" . $fin . "|" . $g0 . "," . $g1 . "|" . ($c + 4);
+        ');
+        if (("" . $res) ne "cdef|fé_xyz|1,2:3,4|outer|10,12|59") {
+            die("bad vm eval res: " . $res);
+        }
+        Strada::Interpreter::reset();
+        $i = $i + 1;
+    }
+
+    Strada::JIT::init();
+    Strada::JIT::eval('func r6l_fn(int $x) int { return $x * 2; }');
+    my scalar $jr1 = Strada::JIT::eval('return r6l_fn(21);');
+    if (($jr1 + 0) != 42) { die("bad jit return fn"); }
+    Strada::JIT::eval('
+        package R6LJBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6LJBase"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other; }
+        use overload "+" => "add_op";
+    ');
+    Strada::JIT::eval('
+        package R6LJChild;
+        extends R6LJBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6LJChild"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other + 100; }
+    ');
+    my scalar $jr2 = Strada::JIT::eval('package main; my scalar $c = R6LJChild::new(7); return $c + 3;');
+    if (($jr2 + 0) != 110) { die("bad jit overload override"); }
+    Strada::JIT::reset();
+
+    say("R6_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

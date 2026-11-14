@@ -90,6 +90,7 @@ typedef enum {
     TOK_GT,           /* > */
     TOK_LE,           /* <= */
     TOK_GE,           /* >= */
+    TOK_SPACESHIP,    /* <=> */
     TOK_STR_EQ,       /* eq (string equality) */
     TOK_STR_NE,       /* ne (string inequality) */
     TOK_STR_LT,       /* lt (string less than) */

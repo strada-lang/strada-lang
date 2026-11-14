@@ -444,6 +444,8 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"loop_try_depth"} = 0;
     my array @try_finally_blocks = ();
     $cg{"try_finally_blocks"} = \@try_finally_blocks;
+    my array @try_local_marks = ();
+    $cg{"try_local_marks"} = \@try_local_marks;
     $cg{"current_elem_var"} = "__elem_";
     $cg{"current_sort_a"} = "__sort_a_";
     $cg{"current_sort_b"} = "__sort_b_";
@@ -987,11 +989,20 @@ func emit_try_unwind_to(scalar $cg, int $target_td) void {
         return;
     }
     my scalar $tf_blocks = $cg->{"try_finally_blocks"};
+    my scalar $tl_marks = $cg->{"try_local_marks"};
     my int $saved_fc = $cg->{"finally_count"} + 0;
     my int $ti = $cur_td - 1;
     while ($ti >= $target_td) {
         emit_indent($cg);
         emit($cg, "STRADA_TRY_POP();\n");
+        my str $lm = "";
+        if ($tl_marks) {
+            $lm = "" . $tl_marks->[$ti];
+        }
+        if (length($lm) > 0) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(" . $lm . ");\n");
+        }
         my scalar $fb = 0;
         if ($tf_blocks) {
             $fb = $tf_blocks->[$ti];
@@ -1558,36 +1569,18 @@ func codegen_track_method(scalar $cg, scalar $fn, str $pkg) void {
     $pkg_info->{"count"} = $idx + 1;
 }
 
-# Helper: emit strada_overload_register for a single operator if it's in the overload hash
-func gen_overload_reg_if(scalar $sb, str $pkg, scalar $pkg_ol, scalar $methods, int $method_count, str $op) void {
+# Helper: emit strada_overload_register_method for a single operator if it's in the overload hash
+func gen_overload_reg_if(scalar $sb, str $pkg, scalar $pkg_ol, str $op) void {
     my str $method_name = "" . $pkg_ol->{$op};
     if (length($method_name) == 0) { return; }
-    # Find the wrapper function for this method
-    my int $i = 0;
-    while ($i < $method_count) {
-        my scalar $m = $methods->[$i];
-        if ($m->{"method_name"} eq $method_name) {
-            sb_append($sb, "    strada_overload_register(" . c_str_lit($pkg) . ", " . c_str_lit($op) . ", __wrap_" . $m->{"func_name"} . ");\n");
-            return;
-        }
-        $i = $i + 1;
-    }
+    sb_append($sb, "    strada_overload_register_method(" . c_str_lit($pkg) . ", " . c_str_lit($op) . ", " . c_str_lit($method_name) . ");\n");
 }
 
-# Helper: emit strada_overload_register for stringify ("") operator
-func gen_overload_reg_stringify(scalar $sb, str $pkg, scalar $pkg_ol, scalar $methods, int $method_count) void {
+# Helper: emit strada_overload_register_method for stringify ("") operator
+func gen_overload_reg_stringify(scalar $sb, str $pkg, scalar $pkg_ol) void {
     my str $method_name = "" . $pkg_ol->{"\"\""};
     if (length($method_name) == 0) { return; }
-    # Find the wrapper function for this method
-    my int $i = 0;
-    while ($i < $method_count) {
-        my scalar $m = $methods->[$i];
-        if ($m->{"method_name"} eq $method_name) {
-            sb_append($sb, "    strada_overload_register(" . c_str_lit($pkg) . ", \"\\\"\\\"\", __wrap_" . $m->{"func_name"} . ");\n");
-            return;
-        }
-        $i = $i + 1;
-    }
+    sb_append($sb, "    strada_overload_register_method(" . c_str_lit($pkg) . ", \"\\\"\\\"\", " . c_str_lit($method_name) . ");\n");
 }
 
 # The C expression for a parameter's default value when that default is a
@@ -1964,33 +1957,33 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
             # For each operator in the overload hash, find the matching wrapper
             # and emit strada_overload_register() calls.
             # We check each known operator individually (bootstrap-safe, no array iteration).
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "+");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "-");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "*");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "/");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "%");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "**");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ".");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "==");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "!=");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ">");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<=");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ">=");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<=>");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "eq");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "ne");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "lt");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "gt");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "le");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "ge");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "cmp");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "neg");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "~");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "bool");
-            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "!");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "+");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "-");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "*");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "/");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "%");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "**");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, ".");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "==");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "!=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "<");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, ">");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "<=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, ">=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "<=>");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "eq");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "ne");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "lt");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "gt");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "le");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "ge");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "cmp");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "neg");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "~");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "bool");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "!");
             # Stringify ("") overload - key in hash is two double-quote chars
-            gen_overload_reg_stringify($sb, $pkg, $pkg_ol, $methods, $method_count);
+            gen_overload_reg_stringify($sb, $pkg, $pkg_ol);
         }
     }
 
@@ -3755,13 +3748,21 @@ func regex_pattern_has_interp(str $pattern) int {
     return 0;
 }
 
-# Emit `char *__subst_pat = <the interpolated pattern as a C string>; ` for a
-# substitution whose pattern mentions variables. The caller passes __subst_pat
-# as the pattern and releases it with strada_cstr_free.
+# Emit `StradaValue *__subst_pstr` (cleanup-protected when cleanup_push_useful)
+# and `const char *__subst_pat` for an interpolated regex pattern.
 func gen_subst_pattern_prelude(scalar $cg, str $pattern) void {
+    my int $sp = cleanup_push_useful($cg);
     emit($cg, "StradaValue *__subst_psv = ");
     gen_regex_interpolated_pattern($cg, $pattern);
-    emit($cg, "; char *__subst_pat = strada_to_str_ss(__subst_psv); strada_decref(__subst_psv); ");
+    emit($cg, "; ");
+    if ($sp == 1) { emit($cg, "strada_cleanup_push(__subst_psv); "); }
+    emit($cg, "StradaValue *__subst_pstr = strada_to_str_sv(__subst_psv); ");
+    if ($sp == 1) {
+        emit($cg, "strada_cleanup_pop_decref(__subst_psv); strada_cleanup_push(__subst_pstr); ");
+    } else {
+        emit($cg, "strada_decref(__subst_psv); ");
+    }
+    emit($cg, "const char *__subst_pat = (__subst_pstr && !STRADA_IS_TAGGED_INT(__subst_pstr) && __subst_pstr->value.pv) ? __subst_pstr->value.pv : \"\"; ");
 }
 
 # Generate code for regex pattern / replacement with variable interpolation.
@@ -4086,6 +4087,92 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
             emit($cg, "strada_to_num(");
             gen_expression($cg, $expr);
             emit($cg, ")");
+        }
+    }
+}
+
+# Check whether $expr is a single-quoted char literal ('x') promoted in comparison
+func sq_char_is_lit(scalar $expr) int {
+    if (defined($expr) == 1 && $expr->{"type"} == NODE_INT_LITERAL() && exists($expr->{"from_sq_str"})) {
+        return 1;
+    }
+    return 0;
+}
+
+# Compute numeric (atof-compatible) value string for a single-quoted char literal
+func sq_char_str_num(str $s) str {
+    if (length($s) == 1) {
+        my int $c = ord($s);
+        if ($c >= 48 && $c <= 57) { # '0' .. '9'
+            return ($c - 48) . ".0";
+        }
+    }
+    return "0.0";
+}
+
+# True when one side is a promoted 'x' literal paired with a non-int-typed peer
+func has_sq_char_cmp(scalar $cg, scalar $left, scalar $right) int {
+    my int $lsq = sq_char_is_lit($left);
+    my int $rsq = sq_char_is_lit($right);
+    if ($lsq == 1 && $rsq == 0 && expr_is_int_typed($cg, $right) == 0) {
+        return 1;
+    }
+    if ($rsq == 1 && $lsq == 0 && expr_is_int_typed($cg, $left) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# Emit single-quoted char vs dynamic-scalar comparison evaluating $peer once
+func emit_sq_char_cmp(scalar $cg, scalar $left, scalar $right, str $op, int $wrap_sv) void {
+    my int $left_is_sq = sq_char_is_lit($left);
+    my scalar $lit = $right;
+    my scalar $peer = $left;
+    if ($left_is_sq == 1) {
+        $lit = $left;
+        $peer = $right;
+    }
+    my int $peer_owned = 0;
+    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $peer) == 1) {
+        $peer_owned = 1;
+    }
+    my int $use_push = cleanup_push_useful($cg);
+    my str $char_code = "" . $lit->{"value"};
+    my str $sq_num = sq_char_str_num("" . $lit->{"from_sq_str"});
+
+    emit($cg, "({ StradaValue *__sq_p = ");
+    gen_expression($cg, $peer);
+    emit($cg, "; ");
+    if ($peer_owned == 1 && $use_push == 1) {
+        emit($cg, "strada_cleanup_push(__sq_p); ");
+    }
+    emit($cg, "double __sq_pv = strada_to_num(__sq_p); ");
+    emit($cg, "double __sq_cv = strada_sq_num_val(__sq_p, (int64_t)" . $char_code . ", " . $sq_num . "); ");
+    if ($peer_owned == 1) {
+        if ($use_push == 1) {
+            emit($cg, "strada_cleanup_pop_decref(__sq_p); ");
+        } else {
+            emit($cg, "strada_decref(__sq_p); ");
+        }
+    }
+    if ($left_is_sq == 1) {
+        emit($cg, "double __sq_l = __sq_cv; double __sq_r = __sq_pv; ");
+    } else {
+        emit($cg, "double __sq_l = __sq_pv; double __sq_r = __sq_cv; ");
+    }
+    if ($op eq "<=>") {
+        emit($cg, "int64_t __sq_cmp = 0; if (__sq_l < __sq_r) { __sq_cmp = -1; } else if (__sq_l > __sq_r) { __sq_cmp = 1; } ");
+        if ($wrap_sv == 1) {
+            emit($cg, "strada_new_int(__sq_cmp); })");
+        } else {
+            emit($cg, "(int)(__sq_cmp != 0); })");
+        }
+    } else {
+        emit($cg, "int __sq_cmp = (__sq_l " . $op . " __sq_r) ? 1 : 0; ");
+        if ($wrap_sv == 1) {
+            emit($cg, "strada_new_int((int64_t)__sq_cmp); })");
+        } else {
+            emit($cg, "__sq_cmp; })");
         }
     }
 }
@@ -5354,6 +5441,10 @@ func emit_condition(scalar $cg, scalar $expr) void {
         # Comparison operators: emit raw C comparison ONLY when not overloaded
         if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
             if ($cg->{"has_overloads"} == 0 || check_overload_binary($cg, $expr->{"left"}, $expr->{"right"}, $op) == 0) {
+                if (has_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}) == 1) {
+                    emit_sq_char_cmp($cg, $expr->{"left"}, $expr->{"right"}, $op, 0);
+                    return;
+                }
                 # Use int64_t path when both sides are int-typed (preserves full 64-bit precision!)
                 if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
                     emit($cg, "(");
@@ -6679,12 +6770,8 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     if ($key_expr->{"type"} == NODE_STR_LITERAL() && str_has_nul($key_expr->{"value"}) == 0) {
         $key_is_lit = 1;
     }
-    my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
-    my int $hca_autoviv = 0;
-    if (autoviv_link_type($hash_expr) == 1) {
-        $hca_autoviv = 1;
-        $hash_cleanup = 0;
-    }
+    my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1 && autoviv_link_type($hash_expr) == 0;
+    my int $hca_av_cl = autoviv_chain_needs_cleanup($cg, $hash_expr);
     my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
 
     my str $hca_opch = "";
@@ -6695,13 +6782,12 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         elsif ($op eq "/=") { $hca_opch = "'/'"; }
         elsif ($op eq ".=") { $hca_opch = "'.'"; }
     }
-    if ($hca_autoviv == 1) {
-        $cg->{"autoviv"} = 1;
-    }
     my int $hca_push = cleanup_push_useful($cg);
     if (length($hca_opch) > 0) {
-        emit($cg, "({ StradaValue *__hca_h = ");
-        gen_expression($cg, $hash_expr);
+        emit($cg, "({ ");
+        if ($hca_av_cl == 1) { emit($cg, "int __hca_av_mk = strada_cleanup_mark(); "); }
+        emit($cg, "StradaValue *__hca_h = ");
+        gen_assign_container_marked($cg, $hash_expr, 1, $hca_av_cl);
         emit($cg, "; ");
         if ($hca_push == 1 && $hash_cleanup == 1) { emit($cg, "strada_cleanup_push(__hca_h); "); }
         if ($key_is_lit == 0) {
@@ -6728,6 +6814,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
                 if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                 emit($cg, "strada_decref(__hca_h); ");
             }
+            if ($hca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__hca_av_mk); "); }
             emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
         }
         if ($key_is_lit == 1) {
@@ -6755,12 +6842,15 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_h); ");
         }
+        if ($hca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__hca_av_mk); "); }
         emit($cg, "(StradaValue*)NULL; })");
         return;
     }
 
-    emit($cg, "({ StradaValue *__hca_h = ");
-    gen_expression($cg, $hash_expr);
+    emit($cg, "({ ");
+    if ($hca_av_cl == 1) { emit($cg, "int __hca_av_mk = strada_cleanup_mark(); "); }
+    emit($cg, "StradaValue *__hca_h = ");
+    gen_assign_container_marked($cg, $hash_expr, 1, $hca_av_cl);
     emit($cg, "; ");
     if ($hca_push == 1 && $hash_cleanup == 1) { emit($cg, "strada_cleanup_push(__hca_h); "); }
     if ($key_is_lit == 0) {
@@ -6809,7 +6899,13 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_h); ");
         }
-        if ($is_void == 1) {
+        if ($hca_av_cl == 1) {
+            if ($is_void == 1) {
+                emit($cg, "strada_decref(__hca_new); strada_cleanup_drain_to(__hca_av_mk); (StradaValue*)NULL; })");
+            } else {
+                emit($cg, "strada_cleanup_drain_to(__hca_av_mk); __hca_new; })");
+            }
+        } elsif ($is_void == 1) {
             emit($cg, "strada_decref(__hca_new); (StradaValue*)NULL; })");
         } else {
             emit($cg, "__hca_new; })");
@@ -6844,6 +6940,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_h); ");
         }
+        if ($hca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__hca_av_mk); "); }
         emit($cg, "strada_safe_mod(__hca_ml, 0); } __hca_new = strada_new_int_il(strada_floored_mod(__hca_ml, __hca_mr)); ");
     } elsif ($op eq "/=") {
         emit($cg, "double __hca_dl = strada_to_num(__hca_old); double __hca_dr = strada_to_num(__hca_rhs); if (__hca_dr == 0.0) { ");
@@ -6861,6 +6958,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_h); ");
         }
+        if ($hca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__hca_av_mk); "); }
         emit($cg, "strada_throw(\"Illegal division by zero\"); } __hca_new = strada_safe_div(__hca_dl, __hca_dr); ");
     } else {
         emit($cg, "__hca_new = ");
@@ -6915,7 +7013,13 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         emit($cg, "strada_decref(__hca_h); ");
     }
-    if ($is_void == 1) {
+    if ($hca_av_cl == 1) {
+        if ($is_void == 1) {
+            emit($cg, "strada_decref(__hca_new); strada_cleanup_drain_to(__hca_av_mk); (StradaValue*)NULL; })");
+        } else {
+            emit($cg, "strada_cleanup_drain_to(__hca_av_mk); __hca_new; })");
+        }
+    } elsif ($is_void == 1) {
         emit($cg, "strada_decref(__hca_new); (StradaValue*)NULL; })");
     } else {
         emit($cg, "__hca_new; })");
@@ -6933,12 +7037,8 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
     }
     my scalar $idx_expr = $target->{"index"};
     my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
-    my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1;
-    my int $aca_autoviv = 0;
-    if (autoviv_link_type($arr_expr) == 1) {
-        $aca_autoviv = 1;
-        $arr_cleanup = 0;
-    }
+    my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1 && autoviv_link_type($arr_expr) == 0;
+    my int $aca_av_cl = autoviv_chain_needs_cleanup($cg, $arr_expr);
     my int $aca_push = cleanup_push_useful($cg);
 
     my str $aca_opch = "";
@@ -6950,11 +7050,10 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
         elsif ($op eq ".=") { $aca_opch = "'.'"; }
     }
     if (length($aca_opch) > 0) {
-        emit($cg, "({ StradaValue *__aca_arr = ");
-        if ($aca_autoviv == 1) {
-            $cg->{"autoviv"} = 2;
-        }
-        gen_expression($cg, $arr_expr);
+        emit($cg, "({ ");
+        if ($aca_av_cl == 1) { emit($cg, "int __aca_av_mk = strada_cleanup_mark(); "); }
+        emit($cg, "StradaValue *__aca_arr = ");
+        gen_assign_container_marked($cg, $arr_expr, 2, $aca_av_cl);
         emit($cg, "; ");
         if ($aca_push == 1 && $arr_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_arr); "); }
         emit($cg, "StradaValue *__aca_rhs = ");
@@ -6971,6 +7070,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
                 if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                 emit($cg, "strada_decref(__aca_arr); ");
             }
+            if ($aca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__aca_av_mk); "); }
             emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
         }
         emit($cg, "strada_array_compound(__aca_arr, ");
@@ -6984,15 +7084,15 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
             if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__aca_arr); ");
         }
+        if ($aca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__aca_av_mk); "); }
         emit($cg, "(StradaValue*)NULL; })");
         return;
     }
 
-    emit($cg, "({ StradaValue *__aca_arr = ");
-    if ($aca_autoviv == 1) {
-        $cg->{"autoviv"} = 2;
-    }
-    gen_expression($cg, $arr_expr);
+    emit($cg, "({ ");
+    if ($aca_av_cl == 1) { emit($cg, "int __aca_av_mk = strada_cleanup_mark(); "); }
+    emit($cg, "StradaValue *__aca_arr = ");
+    gen_assign_container_marked($cg, $arr_expr, 2, $aca_av_cl);
     emit($cg, "; ");
     if ($aca_push == 1 && $arr_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_arr); "); }
     emit($cg, "int64_t __aca_idx = ");
@@ -7027,7 +7127,13 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
             if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__aca_arr); ");
         }
-        if ($is_void == 1) {
+        if ($aca_av_cl == 1) {
+            if ($is_void == 1) {
+                emit($cg, "strada_decref(__aca_new); strada_cleanup_drain_to(__aca_av_mk); (StradaValue*)NULL; })");
+            } else {
+                emit($cg, "strada_cleanup_drain_to(__aca_av_mk); __aca_new; })");
+            }
+        } elsif ($is_void == 1) {
             emit($cg, "strada_decref(__aca_new); (StradaValue*)NULL; })");
         } else {
             emit($cg, "__aca_new; })");
@@ -7058,6 +7164,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
             if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__aca_arr); ");
         }
+        if ($aca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__aca_av_mk); "); }
         emit($cg, "strada_safe_mod(__aca_ml, 0); } __aca_new = strada_new_int_il(strada_floored_mod(__aca_ml, __aca_mr)); ");
     } elsif ($op eq "/=") {
         emit($cg, "double __aca_dl = strada_to_num(__aca_old); double __aca_dr = strada_to_num(__aca_rhs); if (__aca_dr == 0.0) { ");
@@ -7071,6 +7178,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
             if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__aca_arr); ");
         }
+        if ($aca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__aca_av_mk); "); }
         emit($cg, "strada_throw(\"Illegal division by zero\"); } __aca_new = strada_safe_div(__aca_dl, __aca_dr); ");
     } else {
         emit($cg, "__aca_new = ");
@@ -7119,7 +7227,13 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
         if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         emit($cg, "strada_decref(__aca_arr); ");
     }
-    if ($is_void == 1) {
+    if ($aca_av_cl == 1) {
+        if ($is_void == 1) {
+            emit($cg, "strada_decref(__aca_new); strada_cleanup_drain_to(__aca_av_mk); (StradaValue*)NULL; })");
+        } else {
+            emit($cg, "strada_cleanup_drain_to(__aca_av_mk); __aca_new; })");
+        }
+    } elsif ($is_void == 1) {
         emit($cg, "strada_decref(__aca_new); (StradaValue*)NULL; })");
     } else {
         emit($cg, "__aca_new; })");

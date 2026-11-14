@@ -446,17 +446,26 @@ func exec_insert(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
 # WRAPPER: render the body into `content`, then process the wrapper template.
 func exec_wrapper(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
     my str $content = render_nodes($tt, $node->{"body"}, $stash);
+    my int $depth = ($stash->{"__depth__"} // 0) + 0;
     my scalar $prev = Template::Stash::push_frame($stash);
-    Template::Stash::set_local($stash, "content", $content);
-    bind_params($node->{"params"}, $stash);
-    my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
     my str $out = "";
     try {
-        $out = render_nodes($tt, resolve_template_nodes($tt, $name, $stash), $stash);
+        my int $max = ($stash->{"__maxrec__"} // 100) + 0;
+        if ($depth >= $max) {
+            throw(Template::Exception::make("file", "WRAPPER: recursion limit exceeded"));
+        }
+        Template::Stash::set_local($stash, "content", $content);
+        bind_params($node->{"params"}, $stash);
+        my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
+        my scalar $wnodes = resolve_template_nodes($tt, $name, $stash);
+        $stash->{"__depth__"} = $depth + 1;
+        $out = render_nodes($tt, $wnodes, $stash);
     } catch ($sig) {
+        $stash->{"__depth__"} = $depth;
         Template::Stash::pop_frame($stash, $prev);
         throw($sig);
     }
+    $stash->{"__depth__"} = $depth;
     Template::Stash::pop_frame($stash, $prev);
     sb::append($sb, $out);
 }

@@ -1,0 +1,418 @@
+#!/usr/bin/env strada
+# Cycle 6 Audit regression tests: Runtime/GC + Compiler/CodeGen + Stdlib + Bootstrap syntax
+
+use lib "lib";
+use Template;
+use crypt;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+# ============================================================
+# Bug A: Tied hash/array DELETE & >256B concat key helpers
+# ============================================================
+package R6TieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "R6TieHash");
+}
+func FETCH(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"d"};
+    return $d->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    my scalar $d = $self->{"d"};
+    $d->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int {
+    my scalar $d = $self->{"d"};
+    return exists($d->{$k}) ? 1 : 0;
+}
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"d"};
+    if (!exists($d->{$k})) { return undef; }
+    my scalar $old = $d->{$k};
+    delete($d->{$k});
+    return "del_" . $old;
+}
+func CLEAR(scalar $self) void {
+    my hash %empty = ();
+    $self->{"d"} = \%empty;
+}
+
+package R6TieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["z0", "z1", "z2", "z3"]);
+    return bless(\%self, "R6TieArr");
+}
+func FETCHSIZE(scalar $self) int {
+    return size(@{$self->{"a"}});
+}
+func FETCH(scalar $self, int $idx) scalar {
+    my scalar $a = $self->{"a"};
+    return $a->[$idx];
+}
+func STORE(scalar $self, int $idx, scalar $v) void {
+    my scalar $a = $self->{"a"};
+    $a->[$idx] = $v;
+}
+func STORESIZE(scalar $self, int $n) void { }
+func EXISTS(scalar $self, int $idx) int {
+    my scalar $a = $self->{"a"};
+    return ($idx >= 0 && $idx < size(@$a) && defined($a->[$idx])) ? 1 : 0;
+}
+func DELETE(scalar $self, int $idx) scalar {
+    my scalar $a = $self->{"a"};
+    if ($idx < 0 || $idx >= size(@$a)) { return undef; }
+    my scalar $old = $a->[$idx];
+    $a->[$idx] = undef;
+    return "adel_" . $old;
+}
+
+package R6StrObj;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "R6StrObj");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return $self->{"s"};
+}
+use overload '""' => "to_str";
+
+# ============================================================
+# Bug B1-B3: Tied scalar & global our ref
+# ============================================================
+package R6TieScalar;
+our int $fetch_calls = 0;
+our int $store_calls = 0;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    my hash %self = ("v" => $init);
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar {
+    $fetch_calls = $fetch_calls + 1;
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $v) void {
+    $store_calls = $store_calls + 1;
+    $self->{"v"} = $v;
+}
+
+# ============================================================
+# Bug C: Overload MRO inheritance & child method overrides
+# ============================================================
+package R6OverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6OverBase");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    return $self->{"v"} + $other;
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "Base(" . $self->{"v"} . ")";
+}
+func eq_op(scalar $self, scalar $other, int $rev) int {
+    return ($self->{"v"} == $other) ? 1 : 0;
+}
+func cmp_op(scalar $self, scalar $other, int $rev) int {
+    my int $a = $rev ? ($other + 0) : $self->{"v"};
+    my int $b = $rev ? $self->{"v"} : ($other + 0);
+    return $a <=> $b;
+}
+func bool_op(scalar $self, scalar $other, int $rev) int {
+    return $self->{"v"} != 0 ? 1 : 0;
+}
+use overload "+" => "add_op", '""' => "to_str", "==" => "eq_op", "<=>" => "cmp_op", "bool" => "bool_op";
+
+package R6OverChild;
+extends R6OverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6OverChild");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    return $self->{"v"} + $other + 100;
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "Child(" . $self->{"v"} . ")";
+}
+func eq_op(scalar $self, scalar $other, int $rev) int {
+    return ($self->{"v"} * 2 == $other) ? 1 : 0;
+}
+func cmp_op(scalar $self, scalar $other, int $rev) int {
+    my int $a = $rev ? ($other + 0) : ($self->{"v"} * 2);
+    my int $b = $rev ? ($self->{"v"} * 2) : ($other + 0);
+    return $a <=> $b;
+}
+func bool_op(scalar $self, scalar $other, int $rev) int {
+    return $self->{"v"} == 10 ? 0 : 1;
+}
+
+package R6OverGrandChild;
+extends R6OverChild;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6OverGrandChild");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "GrandChild(" . $self->{"v"} . ")";
+}
+
+# ============================================================
+# Globals and helpers for Bug B & Bug D tests
+# ============================================================
+package main;
+
+our str $g_r6_str = "init";
+our int $g_r6_num = 10;
+our scalar $g_r6_tie_num = 0;
+our str $g_r6_try = "outer";
+our str $g_r6_async = "async_outer";
+
+our str $seen_fin_fall = "";
+our str $seen_fin_throw = "";
+our str $seen_catch_val = "";
+our str $seen_fin_ret = "";
+
+func r6_try_ret_fn() str {
+    $g_r6_try = "outer";
+    $seen_fin_ret = "";
+    try {
+        local $g_r6_try = "ret_try";
+        my scalar $inner_cl = func() str {
+            my str $cl_fin = "";
+            try {
+                local $g_r6_try = "in_cl";
+                $cl_fin = $g_r6_try;
+            } finally {
+                if ($g_r6_try ne "ret_try") { $cl_fin = "ERR:" . $g_r6_try; }
+            }
+            return $cl_fin;
+        };
+        if ($inner_cl->() ne "in_cl") {
+            return "bad_inner_cl";
+        }
+        return $g_r6_try;
+    } finally {
+        $seen_fin_ret = $g_r6_try;
+    }
+    return "unreachable";
+}
+
+async func r6_async_try_local() str {
+    try {
+        local $g_r6_async = "async_inner";
+        return $g_r6_async;
+    } finally {
+        # restored before return completes in async task
+        if ($g_r6_async ne "async_outer") {
+            return "ERR_ASYNC_FIN";
+        }
+    }
+    return "unreachable";
+}
+
+func main() int {
+    # 1. Bug A: tied hash/array delete return values & >256B concat keys
+    my hash %th = ();
+    tie(%th, "R6TieHash");
+    $th{"a"} = "A1";
+    $th{"b"} = "B2";
+    my scalar $d1 = delete($th{"a"});
+    check(defined($d1) && ("" . $d1) eq "del_A1" && !exists($th{"a"}), "tied hash delete returns deleted val");
+    my scalar $href = \%th;
+    my scalar $d2 = delete($href->{"b"});
+    check(defined($d2) && ("" . $d2) eq "del_B2" && !exists($th{"b"}), "tied hashref delete returns deleted val");
+    my scalar $d_miss = delete($th{"missing"});
+    check(!defined($d_miss), "tied hash delete missing returns undef");
+
+    my str $long_pfx = "P" x 320;
+    my scalar $sobj = R6StrObj::new("ovS");
+    my int $imin = -9223372036854775807 - 1;
+    $th{$long_pfx . "tail"} = "long_v";
+    check(("" . $th{$long_pfx . "tail"}) eq "long_v", "tied hash >320B concat key store/fetch");
+    my scalar $dl = delete($th{$long_pfx . "tail"});
+    check(("" . $dl) eq "del_long_v" && !exists($th{$long_pfx . "tail"}), "tied hash >320B concat key delete return");
+
+    my hash %ph = ();
+    $ph{$long_pfx . "p1"} = "pv1";
+    $ph{$long_pfx . 42} = "p42";
+    $ph{$long_pfx . $imin} = "pmin";
+    $ph{$long_pfx . $sobj} = "pov";
+    check($ph{$long_pfx . "p1"} eq "pv1", "hash >320B str concat key");
+    check($ph{$long_pfx . 42} eq "p42", "hash >320B int concat key");
+    check($ph{$long_pfx . $imin} eq "pmin", "hash >320B INT64_MIN concat key");
+    check($ph{$long_pfx . $sobj} eq "pov", "hash >320B overloaded stringify concat key");
+    my scalar $pd = delete($ph{$long_pfx . "p1"});
+    check($pd eq "pv1" && !exists($ph{$long_pfx . "p1"}), "hash >320B concat key delete return");
+    delete($ph{$long_pfx . 42});
+    check(!exists($ph{$long_pfx . 42}), "hash >320B concat key void delete");
+
+    my array @ta = ();
+    tie(@ta, "R6TieArr");
+    my scalar $td1 = delete($ta[1]);
+    check(defined($td1) && ("" . $td1) eq "adel_z1", "tied array delete returns DELETE val");
+    my scalar $taref = \@ta;
+    my scalar $td2 = delete($taref->[2]);
+    check(defined($td2) && ("" . $td2) eq "adel_z2", "tied arrayref delete returns DELETE val");
+
+    my array @ua = ("u0", "u1", "u2");
+    my scalar $ud1 = delete($ua[1]);
+    check($ud1 eq "u1" && !defined($ua[1]) && size(@ua) == 3, "untied array delete returns deleted element");
+    my scalar $uaref = \@ua;
+    my scalar $ud2 = delete($uaref->[0]);
+    check($ud2 eq "u0" && !defined($ua[0]), "untied arrayref delete returns deleted element");
+
+    # 2. Bug B1-B3: \$our_var live cell, local interaction, tied scalar ref, deref ++/--
+    my scalar $gr = \$g_r6_str;
+    check($$gr eq "init", "our ref initial read");
+    $$gr = "via_ref";
+    check($g_r6_str eq "via_ref", "our ref write reflects in our var");
+    $g_r6_str = "via_our";
+    check($$gr eq "via_our", "our var write reflects in ref");
+    {
+        local $g_r6_str = "loc_1";
+        check($$gr eq "loc_1", "our ref sees active local value");
+        $$gr = "loc_2";
+        check($g_r6_str eq "loc_2", "our ref write inside local updates local value");
+    }
+    check($g_r6_str eq "via_our" && $$gr eq "via_our", "our var and outer ref restored after local scope");
+
+    my scalar $numref = \$g_r6_num;
+    check(($$numref++) == 10 && $g_r6_num == 11, "our ref postfix ++");
+    check((++$$numref) == 12 && $g_r6_num == 12, "our ref prefix ++");
+    check(($$numref--) == 12 && $g_r6_num == 11, "our ref postfix --");
+    check((--$$numref) == 10 && $g_r6_num == 10, "our ref prefix --");
+
+    tie($g_r6_tie_num, "R6TieScalar", 50);
+    my scalar $tgr = \$g_r6_tie_num;
+    check($$tgr == 50, "tied our scalar ref read");
+    check(($$tgr++) == 50 && $g_r6_tie_num == 51, "tied our scalar ref postfix ++");
+    check((++$$tgr) == 52 && $$tgr == 52, "tied our scalar ref prefix ++");
+    $$tgr = 70;
+    check($g_r6_tie_num == 70, "tied our scalar ref store");
+    untie($g_r6_tie_num);
+
+    my int $lx = 20;
+    my scalar $lr = \$lx;
+    check(($$lr++) == 20 && (++$$lr) == 22 && $lx == 22, "lexical slot ref ++/--");
+
+    my int $cx = 30;
+    my scalar $mk_cap = func() scalar { return \$cx; };
+    my scalar $cr = $mk_cap->();
+    check(($$cr++) == 30 && (++$$cr) == 32 && $cx == 32, "closure PerlaCell ref ++/--");
+
+    my scalar $lts = "";
+    tie($lts, "R6TieScalar", 100);
+    my scalar $ltr = \$lts;
+    check(($$ltr++) == 100 && (++$$ltr) == 102 && $lts == 102, "lexical tied scalar ref ++/--");
+    untie($lts);
+
+    # 3. Bug C: Overload MRO inheritance & child overrides without re-declaring use overload
+    my scalar $ob = R6OverBase::new(10);
+    my scalar $oc = R6OverChild::new(10);
+    my scalar $oc_true = R6OverChild::new(99);
+    my scalar $ogc = R6OverGrandChild::new(7);
+    check(($ob + 5) == 15 && ("" . $ob) eq "Base(10)" && ($ob == 10) == 1 && ($ob <=> 12) == -1, "overload base methods");
+    check(($ob ? 1 : 0) == 1, "overload base bool");
+    check(($oc + 5) == 115, "overload child overridden + without use overload");
+    check(("" . $oc) eq "Child(10)", "overload child overridden stringify without use overload");
+    check(($oc == 20) == 1 && ($oc <=> 20) == 0, "overload child overridden == and <=>");
+    check(($oc ? 1 : 0) == 0 && ($oc_true ? 1 : 0) == 1, "overload child overridden bool");
+    check(($ogc + 5) == 112 && ("" . $ogc) eq "GrandChild(7)", "overload 3-level MRO inheritance + override");
+
+    # 4. Bug D: try/catch/finally local unwind, return inside try, next OUTER, closure & async
+    $g_r6_try = "outer";
+    try {
+        local $g_r6_try = "in_try_fall";
+    } finally {
+        $seen_fin_fall = $g_r6_try;
+    }
+    check($seen_fin_fall eq "outer" && $g_r6_try eq "outer", "try fallthrough restores local before finally");
+
+    $g_r6_try = "outer";
+    try {
+        local $g_r6_try = "in_try_throw";
+        die("r6_try_boom");
+    } catch ($te) {
+        $seen_catch_val = $g_r6_try;
+        local $g_r6_try = "in_catch";
+    } finally {
+        $seen_fin_throw = $g_r6_try;
+    }
+    check($seen_catch_val eq "outer" && $seen_fin_throw eq "outer" && $g_r6_try eq "outer", "try throw + catch local restored before finally");
+
+    my str $ret_got = r6_try_ret_fn();
+    check($ret_got eq "ret_try" && $seen_fin_ret eq "outer" && $g_r6_try eq "outer", "return inside try evaluates expr before local restore + finally sees outer");
+
+    # async func inside try block with its own try/local
+    $g_r6_try = "outer";
+    $g_r6_async = "async_outer";
+    my scalar $fut = undef;
+    try {
+        local $g_r6_try = "around_async";
+        $fut = r6_async_try_local();
+    } finally {
+        check($g_r6_try eq "outer", "enclosing try local restored cleanly with async inside");
+    }
+    my str $af_val = await $fut;
+    check($af_val eq "async_inner" && $g_r6_async eq "async_outer", "async func own try/local/finally unwinds cleanly");
+
+    # next OUTER restores outer loop local
+    $g_r6_try = "outer";
+    my array @outer_seen = ();
+    my int $oi = 0;
+    OUTER: while ($oi < 3) {
+        local $g_r6_try = "loop_" . $oi;
+        push(@outer_seen, $g_r6_try);
+        $oi = $oi + 1;
+        my int $ii = 0;
+        while ($ii < 2) {
+            local $g_r6_try = "inner_" . $oi;
+            $ii = $ii + 1;
+            next OUTER;
+        }
+    }
+    check($g_r6_try eq "outer" && size(@outer_seen) == 3 && $outer_seen[2] eq "loop_2", "next OUTER restores outer + inner loop locals");
+
+    # 5. Single-quote backslash preservation, <=> on chars, /x newline escape, Template WRAPPER, crypt
+    my str $sq_nl = '\n';
+    my str $sq_bs = '\\';
+    my str $sq_q = '\'';
+    check(length($sq_nl) == 2 && substr($sq_nl, 0, 1) eq "\\" && substr($sq_nl, 1, 1) eq "n", "single quotes preserve \\n");
+    check($sq_bs eq "\\" && length($sq_bs) == 1 && $sq_q eq "'" && length($sq_q) == 1, "single quotes handle \\\\ and \\'");
+    check(('a' <=> 'b') == -1 && ('z' <=> 'a') == 1 && ('a' <=> 'a') == 0, "char-code <=> comparisons");
+
+    my str $has_nl = "ab\ncd";
+    my str $no_nl = "ab cd";
+    check(($has_nl =~ /\n/x) == 1 && ($no_nl =~ /\n/x) == 0, "regex /\\n/x matches newline rather than unescaped ws");
+
+    my scalar $tt = Template::new({});
+    my int $wrap_err = 0;
+    try {
+        my str $wbad = $tt->process_string("[% WRAPPER inf %]hi[% END %][% BLOCK inf %][% WRAPPER inf %][% content %][% END %][% END %]", {});
+    } catch ($we) {
+        if (Template::Exception::is_exception($we) && index(Template::Exception::as_string($we), "recursion limit exceeded") >= 0) {
+            $wrap_err = 1;
+        }
+    }
+    my str $wok = $tt->process_string("[% WRAPPER ok %]x[% END %][% BLOCK ok %][[% content %]][% END %]", {});
+    check($wrap_err == 1 && $wok eq "[x]", "Template WRAPPER recursion limit throws cleanly without corrupting engine");
+
+    my str $cr_res = crypt::hashpw("pass", "ab");
+    check(length($cr_res) > 2 && crypt::verify("pass", $cr_res) == 1, "use crypt auto-links -lcrypt cleanly");
+
+    if ($g_fail > 0) {
+        say("R6_RUNTIME_COMPILER_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R6_RUNTIME_COMPILER_OK");
+    return 0;
+}

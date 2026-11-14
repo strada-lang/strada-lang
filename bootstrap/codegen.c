@@ -1639,6 +1639,12 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, " >= ");
                 gen_as_num(cg, expr->data.binary_op.right);
                 emit(cg, ")");
+            } else if (strcmp(op, "<=>") == 0) {
+                emit(cg, "({ double __sl = ");
+                gen_as_num(cg, expr->data.binary_op.left);
+                emit(cg, "; double __sr = ");
+                gen_as_num(cg, expr->data.binary_op.right);
+                emit(cg, "; strada_new_int(__sl < __sr ? -1 : (__sl > __sr ? 1 : 0)); })");
             } else if (strcmp(op, "&&") == 0) {
                 // Logical AND with cleanup for owned operands
                 emit(cg, "strada_new_int(");

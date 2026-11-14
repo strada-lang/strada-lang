@@ -1,0 +1,238 @@
+# Cycle 6 compiled / tree-walk / bytecode --vm parity suite
+
+package R6PTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "R6PTieHash");
+}
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"d"}->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    $self->{"d"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int {
+    return exists($self->{"d"}->{$k}) ? 1 : 0;
+}
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"d"};
+    if (!exists($d->{$k})) { return undef; }
+    my scalar $old = $d->{$k};
+    delete($d->{$k});
+    return "del_" . $old;
+}
+
+package R6PTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["x0", "x1", "x2"]);
+    return bless(\%self, "R6PTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void { }
+func EXISTS(scalar $self, int $i) int {
+    my scalar $a = $self->{"a"};
+    return ($i >= 0 && $i < size(@$a) && defined($a->[$i])) ? 1 : 0;
+}
+func DELETE(scalar $self, int $i) scalar {
+    my scalar $a = $self->{"a"};
+    if ($i < 0 || $i >= size(@$a)) { return undef; }
+    my scalar $old = $a->[$i];
+    $a->[$i] = undef;
+    return "adel_" . $old;
+}
+
+package R6PTieArrSplice;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["s0", "s1", "s2", "s3"]);
+    return bless(\%self, "R6PTieArrSplice");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void {
+    my scalar $a = $self->{"a"};
+    while (size(@$a) > $n) { pop(@$a); }
+    while (size(@$a) < $n) { push(@$a, undef); }
+}
+
+package R6PTieScalar;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    my hash %self = ("v" => $init);
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R6PStrObj;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "R6PStrObj");
+}
+func to_str(scalar $self, scalar $other, int $rev) str { return $self->{"s"}; }
+use overload '""' => "to_str";
+
+package R6POverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6POverBase");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other; }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Base(" . $self->{"v"} . ")"; }
+func cmp_op(scalar $self, scalar $other, int $rev) int {
+    my int $a = $rev ? ($other + 0) : $self->{"v"};
+    my int $b = $rev ? $self->{"v"} : ($other + 0);
+    return $a <=> $b;
+}
+use overload "+" => "add_op", '""' => "to_str", "<=>" => "cmp_op";
+
+package R6POverChild;
+extends R6POverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6POverChild");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other + 100; }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Child(" . $self->{"v"} . ")"; }
+func cmp_op(scalar $self, scalar $other, int $rev) int {
+    my int $a = $rev ? ($other + 0) : ($self->{"v"} * 2);
+    my int $b = $rev ? ($self->{"v"} * 2) : ($other + 0);
+    return $a <=> $b;
+}
+
+package main;
+
+our str $gp_str = "init";
+our int $gp_num = 10;
+our str $gp_try = "outer";
+
+func p_try_ret() str {
+    $gp_try = "outer";
+    my str $fin = "";
+    try {
+        local $gp_try = "in_try_ret";
+        return $gp_try;
+    } finally {
+        $fin = $gp_try;
+    }
+    return "bad";
+}
+
+func main() int {
+    # R6P01: tied delete return values, untied array delete, >320B concat keys
+    my hash %th = ();
+    tie(%th, "R6PTieHash");
+    $th{"k1"} = "v1";
+    $th{"k2"} = "v2";
+    my scalar $td1 = delete($th{"k1"});
+    my scalar $thref = \%th;
+    my scalar $td2 = delete($thref->{"k2"});
+    my str $lp = "K" x 320;
+    my hash %ph = ();
+    $ph{$lp . "a"} = "LA";
+    $ph{$lp . (-9223372036854775807 - 1)} = "LMIN";
+    $ph{$lp . R6PStrObj::new("OV")} = "LOV";
+    my scalar $pd = delete($ph{$lp . "a"});
+
+    my array @ta = ();
+    tie(@ta, "R6PTieArr");
+    my scalar $ad1 = delete($ta[1]);
+    my array @ua = ("u0", "u1", "u2");
+    my scalar $ud1 = delete($ua[1]);
+    say("R6P01:" . $td1 . "|" . $td2 . "|" . $ph{$lp . (-9223372036854775807 - 1)} . "|" . $ph{$lp . "OV"} . "|" . $pd . "|" . exists($ph{$lp . "a"}) . "|" . $ad1 . "|" . $ud1);
+
+    # R6P02: \$our_var + local + tied/untied deref ++/--
+    my scalar $gr = \$gp_str;
+    $$gr = "w1";
+    my str $loc_seen = "";
+    {
+        local $gp_str = "loc";
+        $loc_seen = $$gr;
+        $$gr = "loc2";
+        $loc_seen = $loc_seen . "," . $gp_str;
+    }
+    my scalar $nr = \$gp_num;
+    my int $np1 = $$nr++;
+    my int $np2 = ++$$nr;
+    my int $nm1 = $$nr--;
+    my int $nm2 = --$$nr;
+
+    my scalar $ts = "";
+    tie($ts, "R6PTieScalar", 40);
+    my scalar $tr = \$ts;
+    my int $tp1 = $$tr++;
+    my int $tp2 = ++$$tr;
+    untie($ts);
+    say("R6P02:" . $gp_str . "|" . $loc_seen . "|" . $np1 . "," . $np2 . "," . $nm1 . "," . $nm2 . "," . $gp_num . "|" . $tp1 . "," . $tp2);
+
+    # R6P03: overload inheritance & child overrides
+    my scalar $ob = R6POverBase::new(10);
+    my scalar $oc = R6POverChild::new(10);
+    say("R6P03:" . ($ob + 5) . "," . $ob . "," . ($ob <=> 12) . "|" . ($oc + 5) . "," . $oc . "," . ($oc <=> 20));
+
+    # R6P04: local unwind across try/catch/finally + return + next OUTER
+    $gp_try = "outer";
+    my str $f_ok = "";
+    my str $c_ok = "";
+    my str $fc_ok = "";
+    try { local $gp_try = "t1"; } finally { $f_ok = $gp_try; }
+    try {
+        local $gp_try = "t2";
+        throw("boom");
+    } catch ($e) {
+        $c_ok = $gp_try;
+        local $gp_try = "in_c";
+    } finally {
+        $fc_ok = $gp_try;
+    }
+    my str $rv = p_try_ret();
+    my array @seen_o = ();
+    my int $oi = 0;
+    OUTER: while ($oi < 2) {
+        local $gp_try = "L" . $oi;
+        push(@seen_o, $gp_try);
+        $oi = $oi + 1;
+        my int $ii = 0;
+        while ($ii < 2) {
+            local $gp_try = "I" . $oi;
+            $ii = $ii + 1;
+            next OUTER;
+        }
+    }
+    say("R6P04:" . $f_ok . "," . $c_ok . "," . $fc_ok . "|" . $rv . "," . $gp_try . "|" . join(",", @seen_o));
+
+    # R6P05: splice arities (1-arg, 2-arg, 3-arg negative, multi-repl, tied 2-arg)
+    my array @sp1 = (1, 2, 3);
+    my array @r1 = splice(@sp1);
+    my array @sp2 = (10, 20, 30, 40, 50);
+    my array @r2 = splice(@sp2, 2);
+    my array @sp3 = (10, 20, 30, 40, 50);
+    my array @r3 = splice(@sp3, 1, -1);
+    my array @sp4 = (1, 2, 3);
+    my array @r4 = splice(@sp4, 1, 1, 9, 8);
+    my array @tsp = ();
+    tie(@tsp, "R6PTieArrSplice");
+    my array @rtsp = splice(@tsp, 2);
+    say("R6P05:" . join(",", @r1) . ":" . size(@sp1) . "|" . join(",", @sp2) . ":" . join(",", @r2) . "|" . join(",", @sp3) . ":" . join(",", @r3) . "|" . join(",", @sp4) . ":" . join(",", @r4) . "|" . join(",", @rtsp) . ":" . size(@tsp));
+
+    # R6P06: substr arities (2-arg ASCII & UTF-8, 3-arg negative, undef len)
+    my str $sa = "abcdef";
+    my str $su = "café_xyz";
+    utf8::decode($su);
+    my str $sub1 = substr($sa, 2);
+    my str $sub2 = substr($su, 2);
+    my str $sub3 = substr($sa, 1, -1);
+    my str $sub4 = substr($sa, 1, undef);
+    say("R6P06:" . $sub1 . "|" . $sub2 . "|" . $sub3 . "|" . length($sub4));
+
+    # R6P07: single-quote escapes, char <=>, /x newline
+    my str $sq = '\n\\\'';
+    my str $nl_s = "a\nb";
+    my int $m_nl = ($nl_s =~ /\n/x) ? 1 : 0;
+    my int $nm_nl = ("a b" =~ /\n/x) ? 1 : 0;
+    say("R6P07:" . length($sq) . "|" . ('a' <=> 'b') . "," . ('z' <=> 'a') . "|" . $m_nl . "," . $nm_nl);
+
+    say("R6_PARITY_OK");
+    return 0;
+}

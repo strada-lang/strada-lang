@@ -1324,6 +1324,7 @@ static int dbi_execute_raw(DbiStatement *sth) {
                         sth->column_types = NULL;
                         sth->num_columns = 0;
                         PQclear(res);
+                        sth->result = NULL;
                         dbi_set_error(dbh, -1, "Out of memory");
                         return -1;
                     }
@@ -1338,6 +1339,7 @@ static int dbi_execute_raw(DbiStatement *sth) {
                             sth->column_types = NULL;
                             sth->num_columns = 0;
                             PQclear(res);
+                            sth->result = NULL;
                             dbi_set_error(dbh, -1, "Out of memory");
                             return -1;
                         }

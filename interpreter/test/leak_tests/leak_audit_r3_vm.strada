@@ -67,13 +67,13 @@ func main() int {
         my str $lk = make_long_key($i);
         $h{"pre_" . $lk} = "v_" . $i;
         my scalar $d = delete($h{"pre_" . $lk});
-        if (defined($d) || exists($h{"pre_" . $lk})) { return 2; }
+        if (!defined($d) || ("" . $d) ne ("v_" . $i) || exists($h{"pre_" . $lk})) { return 2; }
 
         my hash %th = ();
         tie(%th, "LeakR3TieH");
         $th{"dk_" . $i} = "tv_" . $i;
         my scalar $td = delete($th{"dk_" . $i});
-        if (defined($td) || exists($th{"dk_" . $i})) { return 3; }
+        if (!defined($td) || ("" . $td) ne ("tv_" . $i) || exists($th{"dk_" . $i})) { return 3; }
         untie(%th);
 
         # >16 builtin args (push + sprintf)

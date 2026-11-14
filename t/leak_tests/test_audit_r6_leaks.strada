@@ -1,0 +1,232 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 6 (Runtime/GC + Compiler/CodeGen + Template WRAPPER)
+
+use lib "lib";
+use Template;
+
+package LeakR6TieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "LeakR6TieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"d"};
+    if (!exists($d->{$k})) { return undef; }
+    my scalar $old = $d->{$k};
+    delete($d->{$k});
+    return "del_" . $old;
+}
+
+package LeakR6ThrowTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "LeakR6ThrowTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return "v"; }
+func STORE(scalar $self, str $k, scalar $v) void { }
+func EXISTS(scalar $self, str $k) int { return 1; }
+func DELETE(scalar $self, str $k) scalar {
+    die("lr6_del_err");
+    return undef;
+}
+
+package LeakR6TieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["x0", "x1", "x2"]);
+    return bless(\%self, "LeakR6TieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void { }
+func DELETE(scalar $self, int $i) scalar {
+    my scalar $a = $self->{"a"};
+    if ($i < 0 || $i >= size(@$a)) { return undef; }
+    my scalar $old = $a->[$i];
+    $a->[$i] = undef;
+    return "adel_" . $old;
+}
+
+package LeakR6ThrowTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["x0"]);
+    return bless(\%self, "LeakR6ThrowTieArr");
+}
+func FETCHSIZE(scalar $self) int { return 1; }
+func FETCH(scalar $self, int $i) scalar { return "x0"; }
+func STORE(scalar $self, int $i, scalar $v) void { }
+func STORESIZE(scalar $self, int $n) void { }
+func DELETE(scalar $self, int $i) scalar {
+    die("lr6_adel_err");
+    return undef;
+}
+
+package LeakR6TieScalar;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    my hash %self = ("v" => $init);
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package LeakR6StrObj;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "LeakR6StrObj");
+}
+func to_str(scalar $self, scalar $other, int $rev) str { return $self->{"s"}; }
+use overload '""' => "to_str";
+
+package LeakR6OverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR6OverBase");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return "b_" . ($self->{"v"} + $other); }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Base_" . $self->{"v"}; }
+use overload "+" => "add_op", '""' => "to_str";
+
+package LeakR6OverChild;
+extends LeakR6OverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR6OverChild");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return "c_" . ($self->{"v"} + $other); }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Child_" . $self->{"v"}; }
+
+package main;
+
+our str $g_r6l = "outer";
+our int $g_r6l_num = 10;
+our scalar $g_r6l_ts = 0;
+
+func r6_leak_try_ret(int $i) str {
+    $g_r6l = "outer";
+    try {
+        local $g_r6l = "try_ret_" . $i;
+        my scalar $cl = func() str {
+            try {
+                local $g_r6l = "cl_" . $i;
+                if ($i % 2 == 0) { die("inner_cl"); }
+            } catch ($e) {} finally {
+                if ($g_r6l ne ("try_ret_" . $i)) { die("bad_cl_fin"); }
+            }
+            return "ok";
+        };
+        my str $cr = $cl->();
+        if ($cr ne "ok") { return "err"; }
+        return $g_r6l;
+    } finally {
+        if ($g_r6l ne "outer") { die("bad_fin_order"); }
+    }
+    return "bad";
+}
+
+func main() int {
+    my hash %th = ();
+    tie(%th, "LeakR6TieHash");
+    my hash %tth = ();
+    tie(%tth, "LeakR6ThrowTieHash");
+    my array @ta = ();
+    tie(@ta, "LeakR6TieArr");
+    my array @tta = ();
+    tie(@tta, "LeakR6ThrowTieArr");
+
+    my scalar $tt = Template::new({});
+    my str $lp = "L" x 320;
+
+    my int $i = 0;
+    while ($i < 30) {
+        # >320B concat keys + tied delete (returning owned string & throwing)
+        my str $dynk = $lp . "k_" . $i;
+        $th{$lp . "k_" . $i} = "val_" . $i;
+        my scalar $d = delete($th{$lp . "k_" . $i});
+        if (("" . $d) ne ("del_val_" . $i)) { return 1; }
+
+        my hash %ph = ();
+        my scalar $sobj = LeakR6StrObj::new("ov_" . $i);
+        $ph{$lp . $i} = "p_" . $i;
+        $ph{$lp . $sobj} = "po_" . $i;
+        my scalar $pd = delete($ph{$lp . $i});
+        delete($ph{$lp . $sobj});
+        if ($pd ne ("p_" . $i)) { return 2; }
+
+        try { my scalar $td = delete($tth{$dynk}); } catch ($e) {}
+        try { delete($tth{$dynk}); } catch ($e) {}
+
+        $ta[1] = "x1_" . $i;
+        my scalar $ad = delete($ta[1]);
+        if (("" . $ad) ne ("adel_x1_" . $i)) { return 3; }
+        try { my scalar $tad = delete($tta[0]); } catch ($e) {}
+
+        # \$our_var + local + tied global scalar + deref ++/--
+        my scalar $gr = \$g_r6l;
+        {
+            local $g_r6l = "loc_" . $i;
+            $$gr = "loc2_" . $i;
+            if ($g_r6l ne ("loc2_" . $i)) { return 4; }
+        }
+        if ($g_r6l ne "outer") { return 5; }
+
+        my scalar $nr = \$g_r6l_num;
+        my int $p1 = $$nr++;
+        my int $p2 = ++$$nr;
+        my int $p3 = $$nr--;
+        my int $p4 = --$$nr;
+        if ($p1 != 10 || $p2 != 12 || $p3 != 12 || $p4 != 10) { return 6; }
+
+        tie($g_r6l_ts, "LeakR6TieScalar", $i);
+        my scalar $tgr = \$g_r6l_ts;
+        my int $tv1 = $$tgr++;
+        my int $tv2 = ++$$tgr;
+        if ($tv1 != $i || $tv2 != ($i + 2)) { return 7; }
+        untie($g_r6l_ts);
+
+        # Overload MRO child override
+        my scalar $oc = LeakR6OverChild::new($i);
+        my str $oa = "" . ($oc + 5);
+        my str $os = "" . $oc;
+        if ($oa ne ("c_" . ($i + 5)) || $os ne ("Child_" . $i)) { return 8; }
+
+        # try/catch/finally local unwind + return + next OUTER
+        my str $rr = r6_leak_try_ret($i);
+        if ($rr ne ("try_ret_" . $i) || $g_r6l ne "outer") { return 9; }
+
+        try {
+            local $g_r6l = "throw_in_try_" . $i;
+            die("r6l_boom");
+        } catch ($ce) {
+            if ($g_r6l ne "outer") { return 10; }
+            local $g_r6l = "in_catch_" . $i;
+        } finally {
+            if ($g_r6l ne "outer") { return 11; }
+        }
+
+        my int $oi = 0;
+        OUTER: while ($oi < 2) {
+            local $g_r6l = "lo_" . $oi;
+            $oi = $oi + 1;
+            my int $ii = 0;
+            while ($ii < 2) {
+                local $g_r6l = "li_" . $oi;
+                $ii = $ii + 1;
+                next OUTER;
+            }
+        }
+        if ($g_r6l ne "outer") { return 12; }
+
+        # Template WRAPPER recursion limit throw/unwind
+        try {
+            my str $wo = $tt->process_string("[% WRAPPER inf %]x[% END %][% BLOCK inf %][% WRAPPER inf %][% content %][% END %][% END %]", {});
+        } catch ($we) {}
+
+        $i = $i + 1;
+    }
+
+    say("R6_LEAKS_OK");
+    return 0;
+}

@@ -61,12 +61,20 @@ POSTGRES_CFLAGS ?=
 MYSQL_CFLAGS ?=
 FFI_CFLAGS ?=
 HAVE_LIBFFI ?= 0
-HAVE_PCRE2 ?= $(shell if [ -f vendor/pcre2/libpcre2-8.a ]; then echo 1; elif printf '\043define PCRE2_CODE_UNIT_WIDTH 8\n\043include <pcre2.h>\n' | $(CC) -E -x c - >/dev/null 2>&1; then echo 1; else echo 0; fi)
+BUNDLED_PCRE2 ?= $(shell if [ -f vendor/pcre2/Makefile ] && [ ! -f config.mk ]; then echo 1; else echo 0; fi)
+ifeq ($(BUNDLED_PCRE2),1)
+HAVE_PCRE2 ?= 1
+PCRE2_CFLAGS ?= -DPCRE2_STATIC -I$(CURDIR)/vendor/pcre2/src
+PCRE2_LIBS ?=
+STATIC_PCRE2 ?= 1
+PCRE2_STATIC_LIB ?= $(CURDIR)/vendor/pcre2/libpcre2-8.a
+else
+HAVE_PCRE2 ?= $(shell if printf '\043define PCRE2_CODE_UNIT_WIDTH 8\n\043include <pcre2.h>\n' | $(CC) -E -x c - >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PCRE2_CFLAGS ?=
 PCRE2_LIBS ?= -lpcre2-8
 STATIC_PCRE2 ?= 0
 PCRE2_STATIC_LIB ?=
-BUNDLED_PCRE2 ?= $(shell if [ -f vendor/pcre2/libpcre2-8.a ] && [ ! -f config.mk ]; then echo 1; else echo 0; fi)
+endif
 # Runtime memory-management features (compile-time, default ON). Set to 0 via
 # ./configure --without-cycle-gc / --without-arena, or `make HAVE_CYCLE_GC=0`.
 HAVE_CYCLE_GC ?= 1

@@ -588,7 +588,13 @@ func directive_word(str $trimmed) str {
     if ($end < $len) {
         my str $next = substr($trimmed, $end, 1);
         if ($next ne " " && $next ne "\t") {
-            if (!($w eq "include" && ($next eq "\"" || $next eq "<"))) {
+            my int $ok = 0;
+            if ($w eq "include" && ($next eq "\"" || $next eq "<")) {
+                $ok = 1;
+            } elsif (($w eq "if" || $w eq "elif") && ($next eq "(" || $next eq "!")) {
+                $ok = 1;
+            }
+            if ($ok == 0) {
                 return "";
             }
         }

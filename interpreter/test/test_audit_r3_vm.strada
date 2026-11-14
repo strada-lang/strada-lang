@@ -223,15 +223,15 @@ func main() int {
     my scalar $d1 = delete($th{"plain"});
     my str $dyn = "dyn";
     my scalar $d2 = delete($th{"k_" . $dyn});
-    my int $d1_ok = (!defined($d1) && !exists($th{"plain"})) ? 1 : 0;
-    my int $d2_ok = (!defined($d2) && !exists($th{"k_" . $dyn})) ? 1 : 0;
+    my int $d1_ok = (defined($d1) && $d1 == 11 && !exists($th{"plain"})) ? 1 : 0;
+    my int $d2_ok = (defined($d2) && $d2 == 22 && !exists($th{"k_" . $dyn})) ? 1 : 0;
     my str $lpad = make_pad320();
     my hash %lh = ();
     $lh{"pre_" . $lpad} = "LVAL";
     my int $ex1 = exists($lh{"pre_" . $lpad}) ? 1 : 0;
     my scalar $lg1 = $lh{"pre_" . $lpad};
     my scalar $ld1 = delete($lh{"pre_" . $lpad});
-    my int $ld1_ok = !defined($ld1) ? 1 : 0;
+    my int $ld1_ok = (defined($ld1) && $ld1 eq "LVAL") ? 1 : 0;
     my int $ex2 = exists($lh{"pre_" . $lpad}) ? 1 : 0;
     my int $min64 = -9223372036854775807 - 1;
     $lh{"min_" . $min64} = "M64";

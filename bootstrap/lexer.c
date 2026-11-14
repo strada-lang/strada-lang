@@ -327,17 +327,28 @@ static Token* read_string(Lexer *lex) {
         if (lexer_current(lex) == '\\') {
             lexer_advance(lex);
             char next = lexer_current(lex);
-            char out;
-            switch (next) {
-                case 'n':  out = '\n'; break;
-                case 't':  out = '\t'; break;
-                case 'r':  out = '\r'; break;
-                case '\\': out = '\\'; break;
-                case '\"': out = '\"'; break;
-                case '\'': out = '\''; break;
-                default:   out = next; break;
+            if (!next) break;
+            if (quote == '\'') {
+                if (next == '\\' || next == '\'') {
+                    lex_sb_putc(&buffer, &buf_len, &buf_cap, next);
+                } else {
+                    /* Preserve backslash for all other sequences in single quotes (e.g. '\n', '\t', '\r') */
+                    lex_sb_putc(&buffer, &buf_len, &buf_cap, '\\');
+                    lex_sb_putc(&buffer, &buf_len, &buf_cap, next);
+                }
+            } else {
+                char out;
+                switch (next) {
+                    case 'n':  out = '\n'; break;
+                    case 't':  out = '\t'; break;
+                    case 'r':  out = '\r'; break;
+                    case '\\': out = '\\'; break;
+                    case '\"': out = '\"'; break;
+                    case '\'': out = '\''; break;
+                    default:   out = next; break;
+                }
+                lex_sb_putc(&buffer, &buf_len, &buf_cap, out);
             }
-            lex_sb_putc(&buffer, &buf_len, &buf_cap, out);
             lexer_advance(lex);
         } else {
             lex_sb_putc(&buffer, &buf_len, &buf_cap, lexer_current(lex));
@@ -417,6 +428,10 @@ Token* lexer_next(Lexer *lex) {
     if (strcmp(ch3, "...") == 0) {
         lexer_advance(lex); lexer_advance(lex); lexer_advance(lex);
         return make_token(TOK_ELLIPSIS, "...", line, col);
+    }
+    if (strcmp(ch3, "<=>") == 0) {
+        lexer_advance(lex); lexer_advance(lex); lexer_advance(lex);
+        return make_token(TOK_SPACESHIP, "<=>", line, col);
     }
     
     if (strcmp(ch2, "==") == 0) {

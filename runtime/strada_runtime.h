@@ -588,6 +588,7 @@ StradaValue* strada_new_str_len(const char *s, size_t len);  /* Binary-safe stri
 StradaValue* strada_new_str_lit(const char *s, size_t len);  /* String literal (UTF-8 char-flagged when valid UTF-8) */
 StradaValue* strada_new_str_len_utf8(const char *s, size_t len);  /* Set SVf_UTF8 flag */
 StradaValue* strada_new_str_charflag(const char *s, const char *flag_src); /* UTF-8 flag iff flag_src is valid UTF-8 */
+StradaValue* strada_new_str_charflag_len(const char *s, size_t len, const char *flag_src, size_t flag_len);
 void         strada_set_utf8_flag(StradaValue *sv, int on);     /* Toggle UTF-8 flag */
 void         strada_array_set_utf8_flag(StradaValue *arr_sv, int on); /* Stamp every STRADA_STR element */
 size_t       byte_to_char_offset(const char *s, size_t byte_offset);
@@ -1280,6 +1281,7 @@ StradaValue* strada_call_named_guarded(StradaValue *name_sv, StradaValue *arg_sv
 StradaValue* strada_slot_ref_create(StradaValue **slot);
 StradaValue* strada_deref(StradaValue *ref);          /* $$ref - deref scalar ref */
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value); /* deref_set($ref, $val) */
+StradaValue* strada_deref_inc(StradaValue *ref, int64_t delta, int is_prefix); /* $$ref++ / --$$ref */
 StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil); /* %{$ref} = LIST, @{$ref} = LIST */
 StradaHash* strada_deref_hash(StradaValue *ref);      /* For $ref->{key} */
 StradaArray* strada_deref_array(StradaValue *ref);    /* For $ref->[index] */
@@ -1338,6 +1340,7 @@ const char* strada_get_method_package(void);      /* Get current method's packag
 
 /* Operator overloading */
 void strada_overload_register(const char *package, const char *op, StradaMethod func);
+void strada_overload_register_method(const char *package, const char *op, const char *method_name);
 StradaValue* strada_overload_binary(StradaValue *left, StradaValue *right, const char *op);
 StradaValue* strada_overload_unary(StradaValue *operand, const char *op);
 StradaValue* strada_overload_stringify(StradaValue *val);
@@ -1513,6 +1516,7 @@ StradaValue* strada_regex_match_all(const char *str, const char *pattern);
 char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
 int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement, const char *flags, int global, char **result_out);
+int strada_regex_replace_capture_len(const char *str, size_t subject_length, int is_utf8, const char *pattern, const char *replacement, const char *flags, int global, char **result_out, size_t *out_len);
 StradaArray* strada_string_split(const char *str, const char *delim);
 StradaArray* strada_regex_split(const char *str, const char *pattern);
 StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit);
@@ -2012,6 +2016,7 @@ void strada_global_set(StradaValue *name, StradaValue *val);
 void strada_global_set_cstr(const char *name, StradaValue *val);
 StradaValue* strada_global_get(StradaValue *name);
 StradaValue* strada_global_get_cstr(const char *name);
+StradaValue* strada_global_ref_create(const char *name);
 void strada_global_weaken_cstr(const char *name);
 int strada_global_exists(StradaValue *name);
 void strada_global_delete(StradaValue *name);
@@ -2093,6 +2098,7 @@ StradaValue* strada_tied_hash_fetch_sv(StradaValue *sv, StradaValue *key);
 void strada_tied_hash_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val);
 int strada_tied_hash_exists_sv(StradaValue *sv, StradaValue *key);
 void strada_tied_hash_delete_sv(StradaValue *sv, StradaValue *key);
+StradaValue* strada_tied_hash_delete_take_sv(StradaValue *sv, StradaValue *key);
 StradaValue* strada_tied_hash_firstkey(StradaValue *sv);
 StradaValue* strada_tied_hash_nextkey(StradaValue *sv, const char *lastkey);
 void strada_tied_hash_clear(StradaValue *sv);
@@ -2121,6 +2127,7 @@ int64_t      strada_tied_array_push(StradaValue *sv, StradaValue *vals_array);
 int64_t      strada_tied_array_unshift(StradaValue *sv, StradaValue *vals_array);
 int          strada_tied_array_exists(StradaValue *sv, int64_t idx);
 void         strada_tied_array_delete(StradaValue *sv, int64_t idx);
+StradaValue* strada_tied_array_delete_take(StradaValue *sv, int64_t idx);
 void         strada_tied_array_clear(StradaValue *sv);
 StradaValue* strada_tied_array_splice(StradaValue *sv, int64_t offset, int64_t length, StradaValue *repl_sv);
 void         strada_av_push_sv(StradaValue *sv, StradaValue *val);
@@ -2196,6 +2203,14 @@ static inline void strada_av_delete_sv(StradaValue *sv, int64_t idx) {
     StradaArray *av = strada_deref_array(sv);
     StradaValue *old = strada_array_delete_idx(av, idx);
     strada_decref(old);
+}
+static inline StradaValue* strada_av_delete_take_idx(StradaValue *sv, int64_t idx) {
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_delete_take(tsv, idx);
+    }
+    StradaArray *av = strada_deref_array(sv);
+    return strada_array_delete_idx(av, idx);
 }
 
 /* Attach a metadata block to an SV if absent. Public so perla can set
@@ -2404,11 +2419,7 @@ static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) {
-        StradaValue *old = strada_tied_hash_fetch_sv(msv, key);
-        if (old) strada_cleanup_push(old);
-        strada_tied_hash_delete_sv(msv, key);
-        if (old) strada_cleanup_pop();
-        return old ? old : strada_undef_static();
+        return strada_tied_hash_delete_take_sv(msv, key);
     }
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
     return strada_hash_delete_take_sv(hv, key);
@@ -2444,6 +2455,69 @@ void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int 
 void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op);
 /* Single-pass array-element compound assignment ($a[i] op= rhs); rhs borrowed. */
 void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, int op);
+
+/* Dynamic numeric coercion for single-quoted single-char literal ('x') paired
+ * with a runtime-scalar operand: int/undef/ref peers compare by char_code,
+ * float/str peers compare by the string numeric value sq_num. */
+static inline double strada_sq_num_val(StradaValue *peer, int64_t char_code, double sq_num) {
+    StradaValue *fetched = NULL;
+    StradaValue *p = peer;
+    if (p && !STRADA_IS_TAGGED_INT(p) && p->meta && p->meta->is_tied && p->meta->tied_obj
+        && p->type != STRADA_HASH && p->type != STRADA_ARRAY) {
+        fetched = strada_tied_scalar_fetch(p);
+        p = fetched;
+    }
+    double res;
+    if (!p || STRADA_IS_TAGGED_INT(p) || p->type == STRADA_INT || p->type == STRADA_UNDEF) {
+        res = (double)char_code;
+    } else if (p->type == STRADA_NUM || p->type == STRADA_STR) {
+        res = sq_num;
+    } else {
+        res = (double)char_code;
+    }
+    if (fetched) strada_decref(fetched);
+    return res;
+}
+
+/* Switch/case matcher for single-quoted char literals ('A', '\n', etc.):
+ * unwraps tied scalar once; int/tagged-int compares against char_code,
+ * undef compares as "", and other values compare byte contents against lit. */
+static inline int strada_case_eq_char(StradaValue *sw, const char *lit, size_t lit_len, int64_t char_code) {
+    if (!lit) { lit = ""; lit_len = 0; }
+    StradaValue *fetched = NULL;
+    StradaValue *s = sw;
+    if (s && !STRADA_IS_TAGGED_INT(s) && s->meta && s->meta->is_tied && s->meta->tied_obj
+        && s->type != STRADA_HASH && s->type != STRADA_ARRAY) {
+        fetched = strada_tied_scalar_fetch(s);
+        s = fetched;
+        if (fetched) strada_cleanup_push(fetched);
+    }
+    int eq = 0;
+    if (!s || (!STRADA_IS_TAGGED_INT(s) && s->type == STRADA_UNDEF)) {
+        eq = (lit_len == 0);
+    } else if (STRADA_IS_TAGGED_INT(s)) {
+        eq = (STRADA_TAGGED_INT_VAL(s) == char_code);
+    } else if (s->type == STRADA_INT) {
+        eq = (s->value.iv == char_code);
+    } else if (!s->meta && s->type == STRADA_STR) {
+        const char *pv = s->value.pv ? s->value.pv : "";
+        size_t slen = STRADA_STR_BYTELEN(s);
+        if (slen == 0 && pv[0] != '\0') slen = strlen(pv);
+        eq = (slen == lit_len && memcmp(pv, lit, lit_len) == 0);
+    } else {
+        StradaValue *sv = strada_to_str_sv(s);
+        const char *pv = (sv && !STRADA_IS_TAGGED_INT(sv) && sv->value.pv) ? sv->value.pv : "";
+        size_t slen = 0;
+        if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->value.pv) {
+            slen = STRADA_STR_BYTELEN(sv);
+            if (slen == 0 && pv[0] != '\0') slen = strlen(pv);
+        }
+        eq = (slen == lit_len && memcmp(pv, lit, lit_len) == 0);
+        strada_decref(sv);
+    }
+    if (fetched) strada_cleanup_pop_decref(fetched);
+    return eq;
+}
 
 
 /* ---- Event loop support (Async::Loop): epoll/eventfd primitives,

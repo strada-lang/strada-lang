@@ -1,0 +1,122 @@
+# Cycle 6 Valgrind leak regression test for tree-walk & bytecode --vm interpreter
+
+package R6VMTieHash;
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "R6VMTieHash");
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $d = $self->{"d"};
+    if (!exists($d->{$k})) { return undef; }
+    my scalar $old = $d->{$k};
+    delete($d->{$k});
+    return "del_" . $old;
+}
+
+package R6VMTieArr;
+func TIEARRAY(scalar ...@args) scalar {
+    my hash %self = ("a" => ["x0", "x1", "x2"]);
+    return bless(\%self, "R6VMTieArr");
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $self, int $n) void { }
+func DELETE(scalar $self, int $i) scalar {
+    my scalar $a = $self->{"a"};
+    my scalar $old = $a->[$i];
+    $a->[$i] = undef;
+    return "adel_" . $old;
+}
+
+package R6VMOverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6VMOverBase");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return "B_" . ($self->{"v"} + $other); }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Base_" . $self->{"v"}; }
+use overload "+" => "add_op", '""' => "to_str";
+
+package R6VMOverChild;
+extends R6VMOverBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R6VMOverChild");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar { return "C_" . ($self->{"v"} + $other); }
+func to_str(scalar $self, scalar $other, int $rev) str { return "Child_" . $self->{"v"}; }
+
+package main;
+
+our str $g_r6vm = "outer";
+our int $g_r6vm_n = 10;
+
+func vm_try_ret(int $i) str {
+    $g_r6vm = "outer";
+    try {
+        local $g_r6vm = "try_" . $i;
+        return $g_r6vm;
+    } finally {
+        if ($g_r6vm ne "outer") { return "ERR_FIN"; }
+    }
+    return "ERR";
+}
+
+func run_iter(int $i) int {
+    my hash %th = ();
+    tie(%th, "R6VMTieHash");
+    my str $lp = "M" x 320;
+    $th{$lp . $i} = "v_" . $i;
+    my scalar $d = delete($th{$lp . $i});
+    if (("" . $d) ne ("del_v_" . $i)) { return 1; }
+
+    my array @ta = ();
+    tie(@ta, "R6VMTieArr");
+    my scalar $ad = delete($ta[1]);
+    if (("" . $ad) ne "adel_x1") { return 2; }
+
+    my scalar $gr = \$g_r6vm;
+    {
+        local $g_r6vm = "l_" . $i;
+        $$gr = "l2_" . $i;
+    }
+    if ($g_r6vm ne "outer") { return 3; }
+
+    my scalar $nr = \$g_r6vm_n;
+    my int $a = $$nr++;
+    my int $b = ++$$nr;
+    my int $c = $$nr--;
+    my int $e = --$$nr;
+    if ($a != 10 || $b != 12 || $c != 12 || $e != 10) { return 4; }
+
+    my scalar $oc = R6VMOverChild::new($i);
+    if (("" . ($oc + 3)) ne ("C_" . ($i + 3)) || ("" . $oc) ne ("Child_" . $i)) { return 5; }
+
+    if (vm_try_ret($i) ne ("try_" . $i) || $g_r6vm ne "outer") { return 6; }
+
+    my array @sp = (1, 2, 3, 4);
+    my array @sr = splice(@sp, 2);
+    if (size(@sp) != 2 || size(@sr) != 2) { return 7; }
+
+    my str $su = "café_" . $i;
+    utf8::decode($su);
+    if (substr($su, 2) ne ("fé_" . $i)) { return 8; }
+
+    return 0;
+}
+
+func main() int {
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        my int $rc = run_iter($i);
+        if ($rc != 0) {
+            say("FAIL rc=" . $rc);
+            return $rc;
+        }
+    }
+    say("R6_VM_LEAKS_OK");
+    return 0;
+}

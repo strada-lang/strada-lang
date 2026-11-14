@@ -1,0 +1,92 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # 1. Eval::eval_string_vm Cycle 6 parity checks
+    my str $vm_out = "" . Strada::Interpreter::eval_string_vm('
+        package R6EvalBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6EvalBase"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other; }
+        use overload "+" => "add_op";
+        package R6EvalChild;
+        extends R6EvalBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6EvalChild"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other + 50; }
+        package main;
+        our str $ge_try = "outer";
+        my str $fin = "";
+        try {
+            local $ge_try = "inner";
+        } finally {
+            $fin = $ge_try;
+        }
+        my str $sa = "abcdef";
+        my str $su = "café_xyz";
+        utf8::decode($su);
+        my array @sp = (1, 2, 3, 4);
+        my array @sr = splice(@sp, 2);
+        our int $ge_n = 7;
+        my scalar $gr = \$ge_n;
+        $$gr = 9;
+        my scalar $oc = R6EvalChild::new(5);
+        my str $sq = "\\n";
+        substr($sa, 2) . "|" . substr($su, 2) . "|" . join(",", @sp) . ":" . join(",", @sr) . "|" . $fin . "|" . $ge_n . "|" . ($oc + 4) . "|" . (\'a\' <=> \'b\');
+    ');
+    check($vm_out eq "cdef|fé_xyz|1,2:3,4|outer|9|59|-1", "R6 eval_string_vm got=" . $vm_out);
+
+    # Also test single-quoted '\n' literal inside VM eval string and scalar ref over our
+    my str $vm_sq = "" . Strada::Interpreter::eval_string_vm('my str $q = \'\\n\'; length($q) . ":" . substr($q, 0, 1)');
+    check($vm_sq eq "2:\\", "R6 eval_string_vm single-quoted \\n got=" . $vm_sq);
+
+    Strada::Interpreter::reset();
+
+    # 2. Strada::JIT::eval: return EXPR, OOP class definition & reset
+    Strada::JIT::init();
+
+    my scalar $r1 = Strada::JIT::eval('return 10 + 32;');
+    check(($r1 + 0) == 42, "R6 JIT return EXPR;");
+
+    Strada::JIT::eval('func r6_mul(int $x) int { return $x * 3; }');
+    my scalar $r2 = Strada::JIT::eval('return r6_mul(7);');
+    check(($r2 + 0) == 21, "R6 JIT function call with return;");
+
+    Strada::JIT::eval('
+        package R6JitBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6JitBase"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other; }
+        use overload "+" => "add_op";
+    ');
+    Strada::JIT::eval('
+        package R6JitChild;
+        extends R6JitBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "R6JitChild"); }
+        func add_op(scalar $self, scalar $other, int $rev) scalar { return $self->{"v"} + $other + 200; }
+    ');
+    my scalar $r3 = Strada::JIT::eval('package main; my scalar $c = R6JitChild::new(4); return $c + 6;');
+    check(($r3 + 0) == 210, "R6 JIT inherited overload override");
+
+    Strada::JIT::reset();
+
+    # Re-init after reset to confirm clean reset
+    Strada::JIT::init();
+    my scalar $r4 = Strada::JIT::eval('return 11 + 22;');
+    check(($r4 + 0) == 33, "R6 JIT re-init after reset");
+    Strada::JIT::reset();
+
+    if ($g_fail > 0) {
+        say("R6_EVAL_JIT_FAIL: " . $g_fail);
+        return 1;
+    }
+    say("R6_EVAL_JIT_OK");
+    return 0;
+}

@@ -1224,6 +1224,8 @@ func main() int {
                 my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . $probe_ldirs . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
                 if (core::system($probe) == 0) {
                     @link_flags = (@link_flags, "-l" . $lib);
+                } elsif ($lib eq "crypt" && core::system("echo 'char *crypt(const char *, const char *); int main(void){char *(*f)(const char*,const char*) = crypt; return !f;}' | " . join(" ", map { sq($_) } @CC) . " -x c - -o /dev/null 2>/dev/null") == 0) {
+                    # crypt() is provided directly by libc (e.g. macOS / BSD)
                 } else {
                     say(STDERR, "Warning: skipping -l" . $lib . " (declared via link_lib by a used module, but not installed)");
                 }

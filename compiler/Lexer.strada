@@ -2161,14 +2161,8 @@ func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
             if ($escaped == '/') {
                 # Escaped slash - just add the slash
                 sb_append($sb, "/");
-            } elsif ($escaped == 'n') {
-                sb_append($sb, "\n");
-            } elsif ($escaped == 't') {
-                sb_append($sb, "\t");
-            } elsif ($escaped == 'r') {
-                sb_append($sb, "\r");
             } else {
-                # Keep the backslash and next byte for regex escapes (e.g., \d, \w, \s, \\)
+                # Keep backslash for regex escapes (including \n, \t, \r so /x ignores literal whitespace only)
                 sb_append($sb, "\\");
                 sb_append($sb, substr_bytes($source, $lexer->{"pos"}, 1));
             }
@@ -2231,14 +2225,8 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
             my int $escaped = lex_current_code($lexer);
             if ($escaped == '/') {
                 sb_append($pattern_sb, "/");
-            } elsif ($escaped == 'n') {
-                sb_append($pattern_sb, "\n");
-            } elsif ($escaped == 't') {
-                sb_append($pattern_sb, "\t");
-            } elsif ($escaped == 'r') {
-                sb_append($pattern_sb, "\r");
             } else {
-                # Keep other escapes as-is for regex engine (e.g., \d, \w, \s, \\)
+                # Keep backslash for regex escapes (including \n, \t, \r so /x ignores literal whitespace only)
                 sb_append($pattern_sb, "\\");
                 sb_append($pattern_sb, substr_bytes($source, $lexer->{"pos"}, 1));
             }
