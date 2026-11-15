@@ -1,0 +1,94 @@
+use lib "lib";
+use JSON;
+use compress;
+use DBI;
+
+package R13StrOv;
+use overload '""' => "to_s";
+func new(str $v) scalar { return bless({"v" => $v}, "R13StrOv"); }
+func to_s(scalar $self) str { return $self->{"v"}; }
+
+package R13TieStr;
+func TIESCALAR(str $cls, str $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R13TieHash;
+func TIEHASH(str $cls) scalar {
+    return bless({"data" => {"k1" => "v1", "k2" => R13StrOv::new("ov2")}, "order" => ["k2", "k1"], "pos" => 0}, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"data"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"data"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"data"}, $k); }
+func FIRSTKEY(scalar $self) scalar {
+    $self->{"pos"} = 1;
+    return $self->{"order"}->[0];
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my int $p = $self->{"pos"};
+    if ($p >= size($self->{"order"})) { return undef; }
+    $self->{"pos"} = $p + 1;
+    return $self->{"order"}->[$p];
+}
+
+package main;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # R13-LIB4: JSON blessed string overload + tied scalar + tied hash + decode error
+    my str $long_dummy = "A" x 200;
+    my scalar $bs_short = bless($long_dummy, "R13Unrelated");
+    my scalar $bo = R13StrOv::new("hello_ov");
+    my scalar $bo_u8 = R13StrOv::new("café");
+    my scalar $ts = "";
+    tie($ts, "R13TieStr", "tied_s");
+    my hash %th = ();
+    tie(%th, "R13TieHash");
+
+    my str $j1 = JSON::encode({"o" => $bo, "t" => $ts, "u" => $bo_u8, "th" => \%th});
+    my scalar $d1 = JSON::decode($j1);
+    check($d1->{"o"} eq "hello_ov", "JSON encode blessed overload value");
+    check($d1->{"t"} eq "tied_s", "JSON encode tied scalar value");
+    check($d1->{"u"} eq "café", "JSON encode blessed overload utf8");
+    check($d1->{"th"}->{"k1"} eq "v1" && $d1->{"th"}->{"k2"} eq "ov2", "JSON encode tied hash");
+
+    my scalar $bad_j = JSON::decode("{broken_json");
+    check(!defined($bad_j), "JSON decode invalid returns undef");
+
+    # R13-LIB3: compress blessed overload + tied scalar (gzip/gunzip, deflate/inflate)
+    my str $big_ov_val = "CompressPayload_" . ("Z" x 120);
+    my scalar $ov_p = R13StrOv::new($big_ov_val);
+    my str $gz = compress::gzip($ov_p);
+    my scalar $ov_gz = R13StrOv::new($gz);
+    my str $ungz = compress::gunzip($ov_gz);
+    check($ungz eq $big_ov_val, "compress gzip/gunzip blessed overload");
+
+    my str $df = compress::deflate($ts);
+    my scalar $ts_df = "";
+    tie($ts_df, "R13TieStr", $df);
+    my str $inf = compress::inflate($ts_df);
+    check($inf eq "tied_s", "compress deflate/inflate tied scalar");
+    untie($ts);
+    untie($ts_df);
+
+    # R13-LIB2: DBI quote and quote_identifier on blessed overload & tied scalar
+    my scalar $ts_sql = "";
+    tie($ts_sql, "R13TieStr", "O'Reilly");
+    my str $q1 = DBI::quote(undef, R13StrOv::new("it's"));
+    my str $q2 = DBI::quote(undef, $ts_sql);
+    my str $qi1 = DBI::quote_identifier(undef, R13StrOv::new("my_col"));
+    my str $qi2 = DBI::quote_identifier(undef, $ts_sql);
+    check($q1 eq "'it''s'", "DBI::quote blessed overload: " . $q1);
+    check($q2 eq "'O''Reilly'", "DBI::quote tied scalar: " . $q2);
+    check($qi1 eq "\"my_col\"", "DBI::quote_identifier blessed overload: " . $qi1);
+    check($qi2 eq "\"O'Reilly\"", "DBI::quote_identifier tied scalar: " . $qi2);
+    untie($ts_sql);
+
+    say("AUDIT_R13_STDLIB_TOOLS_OK");
+    return 0;
+}

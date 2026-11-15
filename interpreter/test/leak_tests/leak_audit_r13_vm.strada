@@ -1,0 +1,75 @@
+# R13-VM1..9 leak tests under valgrind (--tree-walk & --vm)
+
+package R13VmLkCycA;
+extends R13VmLkCycB;
+package R13VmLkCycB;
+extends R13VmLkCycA;
+
+package R13VmLkDBase;
+func m(scalar $s) str { return "base"; }
+around "m" func(scalar $orig, scalar $s) str { return "[" . $orig->($s) . "]"; }
+package R13VmLkDL; extends R13VmLkDBase;
+package R13VmLkDR; extends R13VmLkDBase;
+package R13VmLkDC; extends R13VmLkDL, R13VmLkDR;
+
+package R13VmLkArr;
+use overload '""' => "as_str", '+' => "add_op", 'bool' => "as_bool";
+func new(int $x) scalar {
+    my array @a = ($x, $x + 1);
+    return bless(\@a, "R13VmLkArr");
+}
+func as_str(scalar $s) str { return "A:" . $s->[0]; }
+func add_op(scalar $s, scalar $o, int $rev) scalar { return R13VmLkArr::new($s->[0] + $o); }
+func as_bool(scalar $s) int { return $s->[0] != 0 ? 1 : 0; }
+func val(scalar $s) int { return $s->[0]; }
+
+package R13VmLkTieArr;
+func TIESCALAR(str $cls, str $v) scalar {
+    my array @a = ($v);
+    return bless(\@a, $cls);
+}
+func FETCH(scalar $s) scalar { return $s->[0]; }
+func STORE(scalar $s, scalar $v) void { $s->[0] = $v; }
+
+package main;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 15) {
+        my scalar $ca = bless({}, "R13VmLkCycA");
+        $ca->isa("Missing");
+        my scalar $dc = bless({}, "R13VmLkDC");
+        $dc->m();
+
+        my str $st = "hello\n";
+        my scalar $sr = \$st;
+        chomp($$sr);
+        chop($$sr);
+
+        my scalar $ao = R13VmLkArr::new($i + 1);
+        my scalar $sum = $ao + 5;
+        my str $sao = "" . $sum;
+        if ($ao) { $ao->val(); }
+        my scalar $so = bless(\$i, "R13VmLkArr");
+        blessed($so);
+        my scalar $fo = bless(func() int { return 1; }, "R13VmLkArr");
+        $fo->();
+        try { die($ao); } catch (R13VmLkArr $e) { $e->val(); }
+
+        my scalar $ts = "";
+        tie($ts, "R13VmLkTieArr", "x");
+        $ts = "y";
+        my str $tv = $ts;
+        untie($ts);
+
+        my str $r1 = replace("a\x00b\x00é", "\x00", ":");
+        my str $r2 = replace_all("a\x00b\x00c", "\x00", ":");
+        my str $q1 = core::quotemeta("a.b[é]?");
+        my array @p = ("a/", "/b", "c/");
+        my str $j1 = core::path_join(\@p);
+
+        $i = $i + 1;
+    }
+    say("R13_VM_LEAKS_OK");
+    return 0;
+}

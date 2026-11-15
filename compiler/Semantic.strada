@@ -2544,8 +2544,11 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 my int $var_type = $var->{"var_type"};
 
                 # Check for redeclaration in current scope
-                if (exists($scope_vars->{$name})) {
+                if (exists($scope_vars->{$name}) || exists($scope_vars->{$sigil . ":" . $name})) {
                     my scalar $prev_info = $scope_vars->{$name};
+                    if (!defined($prev_info)) {
+                        $prev_info = $scope_vars->{$sigil . ":" . $name};
+                    }
                     my int $prev_line = $prev_info->{"line"};
                     semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
                 }

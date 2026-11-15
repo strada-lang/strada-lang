@@ -1,0 +1,142 @@
+package R13Num;
+use overload '+' => "add", '-' => "sub_op", 'neg' => "neg_op", '""' => "as_str";
+func new(int $v) scalar { return bless({"v" => $v}, "R13Num"); }
+func val(scalar $self) int { return $self->{"v"}; }
+func add(scalar $self, scalar $other, int $rev) scalar {
+    my int $o = ref($other) eq "R13Num" ? $other->{"v"} : ($other + 0);
+    return R13Num::new($self->{"v"} + $o);
+}
+func sub_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $o = ref($other) eq "R13Num" ? $other->{"v"} : ($other + 0);
+    return R13Num::new($rev ? ($o - $self->{"v"}) : ($self->{"v"} - $o));
+}
+func neg_op(scalar $self) scalar {
+    return R13Num::new(0 - $self->{"v"});
+}
+func as_str(scalar $self) str {
+    return "" . $self->{"v"};
+}
+
+package R13ArrBox;
+func new(int $a, int $b) scalar {
+    my array @items = ($a, $b);
+    return bless(\@items, "R13ArrBox");
+}
+func sum(scalar $self) int {
+    return $self->[0] + $self->[1];
+}
+
+package main;
+
+func test_c1_c2() int {
+    # R13-C1/C2: multi-line string/comment/q{} ending before code or __C__ on same line
+    my str $ml = "line1
+line2"; my str $mq = q{pq1
+pq2}; my int $a1 = 11;
+    /* multi-line
+       comment */ my int $a2 = 22;
+    if ($a1 != 11 || $a2 != 22 || $ml ne "line1\nline2" || $mq ne "pq1\npq2") {
+        return 10;
+    }
+
+    # R13-C2: __C__ block closing indentation/length handling & closing ml string -> __C__
+    my int $cx = 0;
+    my str $mc = "p1
+p2"; __C__ {
+        strada_decref(cx);
+        cx = strada_new_int(33);
+    } my int $cy = 7;
+    if ($cx != 33 || $cy != 7 || $mc ne "p1\np2") { return 11; }
+    return 0;
+}
+
+func test_c4_c5() int {
+    # R13-C4: could_be_blessed through do{}, field access, map/grep, unary, assign, chained +
+    my scalar $wrap = {"obj" => R13Num::new(5)};
+    my scalar $r1 = (do { R13Num::new(2); }) + R13Num::new(3);
+    my scalar $r2 = $wrap->{"obj"} + 4;
+    my scalar $r3 = (-R13Num::new(4)) + R13Num::new(10);
+    my scalar $tmp = undef;
+    my scalar $r4 = ($tmp = R13Num::new(7)) + R13Num::new(8);
+    my array @mapped = map { R13Num::new($_); } (3, 4);
+    my scalar $r5 = $mapped[0] + $mapped[1];
+    my scalar $r6 = (R13Num::new(1) + R13Num::new(2)) + R13Num::new(3);
+    if ($r1->val() != 5 || $r2->val() != 9 || $r3->val() != 6 || $r4->val() != 15 || $r5->val() != 7 || $r6->val() != 6) {
+        return 20;
+    }
+
+    # R13-C5: hash compound assignment where RHS clears/reassigns container variable
+    my hash %base_h = ("k" => "left");
+    my scalar $h = \%base_h;
+    $h->{"k"} .= do { $h = {"k" => "replaced"}; "_right"; };
+    if ($base_h{"k"} ne "left_right" || $h->{"k"} ne "replaced") {
+        return 21;
+    }
+    my hash %nh = ("n" => 10);
+    my scalar $href = \%nh;
+    $href->{"n"} += do { $href = {}; 5; };
+    if ($nh{"n"} != 15) {
+        return 22;
+    }
+    return 0;
+}
+
+func test_c6_c7_c8_c9() int {
+    # R13-C6: split with literal NUL byte delimiter
+    my str $bin = "x\x00y\x00z";
+    my array @sp1 = split("\0", $bin);
+    if (scalar(@sp1) != 3 || $sp1[0] ne "x" || $sp1[1] ne "y" || $sp1[2] ne "z") {
+        return 30;
+    }
+    my str $bin2 = "a\x00\x00b\x00c";
+    my array @sp2 = split("\0\0", $bin2);
+    if (scalar(@sp2) != 2 || $sp2[0] ne "a" || $sp2[1] ne "b\x00c") {
+        return 31;
+    }
+
+    # R13-C7: join() with 0 args and ...@spread
+    if (join() ne "") { return 32; }
+    my array @a = ("one", "two");
+    my array @b = ("three", "four");
+    if (join("-", ...@a, ...@b) ne "one-two-three-four") { return 33; }
+    if (join(",", "head", ...["m1", "m2"], "tail") ne "head,m1,m2,tail") { return 34; }
+
+    # R13-C8: sprintf() / printf() with 0 args
+    if (sprintf() ne "") { return 35; }
+    printf();
+
+    # R13-C9: $0 = ... and $0 .= ... in value & void contexts
+    my str $orig0 = $0;
+    $0 = "r13_proc";
+    $0 .= "_a";
+    my str $v1 = ($0 = "r13_val");
+    my str $v2 = ($0 .= "_b");
+    if ($v1 ne "r13_val" || $v2 ne "r13_val_b" || $0 ne "r13_val_b") {
+        $0 = $orig0;
+        return 36;
+    }
+    $0 = $orig0;
+    return 0;
+}
+
+func test_rt_blessed_arr() int {
+    # Blessed array + isa/blessed/reftype/ref
+    my scalar $ab = R13ArrBox::new(10, 20);
+    if ($ab->sum() != 30 || blessed($ab) ne "R13ArrBox" || ref($ab) ne "R13ArrBox" || reftype($ab) ne "ARRAY" || !$ab->isa("R13ArrBox")) {
+        return 40;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $r1 = test_c1_c2();
+    if ($r1 != 0) { say("FAIL c1_c2=" . $r1); return 1; }
+    my int $r2 = test_c4_c5();
+    if ($r2 != 0) { say("FAIL c4_c5=" . $r2); return 1; }
+    my int $r3 = test_c6_c7_c8_c9();
+    if ($r3 != 0) { say("FAIL c6_9=" . $r3); return 1; }
+    my int $r4 = test_rt_blessed_arr();
+    if ($r4 != 0) { say("FAIL rt_arr=" . $r4); return 1; }
+    say("AUDIT_R13_COMPILER_RUNTIME_OK");
+    return 0;
+}

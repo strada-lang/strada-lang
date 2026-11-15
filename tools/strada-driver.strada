@@ -1123,6 +1123,7 @@ func main() int {
                             core::spew($stamp_path, $stamp);
                         }
                     }
+                    core::unlink($sdir . "/shards.txt");
                     $ACTIVE_SHARD_DIR = $sdir;
                     @sc = (@sc, "--split-dir", $sdir);
                 }

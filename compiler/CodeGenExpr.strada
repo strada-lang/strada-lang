@@ -2077,13 +2077,20 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             # $0 assignment: also call setprocname
             if ($target_type == NODE_VARIABLE() && $target->{"name"} eq "__program_name") {
                 my scalar $pn_rhs = $expr->{"value"};
+                my int $pn_is_void = 0;
+                if (($expr->{"is_void_stmt"} + 0) == 1) { $pn_is_void = 1; }
                 emit($cg, "({ StradaValue *__pn_v = ");
                 gen_expression($cg, $pn_rhs);
                 emit($cg, "; StradaValue *__pn_old = __program_name; ");
                 if (needs_temp_cleanup($cg, $pn_rhs) == 0) {
                     emit($cg, "strada_incref(__pn_v); ");
                 }
-                emit($cg, "__program_name = __pn_v; if (__pn_old) strada_decref(__pn_old); strada_setprocname(__pn_v); __pn_v; })");
+                emit($cg, "__program_name = __pn_v; if (__pn_old) strada_decref(__pn_old); strada_decref(strada_setprocname(__pn_v)); ");
+                if ($pn_is_void == 1) {
+                    emit($cg, "(StradaValue*)NULL; })");
+                } else {
+                    emit($cg, "strada_incref(__pn_v); __pn_v; })");
+                }
                 return;
             }
 
@@ -2258,11 +2265,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
             }
             my int $needs_incref = 0;
-            # Variable assignment shares reference (except `our` globals, which
-            # already return an owned ref from strada_global_get_cstr).
+            # Variable assignment shares reference (except `our` globals and $__program_name ($0),
+            # which already return an owned ref from strada_global_get_cstr / strada_getprocname).
             if ($rhs_type == NODE_VARIABLE()) {
                 my str $rhs_vc = escape_c_keyword($rhs->{"name"});
-                if (length("" . $cg->{"our_vars"}->{$rhs_vc}) == 0) {
+                if ($rhs->{"name"} ne "__program_name" && length("" . $cg->{"our_vars"}->{$rhs_vc}) == 0) {
                     $needs_incref = 1;
                 }
             }
@@ -2841,7 +2848,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "__tcr; }) : (");
             }
             # Check for overloaded compound assignment (Perl: $a += $b uses + overload)
-            if ($cg->{"has_overloads"} == 1 && $target_type == NODE_VARIABLE() && expr_is_int_typed($cg, $target) == 0 && could_be_blessed($target) == 1
+            if ($cg->{"has_overloads"} == 1 && $target_type == NODE_VARIABLE() && $target->{"name"} ne "__program_name" && expr_is_int_typed($cg, $target) == 0 && could_be_blessed($target) == 1
                 && ($op eq "+=" || $op eq "-=" || $op eq "*=" || $op eq "/=" || $op eq ".=")) {
                 my str $base_op = "+";
                 if ($op eq "-=") {
@@ -3250,6 +3257,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             } elsif ($op eq ".=") {
             my scalar $rhs_val = $expr->{"value"};
             if ($target_type == NODE_VARIABLE() && $target->{"name"} eq "__program_name") {
+                my int $pn_is_void = 0;
+                if (($expr->{"is_void_stmt"} + 0) == 1) { $pn_is_void = 1; }
                 my int $pn_dot_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs_val) == 1 && expr_is_always_tagged_int($cg, $rhs_val) == 0;
                 my int $pn_dot_push = cleanup_push_useful($cg);
                 emit($cg, "({ StradaValue *__pn_l = strada_getprocname(); ");
@@ -3265,7 +3274,12 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
                 if ($pn_dot_push == 1) { emit($cg, "strada_cleanup_pop_decref(__pn_l); "); }
                 else { emit($cg, "strada_decref(__pn_l); "); }
-                emit($cg, "strada_setprocname(__pn_res); __pn_res; })");
+                emit($cg, "StradaValue *__pn_old = __program_name; __program_name = __pn_res; if (__pn_old) strada_decref(__pn_old); strada_decref(strada_setprocname(__pn_res)); ");
+                if ($pn_is_void == 1) {
+                    emit($cg, "(StradaValue*)NULL; })");
+                } else {
+                    emit($cg, "strada_incref(__pn_res); __pn_res; })");
+                }
             # Fast path: .= literal or pure non-aliasing RHS -> direct in-place append
             } elsif ($target_type == NODE_VARIABLE() && $rhs_val->{"type"} == NODE_STR_LITERAL()) {
                 my str $lit_val = $rhs_val->{"value"};

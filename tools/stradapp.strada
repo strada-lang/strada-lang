@@ -1156,7 +1156,7 @@ func pp_detect_heredoc_tags(str $line) scalar {
 
 func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref,
                           scalar $q_open_ref, scalar $q_close_ref, scalar $q_depth_ref,
-                          scalar $q_parts_ref, scalar $q_is_rx_ref) void {
+                          scalar $q_parts_ref, scalar $q_is_rx_ref, int $stop_on_clear) int {
     my int $len = length($line);
     my int $i = 0;
     my int $can_regex = 1;
@@ -1166,6 +1166,7 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             if ($chc eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
                 $$cmt_ref = 0;
                 $i = $i + 2;
+                if ($stop_on_clear == 1) { return $i; }
                 next;
             }
             $i = $i + 1;
@@ -1174,14 +1175,24 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
         if ($$dq_ref == 1) {
             my str $chd = substr($line, $i, 1);
             if ($chd eq "\\") { $i = $i + 2; next; }
-            if ($chd eq "\"") { $$dq_ref = 0; $can_regex = 0; }
+            if ($chd eq "\"") {
+                $$dq_ref = 0; $can_regex = 0;
+                $i = $i + 1;
+                if ($stop_on_clear == 1) { return $i; }
+                next;
+            }
             $i = $i + 1;
             next;
         }
         if ($$sq_ref == 1) {
             my str $chs = substr($line, $i, 1);
             if ($chs eq "\\") { $i = $i + 2; next; }
-            if ($chs eq "'") { $$sq_ref = 0; $can_regex = 0; }
+            if ($chs eq "'") {
+                $$sq_ref = 0; $can_regex = 0;
+                $i = $i + 1;
+                if ($stop_on_clear == 1) { return $i; }
+                next;
+            }
             $i = $i + 1;
             next;
         }
@@ -1190,6 +1201,7 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             if ($$q_depth_ref == 0 && $$q_parts_ref == 0) {
                 $$q_is_rx_ref = 0;
                 $can_regex = 0;
+                if ($stop_on_clear == 1) { return $i; }
             }
             next;
         }
@@ -1253,6 +1265,7 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
         }
         $i = $i + 1;
     }
+    return -1;
 }
 
 func preprocess(str $filename) str {
@@ -1331,9 +1344,19 @@ func preprocess(str $filename) str {
             $i++;
             next;
         }
+        my str $c_prefix = "";
         if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0 || $ml_q_parts > 0) {
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx);
-            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && $ml_q_depth == 0 && $ml_q_parts == 0 && size(@pending_heredocs) > 0) {
+            my int $ml_end = pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx, 1);
+            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0 || $ml_q_parts > 0 || $ml_end < 0) {
+                if ($active) {
+                    $output = $output . $line . "\n";
+                } else {
+                    $output = $output . "\n";
+                }
+                $i++;
+                next;
+            }
+            if (size(@pending_heredocs) > 0) {
                 my int $pi = 0;
                 while ($pi < size(@pending_heredocs)) {
                     push(@heredoc_tags, $pending_heredocs[$pi]);
@@ -1341,15 +1364,11 @@ func preprocess(str $filename) str {
                 }
                 @pending_heredocs = ();
             }
-            if ($active) {
-                $output = $output . $line . "\n";
-            } else {
-                $output = $output . "\n";
-            }
-            $i++;
-            next;
+            $c_prefix = substr($line, 0, $ml_end);
+            $line = substr($line, $ml_end);
+            $trimmed = trim($line);
         }
-        if ($in_c_block == 0 && pp_is_pod_start($line) == 1) {
+        if ($in_c_block == 0 && length($c_prefix) == 0 && pp_is_pod_start($line) == 1) {
             $in_pod = 1;
             if ($active) {
                 $output = $output . $line . "\n";
@@ -1360,7 +1379,6 @@ func preprocess(str $filename) str {
             next;
         }
 
-        my str $c_prefix = "";
         my int $same_line_done = 0;
         while ($same_line_done == 0) {
             $same_line_done = 1;
@@ -1492,13 +1510,16 @@ func preprocess(str $filename) str {
                 last;
             }
 
-            if (substr($trimmed, 0, 1) eq "#" && length($c_prefix) == 0) {
+            if (substr($trimmed, 0, 1) eq "#") {
             if ($i == 0 && starts_with($trimmed, "#!")) {
                 # Shebang (#!/usr/bin/env strada) on line 1: pass through untouched.
                 if ($active) {
-                    $output = $output . $line . "\n";
+                    $output = $output . $c_prefix . $line . "\n";
                 }
             } else {
+                if (length($c_prefix) > 0 && $active) {
+                    $output = $output . $c_prefix . "\n";
+                }
                 my str $word = directive_word($trimmed);
                 my str $raw_rest = "";
                 if ($word ne "" && length($trimmed) > 1 + length($word)) {
@@ -1664,7 +1685,7 @@ func preprocess(str $filename) str {
             }
         } else {
             my scalar $hd_list = pp_detect_heredoc_tags($line);
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx);
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx, 0);
             if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0 || $ml_q_parts > 0) {
                 my int $hi = 0;
                 while ($hi < size($hd_list)) {

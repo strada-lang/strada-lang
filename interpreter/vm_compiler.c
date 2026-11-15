@@ -1304,6 +1304,39 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)v_slot);
         ctx->assign_depth--;
         return;
+    } else if (ttype == NI_DEREF_SCALAR) {
+        StradaValue *ref_node = ast_get(t, "ref");
+        if (!ref_node || STRADA_IS_TAGGED_INT(ref_node)) ref_node = ast_get(t, "target");
+        int d = ctx->assign_depth++;
+        char rbuf[32], vbuf[32];
+        snprintf(rbuf, sizeof(rbuf), "__cip_r%d", d);
+        snprintf(vbuf, sizeof(vbuf), "__cip_v%d", d);
+        int r_slot = ctx_add_local(ctx, rbuf, '$');
+        int v_slot = ctx_add_local(ctx, vbuf, '$');
+        compile_expr(ctx, ref_node);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+        vm_chunk_emit(ctx->chunk, OP_DEREF_SCALAR);
+        if (is_chop) {
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
+            vm_chunk_emit(ctx->chunk, 1);
+        } else {
+            vm_chunk_emit(ctx->chunk, OP_CHOMP);
+        }
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)v_slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)v_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_SREF);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)v_slot);
+        ctx->assign_depth--;
+        return;
     }
 
     compile_expr(ctx, arg0);
@@ -5179,7 +5212,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else {
             emit_default_scalar_init(ctx, ast_int(node, "var_type"));
         }
-        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit(ctx->chunk, (init && !STRADA_IS_TAGGED_INT(init)) ? OP_STORE_GLOBAL : OP_INIT_GLOBAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
         break;
     }
@@ -5258,7 +5291,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
-        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit(ctx->chunk, (init && !STRADA_IS_TAGGED_INT(init)) ? OP_STORE_GLOBAL : OP_INIT_GLOBAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
 
         /* Track for restore on scope exit / return */
@@ -5284,7 +5317,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit_i64(ctx->chunk, 0);
         }
         size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
-        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit(ctx->chunk, (init && !STRADA_IS_TAGGED_INT(init)) ? OP_STORE_GLOBAL : OP_INIT_GLOBAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
         break;
     }

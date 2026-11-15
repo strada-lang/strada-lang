@@ -1678,6 +1678,7 @@ int strada_regex_replace_capture(const char *str, const char *pattern, const cha
 int strada_regex_replace_capture_len(const char *str, size_t subject_length, int is_utf8, const char *pattern, const char *replacement, const char *flags, int global, char **result_out, size_t *out_len);
 StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv, StradaValue *repl_sv, const char *flags, int global);
 StradaArray* strada_string_split(const char *str, const char *delim);
+StradaArray* strada_string_split_n(const char *str, const char *delim, size_t delim_len);
 StradaArray* strada_regex_split(const char *str, const char *pattern);
 StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit);
 StradaArray* strada_regex_capture(const char *str, const char *pattern);

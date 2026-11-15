@@ -1308,6 +1308,9 @@ func interp_new() scalar {
     $interp{"has_tied_arrays"} = 0;
     $interp{"has_tied_scalars"} = 0;
     $interp{"has_pkg_ours"} = 0;
+    my hash %blessed_refs = ();
+    $interp{"blessed_refs"} = \%blessed_refs;
+    $interp{"has_blessed_refs"} = 0;
     # Builtin function lookup hash (O(1) instead of 88 string comparisons)
     init_builtins(\%interp);
     # Operator ID lookup hash (O(1) instead of 23+ string comparisons)
@@ -1726,18 +1729,81 @@ func interp_find_autoload(scalar $interp, str $pkg) scalar {
     return undef;
 }
 
-# Check if an object isa given class (walks inheritance)
-func interp_isa(scalar $interp, str $obj_class, str $target_class) int {
+func interp_blessed_ref_key(scalar $v) str {
+    my str $k = "";
+    __C__ {
+        StradaValue *sv = v;
+        void *ptr = (void *)sv;
+        if (sv && !STRADA_IS_TAGGED_INT(sv)) {
+            if (sv->type == STRADA_ARRAY) {
+                ptr = (void *)sv->value.av;
+            } else if (sv->type == STRADA_HASH) {
+                ptr = (void *)sv->value.hv;
+            } else if (sv->type == STRADA_REF && sv->value.rv && !STRADA_IS_TAGGED_INT(sv->value.rv)) {
+                StradaValue *inner = sv->value.rv;
+                if (inner->type == STRADA_ARRAY) ptr = (void *)inner->value.av;
+                else if (inner->type == STRADA_HASH) ptr = (void *)inner->value.hv;
+                else ptr = (void *)inner;
+            }
+        }
+        char kbuf[48];
+        snprintf(kbuf, sizeof(kbuf), "%p", ptr);
+        strada_decref(k);
+        k = strada_new_str(kbuf);
+    }
+    return $k;
+}
+
+func get_obj_class_in(scalar $interp, scalar $obj) str {
+    if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+        return $obj->{"__class__"};
+    }
+    if (defined($interp) && $interp->{"has_blessed_refs"} == 1 && length(ref($obj)) > 0) {
+        my str $bk = interp_blessed_ref_key($obj);
+        if (exists($interp->{"blessed_refs"}, $bk)) {
+            my scalar $entry = $interp->{"blessed_refs"}->{$bk};
+            if (defined($entry) && defined($entry->{"wref"})) {
+                return $entry->{"pkg"};
+            }
+            delete($interp->{"blessed_refs"}, $bk);
+        }
+    }
+    return "";
+}
+
+func interp_resolve_obj_pkg_in(scalar $interp, scalar $obj) str {
+    my str $pkg = get_obj_class_in($interp, $obj);
+    if (length($pkg) == 0) {
+        my str $ref_type = ref($obj);
+        if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
+            $pkg = $ref_type;
+        }
+    }
+    if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
+        $pkg = "" . $obj;
+    }
+    return $pkg;
+}
+
+# Check if an object isa given class (walks inheritance with cycle guard)
+func interp_isa_rec(scalar $interp, str $obj_class, str $target_class, scalar $visited) int {
     if ($obj_class eq $target_class) { return 1; }
+    if (exists($visited, $obj_class)) { return 0; }
+    $visited->{$obj_class} = 1;
     if (exists($interp->{"inherits"}, $obj_class)) {
         my scalar $parents = $interp->{"inherits"}->{$obj_class};
         my int $pi = 0;
         while ($pi < size($parents)) {
-            if (interp_isa($interp, $parents->[$pi], $target_class)) { return 1; }
+            if (interp_isa_rec($interp, $parents->[$pi], $target_class, $visited)) { return 1; }
             $pi = $pi + 1;
         }
     }
     return 0;
+}
+
+func interp_isa(scalar $interp, str $obj_class, str $target_class) int {
+    my hash %visited = ();
+    return interp_isa_rec($interp, $obj_class, $target_class, \%visited);
 }
 
 # Merge sort implementation for interpreter sort with custom comparator
@@ -1816,17 +1882,26 @@ func interp_merge(scalar $arr, int $left, int $mid, int $right, scalar $interp, 
     }
 }
 
-# Build linearized MRO (depth-first) for a class
-func interp_build_mro(scalar $interp, str $pkg, scalar $mro) void {
+# Build linearized MRO (depth-first, deduplicated with cycle guard) for a class
+func interp_build_mro_rec(scalar $interp, str $pkg, scalar $mro, scalar $seen) void {
     if (!exists($interp->{"inherits"}, $pkg)) { return; }
     my scalar $parents = $interp->{"inherits"}->{$pkg};
     my int $pi = 0;
     while ($pi < size($parents)) {
         my str $parent = $parents->[$pi];
-        push($mro, $parent);
-        interp_build_mro($interp, $parent, $mro);
+        if (!exists($seen, $parent)) {
+            $seen->{$parent} = 1;
+            push($mro, $parent);
+            interp_build_mro_rec($interp, $parent, $mro, $seen);
+        }
         $pi = $pi + 1;
     }
+}
+
+func interp_build_mro(scalar $interp, str $pkg, scalar $mro) void {
+    my hash %seen = ();
+    $seen{$pkg} = 1;
+    interp_build_mro_rec($interp, $pkg, $mro, \%seen);
 }
 
 # Load OOP features from a parsed program (called from Main)
@@ -1897,12 +1972,14 @@ func interp_load_oop(scalar $interp, scalar $program) void {
     my int $iki = 0;
     while ($iki < size($inh_keys)) {
         my str $cls = $inh_keys->[$iki];
-        if (!exists($interp->{"mro"}, $cls)) {
-            my array @mro = ();
-            interp_build_mro($interp, $cls, \@mro);
-            $interp->{"mro"}->{$cls} = \@mro;
-        }
+        my array @mro = ();
+        interp_build_mro($interp, $cls, \@mro);
+        $interp->{"mro"}->{$cls} = \@mro;
         $iki = $iki + 1;
+    }
+    if (size($inh_keys) > 0) {
+        my hash %new_mc = ();
+        $interp->{"method_cache"} = \%new_mc;
     }
     # Clear method cache when OOP structure changes
     my hash %new_mc = ();
@@ -2080,6 +2157,9 @@ func interp_run_main(scalar $interp, scalar $argv) int {
         }
     }
     if (!defined($func_info)) {
+        $func_info = interp_get_func($interp, "run");
+    }
+    if (!defined($func_info)) {
         die("Error: no main() function defined");
     }
     # Set @ARGV in global env
@@ -2202,7 +2282,7 @@ func interp_find_var_slot(scalar $interp, scalar $env, str $name) scalar {
 }
 
 func interp_tied_find_method(scalar $interp, scalar $tie_obj, str $method) scalar {
-    my str $tpkg = get_obj_class($tie_obj);
+    my str $tpkg = get_obj_class_in($interp, $tie_obj);
     if (length($tpkg) == 0) { return undef; }
     return interp_resolve_method($interp, $tpkg, $method);
 }
@@ -2547,9 +2627,9 @@ func interp_is_truthy(scalar $interp, scalar $val) int {
     if ($rt eq "") {
         return $val ? 1 : 0;
     }
-    if ($rt eq "HASH") {
-        if (exists($val, "__scalar_ref__")) { return 1; }
-        if (exists($val, "__class__")) {
+    if (($rt eq "HASH" && exists($val, "__class__")) || $interp->{"has_blessed_refs"} == 1) {
+        my str $ocls = get_obj_class_in($interp, $val);
+        if (length($ocls) > 0) {
             if ($interp->{"has_overloads"} == 1) {
                 my scalar $ovl = check_overload($interp, $val, "bool");
                 if (defined($ovl)) {
@@ -2559,6 +2639,9 @@ func interp_is_truthy(scalar $interp, scalar $val) int {
             }
             return 1;
         }
+    }
+    if ($rt eq "HASH") {
+        if (exists($val, "__scalar_ref__")) { return 1; }
         if (exists($val, "__tied__")) {
             my scalar $tobj = $val->{"__tied__"};
             my scalar $sc = interp_tied_find_method($interp, $tobj, "SCALAR");
@@ -2828,7 +2911,7 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
         # Check for tied hash STORE
         if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
             my scalar $tie_obj = $hash_val->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
+            my str $tie_pkg = get_obj_class_in($interp, $tie_obj);
             if (length($tie_pkg) > 0) {
                 my scalar $store_fn = interp_resolve_method($interp, $tie_pkg, "STORE");
                 if (defined($store_fn)) {
@@ -2850,7 +2933,7 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
         my str $key = eval_node($interp, $target->{"key"}, $env);
         if (ref($ref_val) eq "HASH" && exists($ref_val, "__tied__")) {
             my scalar $tie_obj = $ref_val->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
+            my str $tie_pkg = get_obj_class_in($interp, $tie_obj);
             if (length($tie_pkg) > 0) {
                 my scalar $store_fn = interp_resolve_method($interp, $tie_pkg, "STORE");
                 if (defined($store_fn)) {
@@ -3007,7 +3090,7 @@ func eval_lvalue_read(scalar $interp, scalar $prep, scalar $env) scalar {
         my str $k = $prep->{"key"};
         if (ref($h) eq "HASH" && exists($h, "__tied__")) {
             my scalar $tie_obj = $h->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
+            my str $tie_pkg = get_obj_class_in($interp, $tie_obj);
             if (length($tie_pkg) > 0) {
                 my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
                 if (defined($fetch_fn)) {
@@ -3050,7 +3133,7 @@ func eval_lvalue_write(scalar $interp, scalar $prep, scalar $value, scalar $env)
         my str $k = $prep->{"key"};
         if (ref($h) eq "HASH" && exists($h, "__tied__")) {
             my scalar $tie_obj = $h->{"__tied__"};
-            my str $tie_pkg = $tie_obj->{"__class__"};
+            my str $tie_pkg = get_obj_class_in($interp, $tie_obj);
             if (length($tie_pkg) > 0) {
                 my scalar $store_fn = interp_resolve_method($interp, $tie_pkg, "STORE");
                 if (defined($store_fn)) {
@@ -3109,7 +3192,7 @@ func interp_unwind_locals(scalar $interp, int $depth) void {
             my scalar $sh = $save->{"hash"};
             if (ref($sh) eq "HASH" && exists($sh, "__tied__")) {
                 my scalar $tobj = $sh->{"__tied__"};
-                my str $tpkg = get_obj_class($tobj);
+                my str $tpkg = get_obj_class_in($interp, $tobj);
                 if ($save->{"had_key"} == 1) {
                     if (length($tpkg) > 0) {
                         my scalar $store_fn = interp_resolve_method($interp, $tpkg, "STORE");
@@ -3256,7 +3339,7 @@ func interp_invoke_method_call(scalar $interp, scalar $obj, str $method, scalar 
     my int $meth_ctx = $interp->{"next_call_context"};
     $interp->{"next_call_context"} = 0;
     # Get object's class
-    my str $pkg = interp_resolve_obj_pkg($obj);
+    my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
     my int $argc = size($args_ref) - 1;
 
     # Handle isa() special method
@@ -3541,11 +3624,17 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
 
         my scalar $mods = $interp->{"method_modifiers"};
         my array @mod_classes = ($pkg);
+        my hash %seen_mc = ();
+        $seen_mc{$pkg} = 1;
         if (exists($interp->{"mro"}, $pkg)) {
             my scalar $mro_list = $interp->{"mro"}->{$pkg};
             my int $mri = 0;
             while ($mri < size($mro_list)) {
-                push(@mod_classes, $mro_list->[$mri]);
+                my str $mc_cls = $mro_list->[$mri];
+                if (!exists(%seen_mc, $mc_cls)) {
+                    $seen_mc{$mc_cls} = 1;
+                    push(@mod_classes, $mc_cls);
+                }
                 $mri = $mri + 1;
             }
         }
@@ -3663,7 +3752,7 @@ func check_overload_walk(scalar $interp, str $recv_pkg, str $cur_pkg, str $op, s
 }
 
 func check_overload(scalar $interp, scalar $val, str $op) scalar {
-    my str $pkg = get_obj_class($val);
+    my str $pkg = get_obj_class_in($interp, $val);
     if (length($pkg) == 0) { return undef; }
     if (exists($interp->{"overloads"}, $pkg)) {
         my scalar $pkg_ovl = $interp->{"overloads"}->{$pkg};
@@ -4004,7 +4093,7 @@ func interp_stringify_val(scalar $interp, scalar $v) scalar {
 func interp_hash_get(scalar $interp, scalar $hash_val, str $key) scalar {
     if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
         my scalar $tie_obj = $hash_val->{"__tied__"};
-        my str $tie_pkg = $tie_obj->{"__class__"};
+        my str $tie_pkg = get_obj_class_in($interp, $tie_obj);
         if (length($tie_pkg) > 0) {
             my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
             if (defined($fetch_fn)) {
@@ -4723,23 +4812,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return replace($args->[0], $args->[1], $args->[2], $args->[3]);
     }
     if ($bid == BI::REPLACE_ALL) {
-        my str $ra_str = $args->[0];
-        my str $ra_pat = $args->[1];
-        my str $ra_rep = $args->[2];
-        my str $ra_result = "";
-        __C__ {
-            char *s = strada_to_str(ra_str);
-            char *p = strada_to_str(ra_pat);
-            char *r = strada_to_str(ra_rep);
-            char *res = strada_regex_replace_all(s, p, r, NULL);
-            strada_decref(ra_result);
-            ra_result = strada_new_str(res);
-            free(res);
-            free(r);
-            free(p);
-            free(s);
-        }
-        return $ra_result;
+        return replace_all($args->[0], $args->[1], $args->[2]);
     }
     if ($bid == BI::UPPER) {
         return uc($args->[0]);
@@ -4913,6 +4986,8 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::REF_FN) {
         my scalar $v = $args->[0];
+        my str $bcls = get_obj_class_in($interp, $v);
+        if (length($bcls) > 0) { return $bcls; }
         if (ref($v) eq "HASH") {
             if (exists($v, "__scalar_ref__")) { return "SCALAR"; }
             if (exists($v, "__class__")) { return $v->{"__class__"}; }
@@ -5223,7 +5298,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::ABS) {
         if ($argc < 1) { return 0; }
         my scalar $v = $args->[0];
-        if ($interp->{"has_overloads"} == 1 && ref($v) eq "HASH" && exists($v, "__class__")) {
+        if ($interp->{"has_overloads"} == 1 && length(get_obj_class_in($interp, $v)) > 0) {
             my scalar $ovl = check_overload($interp, $v, "abs");
             if (defined($ovl)) {
                 return call_user_func($interp, $ovl, [$v, undef, 0]);
@@ -5362,8 +5437,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::BLESSED) {
         my scalar $v = $args->[0];
-        if (ref($v) eq "HASH" && exists($v, "__class__")) {
-            return $v->{"__class__"};
+        my str $bcls = get_obj_class_in($interp, $v);
+        if (length($bcls) > 0) {
+            return $bcls;
         }
         my str $rt = ref($v);
         if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
@@ -5384,6 +5460,14 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my str $pkg_name = $args->[1];
         if (ref($hash_ref) eq "HASH") {
             $hash_ref->{"__class__"} = $pkg_name;
+        } elsif (length(ref($hash_ref)) > 0) {
+            my str $bk = interp_blessed_ref_key($hash_ref);
+            my hash %bentry = ();
+            $bentry{"pkg"} = $pkg_name;
+            $bentry{"wref"} = $hash_ref;
+            core::weaken($bentry{"wref"});
+            $interp->{"blessed_refs"}->{$bk} = \%bentry;
+            $interp->{"has_blessed_refs"} = 1;
         }
         return $hash_ref;
     }
@@ -5426,7 +5510,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $target = $args->[1];
-        my str $pkg = interp_resolve_obj_pkg($obj);
+        my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
         if (length($pkg) > 0) {
             return interp_isa($interp, $pkg, $target) ? 1 : 0;
         }
@@ -5436,7 +5520,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $method_name = $args->[1];
-        my str $pkg = interp_resolve_obj_pkg($obj);
+        my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
         if (length($pkg) > 0) {
             if ($method_name eq "isa" || $method_name eq "can") {
                 return 1;
@@ -5452,7 +5536,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $target = $args->[1];
-        my str $pkg = interp_resolve_obj_pkg($obj);
+        my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
         if (length($pkg) > 0) {
             return interp_isa($interp, $pkg, $target) ? 1 : 0;
         }
@@ -5498,7 +5582,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($argc >= 2) {
             my scalar $obj = $args->[0];
             my str $method_name = $args->[1];
-            my str $pkg = interp_resolve_obj_pkg($obj);
+            my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
             if (length($pkg) > 0) {
                 if ($method_name eq "isa" || $method_name eq "can") {
                     return 1;
@@ -5742,7 +5826,31 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::getcwd();
     }
     if ($bid == BI::SYS_PATH_JOIN) {
-        return core::path_join($args->[0], $args->[1]);
+        my int $pj_argc = size($args);
+        if ($pj_argc == 0) { return ""; }
+        if ($pj_argc == 1) {
+            my scalar $a0 = $args->[0];
+            if (ref($a0) eq "ARRAY") {
+                my array @pj_items = ();
+                my int $pjn = interp_arr_len($interp, $a0);
+                my int $pji = 0;
+                while ($pji < $pjn) {
+                    my scalar $pje = interp_arr_get($interp, $a0, $pji);
+                    push(@pj_items, defined($pje) ? ("" . interp_stringify_val($interp, $pje)) : "");
+                    $pji = $pji + 1;
+                }
+                return core::path_join(\@pj_items);
+            }
+            return defined($a0) ? ("" . interp_stringify_val($interp, $a0)) : "";
+        }
+        my array @pj_parts = ();
+        my int $pji = 0;
+        while ($pji < $pj_argc) {
+            my scalar $pje = $args->[$pji];
+            push(@pj_parts, defined($pje) ? ("" . interp_stringify_val($interp, $pje)) : "");
+            $pji = $pji + 1;
+        }
+        return core::path_join(\@pj_parts);
     }
 
     # ---- core:: process ----
@@ -6137,7 +6245,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::MATH_ABS) {
         if ($argc < 1) { return 0; }
         my scalar $v = $args->[0];
-        if ($interp->{"has_overloads"} == 1 && ref($v) eq "HASH" && exists($v, "__class__")) {
+        if ($interp->{"has_overloads"} == 1 && length(get_obj_class_in($interp, $v)) > 0) {
             my scalar $ovl = check_overload($interp, $v, "abs");
             if (defined($ovl)) {
                 return call_user_func($interp, $ovl, [$v, undef, 0]);
@@ -6211,9 +6319,17 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     # ---- OOP functions ----
     if ($bid == BI::BLESS) {
         my scalar $ref_val = $args->[0];
-        my str $class_name = $args->[1];
+        my str $class_name = (size($args) > 1 && defined($args->[1])) ? $args->[1] : $interp->{"package"};
         if (ref($ref_val) eq "HASH") {
             $ref_val->{"__class__"} = $class_name;
+        } elsif (length(ref($ref_val)) > 0) {
+            my str $bk = interp_blessed_ref_key($ref_val);
+            my hash %bentry = ();
+            $bentry{"pkg"} = $class_name;
+            $bentry{"wref"} = $ref_val;
+            core::weaken($bentry{"wref"});
+            $interp->{"blessed_refs"}->{$bk} = \%bentry;
+            $interp->{"has_blessed_refs"} = 1;
         }
         return $ref_val;
     }
@@ -7818,8 +7934,15 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
                     my int $matches = 0;
                     if (length($catch_type) == 0) {
                         $matches = 1;
-                    } elsif (ref($e) eq "HASH" && exists($e, "__class__")) {
-                        if (interp_isa($interp, $e->{"__class__"}, $catch_type)) {
+                    } else {
+                        my str $ecls = get_obj_class_in($interp, $e);
+                        if (length($ecls) == 0) {
+                            my str $ert = ref($e);
+                            if ($ert ne "HASH" && $ert ne "ARRAY" && $ert ne "" && $ert ne "0") {
+                                $ecls = $ert;
+                            }
+                        }
+                        if (length($ecls) > 0 && interp_isa($interp, $ecls, $catch_type)) {
                             $matches = 1;
                         }
                     }
@@ -8060,7 +8183,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
             my int $first_is_self = 0;
             if (defined($first_raw) && $first_raw->{"type"} == NI::VARIABLE && $first_raw->{"name"} eq "self") {
                 $first_is_self = 1;
-            } elsif (length(get_obj_class($evaled_args[0])) > 0 || !defined($env_self)) {
+            } elsif (length(get_obj_class_in($interp, $evaled_args[0])) > 0 || !defined($env_self)) {
                 $first_is_self = 1;
             }
             if ($first_is_self == 1) {
@@ -8085,7 +8208,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
         if (defined($def_pkg) && length("" . $def_pkg) > 0) {
             $pkg = "" . $def_pkg;
         } elsif (defined($self_obj)) {
-            $pkg = get_obj_class($self_obj);
+            $pkg = get_obj_class_in($interp, $self_obj);
         }
 
         # Look up method in parent classes of $pkg
@@ -8227,7 +8350,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
             }
             if (ref($h) eq "HASH" && exists($h, "__tied__")) {
                 my scalar $tobj = $h->{"__tied__"};
-                my str $tpkg = get_obj_class($tobj);
+                my str $tpkg = get_obj_class_in($interp, $tobj);
                 my int $had_k = interp_hash_exists($interp, $h, $hkey);
                 my scalar $old_v = undef;
                 if ($had_k == 1 && length($tpkg) > 0) {
@@ -9706,7 +9829,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     if ($type == NI::FIELD_ACCESS) {
         my scalar $obj = eval_node($interp, $node->{"object"}, $env);
         my str $field = $node->{"field"};
-        my str $pkg = interp_resolve_obj_pkg($obj);
+        my str $pkg = interp_resolve_obj_pkg_in($interp, $obj);
         my array @args = ();
         push(@args, $obj);
         $interp->{"next_call_context"} = $eval_ctx;
@@ -10406,6 +10529,9 @@ func interp_cleanup(scalar $interp) void {
     $interp->{"has_tied_arrays"} = 0;
     $interp->{"has_tied_scalars"} = 0;
     $interp->{"has_pkg_ours"} = 0;
+    my hash %empty_br = ();
+    $interp->{"blessed_refs"} = \%empty_br;
+    $interp->{"has_blessed_refs"} = 0;
     core::gc_collect();
 }
 
@@ -10586,7 +10712,10 @@ func eval_string_vm(str $code) scalar {
                 $gn = $gpkg . "::" . $gn;
             }
             if (length($gn) > 0) {
-                $newly_declared{$gn} = 1;
+                my int $has_init = (defined($pg->{"init"}) && (length(ref($pg->{"init"})) > 0 || $pg->{"init"} != 0)) ? 1 : 0;
+                if (!($pg->{"type"} == NI::OUR_DECL && exists(%g_eval_vm_our_names, $gn) && $has_init == 0)) {
+                    $newly_declared{$gn} = 1;
+                }
             }
         }
         $pgi = $pgi + 1;
@@ -10696,9 +10825,9 @@ func eval_string_vm(str $code) scalar {
                 int __cm = strada_cleanup_mark();
                 int __lm = strada_local_depth_get();
                 if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+                    vm_seed_globals(vvm, globals_ref, skip_ref);
                     vm_run_globals_init(vvm);
                     if (!vvm->has_exception) {
-                        vm_seed_globals(vvm, globals_ref, skip_ref);
                         VMValue vres = vm_execute(vvm, entry);
                         if (!vvm->has_exception) {
                             strada_decref(vm_result);

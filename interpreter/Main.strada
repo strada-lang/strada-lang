@@ -943,7 +943,7 @@ func eval_has_entry_func(str $src) int {
                 my scalar $at = $toks->[$i + 2];
                 if ($cur_pkg eq "main" && $nt->{"type"} eq "IDENT" && defined($nt->{"value"}) &&
                     ($nt->{"value"} eq "main" || $nt->{"value"} eq "run") &&
-                    $at->{"type"} eq "LPAREN") {
+                    ($at->{"type"} eq "LPAREN" || $at->{"type"} eq "LBRACE")) {
                     return 1;
                 }
             }

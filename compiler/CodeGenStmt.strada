@@ -823,7 +823,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my str $init_name_chk = escape_c_keyword($init->{"name"});
                     my scalar $our_vars_chk = $cg->{"our_vars"};
                     my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
-                    if (length($init_our_chk) == 0) {
+                    if ($init->{"name"} ne "__program_name" && length($init_our_chk) == 0) {
                         emit($cg, "; " . $target_lval . " = strada_copy_scalar_il(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_SUBSCRIPT()) {

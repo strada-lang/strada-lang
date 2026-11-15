@@ -1,0 +1,110 @@
+use lib "lib";
+use JSON;
+use compress;
+use DBI;
+
+package R13LkNum;
+use overload '+' => "add_op", 'neg' => "neg_op", '""' => "as_str";
+func new(int $v) scalar { return bless({"v" => $v}, "R13LkNum"); }
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $o = ref($other) eq "R13LkNum" ? $other->{"v"} : ($other + 0);
+    return R13LkNum::new($self->{"v"} + $o);
+}
+func neg_op(scalar $self) scalar { return R13LkNum::new(0 - $self->{"v"}); }
+func as_str(scalar $self) str { return "N:" . $self->{"v"}; }
+
+package R13LkStrOv;
+use overload '""' => "to_s";
+func new(str $v) scalar { return bless({"v" => $v}, "R13LkStrOv"); }
+func to_s(scalar $self) str { return $self->{"v"}; }
+
+package R13LkTie;
+func TIESCALAR(str $cls, str $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R13LkTieHash;
+func TIEHASH(str $cls) scalar {
+    return bless({"data" => {"a" => R13LkStrOv::new("ov"), "b" => "raw"}, "keys" => ["a", "b"], "pos" => 0}, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"data"}->{$k}; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"data"}, $k); }
+func FIRSTKEY(scalar $self) scalar { $self->{"pos"} = 1; return $self->{"keys"}->[0]; }
+func NEXTKEY(scalar $self, str $last) scalar {
+    my int $p = $self->{"pos"};
+    if ($p >= size($self->{"keys"})) { return undef; }
+    $self->{"pos"} = $p + 1;
+    return $self->{"keys"}->[$p];
+}
+
+package R13LkArr;
+func new(int $a) scalar { my array @x = ($a, $a + 1); return bless(\@x, "R13LkArr"); }
+func DESTROY(scalar $self) void { }
+
+package main;
+
+func main() int {
+    my str $orig0 = $0;
+    my int $i = 0;
+    while ($i < 10) {
+        # R13-C4: could_be_blessed via do{}, field access, unary, map, assign
+        my scalar $wrap = {"n" => R13LkNum::new(2)};
+        my scalar $c1 = (do { R13LkNum::new(3); }) + R13LkNum::new(4);
+        my scalar $c2 = $wrap->{"n"} + (-R13LkNum::new(1));
+        my scalar $tmp = undef;
+        my scalar $c3 = ($tmp = R13LkNum::new(5)) + R13LkNum::new(6);
+        my array @mp = map { R13LkNum::new($_); } (1, 2);
+        my scalar $c4 = $mp[0] + $mp[1];
+
+        # R13-C5: hash compound assign replacing container in RHS
+        my hash %bh = ("k" => "left");
+        my scalar $hr = \%bh;
+        $hr->{"k"} .= do { $hr = {"k" => "new"}; "_right"; };
+
+        # R13-C6, C7, C8, C9
+        my array @sp = split("\0", "x\x00y\x00z");
+        my array @a = ("p", "q");
+        my str $jn0 = join();
+        my str $jns = join("-", ...@a, ...["r", "s"]);
+        my str $sp0 = sprintf();
+        $0 = "r13_lk";
+        $0 .= "_a";
+        my str $p0 = ($0 = "r13_lk_v");
+
+        # Blessed array
+        my scalar $ab = R13LkArr::new($i);
+
+        # R13-LIB2, LIB3, LIB4: DBI / compress / JSON on blessed overloads & tied scalars/hashes
+        my scalar $ov = R13LkStrOv::new("val_'_" . $i);
+        my scalar $ts = "";
+        tie($ts, "R13LkTie", "t_'_" . $i);
+        my hash %th = ();
+        tie(%th, "R13LkTieHash");
+
+        my str $jenc = JSON::encode({"ov" => $ov, "ts" => $ts, "th" => \%th});
+        my scalar $jdec = JSON::decode($jenc);
+        my scalar $jbad = JSON::decode("{bad");
+
+        my str $gz = compress::gzip($ov);
+        my scalar $ov_gz = R13LkStrOv::new($gz);
+        my str $ug = compress::gunzip($ov_gz);
+        my str $df = compress::deflate($ts);
+        my scalar $ts_df = "";
+        tie($ts_df, "R13LkTie", $df);
+        my str $inf = compress::inflate($ts_df);
+
+        my str $dq1 = DBI::quote(undef, $ov);
+        my str $dq2 = DBI::quote(undef, $ts);
+        my str $dqi1 = DBI::quote_identifier(undef, R13LkStrOv::new("col_" . $i));
+        my str $dqi2 = DBI::quote_identifier(undef, $ts);
+
+        untie($ts);
+        untie($ts_df);
+        untie(%th);
+        $i = $i + 1;
+    }
+    $0 = $orig0;
+    core::gc_collect();
+    say("R13_LEAKS_OK");
+    return 0;
+}

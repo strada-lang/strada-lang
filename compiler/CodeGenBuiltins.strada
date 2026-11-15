@@ -1653,9 +1653,9 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 if ($spl_sp == 1) { emit($cg, "strada_cleanup_push(__split_ssv); "); }
                 emit($cg, "const char *__str_cstr = (__split_ssv && !STRADA_IS_TAGGED_INT(__split_ssv) && __split_ssv->value.pv) ? __split_ssv->value.pv : \"\"; ");
                 emit($cg, "strada_regex_set_subject_for_sv(__split_ssv); ");
-                emit($cg, "StradaValue *__sv = strada_new_array_from_av(strada_string_split(__str_cstr, ");
+                emit($cg, "StradaValue *__sv = strada_new_array_from_av(strada_string_split_n(__str_cstr, ");
                 gen_str_literal_c($cg, $pattern_arg->{"value"});
-                emit($cg, ")); strada_regex_clear_subject_len(); ");
+                emit($cg, ", (size_t)" . bytes($pattern_arg->{"value"}) . ")); strada_regex_clear_subject_len(); ");
                 if ($spl_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__split_ssv); "); }
                 else { emit($cg, "strada_decref(__split_ssv); "); }
             } else {
@@ -1718,8 +1718,20 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             # produced an empty string.
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
+            if ($argc < 1) {
+                emit($cg, "strada_new_str(\"\")");
+                return 1;
+            }
             my scalar $sep_arg = $args->[0];
             my int $sep_needs_cleanup = needs_temp_cleanup($cg, $sep_arg);
+            my int $join_has_spread = 0;
+            my int $jsi = 1;
+            while ($jsi < $argc) {
+                if ($args->[$jsi]->{"type"} == NODE_SPREAD()) {
+                    $join_has_spread = 1;
+                }
+                $jsi = $jsi + 1;
+            }
 
             # Call strada_join_sv directly: it borrows plain-STR elements
             # (no per-element copy), builds straight into the result
@@ -1733,7 +1745,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             gen_expression($cg, $sep_arg);
             emit($cg, "; ");
             if ($jn_sp == 1 && $jn_s_cl == 1) { emit($cg, "strada_cleanup_push(__join_sep); "); }
-            if ($argc == 2) {
+            if ($argc == 2 && $join_has_spread == 0) {
                 my int $arr_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[1]) == 1;
                 if ($arr_needs_cleanup == 1) {
                     emit($cg, "StradaValue *__join_arr = ");
@@ -1749,14 +1761,29 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     emit($cg, ")); ");
                 }
             } else {
-                # Build a temporary array of all the scalar elements.
+                # Build a temporary array of all the list/spread elements.
                 emit($cg, "StradaValue *__join_arr = strada_new_array(); ");
                 if ($jn_sp == 1) { emit($cg, "strada_cleanup_push(__join_arr); "); }
                 emit($cg, "StradaArray *__join_av = strada_deref_array(__join_arr); ");
                 my int $ji = 1;
                 while ($ji < $argc) {
                     my scalar $je = $args->[$ji];
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $je) == 1) {
+                    if ($je->{"type"} == NODE_SPREAD()) {
+                        my int $jns_cl = 0;
+                        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $je->{"target"}) == 1) { $jns_cl = 1; }
+                        my int $jns_push = 0;
+                        if ($jns_cl == 1 && $jn_sp == 1) { $jns_push = 1; }
+                        emit($cg, "{ StradaValue *__je_s = ");
+                        gen_expression($cg, $je->{"target"});
+                        emit($cg, "; ");
+                        if ($jns_push == 1) { emit($cg, "strada_cleanup_push(__je_s); "); }
+                        emit($cg, "strada_av_append_all(__join_av, __je_s); ");
+                        if ($jns_cl == 1) {
+                            if ($jns_push == 1) { emit($cg, "strada_cleanup_pop_decref(__je_s); "); }
+                            else { emit($cg, "strada_decref(__je_s); "); }
+                        }
+                        emit($cg, "} ");
+                    } elsif ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $je) == 1) {
                         emit($cg, "{ StradaValue *__je = ");
                         gen_expression($cg, $je);
                         emit($cg, "; strada_array_push_take(__join_av, __je); } ");
@@ -4821,6 +4848,10 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             # (the latter is what core::sprintf normalizes to).
             my scalar $args = $expr->{"args"};
             my int $arg_count = $expr->{"arg_count"};
+            if ($arg_count == 0) {
+                emit($cg, "strada_new_str(\"\")");
+                return 1;
+            }
 
             emit($cg, "(({ ");
 
@@ -4879,6 +4910,10 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             # truncation.
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
+            if ($argc == 0) {
+                emit($cg, "((StradaValue*)NULL)");
+                return 1;
+            }
             my int $pf_push = cleanup_push_useful($cg);
             my array @pf_cl = ();
             emit($cg, "({ ");

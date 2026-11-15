@@ -1,0 +1,7 @@
+VM1=10|<base>
+VM2=hi:h:h
+VM3=R13ArrObj|R13ArrObj|7|Arr(3,4)|10|12|R13ScalarObj|R13ScalarObj|77|R13FnObj|15|oops|t1>t2
+VM4=a:b_c|5|a:b:c|cafE|1
+VM5=a\.b\[é\]\?|1
+VM6=usr/local/bin
+VM9=30|MIC|105

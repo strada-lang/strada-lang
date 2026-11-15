@@ -233,6 +233,7 @@ typedef enum {
     OP_FIELD_ACCESS,    /* u16 field_str_idx, u8 argc — $obj->field without parens */
     OP_MAP_PUSH,        /* pop src, pop dst_array — append elements if array (else push src incl. undef) */
     OP_SET_CALL_CTX,    /* u8 ctx (0=scalar, 1=array, 2=hash) — set pending call context */
+    OP_INIT_GLOBAL,     /* u16 name_str_idx — store to global registry only if not already set */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -689,6 +690,7 @@ typedef struct {
     VMObjHeader hdr;
     VMValue cell;      /* VM_OBJ_CELL holding target value (when global_name == NULL) */
     char *global_name; /* non-NULL when referencing an `our` global */
+    char *class_name;  /* blessed package name (NULL if unblessed) */
 } VMScalarRef;
 static inline VMScalarRef *VM_AS_SREF(VMValue v) { return (VMScalarRef*)VM_TO_PTR(v); }
 
@@ -750,6 +752,7 @@ struct VMArray {
     int size;
     int cap;
     VMValue tied_obj;   /* TIEARRAY implementation object (0/undef = untied) */
+    char *class_name;   /* blessed package name (NULL if unblessed) */
 };
 
 /* Hash table (open addressing) */
@@ -781,6 +784,7 @@ struct VMClosure {
     int has_bound_arg;
     VMValue bound_arg;
     VMValue *captures;  /* shared mutable capture slots */
+    char *class_name;   /* blessed class name (NULL if unblessed) */
 };
 
 /* Filehandle wrapper for VM */

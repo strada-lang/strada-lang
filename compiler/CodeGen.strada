@@ -2270,6 +2270,9 @@ func get_oop_pkg_count(scalar $cg) int {
 # Returns 1 if the expression MIGHT be blessed, 0 if it CANNOT be.
 # Used for operator overloading: only emit dispatch code when operands could be blessed.
 func could_be_blessed(scalar $expr) int {
+    if (!$expr) {
+        return 0;
+    }
     my int $type = $expr->{"type"};
 
     # Variables with scalar/undef type could be blessed
@@ -2321,8 +2324,28 @@ func could_be_blessed(scalar $expr) int {
         return 1;
     }
 
-    # Binary/unary ops produce numeric/string results, not blessed
-    # (unless they themselves use overloading, but the dispatch handles that)
+    # Other value-returning expressions that can yield or propagate blessed objects
+    if ($type == NODE_DO_EXPR() || $type == NODE_FIELD_ACCESS() ||
+        $type == NODE_MAP() || $type == NODE_GREP() ||
+        $type == NODE_AWAIT() || $type == NODE_READLINE() ||
+        $type == NODE_SUPER_CALL()) {
+        return 1;
+    }
+
+    # Overloaded binary/unary/inc/assign ops can return blessed objects if operands can be blessed
+    if ($type == NODE_BINARY_OP()) {
+        if (could_be_blessed($expr->{"left"}) == 1 || could_be_blessed($expr->{"right"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_UNARY_OP() || $type == NODE_INCREMENT()) {
+        return could_be_blessed($expr->{"operand"});
+    }
+    if ($type == NODE_ASSIGN()) {
+        return could_be_blessed($expr->{"value"});
+    }
+
     return 0;
 }
 
@@ -6593,6 +6616,9 @@ func assign_is_owned_expr(scalar $cg, scalar $expr) int {
         return 1;
     }
     if ($tt == NODE_VARIABLE()) {
+        if ($tgt->{"name"} eq "__program_name") {
+            return 1;
+        }
         my str $onm = escape_c_keyword($tgt->{"name"});
         my scalar $ov = $cg->{"our_vars"};
         if ($ov && length("" . $ov->{$onm}) > 0) {
@@ -6788,9 +6814,12 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
     }
 
     # Variables don't need cleanup (already tracked) - UNLESS they are 'our' variables
-    # which emit strada_global_get() returning an owned StradaValue*
+    # (strada_global_get returns an owned StradaValue*) or $__program_name ($0, strada_getprocname())
     if ($type == NODE_VARIABLE()) {
         my str $var_name = $expr->{"name"};
+        if ($var_name eq "__program_name") {
+            return 1;
+        }
         my str $c_name = escape_c_keyword($var_name);
         my scalar $our_vars = $cg->{"our_vars"};
         my str $our_check = "" . $our_vars->{$c_name};
@@ -6923,6 +6952,9 @@ func return_needs_incref(scalar $cg, scalar $expr) int {
     # incref would leak one ref per `return $g` call.
     if ($type == NODE_VARIABLE()) {
         my str $rn_var_name = "" . $expr->{"name"};
+        if ($rn_var_name eq "__program_name") {
+            return 0;
+        }
         my str $rn_c_name = escape_c_keyword($rn_var_name);
         my scalar $rn_our_vars = $cg->{"our_vars"};
         my str $rn_our_check = "" . $rn_our_vars->{$rn_c_name};
@@ -7211,6 +7243,11 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         $key_is_lit = 1;
     }
     my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1 && autoviv_link_type($hash_expr) == 0;
+    my int $hash_retain = 0;
+    if ($cg->{"cleanup_enabled"} == 1 && $hash_cleanup == 0 && autoviv_link_type($hash_expr) == 0) {
+        $hash_retain = 1;
+        $hash_cleanup = 1;
+    }
     my int $hca_av_cl = autoviv_chain_needs_cleanup($cg, $hash_expr);
     my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
 
@@ -7229,6 +7266,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         emit($cg, "StradaValue *__hca_h = ");
         gen_assign_container_marked($cg, $hash_expr, 1, $hca_av_cl);
         emit($cg, "; ");
+        if ($hash_retain == 1) { emit($cg, "strada_incref(__hca_h); "); }
         if ($hca_push == 1 && $hash_cleanup == 1) { emit($cg, "strada_cleanup_push(__hca_h); "); }
         if ($key_is_lit == 0) {
             emit($cg, "StradaValue *__hca_k = ");
@@ -7292,6 +7330,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     emit($cg, "StradaValue *__hca_h = ");
     gen_assign_container_marked($cg, $hash_expr, 1, $hca_av_cl);
     emit($cg, "; ");
+    if ($hash_retain == 1) { emit($cg, "strada_incref(__hca_h); "); }
     if ($hca_push == 1 && $hash_cleanup == 1) { emit($cg, "strada_cleanup_push(__hca_h); "); }
     if ($key_is_lit == 0) {
         emit($cg, "StradaValue *__hca_k = ");

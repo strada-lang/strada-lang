@@ -81,11 +81,15 @@ static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
             SvUTF8_off(sv);
         }
     } else {
-        char *s = strada_to_str(val);
-        size_t len = s ? strlen(s) : 0;
-        sv_setpvn(sv, s ? s : "", (STRLEN)len);
-        free(s);
-        SvUTF8_off(sv);
+        StradaValue *ev = strada_to_str_sv(val);
+        size_t len = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+        sv_setpvn(sv, (ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "", (STRLEN)len);
+        if (ev && !STRADA_IS_TAGGED_INT(ev) && STRADA_STR_IS_UTF8(ev)) {
+            SvUTF8_on(sv);
+        } else {
+            SvUTF8_off(sv);
+        }
+        if (ev) strada_decref(ev);
     }
     if (fetched) strada_cleanup_pop_decref(fetched);
 }
@@ -141,7 +145,7 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
     } else if (arg->type == STRADA_NUM) {
         dst->kind = P5_ARG_NUM;
         dst->nv = arg->value.nv;
-    } else if (arg->type == STRADA_STR && !(arg->meta && arg->meta->blessed_package)) {
+    } else if (arg->type == STRADA_STR && !(arg->meta && (arg->meta->blessed_package || arg->meta->is_tied))) {
         size_t len = STRADA_STR_BYTELEN(arg);
         char *buf = malloc(len + 1);
         if (buf) {
@@ -154,17 +158,24 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
         dst->is_utf8 = STRADA_STR_IS_UTF8(arg) ? 1 : 0;
     } else {
         StradaValue *tmp = fetched;
-        fetched = NULL; /* Avoid double-decref if strada_to_str throws */
+        fetched = NULL; /* Avoid double-decref if strada_to_str_sv throws */
         if (tmp) strada_inflight_push(tmp);
-        char *s = strada_to_str(arg);
+        StradaValue *ev = strada_to_str_sv(arg);
         if (tmp) {
             strada_inflight_pop();
             strada_decref(tmp);
         }
+        size_t len = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+        char *buf = malloc(len + 1);
+        if (buf) {
+            if (len > 0 && ev && ev->value.pv) memcpy(buf, ev->value.pv, len);
+            buf[len] = '\0';
+        }
         dst->kind = P5_ARG_STR;
-        dst->pv = s;
-        dst->len = s ? strlen(s) : 0;
-        dst->is_utf8 = 0;
+        dst->pv = buf;
+        dst->len = buf ? len : 0;
+        dst->is_utf8 = (ev && !STRADA_IS_TAGGED_INT(ev) && STRADA_STR_IS_UTF8(ev)) ? 1 : 0;
+        if (ev) strada_decref(ev);
         return;
     }
     if (fetched) strada_decref(fetched);
@@ -593,7 +604,7 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
     }
 
     char *orig_name = strada_to_str(name_sv);
-    const char *name = orig_name;
+    const char *name = orig_name ? orig_name : "";
 
     /* Skip the sigil if present */
     if (name[0] == '$') {
@@ -601,10 +612,10 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
     }
 
     SV *sv = get_sv(name, GV_ADD);
+    free(orig_name);
     if (sv) {
         perl5_set_sv_from_strada(sv, value_sv);
     }
-    free(orig_name);
 }
 
 /* Get a Perl scalar variable as StradaValue preserving UTF-8 and NUL bytes */

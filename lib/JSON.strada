@@ -191,33 +191,32 @@ static int json_keycmp(const void *a, const void *b) {
 
 static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth);
 
+static StradaValue* json_str_bytes(StradaValue *v, const char **out_s, size_t *out_n) {
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR
+        && !(v->meta && (v->meta->blessed_package || v->meta->is_tied))) {
+        *out_s = v->value.pv ? v->value.pv : "";
+        *out_n = STRADA_STR_BYTELEN(v);
+        return NULL;
+    }
+    StradaValue *ev = strada_to_str_sv(v);
+    *out_s = (ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "";
+    *out_n = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+    return ev;
+}
+
 static int json_tied_keycmp(const void *a, const void *b) {
     StradaValue *va = *(StradaValue* const*)a;
     StradaValue *vb = *(StradaValue* const*)b;
-    char *oa = NULL, *ob = NULL;
     const char *sa = "";
     const char *sb_s = "";
     size_t la = 0, lb = 0;
-    if (va && !STRADA_IS_TAGGED_INT(va) && va->type == STRADA_STR && va->value.pv) {
-        sa = va->value.pv;
-        la = STRADA_STR_BYTELEN(va);
-    } else {
-        oa = strada_to_str(va);
-        sa = oa ? oa : "";
-        la = strlen(sa);
-    }
-    if (vb && !STRADA_IS_TAGGED_INT(vb) && vb->type == STRADA_STR && vb->value.pv) {
-        sb_s = vb->value.pv;
-        lb = STRADA_STR_BYTELEN(vb);
-    } else {
-        ob = strada_to_str(vb);
-        sb_s = ob ? ob : "";
-        lb = strlen(sb_s);
-    }
+    StradaValue *oa = json_str_bytes(va, &sa, &la);
+    if (oa) strada_cleanup_push(oa);
+    StradaValue *ob = json_str_bytes(vb, &sb_s, &lb);
     size_t minlen = la < lb ? la : lb;
     int cmp = minlen ? memcmp(sa, sb_s, minlen) : 0;
-    if (oa) free(oa);
-    if (ob) free(ob);
+    if (ob) strada_decref(ob);
+    if (oa) strada_cleanup_pop_decref(oa);
     if (cmp != 0) return cmp;
     if (la < lb) return -1;
     if (la > lb) return 1;
@@ -250,13 +249,12 @@ static void json_enc_tied_hash(JsonB *b, StradaValue *v, int canonical, int dept
     for (size_t i = 0; i < n; i++) {
         if (i > 0) jb_putc(b, ',');
         StradaValue *k = strada_array_get(keys, i);
-        if (k && !STRADA_IS_TAGGED_INT(k) && k->type == STRADA_STR && k->value.pv) {
-            jb_put_escaped(b, k->value.pv, STRADA_STR_BYTELEN(k));
-        } else {
-            char *ks = strada_to_str(k);
-            jb_put_escaped(b, ks ? ks : "", ks ? strlen(ks) : 0);
-            free(ks);
-        }
+        const char *ks = "";
+        size_t klen = 0;
+        StradaValue *k_owned = json_str_bytes(k, &ks, &klen);
+        if (k_owned) strada_cleanup_push(k_owned);
+        jb_put_escaped(b, ks, klen);
+        if (k_owned) strada_cleanup_pop_decref(k_owned);
         jb_putc(b, ':');
         StradaValue *val = strada_hv_fetch_owned_sv(v, k);
         if (val) strada_cleanup_push(val);
@@ -383,9 +381,11 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
             return;
         }
         case STRADA_STR: {
-            const char *s = v->value.pv ? v->value.pv : "";
-            size_t n = STRADA_STR_BYTELEN(v);
+            const char *s = "";
+            size_t n = 0;
+            StradaValue *owned = json_str_bytes(v, &s, &n);
             jb_put_escaped(b, s, n);
+            if (owned) strada_decref(owned);
             return;
         }
         case STRADA_REF: {
@@ -785,17 +785,10 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
         jp_set_err("Empty JSON input", 0);
         return strada_new_undef();
     }
-    const char *s;
-    size_t n;
-    char *owned = NULL;
-    if (!STRADA_IS_TAGGED_INT(json_sv) && json_sv->type == STRADA_STR) {
-        s = json_sv->value.pv ? json_sv->value.pv : "";
-        n = STRADA_STR_BYTELEN(json_sv);
-    } else {
-        owned = strada_to_str(json_sv);
-        s = owned ? owned : "";
-        n = strlen(s);
-    }
+    const char *s = "";
+    size_t n = 0;
+    StradaValue *owned = json_str_bytes(json_sv, &s, &n);
+    if (owned) strada_cleanup_push(owned);
     JsonP p = { s, 0, n, 0 };
     StradaValue *v = jp_value(&p, 0);
     if (!p.err) {
@@ -807,7 +800,7 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
     } else {
         jp_set_err("Invalid JSON value", p.pos);
     }
-    free(owned);
+    if (owned) strada_cleanup_pop_decref(owned);
     if (p.err) {
         if (v) strada_decref(v);
         return strada_new_undef();

@@ -3095,7 +3095,7 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
             sb_append($sb, "\n");
             lex_advance($lexer);
             my str $csrc = $lexer->{"source"};
-            my int $clen = $lexer->{"source_len"};
+            my int $clen = $lexer->{"length"};
             my int $cp = $lexer->{"pos"};
             while ($cp < $clen && (char_at($csrc, $cp) == ' ' || char_at($csrc, $cp) == '\t')) { $cp = $cp + 1; }
             if ($cp < $clen && char_at($csrc, $cp) == '#') {

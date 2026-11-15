@@ -1,0 +1,90 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # 1. Tree-walk Eval: R13-VM1..6
+    my scalar $tw_res = Strada::Interpreter::eval('
+        package EvCycA; extends EvCycB;
+        package EvCycB; extends EvCycA;
+        package EvDBase;
+        func act(scalar $s) str { return "b"; }
+        around "act" func(scalar $o, scalar $s) str { return "[" . $o->($s) . "]"; }
+        package EvDL; extends EvDBase;
+        package EvDR; extends EvDBase;
+        package EvDC; extends EvDL, EvDR;
+
+        package EvArr;
+        use overload \'""\' => "s", "+" => "add", "bool" => "bl";
+        func new(int $x) scalar { my array @a = ($x); return bless(\@a, "EvArr"); }
+        func s(scalar $self) str { return "EA(" . $self->[0] . ")"; }
+        func add(scalar $self, scalar $o, int $rev) int { return $self->[0] + $o; }
+        func bl(scalar $self) int { return $self->[0] != 0 ? 1 : 0; }
+        func g(scalar $self) int { return $self->[0]; }
+
+        package main;
+        my scalar $cyc = bless({}, "EvCycA");
+        my scalar $dc = bless({}, "EvDC");
+        my scalar $ea = EvArr::new(9);
+        my scalar $ea0 = EvArr::new(0);
+        my int $sv = 5;
+        my scalar $esr = bless(\$sv, "EvArr");
+        my str $caught = "";
+        try { die($ea); } catch (EvArr $e) { $caught = $e->g() . ""; }
+        my str $pj0 = core::path_join();
+        my str $pj1 = core::path_join("solo");
+        my str $pj3 = core::path_join("a/", "b/", "c");
+        my str $pat_nul = "\x00";
+        my str $rep = replace("x\x00é", $pat_nul, "Z");
+        my str $qm = core::quotemeta("a.b[é]");
+        ($cyc->isa("EvCycA") ? 1 : 0) . ($cyc->isa("None") ? 1 : 0)
+            . "|" . $dc->act()
+            . "|" . blessed($ea) . "|" . ref($ea) . "|" . ("" . $ea) . "|" . ($ea + 1) . "|" . ($ea ? 1 : 0) . ($ea0 ? 1 : 0)
+            . "|" . blessed($esr) . "|" . ref($esr) . "|" . $caught
+            . "|" . $pj0 . "," . $pj1 . "," . $pj3
+            . "|" . $rep . "|" . length($rep) . "|" . $qm;
+    ');
+    check($tw_res eq "10|[b]|EvArr|EvArr|EA(9)|10|10|EvArr|EvArr|9|,solo,a/b/c|xZé|3|a\\.b\\[é\\]", "tree-walk eval: " . $tw_res);
+    Strada::Interpreter::reset();
+
+    # 2. HAVE_VM eval_string_vm: R13-VM8 (our redeclaration preserves prior value & later global init sees prior globals)
+    my scalar $r8a = Strada::Interpreter::eval_string_vm('our int $g_r13 = 42; 1;');
+    check(($r8a + 0) == 1, "r13_vm eval 1");
+    my scalar $r8b = Strada::Interpreter::eval_string_vm('our int $g_r13; $g_r13;');
+    check(($r8b + 0) == 42, "r13_vm our redeclaration keeps 42, got " . $r8b);
+    my scalar $r8c = Strada::Interpreter::eval_string_vm('our int $g_derived = $g_r13 + 8; $g_derived;');
+    check(($r8c + 0) == 50, "r13_vm global init sees prior global, got " . $r8c);
+    my scalar $r8d = Strada::Interpreter::eval_string_vm('our int $g_r13 = 99; $g_r13;');
+    check(($r8d + 0) == 99, "r13_vm initialized our updates to 99, got " . $r8d);
+    Strada::Interpreter::reset();
+
+    # 3. Strada::JIT: R13-VM9 (multiple inherit & multiple overload in same package)
+    Strada::JIT::init();
+    my scalar $jres = Strada::JIT::eval('
+        package JR13A;
+        func a_fn(scalar $s) int { return 10; }
+        package JR13B;
+        func b_fn(scalar $s) int { return 20; }
+        package JR13C;
+        inherit JR13A;
+        inherit JR13B;
+        use overload \'""\' => "to_s";
+        use overload "+" => "add_n";
+        func to_s(scalar $s) str { return "JC"; }
+        func add_n(scalar $s, scalar $o, int $rev) int { return 50 + $o; }
+        package main;
+        my scalar $jc = bless({}, "JR13C");
+        ($jc->a_fn() + $jc->b_fn()) . "|" . ("" . $jc) . "|" . ($jc + 7);
+    ');
+    Strada::JIT::reset();
+    check($jres eq "30|JC|57", "JIT multi inherit/overload got: " . $jres);
+
+    say("AUDIT_R13_EVAL_JIT_OK");
+    return 0;
+}

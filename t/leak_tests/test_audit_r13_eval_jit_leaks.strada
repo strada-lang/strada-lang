@@ -1,0 +1,67 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 4) {
+        Strada::Interpreter::eval('
+            package R13EvLkCycA; extends R13EvLkCycB;
+            package R13EvLkCycB; extends R13EvLkCycA;
+            package R13EvLkArr;
+            use overload \'""\' => "s", "+" => "add", "bool" => "bl";
+            func new(int $v) scalar { my array @a = ($v); return bless(\@a, "R13EvLkArr"); }
+            func s(scalar $self) str { return "EA:" . $self->[0]; }
+            func add(scalar $self, scalar $o, int $rev) scalar { return R13EvLkArr::new($self->[0] + $o); }
+            func bl(scalar $self) int { return $self->[0] != 0 ? 1 : 0; }
+            func val(scalar $self) int { return $self->[0]; }
+            package main;
+            my scalar $c = bless({}, "R13EvLkCycA");
+            $c->isa("No");
+            my str $st = "hi\n";
+            my scalar $sr = \$st;
+            chomp($$sr);
+            chop($$sr);
+            my scalar $a = R13EvLkArr::new(5);
+            my scalar $b = $a + 2;
+            my str $s = "" . $b;
+            if ($a) { $a->val(); }
+            my scalar $so = bless(\$st, "R13EvLkArr");
+            blessed($so);
+            my scalar $fo = bless(func() int { return 1; }, "R13EvLkArr");
+            $fo->();
+            try { die($a); } catch (R13EvLkArr $e) { $e->val(); }
+            my str $pj0 = core::path_join();
+            my str $pj2 = core::path_join("a", "b");
+            my str $rp = replace("x\x00é", "\x00", "Z");
+            my str $ra = replace_all("a\x00b\x00c", "\x00", ":");
+            my str $qm = core::quotemeta("a.b[é]");
+        ');
+        Strada::Interpreter::reset();
+
+        Strada::Interpreter::eval_string_vm('our int $ev_lk_x = 10 + ' . $i . '; 1;');
+        Strada::Interpreter::eval_string_vm('our int $ev_lk_x; our int $ev_lk_y = $ev_lk_x + 2; $ev_lk_y;');
+        Strada::Interpreter::reset();
+        $i = $i + 1;
+    }
+
+    Strada::JIT::init();
+    Strada::JIT::eval('
+        package R13JitLkA; func fa(scalar $s) int { return 1; }
+        package R13JitLkB; func fb(scalar $s) int { return 2; }
+        package R13JitLkC;
+        inherit R13JitLkA;
+        inherit R13JitLkB;
+        use overload \'""\' => "s";
+        use overload "+" => "add";
+        func s(scalar $s) str { return "JC"; }
+        func add(scalar $s, scalar $o, int $rev) int { return 10 + $o; }
+        package main;
+        my scalar $j = bless({}, "R13JitLkC");
+        ($j->fa() + $j->fb()) + ($j + 3);
+    ');
+    Strada::JIT::reset();
+
+    say("R13_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

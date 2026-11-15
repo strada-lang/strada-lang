@@ -127,66 +127,50 @@ __C__ {
 
 #define COMPRESS_MAX_OUTPUT ((size_t)256U * 1024U * 1024U)
 
+/* Extract raw bytes + length safely for any StradaValue */
+static StradaValue* compress_extract_bytes(StradaValue *sv, const char **out_buf, size_t *out_len) {
+    if (!sv) {
+        *out_buf = "";
+        *out_len = 0;
+        return NULL;
+    }
+    if (!STRADA_IS_TAGGED_INT(sv)) {
+        if (sv->type == STRADA_STR && !(sv->meta && (sv->meta->blessed_package || sv->meta->is_tied))) {
+            *out_buf = sv->value.pv ? sv->value.pv : "";
+            *out_len = STRADA_STR_BYTELEN(sv);
+            return NULL;
+        }
+        if (sv->type == STRADA_UNDEF && !(sv->meta && (sv->meta->blessed_package || sv->meta->is_tied))) {
+            *out_buf = "";
+            *out_len = 0;
+            return NULL;
+        }
+    }
+    StradaValue *ev = strada_to_str_sv(sv);
+    *out_buf = (ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "";
+    *out_len = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+    return ev;
+}
+
 /* Get byte length from StradaValue - binary safe */
 static size_t compress_get_byte_len(StradaValue *sv) {
-    if (!sv) return 0;
-    if (STRADA_IS_TAGGED_INT(sv)) {
-        char *s = strada_to_str(sv);
-        size_t n = s ? strlen(s) : 0;
-        free(s);
-        return n;
-    }
-    if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
-        return STRADA_STR_BYTELEN(sv);
-    }
-    if (sv->type == STRADA_UNDEF) return 0;
-    char *s = strada_to_str(sv);
-    size_t n = s ? strlen(s) : 0;
-    free(s);
+    const char *buf = NULL;
+    size_t n = 0;
+    StradaValue *owned = compress_extract_bytes(sv, &buf, &n);
+    if (owned) strada_decref(owned);
     return n;
 }
 
-/* Get raw byte pointer from StradaValue - binary safe (does not copy) */
-static const char* compress_get_bytes(StradaValue *sv) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv)) return "";
-    if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
-        return sv->value.pv ? sv->value.pv : "";
-    }
-    return "";
-}
-
-/* Extract raw bytes + length safely for any StradaValue */
-static const char* compress_extract_bytes(StradaValue *sv, size_t *out_len, char **out_owned) {
-    *out_owned = NULL;
-    if (!sv) {
-        *out_len = 0;
-        return "";
-    }
-    if (!STRADA_IS_TAGGED_INT(sv)) {
-        if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
-            *out_len = STRADA_STR_BYTELEN(sv);
-            return sv->value.pv ? sv->value.pv : "";
-        }
-        if (sv->type == STRADA_UNDEF) {
-            *out_len = 0;
-            return "";
-        }
-    }
-    char *s = strada_to_str(sv);
-    *out_owned = s;
-    *out_len = s ? strlen(s) : 0;
-    return s ? s : "";
-}
 static StradaValue* compress_deflate_common(StradaValue *data, int window_bits) {
     size_t input_len = 0;
-    char *owned = NULL;
-    const char *input = compress_extract_bytes(data, &input_len, &owned);
+    const char *input = NULL;
+    StradaValue *owned = compress_extract_bytes(data, &input, &input_len);
 
     size_t cap = (input_len < COMPRESS_MAX_OUTPUT) ? (compressBound((uLong)(input_len > UINT_MAX ? 65536 : input_len)) + 64) : 65536;
     if (cap < 1024) cap = 1024;
     char *output = malloc(cap);
     if (!output) {
-        free(owned);
+        if (owned) strada_decref(owned);
         return strada_new_str("");
     }
 
@@ -194,7 +178,7 @@ static StradaValue* compress_deflate_common(StradaValue *data, int window_bits) 
     memset(&strm, 0, sizeof(strm));
     if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         free(output);
-        free(owned);
+        if (owned) strada_decref(owned);
         return strada_new_str("");
     }
 
@@ -230,7 +214,7 @@ static StradaValue* compress_deflate_common(StradaValue *data, int window_bits) 
     }
 
     deflateEnd(&strm);
-    free(owned);
+    if (owned) strada_decref(owned);
     if (!ok) {
         free(output);
         return strada_new_str("");
@@ -344,8 +328,8 @@ func gunzip(str $data) str {
     my str $result = "";
     __C__ {
         size_t input_len = 0;
-        char *owned = NULL;
-        const char *input = compress_extract_bytes(data, &input_len, &owned);
+        const char *input = NULL;
+        StradaValue *owned = compress_extract_bytes(data, &input, &input_len);
         if (input_len > 0) {
             StradaValue *out = compress_inflate_stream(input, input_len, 15 + 16, NULL);
             if (out) {
@@ -353,7 +337,7 @@ func gunzip(str $data) str {
                 result = out;
             }
         }
-        free(owned);
+        if (owned) strada_decref(owned);
     }
     return $result;
 }
@@ -363,8 +347,8 @@ func inflate(str $data) str {
     my str $result = "";
     __C__ {
         size_t input_len = 0;
-        char *owned = NULL;
-        const char *input = compress_extract_bytes(data, &input_len, &owned);
+        const char *input = NULL;
+        StradaValue *owned = compress_extract_bytes(data, &input, &input_len);
         if (input_len > 0) {
             int wbits_list[2] = { -15, 15 };
             for (int wi = 0; wi < 2; wi++) {
@@ -378,7 +362,7 @@ func inflate(str $data) str {
                 if (truncated) break;
             }
         }
-        free(owned);
+        if (owned) strada_decref(owned);
     }
     return $result;
 }

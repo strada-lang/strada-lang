@@ -1536,19 +1536,30 @@ static void dbi_clear_bindings(DbiStatement *sth) {
  * NUL bytes - images, any binary data); other values are stringified.
  * Returns a malloc'd, NUL-terminated buffer. */
 static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
-    if (val && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_STR
-        && !(val->meta && val->meta->is_tied)) {
-        size_t n = STRADA_STR_BYTELEN(val);
-        char *p = malloc(n + 1);
-        if (!p) { *len = 0; return NULL; }
-        if (n > 0 && val->value.pv) memcpy(p, val->value.pv, n);
-        p[n] = 0;
-        *len = (unsigned long)n;
-        return p;
+    StradaValue *owned = NULL;
+    StradaValue *src = val;
+    if (!val || STRADA_IS_TAGGED_INT(val) || val->type != STRADA_STR
+        || (val->meta && (val->meta->blessed_package || val->meta->is_tied))) {
+        owned = strada_to_str_sv(val);
+        src = owned;
     }
-    char *s = strada_to_str(val);
-    *len = s ? (unsigned long)strlen(s) : 0;
-    return s;
+    if (!src || STRADA_IS_TAGGED_INT(src)) {
+        if (owned) strada_decref(owned);
+        *len = 0;
+        return NULL;
+    }
+    size_t n = STRADA_STR_BYTELEN(src);
+    char *p = malloc(n + 1);
+    if (!p) {
+        if (owned) strada_decref(owned);
+        *len = 0;
+        return NULL;
+    }
+    if (n > 0 && src->value.pv) memcpy(p, src->value.pv, n);
+    p[n] = 0;
+    *len = (unsigned long)n;
+    if (owned) strada_decref(owned);
+    return p;
 }
 
 static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
@@ -2843,10 +2854,15 @@ func quote_identifier(scalar $dbh, str $name) str {
     my int $nul_err = 0;
     __C__ {
         DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
-        char *nm = strada_to_str(name);
-        size_t nm_len = (name && !STRADA_IS_TAGGED_INT(name) && name->type == STRADA_STR)
-            ? STRADA_STR_BYTELEN(name) : (nm ? strlen(nm) : 0);
-        if (nm_len == 0 && nm && nm[0] != '\0') nm_len = strlen(nm);
+        StradaValue *owned = NULL;
+        StradaValue *src = name;
+        if (!name || STRADA_IS_TAGGED_INT(name) || name->type != STRADA_STR
+            || (name->meta && (name->meta->blessed_package || name->meta->is_tied))) {
+            owned = strada_to_str_sv(name);
+            src = owned;
+        }
+        const char *nm = (src && !STRADA_IS_TAGGED_INT(src) && src->value.pv) ? src->value.pv : NULL;
+        size_t nm_len = (src && !STRADA_IS_TAGGED_INT(src)) ? STRADA_STR_BYTELEN(src) : 0;
         if (!nm || strlen(nm) != nm_len) {
             strada_decref(nul_err);
             nul_err = strada_new_int(1);
@@ -2854,11 +2870,11 @@ func quote_identifier(scalar $dbh, str $name) str {
             char *quoted = dbi_quote_identifier(h, nm);
             if (quoted) {
                 strada_decref(result);
-                result = strada_new_str_like(quoted, name);
+                result = strada_new_str_like(quoted, src);
                 free(quoted);
             }
         }
-        free(nm);
+        if (owned) strada_decref(owned);
     }
     if ($nul_err == 1) {
         throw "DBI::quote_identifier: cannot quote identifier containing embedded NUL byte";

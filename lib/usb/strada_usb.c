@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <libusb-1.0/libusb.h>
 
 /* Include Strada runtime for StradaValue type */
@@ -39,6 +40,19 @@ static int usb_ensure_init(void) {
         usb_initialized = 1;
     }
     return ret;
+}
+
+static StradaValue* usb_str_bytes(StradaValue *sv, const char **buf_out, size_t *len_out) {
+    StradaValue *owned = NULL;
+    StradaValue *src = sv;
+    if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_STR
+        || (sv->meta && (sv->meta->blessed_package || sv->meta->is_tied))) {
+        owned = strada_to_str_sv(sv);
+        src = owned;
+    }
+    *buf_out = (src && !STRADA_IS_TAGGED_INT(src) && src->value.pv) ? src->value.pv : "";
+    *len_out = (src && !STRADA_IS_TAGGED_INT(src)) ? STRADA_STR_BYTELEN(src) : 0;
+    return owned;
 }
 
 /* Initialize libusb
@@ -303,17 +317,17 @@ StradaValue* strada_usb_bulk_transfer(StradaValue *handle_sv, StradaValue *endpo
         return result;
     } else {
         /* OUT endpoint - write data */
-        char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
-                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
-        if (length < 0) {
-            free(data);
+        const char *data = "";
+        size_t slen = 0;
+        StradaValue *owned = usb_str_bytes(data_sv, &data, &slen);
+        if (slen > (size_t)INT_MAX) {
+            if (owned) strada_decref(owned);
             return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         }
 
         int ret = libusb_bulk_transfer(handle, endpoint, (unsigned char *)data,
-                                        length, &transferred, timeout);
-        free(data);   /* synchronous transfer has consumed it */
+                                       (int)slen, &transferred, timeout);
+        if (owned) strada_decref(owned);
         if (ret < 0) {
             return strada_new_int(ret);
         }
@@ -359,17 +373,17 @@ StradaValue* strada_usb_interrupt_transfer(StradaValue *handle_sv, StradaValue *
         return result;
     } else {
         /* OUT endpoint - write */
-        char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
-                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
-        if (length < 0) {
-            free(data);
+        const char *data = "";
+        size_t slen = 0;
+        StradaValue *owned = usb_str_bytes(data_sv, &data, &slen);
+        if (slen > (size_t)INT_MAX) {
+            if (owned) strada_decref(owned);
             return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         }
 
         int ret = libusb_interrupt_transfer(handle, endpoint, (unsigned char *)data,
-                                             length, &transferred, timeout);
-        free(data);   /* synchronous transfer has consumed it */
+                                            (int)slen, &transferred, timeout);
+        if (owned) strada_decref(owned);
         if (ret < 0) {
             return strada_new_int(ret);
         }
@@ -422,18 +436,17 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
         return result;
     } else {
         /* Host-to-device (write) */
-        char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        size_t slen = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
-                          ? STRADA_STR_BYTELEN(data_sv) : strlen(data);
+        const char *data = "";
+        size_t slen = 0;
+        StradaValue *owned = usb_str_bytes(data_sv, &data, &slen);
         if (slen > 65535) {
-            free(data);
+            if (owned) strada_decref(owned);
             return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         }
-        int length = (int)slen;
 
         int ret = libusb_control_transfer(handle, request_type, request,
-                                           value, index, (unsigned char *)data, (uint16_t)length, timeout);
-        free(data);   /* synchronous transfer has consumed it */
+                                          value, index, (unsigned char *)data, (uint16_t)slen, timeout);
+        if (owned) strada_decref(owned);
         return strada_new_int(ret);
     }
 }

@@ -871,7 +871,7 @@ private func is_package_decl(str $input) int {
 
 # Check if input is an OOP class declaration statement (has, extends, use overload)
 private func is_oop_decl(str $input) int {
-    if ($input =~ /^\s*(has|extends)\s+/) {
+    if ($input =~ /^\s*(has|extends|inherit)\s+/) {
         return 1;
     }
     if ($input =~ /^\s*use\s+overload\b/) {
@@ -2679,6 +2679,7 @@ private func eval_inner(str $code, scalar $flags) scalar {
         $pkg_name =~ s/\s*;.*$//;
         $pkg_name =~ s/\s+$//;
         $g_current_package = $pkg_name;
+        delete($flags, "extends_seen_" . $pkg_name);
         if ($rem ne "") {
             return eval_inner($rem, $flags);
         }
@@ -2761,10 +2762,32 @@ private func eval_inner(str $code, scalar $flags) scalar {
         my str $okey = "";
         if ($oop_stmt =~ /^\s*has\s+.*?[\$@%]([A-Za-z_][A-Za-z0-9_]*)/) {
             $okey = $tpkg . "::has::" . $1;
-        } elsif ($oop_stmt =~ /^\s*extends\s+/) {
+        } elsif ($oop_stmt =~ /^\s*(?:extends|inherit)\s+([\s\S]*)$/) {
             $okey = $tpkg . "::extends";
-        } elsif ($oop_stmt =~ /^\s*use\s+overload\b/) {
-            $okey = $tpkg . "::overload";
+            my str $eflag = "extends_seen_" . $tpkg;
+            if (($flags->{$eflag} + 0) == 1 && exists($g_constant_idx{$okey})) {
+                $g_constants[$g_constant_idx{$okey}] = $g_constants[$g_constant_idx{$okey}] . "\n" . $entry;
+            } else {
+                $flags->{$eflag} = 1;
+                upsert_constant($okey, $entry);
+            }
+            $flags->{"added_decl"} = 1;
+            if ($rem ne "") {
+                return eval_inner($rem, $flags);
+            }
+            return undef;
+        } elsif ($oop_stmt =~ /^\s*use\s+overload\b([\s\S]*)$/) {
+            my str $ov = $1;
+            $ov =~ s/^\s+//;
+            $ov =~ s/[\s;]+$//;
+            $ov =~ s/\s+/ /g;
+            if ($ov =~ /^"((?:\\.|[^"\\])*)"\s*=>\s*[^,]+$/) {
+                $okey = $tpkg . "::overload::\"" . $1 . "\"";
+            } elsif ($ov =~ /^'((?:\\.|[^'\\])*)'\s*=>\s*[^,]+$/) {
+                $okey = $tpkg . "::overload::'" . $1 . "'";
+            } else {
+                $okey = $tpkg . "::overload::" . $ov;
+            }
         }
         upsert_constant($okey, $entry);
         $flags->{"added_decl"} = 1;

@@ -1,0 +1,132 @@
+# R13-VM1..9 3-way parity test (compiled / --tree-walk / --vm)
+
+package R13CycA;
+extends R13CycB;
+package R13CycB;
+extends R13CycA;
+
+package R13DiaBase;
+func act(scalar $self) str { return "base"; }
+around "act" func(scalar $orig, scalar $self) str { return "<" . $orig->($self) . ">"; }
+
+package R13DiaL;
+extends R13DiaBase;
+package R13DiaR;
+extends R13DiaBase;
+package R13DiaChild;
+extends R13DiaL, R13DiaR;
+
+package R13ArrObj;
+use overload '""' => "as_str", 'bool' => "as_bool", '+' => "plus";
+func new(int $x, int $y) scalar {
+    my array @a = ($x, $y);
+    return bless(\@a, "R13ArrObj");
+}
+func sum(scalar $self) int { return $self->[0] + $self->[1]; }
+func as_str(scalar $self) str { return "Arr(" . $self->[0] . "," . $self->[1] . ")"; }
+func as_bool(scalar $self) int { return ($self->[0] + $self->[1]) != 0 ? 1 : 0; }
+func plus(scalar $self, scalar $other, int $rev) scalar {
+    my int $ov = ref($other) eq "R13ArrObj" ? $other->sum() : ($other + 0);
+    return R13ArrObj::new($self->[0] + $ov, $self->[1]);
+}
+
+package R13ScalarObj;
+func new(int $v) scalar {
+    return bless(\($v + 0), "R13ScalarObj");
+}
+func get(scalar $self) int { return $$self; }
+
+package R13FnObj;
+func make_box(int $n) scalar {
+    return bless(func(int $k) int { return $n + $k; }, "R13FnObj");
+}
+func invoke(scalar $self, int $k) int { return $self->($k); }
+
+package R13ErrArr;
+func make(str $msg) scalar {
+    my array @a = ($msg);
+    return bless(\@a, "R13ErrArr");
+}
+func msg(scalar $self) str { return $self->[0]; }
+
+package R13TieHandlerArr;
+func TIESCALAR(str $cls, str $v) scalar {
+    my array @a = ($v);
+    return bless(\@a, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->[0]; }
+func STORE(scalar $self, scalar $v) void { $self->[0] = $v; }
+
+package R13MultiInherA;
+func fa(scalar $self) int { return 10; }
+package R13MultiInherB;
+func fb(scalar $self) int { return 20; }
+package R13MultiInherC;
+inherit R13MultiInherA;
+inherit R13MultiInherB;
+use overload '""' => "as_str";
+use overload '+' => "add_op";
+func as_str(scalar $self) str { return "MIC"; }
+func add_op(scalar $self, scalar $o, int $rev) int { return 100 + $o; }
+
+package main;
+
+func main() int {
+    # R13-VM1: cyclic isa terminates & diamond MRO modifier runs once per ancestor
+    my scalar $ca = bless({}, "R13CycA");
+    my scalar $dc = bless({}, "R13DiaChild");
+    say("VM1=" . ($ca->isa("R13CycA") ? 1 : 0) . ($ca->isa("NoSuch") ? 1 : 0) . "|" . $dc->act());
+
+    # R13-VM2: chomp / chop on $$sref
+    my str $st = "hi\n";
+    my scalar $sr = \$st;
+    my str $cr = chomp($$sr);
+    my str $ch = chop($$sr);
+    say("VM2=" . $cr . ":" . $ch . ":" . $st);
+
+    # R13-VM3: blessed ARRAY, SCALAR ref, CODE ref + overload + typed catch + tied handler
+    my scalar $ao = R13ArrObj::new(3, 4);
+    my scalar $ao0 = R13ArrObj::new(0, 0);
+    my scalar $ao_add = $ao + 5;
+    my scalar $so = R13ScalarObj::new(77);
+    my scalar $fo = R13FnObj::make_box(10);
+    my str $caught = "";
+    try {
+        die(R13ErrArr::make("oops"));
+    } catch (R13ErrArr $e) {
+        $caught = $e->msg();
+    }
+    my scalar $ts = "";
+    tie($ts, "R13TieHandlerArr", "t1");
+    my str $t_before = $ts;
+    $ts = "t2";
+    my str $t_after = $ts;
+    untie($ts);
+    say("VM3=" . blessed($ao) . "|" . ref($ao) . "|" . $ao->sum() . "|" . ("" . $ao) . "|" . ($ao ? 1 : 0) . ($ao0 ? 1 : 0) . "|" . $ao_add->sum()
+        . "|" . blessed($so) . "|" . ref($so) . "|" . $so->get()
+        . "|" . blessed($fo) . "|" . $fo->invoke(5)
+        . "|" . $caught . "|" . $t_before . ">" . $t_after);
+
+    # R13-VM4: replace / replace_all with NUL bytes and UTF-8 preservation
+    my str $pat_nul = "\x00";
+    my str $rep_bin = replace("a\x00b\x00c", $pat_nul, ":");
+    my str $rep_safe = replace_all($rep_bin, "\x00", "_");
+    my str $rep_all = replace_all("a\x00b\x00c", $pat_nul, ":");
+    my str $rep_u8 = replace("café", "é", "E");
+    say("VM4=" . $rep_safe . "|" . length($rep_bin) . "|" . $rep_all . "|" . $rep_u8 . "|" . utf8::is_utf8($rep_u8));
+
+    # R13-VM5: core::quotemeta UTF-8 safe & flag preserved
+    my str $qm_in = "a.b[é]?";
+    my str $qm_out = core::quotemeta($qm_in);
+    say("VM5=" . $qm_out . "|" . utf8::is_utf8($qm_out));
+
+    # R13-VM6: core::path_join with array ref
+    my array @pj = ("usr/", "local/", "bin");
+    say("VM6=" . core::path_join(\@pj));
+
+    # R13-VM9: multiple inherit / overload in one package
+    my scalar $mi = bless({}, "R13MultiInherC");
+    say("VM9=" . ($mi->fa() + $mi->fb()) . "|" . ("" . $mi) . "|" . ($mi + 5));
+
+    return 0;
+}

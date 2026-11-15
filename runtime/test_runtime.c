@@ -630,14 +630,14 @@ static void test_r11_runtime(void) {
     assert(ua1 && ua1->type == STRADA_ARRAY && ua1->value.av->size == 1);
     StradaValue *u1e = strada_array_get(ua1->value.av, 0);
     assert(u1e && u1e->type == STRADA_STR && u1e->value.pv[0] == '\0');
-    strada_decref(u1e); strada_decref(ua1); strada_decref(up_sbe);
+    strada_decref(ua1); strada_decref(up_sbe);
 
     StradaValue *up_sle = strada_new_str_len("\xfe\xff" "ABCDE", 7);
     StradaValue *ua2 = strada_unpack("s</a*", up_sle);
     assert(ua2 && ua2->type == STRADA_ARRAY && ua2->value.av->size == 1);
     StradaValue *u2e = strada_array_get(ua2->value.av, 0);
     assert(u2e && u2e->type == STRADA_STR && u2e->value.pv[0] == '\0');
-    strada_decref(u2e); strada_decref(ua2); strada_decref(up_sle);
+    strada_decref(ua2); strada_decref(up_sle);
 
     StradaValue *up_lbe = strada_new_str_len("\xff\xff\xff\xfe" "ABCDE", 9);
     StradaValue *ua3 = strada_unpack("l>/a*", up_lbe);
@@ -968,11 +968,225 @@ static void test_r12_runtime(void) {
         StradaValue *mres = strada_method_call(obj, "ping", margs);
         assert(strada_to_int(mres) == 777);
         strada_decref(mres);
-        strada_decref(margs);
         strada_decref(obj);
     }
 
     printf("R12 runtime tests OK\n");
+}
+
+/* --- R13 runtime test helpers --- */
+static StradaValue* r13_long_pkg1_id(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return STRADA_MAKE_TAGGED_INT(101);
+}
+static StradaValue* r13_long_pkg2_id(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return STRADA_MAKE_TAGGED_INT(202);
+}
+static StradaValue* r13_long_base_only(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return STRADA_MAKE_TAGGED_INT(303);
+}
+static StradaValue* r13_bin_stringify(StradaValue *self, StradaValue *args) {
+    (void)args;
+    StradaValue *k = strada_hv_fetch_owned(self, "val");
+    if (!k) return strada_new_str("");
+    return k;
+}
+static StradaValue* r13_tied_tiescalar(StradaValue *cls, StradaValue *args) {
+    StradaValue *h = strada_new_hash();
+    if (args && args->type == STRADA_ARRAY && args->value.av->size > 0) {
+        StradaValue *v = strada_array_get(args->value.av, 0);
+        strada_hv_store(h, "v", v);
+    }
+    char *cname = strada_to_str(cls);
+    StradaValue *obj = strada_bless(h, cname);
+    free(cname);
+    return obj;
+}
+static StradaValue* r13_tied_fetch(StradaValue *self, StradaValue *args) {
+    (void)args;
+    return strada_hv_fetch_owned(self, "v");
+}
+
+static void test_r13_runtime(void) {
+    printf("Testing R13 runtime fixes...\n");
+
+    /* R13-RT1: >=256-byte package names in OopPackage, inheritance, strada_set_package/method_package */
+    {
+        char long_base[300];
+        char long_sub1[310];
+        char long_sub2[310];
+        memset(long_base, 'B', 270);
+        long_base[270] = '\0';
+        memcpy(long_sub1, long_base, 270);
+        strcpy(long_sub1 + 270, "::SubOne");
+        memcpy(long_sub2, long_base, 270);
+        strcpy(long_sub2 + 270, "::SubTwo");
+
+        strada_set_package(long_base);
+        assert(strada_current_package() && strcmp(strada_current_package(), long_base) == 0);
+        strada_method_register(long_base, "base_only", r13_long_base_only);
+        strada_inherit(long_sub1, long_base);
+        strada_inherit(long_sub2, long_base);
+        strada_method_register(long_sub1, "ident", r13_long_pkg1_id);
+        strada_method_register(long_sub2, "ident", r13_long_pkg2_id);
+
+        StradaValue *o1 = strada_bless(strada_new_hash(), long_sub1);
+        StradaValue *o2 = strada_bless(strada_new_hash(), long_sub2);
+        assert(strada_isa(o1, long_base) == 1 && strada_isa(o2, long_base) == 1);
+        assert(strada_isa(o1, long_sub2) == 0 && strada_isa(o2, long_sub1) == 0);
+        assert(strada_can(o1, "base_only") == 1 && strada_can(o2, "base_only") == 1);
+
+        StradaValue *r1 = strada_method_call(o1, "ident", strada_new_array());
+        StradaValue *r2 = strada_method_call(o2, "ident", strada_new_array());
+        assert(strada_to_int(r1) == 101 && strada_to_int(r2) == 202);
+        strada_decref(r1); strada_decref(r2);
+        {
+            const char bin_s[] = "a\0b\0c";
+            const char bin_d[] = "\0";
+            strada_regex_set_subject_len(5);
+            StradaArray *sp = strada_string_split_n(bin_s, bin_d, 1);
+            strada_regex_clear_subject_len();
+            StradaValue *spv = strada_new_array_from_av(sp);
+            assert(spv->value.av->size == 3);
+            assert(STRADA_STR_BYTELEN(strada_array_get(spv->value.av, 0)) == 1);
+            assert(STRADA_STR_BYTELEN(strada_array_get(spv->value.av, 1)) == 1);
+            assert(STRADA_STR_BYTELEN(strada_array_get(spv->value.av, 2)) == 1);
+            assert(strada_array_get(spv->value.av, 0)->value.pv[0] == 'a');
+            assert(strada_array_get(spv->value.av, 1)->value.pv[0] == 'b');
+            assert(strada_array_get(spv->value.av, 2)->value.pv[0] == 'c');
+            strada_decref(spv);
+        }
+
+        strada_set_method_package(long_sub1);
+        assert(strada_get_method_package() && strcmp(strada_get_method_package(), long_sub1) == 0);
+        strada_set_method_package(NULL);
+        assert(strada_get_method_package() == NULL);
+        strada_set_package("main");
+        strada_decref(o1); strada_decref(o2);
+    }
+
+    /* R13-RT2: directories / non-fd streams / meta section guards */
+    {
+        StradaValue *dfh = strada_open(".", "r");
+        if (dfh && dfh->type == STRADA_FILEHANDLE && dfh->value.fh) {
+            StradaValue *rf = strada_read_file(dfh);
+            assert(rf && rf->type == STRADA_UNDEF);
+            strada_decref(rf);
+            StradaValue *sf = strada_slurp_fh(dfh);
+            assert(sf && sf->type == STRADA_UNDEF);
+            strada_decref(sf);
+            strada_decref(strada_close(dfh));
+        }
+        if (dfh) strada_decref(dfh);
+
+        StradaValue *dot = strada_new_str(".");
+        StradaValue *ms = strada_read_meta_section(dot);
+        assert(ms && ms->type == STRADA_STR && STRADA_STR_BYTELEN(ms) == 0);
+        strada_decref(ms); strada_decref(dot);
+
+        /* fmemopen (fileno == -1) must still work */
+        StradaValue *mfh = strada_open_str("abc\0def", "r");
+        /* Note strada_open_str uses C strlen, verify normal non-dir memstream read */
+        StradaValue *mrf = strada_read_file(mfh);
+        assert(mrf && mrf->type == STRADA_STR && strcmp(mrf->value.pv, "abc") == 0);
+        strada_decref(mrf);
+        strada_decref(strada_close(mfh));
+        strada_decref(mfh);
+    }
+
+    /* R13-RT3: sprintf %*v combined with * width and .* precision */
+    {
+        StradaValue *fmt1 = strada_new_str("%*v*d");
+        StradaValue *sep = strada_new_str("-");
+        StradaValue *ab = strada_new_str("AB");
+        StradaValue *r1 = strada_sprintf_sv(fmt1, 3, sep, STRADA_MAKE_TAGGED_INT(4), ab);
+        assert(r1 && r1->type == STRADA_STR && strcmp(r1->value.pv, "  65-  66") == 0);
+        strada_decref(r1); strada_decref(fmt1);
+
+        StradaValue *fmt2 = strada_new_str("%*v.*d");
+        StradaValue *r2 = strada_sprintf_sv(fmt2, 3, sep, STRADA_MAKE_TAGGED_INT(3), ab);
+        assert(r2 && r2->type == STRADA_STR && strcmp(r2->value.pv, "065-066") == 0);
+        strada_decref(r2); strada_decref(fmt2); strada_decref(sep); strada_decref(ab);
+    }
+
+    /* R13-RT4, RT5, RT6 setup: blessed '""' object + tied scalar with embedded NUL & UTF-8 */
+    strada_overload_register("R13BinOver", "\"\"", r13_bin_stringify);
+    strada_method_register("R13Tied", "TIESCALAR", r13_tied_tiescalar);
+    strada_method_register("R13Tied", "FETCH", r13_tied_fetch);
+    {
+        StradaValue *h1 = strada_new_hash();
+        StradaValue *v1 = strada_new_str_len_utf8("\xc3\xa9\0a", 4);
+        strada_hv_store(h1, "val", v1);
+        strada_decref(v1);
+        StradaValue *o1 = strada_bless(h1, "R13BinOver");
+
+        StradaValue *h2 = strada_new_hash();
+        StradaValue *v2 = strada_new_str_len_utf8("\xc3\xa9\0b", 4);
+        strada_hv_store(h2, "val", v2);
+        strada_decref(v2);
+        StradaValue *o2 = strada_bless(h2, "R13BinOver");
+
+        /* R13-RT4: NUL-safe compare for blessed '""' and tied scalars */
+        assert(strada_sv_strcmp(o1, o2) < 0);
+        assert(strada_sv_strcmp(o2, o1) > 0);
+        StradaValue *tv1 = strada_new_undef();
+        StradaValue *tref1 = strada_new_ref(tv1, '$');
+        StradaValue *tv2 = strada_new_undef();
+        StradaValue *tref2 = strada_new_ref(tv2, '$');
+        StradaValue *bv1 = strada_new_str_len("p\0x", 3);
+        StradaValue *bv2 = strada_new_str_len("p\0y", 3);
+        strada_decref(strada_tie_scalar(tref1, "R13Tied", 1, bv1));
+        strada_decref(strada_tie_scalar(tref2, "R13Tied", 1, bv2));
+        assert(strada_sv_strcmp(tv1, tv2) < 0);
+        strada_decref(bv1); strada_decref(bv2);
+        strada_decref(tref1); strada_decref(tref2);
+        strada_decref(tv1); strada_decref(tv2);
+
+        /* R13-RT5: strada_regex_build_result preserves UTF-8 & embedded NUL from overload */
+        StradaValue *matches = strada_new_array();
+        StradaValue *m0 = strada_new_array();
+        strada_array_push(m0->value.av, STRADA_MAKE_TAGGED_INT(1));
+        strada_array_push(m0->value.av, STRADA_MAKE_TAGGED_INT(2));
+        strada_array_push(matches->value.av, m0);
+        strada_decref(m0);
+        StradaValue *repls = strada_new_array();
+        strada_array_push(repls->value.av, o1);
+        StradaValue *rebuilt = strada_regex_build_result("XYZ", matches, repls);
+        assert(rebuilt && rebuilt->type == STRADA_STR);
+        assert(STRADA_STR_BYTELEN(rebuilt) == 6);
+        assert(memcmp(rebuilt->value.pv, "X\xc3\xa9\0aZ", 6) == 0);
+        assert(STRADA_STR_IS_UTF8(rebuilt));
+        strada_decref(rebuilt); strada_decref(matches); strada_decref(repls);
+
+        /* R13-RT6: fwrite / write_file_n honor overload + binary NULs */
+        StradaValue *wfh = strada_open_str("", "w");
+        assert(strada_fwrite_sv(wfh, o1) == 4);
+        assert(strada_fwrite_sv_n(wfh, o2, 3) == 3);
+        assert(strada_write_file_n(wfh, o2, 4) == 4);
+        StradaValue *written = strada_str_from_fh(wfh);
+        assert(written && STRADA_STR_BYTELEN(written) == 11);
+        assert(memcmp(written->value.pv, "\xc3\xa9\0a\xc3\xa9\0\xc3\xa9\0b", 11) == 0);
+        strada_decref(written);
+        strada_decref(strada_close(wfh));
+        strada_decref(wfh);
+
+        strada_decref(o1); strada_decref(o2);
+    }
+
+    /* R13-RT7: pack 'U' skips negative codepoints */
+    {
+        StradaValue *pa = strada_new_array();
+        strada_array_push(pa->value.av, STRADA_MAKE_TAGGED_INT(-1));
+        strada_array_push(pa->value.av, STRADA_MAKE_TAGGED_INT(0x110000));
+        strada_array_push(pa->value.av, STRADA_MAKE_TAGGED_INT(65));
+        StradaValue *pk = strada_pack("U*", pa);
+        assert(pk && pk->type == STRADA_STR && STRADA_STR_BYTELEN(pk) == 1 && pk->value.pv[0] == 'A');
+        strada_decref(pk); strada_decref(pa);
+    }
+
+    printf("R13 runtime tests OK\n");
 }
 
 int main() {
@@ -1060,6 +1274,7 @@ int main() {
     test_r10_runtime();
     test_r11_runtime();
     test_r12_runtime();
+    test_r13_runtime();
     
     printf("=== All tests completed ===\n");
     
