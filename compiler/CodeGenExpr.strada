@@ -2032,6 +2032,9 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if ($val_type == NODE_CALL()) {
                         $cg->{"call_context"} = 0;
                     }
+                    if (needs_temp_cleanup($cg, $val) == 0) {
+                        emit($cg, "; strada_incref(__new_h)");
+                    }
                     emit($cg, "; StradaValue *__old_h = ");
                     gen_expression($cg, $target);
                     emit($cg, "; ");
@@ -2506,7 +2509,6 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_hv_store_sv(__sa_h, __sa_k, __sa_tv); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                     else { emit($cg, "strada_decref(__sa_tv); "); }
-                    if ($sa_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__sa_av_mk); "); }
                 } elsif ($sa_tt == NODE_SUBSCRIPT() || $sa_tt == NODE_DEREF_ARRAY()) {
                     emit($cg, "StradaValue *__sa_tv = strada_av_fetch_sv(__sa_a, __sa_idx); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
@@ -2518,7 +2520,6 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     }
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                     else { emit($cg, "strada_decref(__sa_tv); "); }
-                    if ($sa_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__sa_av_mk); "); }
                 } elsif ($sa_tt == NODE_DEREF_SCALAR()) {
                     emit($cg, "StradaValue *__sa_tv = strada_deref(__sa_ref); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
@@ -2545,6 +2546,9 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
                 if ($op eq "&&=" || $op eq "||=" || $op eq "//=") {
                     emit($cg, "} ");
+                }
+                if ($sa_av_cl == 1) {
+                    emit($cg, "strada_cleanup_drain_to(__sa_av_mk); ");
                 }
                 if ($is_void == 1) {
                     emit($cg, "strada_tmps_free(" . $sa_tm . "); (StradaValue*)NULL; })");
@@ -4123,22 +4127,8 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                 }
 
                 if ($receiver_is_self == 1) {
-                    # Check if method matches a has-attr of this package or parents
-                    my int $hai = 0;
-                    while ($hai < $ha_count) {
-                        my str $attr_name = $ha_attrs->[$hai]->{"name"};
-                        my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                        if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || is_subclass_compile_time($cg, $cur_pkg, $attr_pkg, 0) == 1)) {
-                            # An attribute with a builder or lazy default is NOT a plain hash
-                            # read: its accessor may have to run the builder/initializer.
-                            my str $attr_builder = "" . $ha_attrs->[$hai]->{"builder"};
-                            if (length($attr_builder) == 0 && ($ha_attrs->[$hai]->{"lazy"} + 0) == 0
-                                && has_user_method_override($cg, $cur_pkg, $method) == 0
-                                && has_method_modifier($cg, $method) == 0) {
-                                $is_accessor = 1;
-                            }
-                        }
-                        $hai = $hai + 1;
+                    if (length(is_inline_accessor($cg, $method)) > 0) {
+                        $is_accessor = 1;
                     }
                 }
             }
@@ -4407,18 +4397,24 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         # AST node for each explicit position: the provided arg, or
                         # the param's default (0 when absent → strada_new_undef()).
                         my array @dv_nodes = ();
+                        my array @dv_is_def = ();
                         my int $kk = 0;
                         while ($kk < $eff) {
                             my scalar $nd = 0;
+                            my int $isd = 0;
                             if ($kk < $arg_count) {
                                 $nd = $args->[$kk];
                             } elsif ($rf_params) {
                                 my scalar $dp = $rf_params->[$kk + 1];
                                 if ($dp) {
-                                    if ($dp->{"has_default"} == 1) { $nd = $dp->{"default"}; }
+                                    if ($dp->{"has_default"} == 1) {
+                                        $nd = $dp->{"default"};
+                                        $isd = 1;
+                                    }
                                 }
                             }
                             push(@dv_nodes, $nd);
+                            push(@dv_is_def, $isd);
                             $kk = $kk + 1;
                         }
                         if ($eff == 0 && $arg_count == 0) {
@@ -4501,6 +4497,10 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             my int $da = 0;
                             while ($da < $eff) {
                                 my scalar $an = $dv_nodes[$da];
+                                my scalar $da_pkg_saved = 0;
+                                if ($dv_is_def[$da] == 1) {
+                                    $da_pkg_saved = enter_callee_pkg($cg, $rf_i);
+                                }
                                 my int $a_mo = 0;
                                 if ($an) {
                                     if ($cg->{"cleanup_enabled"} == 1 && expr_is_always_tagged_int($cg, $an) == 0) {
@@ -4518,6 +4518,9 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                                     } else {
                                         emit($cg, "StradaValue *__dv_a" . $da . " = strada_new_undef()");
                                     }
+                                }
+                                if ($da_pkg_saved) {
+                                    leave_callee_pkg($cg, $da_pkg_saved);
                                 }
                                 emit($cg, "; ");
                                 $da = $da + 1;
@@ -5058,6 +5061,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $do_has_local = stmt_has_local($do_block);
         emit($cg, "({ StradaValue *__do_res_" . $do_id . " = NULL; {\n");
         indent($cg);
+        my scalar $do_saved_st = save_block_type_state($cg, $do_block);
         scope_push($cg);
         if ($do_has_local == 1) {
             emit_indent($cg);
@@ -5093,6 +5097,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "strada_local_restore_to(__local_do_mark_" . $do_id . ");\n");
         }
         scope_pop($cg);
+        restore_block_type_state($cg, $do_saved_st);
         dedent($cg);
         emit_indent($cg);
         emit($cg, "} __do_res_" . $do_id . " ? __do_res_" . $do_id . " : strada_new_undef(); })");
@@ -7466,6 +7471,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"map_counter"} = $map_id + 1;
 
         my int $map_arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1;
+        my int $map_arr_retain = 0;
         # Lazy-range fast path: map over an int-typed range iterates a
         # native C loop — no strada_range array materialization (mirrors
         # the foreach range path; `map {...} (1..1e6)` no longer builds a
@@ -7476,6 +7482,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
             $map_is_range = 1;
             $map_arr_cleanup = 0;
+        } elsif ($cg->{"cleanup_enabled"} == 1 && $map_arr_cleanup == 0) {
+            $map_arr_retain = 1;
+            $map_arr_cleanup = 1;
         }
         my int $saved_map_depth = $cg->{"scope_depth"};
         my int $saved_map_brk = $cg->{"loop_break_depth"};
@@ -7491,27 +7500,22 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "; int64_t __map_re_" . $map_id . " = ");
             emit_int_operand($cg, $array_expr->{"end"});
             emit($cg, "; ");
-        } elsif ($cg->{"uses_tie"} == 1) {
-            if ($map_arr_cleanup == 1) {
-                emit($cg, "StradaValue *__map_sv_" . $map_id . " = ");
-                gen_expression($cg, $array_expr);
-                # Push so a throwing block body lets the catch's drain
-                # decref the source on the longjmp path.
-                emit($cg, "; strada_cleanup_push(__map_sv_" . $map_id . "); ");
-                foreach_cleanup_enter($cg, $saved_map_depth, "__map_sv_" . $map_id);
-            } else {
-                emit($cg, "StradaValue *__map_sv_" . $map_id . " = ");
-                gen_expression($cg, $array_expr);
-                emit($cg, "; ");
-            }
         } elsif ($map_arr_cleanup == 1) {
             emit($cg, "StradaValue *__map_sv_" . $map_id . " = ");
             gen_expression($cg, $array_expr);
-            # Push so a throwing block body lets the catch's drain
-            # decref the source on the longjmp path.
+            if ($map_arr_retain == 1) {
+                emit($cg, "; strada_incref(__map_sv_" . $map_id . ")");
+            }
+            # Push so a throwing or early-exiting block cleans up the retained/owned source.
             emit($cg, "; strada_cleanup_push(__map_sv_" . $map_id . "); ");
             foreach_cleanup_enter($cg, $saved_map_depth, "__map_sv_" . $map_id);
-            emit($cg, "StradaArray *__map_input_" . $map_id . " = strada_deref_array(__map_sv_" . $map_id . "); ");
+            if ($cg->{"uses_tie"} == 0) {
+                emit($cg, "StradaArray *__map_input_" . $map_id . " = strada_deref_array(__map_sv_" . $map_id . "); ");
+            }
+        } elsif ($cg->{"uses_tie"} == 1) {
+            emit($cg, "StradaValue *__map_sv_" . $map_id . " = ");
+            gen_expression($cg, $array_expr);
+            emit($cg, "; ");
         } else {
             emit($cg, "StradaArray *__map_input_" . $map_id . " = strada_deref_array(");
             gen_expression($cg, $array_expr);
@@ -7558,6 +7562,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             foreach_cleanup_enter($cg, $saved_map_depth + 1, $map_el_var);
         }
 
+        my scalar $map_saved_st = save_block_type_state($cg, $block);
         my int $saved_in_map = $cg->{"in_map_block"} + 0;
         my str $saved_map_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_map_block"} = 1;
@@ -7637,6 +7642,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
+        restore_block_type_state($cg, $map_saved_st);
 
         $cg->{"in_map_block"} = $saved_in_map;
         $cg->{"current_elem_var"} = $saved_map_elem;
@@ -7788,6 +7794,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"grep_counter"} = $grep_id + 1;
 
         my int $grep_arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1;
+        my int $grep_arr_retain = 0;
         # Lazy-range fast path (mirrors map): grep over an int-typed range
         # iterates natively — no input array materialization.
         my int $grep_is_range = 0;
@@ -7796,6 +7803,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
             $grep_is_range = 1;
             $grep_arr_cleanup = 0;
+        } elsif ($cg->{"cleanup_enabled"} == 1 && $grep_arr_cleanup == 0) {
+            $grep_arr_retain = 1;
+            $grep_arr_cleanup = 1;
         }
         my int $saved_grep_depth = $cg->{"scope_depth"};
         my int $saved_grep_brk = $cg->{"loop_break_depth"};
@@ -7811,23 +7821,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "; int64_t __grep_re_" . $grep_id . " = ");
             emit_int_operand($cg, $array_expr->{"end"});
             emit($cg, "; ");
-        } elsif ($cg->{"uses_tie"} == 1) {
-            if ($grep_arr_cleanup == 1) {
-                emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
-                gen_expression($cg, $array_expr);
-                emit($cg, "; strada_cleanup_push(__grep_sv_" . $grep_id . "); ");
-                foreach_cleanup_enter($cg, $saved_grep_depth, "__grep_sv_" . $grep_id);
-            } else {
-                emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
-                gen_expression($cg, $array_expr);
-                emit($cg, "; ");
-            }
         } elsif ($grep_arr_cleanup == 1) {
             emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
             gen_expression($cg, $array_expr);
+            if ($grep_arr_retain == 1) {
+                emit($cg, "; strada_incref(__grep_sv_" . $grep_id . ")");
+            }
             emit($cg, "; strada_cleanup_push(__grep_sv_" . $grep_id . "); ");
             foreach_cleanup_enter($cg, $saved_grep_depth, "__grep_sv_" . $grep_id);
-            emit($cg, "StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(__grep_sv_" . $grep_id . "); ");
+            if ($cg->{"uses_tie"} == 0) {
+                emit($cg, "StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(__grep_sv_" . $grep_id . "); ");
+            }
+        } elsif ($cg->{"uses_tie"} == 1) {
+            emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
+            gen_expression($cg, $array_expr);
+            emit($cg, "; ");
         } else {
             emit($cg, "StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(");
             gen_expression($cg, $array_expr);
@@ -7874,6 +7882,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             foreach_cleanup_enter($cg, $saved_grep_depth + 1, $grep_el_var);
         }
 
+        my scalar $grep_saved_st = save_block_type_state($cg, $block);
         my int $saved_in_grep = $cg->{"in_grep_block"} + 0;
         my str $saved_grep_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_grep_block"} = 1;
@@ -7942,6 +7951,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
+        restore_block_type_state($cg, $grep_saved_st);
 
         $cg->{"in_grep_block"} = $saved_in_grep;
         $cg->{"current_elem_var"} = $saved_grep_elem;

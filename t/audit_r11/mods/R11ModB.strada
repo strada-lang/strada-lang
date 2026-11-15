@@ -1,0 +1,6 @@
+use R11ModBase;
+
+package R11C13Target;
+before "ping" func(scalar $self) void {
+    R11C13Log::add("B>");
+}

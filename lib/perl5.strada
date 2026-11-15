@@ -202,17 +202,22 @@ static void perl5_push_inc(const char *path) {
 
 static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
     if (!sv) return;
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR
+        && !(v->meta && (v->meta->blessed_package || v->meta->is_tied))) {
+        size_t len = STRADA_STR_BYTELEN(v);
+        sv_setpvn(sv, v->value.pv ? v->value.pv : "", (STRLEN)len);
+        if (STRADA_STR_IS_UTF8(v)) {
+            SvUTF8_on(sv);
+        } else {
+            SvUTF8_off(sv);
+        }
+        return;
+    }
     char *s = strada_to_str(v);
-    size_t len = (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR)
-        ? STRADA_STR_BYTELEN(v)
-        : (s ? strlen(s) : 0);
+    size_t len = s ? strlen(s) : 0;
     sv_setpvn(sv, s ? s : "", (STRLEN)len);
     free(s);
-    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR && STRADA_STR_IS_UTF8(v)) {
-        SvUTF8_on(sv);
-    } else {
-        SvUTF8_off(sv);
-    }
+    SvUTF8_off(sv);
 }
 
 static SV* perl5_sv_from_strada(StradaValue *v) {
@@ -392,19 +397,23 @@ func call(str $sub_name, str $arg) str {
                 strada_decref(arg_nv);
                 arg_nv = strada_new_num(use_arg->value.nv);
                 if (fetched) strada_decref(fetched);
-            } else {
-                int u8 = (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_STR && STRADA_STR_IS_UTF8(use_arg)) ? 1 : 0;
+            } else if (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_STR
+                       && !(use_arg->meta && (use_arg->meta->blessed_package || use_arg->meta->is_tied))) {
+                int u8 = STRADA_STR_IS_UTF8(use_arg) ? 1 : 0;
+                size_t clen = STRADA_STR_BYTELEN(use_arg);
+                const char *pv = use_arg->value.pv ? use_arg->value.pv : "";
                 strada_decref(arg_utf8);
                 arg_utf8 = strada_new_int(u8);
-                if (fetched) strada_inflight_push(fetched);
+                strada_decref(arg_s);
+                arg_s = strada_new_str_len(pv, clen);
+                if (fetched) strada_decref(fetched);
+            } else {
+                strada_decref(arg_utf8);
+                arg_utf8 = strada_new_int(0);
+                if (fetched) strada_cleanup_push(fetched);
                 char *cs = strada_to_str(use_arg);
-                size_t clen = (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_STR)
-                    ? STRADA_STR_BYTELEN(use_arg)
-                    : (cs ? strlen(cs) : 0);
-                if (fetched) {
-                    strada_inflight_pop();
-                    strada_decref(fetched);
-                }
+                size_t clen = cs ? strlen(cs) : 0;
+                if (fetched) strada_cleanup_pop_decref(fetched);
                 strada_decref(arg_s);
                 arg_s = strada_new_str_len(cs ? cs : "", clen);
                 free(cs);

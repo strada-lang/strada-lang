@@ -1042,6 +1042,11 @@ func emit_try_unwind_to(scalar $cg, int $target_td) void {
 func codegen_register_function(scalar $cg, scalar $fn) void {
     my str $name = sanitize_name($fn->{"name"});
     my hash %info = ();
+    my str $fpkg = "";
+    if (defined($fn->{"package"})) {
+        $fpkg = "" . $fn->{"package"};
+    }
+    $info{"package"} = $fpkg;
     $info{"param_count"} = $fn->{"param_count"};
     $info{"params"} = $fn->{"params"};
     $info{"return_type"} = $fn->{"return_type"};
@@ -1232,46 +1237,109 @@ func is_inline_int_accessor_call(scalar $cg, scalar $expr) int {
     return expr_is_int_typed($cg, $expr);
 }
 
-# Check if a zero-arg method call on $self can be inlined as a direct hash access.
-# Returns the attribute name if inlineable, empty string otherwise.
-func is_inline_accessor(scalar $cg, str $method) str {
-    # Skip UNIVERSAL methods
+func enter_callee_pkg(scalar $cg, scalar $callee_info) scalar {
+    my hash %saved = ();
+    $saved{"pkg"} = "" . $cg->{"package"};
+    $saved{"fnpkg"} = "" . $cg->{"current_fn_package"};
+    if ($callee_info) {
+        my str $cp = "" . $callee_info->{"package"};
+        if (length($cp) > 0) {
+            $cg->{"package"} = $cp;
+            $cg->{"current_fn_package"} = $cp;
+        }
+    }
+    return \%saved;
+}
+
+func leave_callee_pkg(scalar $cg, scalar $saved) void {
+    $cg->{"package"} = $saved->{"pkg"};
+    $cg->{"current_fn_package"} = $saved->{"fnpkg"};
+}
+
+# Resolve the most-derived `has` attribute for $method in $pkg's MRO if it is safe
+# for direct-hash inline access (no modifiers, no user overrides, no lazy/builder
+# on either the matched attribute or any subclass override). Returns the attr hash
+# or 0 otherwise.
+func resolve_inline_self_attr(scalar $cg, str $pkg, str $method) scalar {
     if ($method eq "isa" || $method eq "can" || $method eq "new" || $method eq "DESTROY") {
-        return "";
+        return 0;
     }
+    if (length($pkg) == 0 || $pkg eq "main") { return 0; }
+    if (has_method_modifier($cg, $method) == 1) { return 0; }
+    if (has_user_method_override($cg, $pkg, $method) == 1) { return 0; }
 
-    my str $pkg = $cg->{"current_fn_package"};
-    if (length($pkg) == 0 || $pkg eq "main") { return ""; }
-
-    my scalar $lookup = $cg->{"accessor_lookup"};
-    if (!$lookup) { return ""; }
-
-    if (has_method_modifier($cg, $method) == 1) { return ""; }
-    if (has_user_method_override($cg, $pkg, $method) == 1) { return ""; }
-
-    # Check direct match: method is a non-lazy has attr of current package
-    my str $key = $pkg . "\t" . $method;
-    if (length("" . $lookup->{$key}) > 0) {
-        return $method;
-    }
-
-    # Check transitive ancestor packages via is_subclass_compile_time
     my scalar $ha_attrs = $cg->{"has_attrs"};
     my int $ha_count = $cg->{"has_attr_count"} + 0;
-    my int $hi = 0;
-    while ($hi < $ha_count) {
-        my str $a_name = "" . $ha_attrs->[$hi]->{"name"};
-        if ($a_name eq $method) {
-            my str $a_pkg = "" . $ha_attrs->[$hi]->{"package"};
-            if (is_subclass_compile_time($cg, $pkg, $a_pkg, 0) == 1) {
-                if (length("" . $lookup->{$a_pkg . "\t" . $method}) > 0) {
-                    return $method;
+    if (!$ha_attrs || $ha_count == 0) { return 0; }
+
+    my array @mro = ();
+    push(@mro, $pkg);
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+    my int $mi = 0;
+    while ($mi < size(@mro)) {
+        my str $cp = $mro[$mi];
+        my int $ii = 0;
+        while ($ii < $ic) {
+            if (("" . $inh->[$ii]->{"child"}) eq $cp) {
+                my str $pp = "" . $inh->[$ii]->{"parent"};
+                my int $seen = 0;
+                my int $si = 0;
+                while ($si < size(@mro)) {
+                    if ($mro[$si] eq $pp) { $seen = 1; last; }
+                    $si = $si + 1;
+                }
+                if ($seen == 0) { push(@mro, $pp); }
+            }
+            $ii = $ii + 1;
+        }
+        $mi = $mi + 1;
+    }
+
+    my scalar $matched = 0;
+    $mi = 0;
+    while ($mi < size(@mro) && !$matched) {
+        my str $mpkg = $mro[$mi];
+        my int $hi = 0;
+        while ($hi < $ha_count) {
+            my scalar $attr = $ha_attrs->[$hi];
+            if (("" . $attr->{"name"}) eq $method && ("" . $attr->{"package"}) eq $mpkg) {
+                $matched = $attr;
+                last;
+            }
+            $hi = $hi + 1;
+        }
+        $mi = $mi + 1;
+    }
+    if (!$matched) { return 0; }
+    if (($matched->{"lazy"} + 0) != 0 || length("" . $matched->{"builder"}) > 0) {
+        return 0;
+    }
+
+    my int $hi2 = 0;
+    while ($hi2 < $ha_count) {
+        my scalar $a2 = $ha_attrs->[$hi2];
+        if (("" . $a2->{"name"}) eq $method) {
+            my str $ap2 = "" . $a2->{"package"};
+            if ($ap2 ne $pkg && is_subclass_compile_time($cg, $ap2, $pkg, 0) == 1) {
+                if (($a2->{"lazy"} + 0) != 0 || length("" . $a2->{"builder"}) > 0) {
+                    return 0;
                 }
             }
         }
-        $hi = $hi + 1;
+        $hi2 = $hi2 + 1;
     }
+    return $matched;
+}
 
+# Check if a zero-arg method call on $self can be inlined as a direct hash access.
+# Returns the attribute name if inlineable, empty string otherwise.
+func is_inline_accessor(scalar $cg, str $method) str {
+    my str $pkg = $cg->{"current_fn_package"};
+    my scalar $ma = resolve_inline_self_attr($cg, $pkg, $method);
+    if ($ma) {
+        return $method;
+    }
     return "";
 }
 
@@ -1682,6 +1750,7 @@ func wrapper_default_expr(scalar $cg, str $pkg, scalar $param, scalar $extra_def
     my scalar $saved_sb = $cg->{"output_sb"};
     my int $saved_cleanup = $cg->{"cleanup_enabled"};
     my int $saved_in_main = $cg->{"in_main"};
+    my str $saved_top_pkg = "" . $cg->{"package"};
     my str $saved_pkg = "" . $cg->{"current_fn_package"};
     my str $saved_anon = "" . $cg->{"anon_func_defs"};
     my scalar $saved_fpn = $cg->{"func_param_names"};
@@ -1690,6 +1759,7 @@ func wrapper_default_expr(scalar $cg, str $pkg, scalar $param, scalar $extra_def
     $cg->{"output_sb"} = sb_new();
     $cg->{"cleanup_enabled"} = 1;
     $cg->{"in_main"} = 0;
+    $cg->{"package"} = $pkg;
     $cg->{"current_fn_package"} = $pkg;
     $cg->{"anon_func_defs"} = "";
     $cg->{"func_param_names"} = [];
@@ -1706,6 +1776,7 @@ func wrapper_default_expr(scalar $cg, str $pkg, scalar $param, scalar $extra_def
     $cg->{"output_sb"} = $saved_sb;
     $cg->{"cleanup_enabled"} = $saved_cleanup;
     $cg->{"in_main"} = $saved_in_main;
+    $cg->{"package"} = $saved_top_pkg;
     $cg->{"current_fn_package"} = $saved_pkg;
     $cg->{"anon_func_defs"} = $saved_anon;
     $cg->{"func_param_names"} = $saved_fpn;
@@ -4682,30 +4753,37 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
         my int $arg_count = $expr->{"arg_count"};
         my str $method = $expr->{"method"};
 
-        # Check 1: Inline accessor calls ($self->x() where x is has rw int $x)
+        # Check 1: Inline accessor calls ($self->x() where x resolves to a non-lazy int attr)
         if ($arg_count == 0 && receiver_is_current_self($cg, $expr) == 1) {
             my str $cur_pkg = $cg->{"current_fn_package"};
-            if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
+            my scalar $ma = resolve_inline_self_attr($cg, $cur_pkg, $method);
+            if ($ma) {
+                if (($ma->{"attr_type"} + 0) != TYPE_INT()) {
+                    return 0;
+                }
                 my scalar $ha_attrs = $cg->{"has_attrs"};
-                my int $ha_count = $cg->{"has_attr_count"};
-                my scalar $acc_lookup = $cg->{"accessor_lookup"};
+                my int $ha_count = $cg->{"has_attr_count"} + 0;
                 my int $hai = 0;
                 while ($hai < $ha_count) {
-                    my str $attr_name = $ha_attrs->[$hai]->{"name"};
-                    my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                    if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || is_subclass_compile_time($cg, $cur_pkg, $attr_pkg, 0) == 1)) {
-                        my int $at = $ha_attrs->[$hai]->{"attr_type"};
-                        if ($at == TYPE_INT()) {
-                            return 1;
+                    my scalar $a3 = $ha_attrs->[$hai];
+                    if (("" . $a3->{"name"}) eq $method) {
+                        my str $ap3 = "" . $a3->{"package"};
+                        if ($ap3 ne $cur_pkg && is_subclass_compile_time($cg, $ap3, $cur_pkg, 0) == 1) {
+                            if (($a3->{"attr_type"} + 0) != TYPE_INT()) {
+                                return 0;
+                            }
                         }
-                        return 0;
                     }
                     $hai = $hai + 1;
                 }
+                return 1;
             }
         }
 
         # Check 2: Devirtualized method calls (known object type → direct function)
+        if (has_method_modifier($cg, $method) == 1) {
+            return 0;
+        }
         my scalar $meth_target = $expr->{"base_object"};
         if (!$meth_target) {
             $meth_target = $expr->{"object"};
@@ -7347,6 +7425,11 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
     my scalar $idx_expr = $target->{"index"};
     my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
     my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1 && autoviv_link_type($arr_expr) == 0;
+    my int $arr_retain = 0;
+    if ($cg->{"cleanup_enabled"} == 1 && $arr_cleanup == 0 && autoviv_link_type($arr_expr) == 0) {
+        $arr_retain = 1;
+        $arr_cleanup = 1;
+    }
     my int $aca_av_cl = autoviv_chain_needs_cleanup($cg, $arr_expr);
     my int $aca_push = cleanup_push_useful($cg);
 
@@ -7364,6 +7447,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
         emit($cg, "StradaValue *__aca_arr = ");
         gen_assign_container_marked($cg, $arr_expr, 2, $aca_av_cl);
         emit($cg, "; ");
+        if ($arr_retain == 1) { emit($cg, "strada_incref(__aca_arr); "); }
         if ($aca_push == 1 && $arr_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_arr); "); }
         emit($cg, "int64_t __aca_idx = ");
         emit_int_operand($cg, $idx_expr);
@@ -7403,6 +7487,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
     emit($cg, "StradaValue *__aca_arr = ");
     gen_assign_container_marked($cg, $arr_expr, 2, $aca_av_cl);
     emit($cg, "; ");
+    if ($arr_retain == 1) { emit($cg, "strada_incref(__aca_arr); "); }
     if ($aca_push == 1 && $arr_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_arr); "); }
     emit($cg, "int64_t __aca_idx = ");
     emit_int_operand($cg, $idx_expr);

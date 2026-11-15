@@ -1,0 +1,9 @@
+package R11C13Log;
+our str $g_log = "";
+func reset() void { $g_log = ""; }
+func add(str $s) void { $g_log = $g_log . $s; }
+func get() str { return $g_log; }
+
+package R11C13Target;
+func new() scalar { return bless({}, "R11C13Target"); }
+func ping(scalar $self) str { return "base"; }

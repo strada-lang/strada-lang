@@ -4716,6 +4716,18 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
             push(@pair, $val);
             return \@pair;
         }
+        if (ref($hv) eq "HASH") {
+            while (1) {
+                my scalar $pair = each($hv);
+                if (!defined($pair) || size($pair) == 0) {
+                    return $pair;
+                }
+                my str $ek = "" . $pair->[0];
+                if ($ek ne "__class__" && $ek ne "__tied__" && $ek ne "__scalar_ref__") {
+                    return $pair;
+                }
+            }
+        }
         return each($hv);
     }
 
@@ -5431,28 +5443,26 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::unlink($args->[0]);
     }
     if ($bid == BI::SYS_RENAME) {
-        core::rename($args->[0], $args->[1]);
-        return undef;
+        return core::rename($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_MKDIR) {
-        core::mkdir($args->[0], $args->[1]);
-        return undef;
+        my int $mode = 493;
+        if (scalar(@{$args}) >= 2 && defined($args->[1])) {
+            $mode = $args->[1] + 0;
+        }
+        return core::mkdir($args->[0], $mode);
     }
     if ($bid == BI::SYS_RMDIR) {
-        core::rmdir($args->[0]);
-        return undef;
+        return core::rmdir($args->[0]);
     }
     if ($bid == BI::SYS_CHMOD) {
-        core::chmod($args->[0], $args->[1]);
-        return undef;
+        return core::chmod($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_LINK) {
-        core::link($args->[0], $args->[1]);
-        return undef;
+        return core::link($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_SYMLINK) {
-        core::symlink($args->[0], $args->[1]);
-        return undef;
+        return core::symlink($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_READLINK) {
         return core::readlink($args->[0]);
@@ -5637,8 +5647,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::umask($args->[0]);
     }
     if ($bid == BI::SYS_UTIME) {
-        core::utime($args->[0], $args->[1], $args->[2]);
-        return undef;
+        return core::utime($args->[0], $args->[1], $args->[2]);
     }
     if ($bid == BI::SYS_FREE) {
         # No-op in interpreter (GC handles memory)
@@ -5879,15 +5888,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- core:: seek/tell ----
     if ($bid == BI::SYS_SEEK) {
-        core::seek($args->[0], $args->[1], $args->[2]);
-        return undef;
+        return core::seek($args->[0], $args->[1], $args->[2]);
     }
     if ($bid == BI::SYS_TELL) {
         return core::tell($args->[0]);
     }
     if ($bid == BI::SYS_REWIND) {
-        core::rewind($args->[0]);
-        return undef;
+        return core::rewind($args->[0]);
     }
 
     # ---- core:: weak references ----
@@ -9266,10 +9273,22 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my str $flags = $node->{"flags"};
         my str $op = $node->{"op"};
 
-        # Apply flags: build pattern with inline modifiers if flags present
+        # Apply flags: keep PCRE2 inline modifiers (i, m, s, x) and ignore
+        # non-PCRE2 flags like g, c, u so (?g) does not break pattern compile.
         my str $effective_pattern = $pattern;
         if (length($flags) > 0) {
-            $effective_pattern = "(?" . $flags . ")" . $pattern;
+            my str $inline_flags = "";
+            my int $fli = 0;
+            while ($fli < length($flags)) {
+                my str $fc = substr($flags, $fli, 1);
+                if ($fc eq "i" || $fc eq "m" || $fc eq "s" || $fc eq "x") {
+                    $inline_flags = $inline_flags . $fc;
+                }
+                $fli = $fli + 1;
+            }
+            if (length($inline_flags) > 0) {
+                $effective_pattern = "(?" . $inline_flags . ")" . $pattern;
+            }
         }
 
         my int $result = match($target, $effective_pattern);

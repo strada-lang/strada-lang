@@ -1,0 +1,44 @@
+#!/usr/bin/env strada
+# Cycle 11 Valgrind leak regression suite: Eval + VM + Strada::JIT (R11-VM1..VM7, R11-VM11)
+
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        my str $code = '
+            my str $tmp = "/tmp/r11_ev_leak_" . core::getpid() . ".bin";
+            my scalar $fh = core::open($tmp, "+>");
+            core::fwrite($fh, "a" . chr(0) . "bc", 4);
+            core::seek($fh, 0, "SEEK_SET");
+            my str $rd = core::fread($fh, 8);
+            core::rewind($fh);
+            core::close($fh);
+            core::unlink($tmp);
+            my str $sp = sprintf("|%*d|%.*f|%5s|%.2s|", 4, 7, 2, 3.14, "éé", "aé");
+            my str $uc = ucfirst("éab") . lcfirst("Éab");
+            length("é" x 3) . ":" . core::byte_length($rd) . ":" . $sp . ":" . $uc;
+        ';
+        my scalar $tw = Strada::Interpreter::eval_string($code);
+        my scalar $vm = Strada::Interpreter::eval_string_vm($code);
+        if (("" . $tw) ne ("" . $vm)) { die("eval_jit leak parity fail"); }
+        my int $caught = 0;
+        try {
+            Strada::Interpreter::eval_string_vm('return $r11l_undecl;');
+        } catch ($e) {
+            $caught = 1;
+        }
+        if ($caught != 1) { die("expected undeclared var compile error"); }
+    }
+    Strada::Interpreter::reset();
+
+    Strada::JIT::init();
+    for (my int $j = 0; $j < 3; $j = $j + 1) {
+        my scalar $r = Strada::JIT::eval("# cmt\n10 + " . $j . " # trailing");
+        if (($r + 0) != 10 + $j) { die("jit leak fail"); }
+    }
+
+    say("R11_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

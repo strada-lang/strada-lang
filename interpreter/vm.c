@@ -1474,6 +1474,8 @@ static int vm_has_stringify(VMProgram *prog, VMValue v);
 static VMValue vm_stringify_ov(VM *vm, VMValue v);
 static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj);
 static VMValue sv_to_vm(StradaValue *sv);
+static size_t vm_utf8_char_count(const char *s, size_t blen);
+static size_t vm_utf8_char_to_byte(const char *s, size_t blen, int64_t char_idx);
 
 static VMArray *vm_split_parts_to_array(StradaArray *parts) {
     VMArray *res = vm_array_new(parts ? (int)parts->size : 0);
@@ -1513,11 +1515,47 @@ static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
             }
             char spec[64]; int si = 0;
             spec[si++] = '%';
-            while (fi < flen && strchr("-+ #0", fmt[fi]) && si < 50) spec[si++] = fmt[fi++];
-            while (fi < flen && isdigit((unsigned char)fmt[fi]) && si < 50) spec[si++] = fmt[fi++];
-            if (fi < flen && fmt[fi] == '.' && si < 50) {
-                spec[si++] = fmt[fi++];
-                while (fi < flen && isdigit((unsigned char)fmt[fi]) && si < 50) spec[si++] = fmt[fi++];
+            while (fi < flen && strchr("-+ #0", fmt[fi]) && si < 20) spec[si++] = fmt[fi++];
+            if (fi < flen && fmt[fi] == '*') {
+                fi++;
+                int star_w = (ai < argc) ? (int)vm_to_int(args[ai++]) : 0;
+                if (star_w < 0) {
+                    int has_minus_flag = 0;
+                    for (int k = 1; k < si; k++) {
+                        if (spec[k] == '-') { has_minus_flag = 1; break; }
+                    }
+                    if (!has_minus_flag && si < 21) {
+                        memmove(spec + 2, spec + 1, (size_t)(si - 1));
+                        spec[1] = '-';
+                        si++;
+                    }
+                    star_w = (star_w == INT_MIN) ? 0 : -star_w;
+                }
+                int avail = (int)sizeof(spec) - si - 16;
+                if (avail > 1) {
+                    int nw = snprintf(spec + si, (size_t)avail, "%d", star_w);
+                    if (nw > 0) si += (nw < avail ? nw : avail - 1);
+                }
+            } else {
+                while (fi < flen && isdigit((unsigned char)fmt[fi]) && si < 40) spec[si++] = fmt[fi++];
+            }
+            if (fi < flen && fmt[fi] == '.' && si < 45) {
+                fi++;
+                if (fi < flen && fmt[fi] == '*') {
+                    fi++;
+                    int star_p = (ai < argc) ? (int)vm_to_int(args[ai++]) : 0;
+                    if (star_p >= 0) {
+                        spec[si++] = '.';
+                        int avail = (int)sizeof(spec) - si - 4;
+                        if (avail > 1) {
+                            int np = snprintf(spec + si, (size_t)avail, "%d", star_p);
+                            if (np > 0) si += (np < avail ? np : avail - 1);
+                        }
+                    }
+                } else {
+                    spec[si++] = '.';
+                    while (fi < flen && isdigit((unsigned char)fmt[fi]) && si < 55) spec[si++] = fmt[fi++];
+                }
             }
             /* Strip C length modifiers so numeric formats always emit full 64-bit ll/double cleanly */
             while (fi < flen && (fmt[fi] == 'h' || fmt[fi] == 'l' || fmt[fi] == 'z' ||
@@ -1539,7 +1577,8 @@ static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
                         arg = vm_stringify_ov(vm, arg);
                         if (vm->has_pending_exc) { free(result); return VM_UNDEF_VAL; }
                     }
-                    if (vm_is_utf8(arg)) out_utf8 = 1;
+                    int arg_u8 = vm_is_utf8(arg);
+                    if (arg_u8) out_utf8 = 1;
                     char abuf[64];
                     size_t slen = 0;
                     const char *sval = vm_bytes_view(arg, abuf, sizeof(abuf), &slen);
@@ -1571,8 +1610,16 @@ static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
                                 sp++;
                             }
                         }
-                        size_t plen = (prec >= 0 && (size_t)prec < slen) ? (size_t)prec : slen;
-                        size_t pad = (width > 0 && (size_t)width > plen) ? ((size_t)width - plen) : 0;
+                        size_t plen = slen;
+                        if (prec >= 0) {
+                            if (arg_u8) {
+                                plen = vm_utf8_char_to_byte(sval, slen, (int64_t)prec);
+                            } else if ((size_t)prec < slen) {
+                                plen = (size_t)prec;
+                            }
+                        }
+                        size_t disp_len = arg_u8 ? vm_utf8_char_count(sval, plen) : plen;
+                        size_t pad = (width > 0 && (size_t)width > disp_len) ? ((size_t)width - disp_len) : 0;
                         char padch = (!has_minus && has_zero) ? '0' : ' ';
                         VM_SPRINTF_ENSURE(pad + plen);
                         if (!has_minus && pad > 0) { memset(result + rlen, padch, pad); rlen += pad; }
@@ -3155,6 +3202,47 @@ static VMValue vm_str_case_transform(VMValue v, int to_upper) {
     VMValue r = vm_make_str_flag(out, olen, 1);
     free(out);
     return r;
+}
+
+static VMValue vm_ucfirst_val(VMValue v, int to_upper) {
+    char buf[256];
+    size_t len = 0;
+    const char *s = vm_bytes_view(v, buf, sizeof(buf), &len);
+    int u8 = vm_is_utf8(v);
+    if (len == 0) return vm_make_str_flag("", 0, u8);
+    if (!u8 || (unsigned char)s[0] < 0x80) {
+        char *r = malloc(len + 1);
+        memcpy(r, s, len);
+        r[len] = '\0';
+        if (to_upper && r[0] >= 'a' && r[0] <= 'z') r[0] -= 32;
+        else if (!to_upper && r[0] >= 'A' && r[0] <= 'Z') r[0] += 32;
+        VMValue out = vm_make_str_flag(r, len, u8);
+        free(r);
+        return out;
+    }
+    const char *nul = (const char *)memchr(s, '\0', len);
+    size_t head_len = nul ? (size_t)(nul - s) : len;
+    if (head_len == 0) return vm_make_str_flag(s, len, u8);
+    size_t cplen = 1;
+    unsigned char c0 = (unsigned char)s[0];
+    if ((c0 & 0xE0) == 0xC0) cplen = 2;
+    else if ((c0 & 0xF0) == 0xE0) cplen = 3;
+    else if ((c0 & 0xF8) == 0xF0) cplen = 4;
+    if (cplen > head_len) return vm_make_str_flag(s, len, u8);
+    char first_cp[8];
+    memcpy(first_cp, s, cplen);
+    first_cp[cplen] = '\0';
+    char *mapped = to_upper ? strada_ucfirst(first_cp) : strada_lcfirst(first_cp);
+    size_t mlen = mapped ? strlen(mapped) : 0;
+    size_t out_len = mlen + (len - cplen);
+    char *r = malloc(out_len + 1);
+    if (mlen > 0) memcpy(r, mapped, mlen);
+    if (len > cplen) memcpy(r + mlen, s + cplen, len - cplen);
+    r[out_len] = '\0';
+    free(mapped);
+    VMValue out = vm_make_str_flag(r, out_len, u8);
+    free(r);
+    return out;
 }
 
 static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMValue *cargs, int cargc, int passed_argc);
@@ -5765,14 +5853,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         int64_t n = vm_to_int(count);
         vm_temp_free(&count);
         if (n <= 0 || slen == 0) {
-            SP_PUSH(vm_str(""));
+            SP_PUSH(vm_make_str_flag("", 0, vm_is_utf8(str)));
         } else if ((uint64_t)n > (256ULL * 1024 * 1024) / slen) {
             fprintf(stderr, "VM error: string repeat overflow\n");
             SP_PUSH(vm_str(""));
         } else {
             size_t total = slen * (size_t)n;
             VMString *vs = malloc(sizeof(VMString) + total + 1);
-            vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR); vs->len = (uint32_t)total;
+            vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
+            if (vm_is_utf8(str)) vs->hdr.is_utf8 = 1;
+            vs->len = (uint32_t)total;
             for (int64_t i = 0; i < n; i++) memcpy(vs->data + (size_t)i * slen, s, slen);
             vs->data[total] = 0;
             SP_PUSH(VM_MAKE_PTR(vs));
@@ -7850,6 +7940,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 if (strcmp(mode, "<") == 0) cmode = "r";
                 else if (strcmp(mode, ">") == 0) cmode = "w";
                 else if (strcmp(mode, ">>") == 0) cmode = "a";
+                else if (strcmp(mode, "+<") == 0) cmode = "r+";
+                else if (strcmp(mode, "+>") == 0) cmode = "w+";
                 FILE *fp = fopen(path, cmode);
                 if (fp) {
                     VMFileHandle *fh = calloc(1, sizeof(VMFileHandle));
@@ -7982,9 +8074,31 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_SEEK: {
             if (argc >= 3 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
                 VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
-                if (fh->fp) fseek((FILE*)fh->fp, vm_to_int(args[1]), (int)vm_to_int(args[2]));
+                if (!fh->fp) {
+                    SP_PUSH(VM_MAKE_INT(-1));
+                } else {
+                    int seek_whence = SEEK_SET;
+                    if (VM_IS_PTR(args[2]) && VM_PTR_TYPE(args[2]) == VM_OBJ_STR) {
+                        const char *ws = VM_AS_STR(args[2])->data;
+                        if (strcmp(ws, "SEEK_SET") == 0) seek_whence = SEEK_SET;
+                        else if (strcmp(ws, "SEEK_CUR") == 0) seek_whence = SEEK_CUR;
+                        else if (strcmp(ws, "SEEK_END") == 0) seek_whence = SEEK_END;
+                        else {
+                            int64_t w = vm_to_int(args[2]);
+                            if (w == 1) seek_whence = SEEK_CUR;
+                            else if (w == 2) seek_whence = SEEK_END;
+                        }
+                    } else {
+                        int64_t w = vm_to_int(args[2]);
+                        if (w == 1) seek_whence = SEEK_CUR;
+                        else if (w == 2) seek_whence = SEEK_END;
+                    }
+                    int rc = fseek((FILE*)fh->fp, (long)vm_to_int(args[1]), seek_whence);
+                    SP_PUSH(VM_MAKE_INT(rc == 0 ? 1 : 0));
+                }
+            } else {
+                SP_PUSH(VM_MAKE_INT(-1));
             }
-            SP_PUSH(VM_MAKE_INT(0));
             break;
         }
         case BUILTIN_CORE_TELL: {
@@ -7997,9 +8111,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_REWIND: {
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
                 VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
-                if (fh->fp) rewind((FILE*)fh->fp);
+                if (fh->fp) {
+                    rewind((FILE*)fh->fp);
+                    SP_PUSH(VM_MAKE_INT(1));
+                } else {
+                    SP_PUSH(VM_MAKE_INT(0));
+                }
+            } else {
+                SP_PUSH(VM_MAKE_INT(0));
             }
-            SP_PUSH(VM_UNDEF_VAL);
             break;
         }
         case BUILTIN_CORE_FLUSH: {
@@ -8008,6 +8128,72 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 if (fh->fp) fflush((FILE*)fh->fp);
             }
             SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+        case BUILTIN_CORE_FWRITE: {
+            if (argc >= 2 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
+                VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
+                if (fh->fp) {
+                    char buf[64];
+                    size_t slen = 0;
+                    const char *s = vm_bytes_view(args[1], buf, sizeof(buf), &slen);
+                    size_t to_write = slen;
+                    if (argc >= 3) {
+                        int64_t n = vm_to_int(args[2]);
+                        if (n <= 0) {
+                            SP_PUSH(VM_MAKE_INT(0));
+                            break;
+                        }
+                        if ((uint64_t)n < to_write) to_write = (size_t)n;
+                    }
+                    if (to_write == 0) {
+                        SP_PUSH(VM_MAKE_INT(0));
+                    } else {
+                        size_t wrote = fwrite(s, 1, to_write, (FILE*)fh->fp);
+                        SP_PUSH(VM_MAKE_INT((int64_t)wrote));
+                    }
+                } else SP_PUSH(VM_MAKE_INT(0));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_CORE_FREAD: {
+            if (argc >= 2) {
+                if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
+                    VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
+                    if (!fh->fp) {
+                        SP_PUSH(VM_UNDEF_VAL);
+                    } else {
+                        int64_t n = vm_to_int(args[1]);
+                        if (n <= 0) {
+                            SP_PUSH(vm_str(""));
+                        } else {
+                            size_t want = (size_t)n;
+                            char *buf = malloc(want + 1);
+                            if (!buf) {
+                                SP_PUSH(VM_UNDEF_VAL);
+                            } else {
+                                size_t got = fread(buf, 1, want, (FILE*)fh->fp);
+                                buf[got] = '\0';
+                                SP_PUSH(VM_MAKE_STR_N(buf, got));
+                                free(buf);
+                            }
+                        }
+                    }
+                } else {
+                    SP_PUSH(VM_UNDEF_VAL);
+                }
+            } else if (argc == 1) {
+                VMValue __vr = VM_UNDEF_VAL;
+                frame->ip = ip;
+                vm->stack_top = sp;
+                int __th = vm_c_call_1(vm, strada_read_file, args[0], &__vr, &throw_exc);
+                stack = vm->stack;
+                RELOAD();
+                if (__th) goto L_builtin_throw_exc;
+                SP_PUSH(__vr);
+            } else {
+                SP_PUSH(VM_UNDEF_VAL);
+            }
             break;
         }
         case BUILTIN_CORE_SLURP: {
@@ -8370,29 +8556,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_MATH_ISINF: { SP_PUSH(VM_MAKE_INT(isinf(vm_to_num(args[0])) ? 1 : 0)); break; }
         case BUILTIN_MATH_ISFINITE: { SP_PUSH(VM_MAKE_INT(isfinite(vm_to_num(args[0])) ? 1 : 0)); break; }
         case BUILTIN_UCFIRST: {
-            if (argc >= 1) {
-                char buf[256];
-                const char *s = vm_to_cstr(args[0], buf, 256);
-                size_t len = strlen(s);
-                char *r = malloc(len + 1);
-                memcpy(r, s, len + 1);
-                if (len > 0 && r[0] >= 'a' && r[0] <= 'z') r[0] -= 32;
-                SP_PUSH(vm_str(r));
-                free(r);
-            } else SP_PUSH(vm_str(""));
+            SP_PUSH(argc >= 1 ? vm_ucfirst_val(args[0], 1) : vm_str(""));
             break;
         }
         case BUILTIN_LCFIRST: {
-            if (argc >= 1) {
-                char buf[256];
-                const char *s = vm_to_cstr(args[0], buf, 256);
-                size_t len = strlen(s);
-                char *r = malloc(len + 1);
-                memcpy(r, s, len + 1);
-                if (len > 0 && r[0] >= 'A' && r[0] <= 'Z') r[0] += 32;
-                SP_PUSH(vm_str(r));
-                free(r);
-            } else SP_PUSH(vm_str(""));
+            SP_PUSH(argc >= 1 ? vm_ucfirst_val(args[0], 0) : vm_str(""));
             break;
         }
         case BUILTIN_TRIM: {
@@ -8558,8 +8726,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             if (argc >= 1) {
                 char buf[512];
                 const char *path = vm_to_cstr(args[0], buf, 512);
-                SP_PUSH(VM_MAKE_INT(remove(path) == 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                SP_PUSH(VM_MAKE_INT(unlink(path)));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_HEX: {
@@ -8928,8 +9096,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_CHDIR: {
             if (argc >= 1) {
                 char buf[512];
-                SP_PUSH(VM_MAKE_INT(chdir(vm_to_cstr(args[0], buf, 512)) == 0 ? 1 : 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                SP_PUSH(VM_MAKE_INT(chdir(vm_to_cstr(args[0], buf, 512))));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_CORE_GETCWD: {
@@ -8941,23 +9109,23 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_MKDIR: {
             if (argc >= 1) {
                 char buf[512];
-                int mode = argc >= 2 ? (int)vm_to_int(args[1]) : 0755;
-                SP_PUSH(VM_MAKE_INT(mkdir(vm_to_cstr(args[0], buf, 512), mode) == 0 ? 1 : 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                mode_t mode = argc >= 2 ? (mode_t)vm_to_int(args[1]) : 0755;
+                SP_PUSH(VM_MAKE_INT(mkdir(vm_to_cstr(args[0], buf, 512), mode)));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_CORE_RMDIR: {
             if (argc >= 1) {
                 char buf[512];
-                SP_PUSH(VM_MAKE_INT(rmdir(vm_to_cstr(args[0], buf, 512)) == 0 ? 1 : 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                SP_PUSH(VM_MAKE_INT(rmdir(vm_to_cstr(args[0], buf, 512))));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_CORE_RENAME: {
             if (argc >= 2) {
                 char obuf[512], nbuf[512];
-                SP_PUSH(VM_MAKE_INT(rename(vm_to_cstr(args[0], obuf, 512), vm_to_cstr(args[1], nbuf, 512)) == 0 ? 1 : 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                SP_PUSH(VM_MAKE_INT(rename(vm_to_cstr(args[0], obuf, 512), vm_to_cstr(args[1], nbuf, 512))));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_CORE_DIRNAME: {
@@ -9009,8 +9177,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_CHMOD: {
             if (argc >= 2) {
                 char buf[512];
-                SP_PUSH(VM_MAKE_INT(chmod(vm_to_cstr(args[0], buf, 512), (mode_t)vm_to_int(args[1])) == 0 ? 1 : 0));
-            } else SP_PUSH(VM_MAKE_INT(0));
+                SP_PUSH(VM_MAKE_INT(chmod(vm_to_cstr(args[0], buf, 512), (mode_t)vm_to_int(args[1]))));
+            } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
         case BUILTIN_CORE_READDIR: {

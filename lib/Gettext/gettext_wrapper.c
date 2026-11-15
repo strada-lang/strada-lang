@@ -60,8 +60,7 @@
  * Returns: char* (current locale or NULL on error)
  */
 const char* gt_setlocale(int category, const char *locale) {
-    const char *result = setlocale(category, locale);
-    return result ? result : "";
+    return setlocale(category, locale);
 }
 
 /* ===== gettext Functions ===== */

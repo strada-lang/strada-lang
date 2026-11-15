@@ -4895,8 +4895,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $mod_program->{"lib_paths_fallback"} = $program->{"lib_paths_fallback"};
     # Share the resolved-deps list so nested modules land in STRADA_DEPS_OUT
     $mod_program->{"dep_files"} = $program->{"dep_files"};
-    # Offset method modifier sequence numbers so modifier C names never collide across modules
-    $mod_program->{"mod_seq_offset"} = $program->{"method_modifier_count"} + 0;
+    # Offset method modifier sequence numbers so modifier C names never collide across nested/sibling modules
+    $mod_program->{"mod_seq_offset"} = $program->{"method_modifier_count"} + ($program->{"mod_seq_offset"} + 0);
 
     # Seed structs from parent program so struct types from earlier modules are visible
     my int $seed_si = 0;

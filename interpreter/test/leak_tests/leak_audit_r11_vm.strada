@@ -1,0 +1,43 @@
+#!/usr/bin/env strada
+# Cycle 11 interpreter Valgrind leak regression suite: R11-VM1..VM10 (--tree-walk & --vm)
+
+package R11EachLeakObj;
+func new() scalar {
+    my hash %h = ("v" => 7);
+    return bless(\%h, "R11EachLeakObj");
+}
+
+package main;
+
+func main() int {
+    my int $pid = core::getpid();
+    my str $f = "/tmp/r11_vm_leak_" . $pid . ".bin";
+    for (my int $i = 0; $i < 5; $i = $i + 1) {
+        my scalar $fh = core::open($f, "+>");
+        core::fwrite($fh, "a" . chr(0) . "bcdef", 4);
+        core::seek($fh, 0, "SEEK_SET");
+        my str $rd = core::fread($fh, 8);
+        core::rewind($fh);
+        core::close($fh);
+        my scalar $fh2 = core::open($f, "r");
+        my str $rd1 = core::fread($fh2);
+        core::close($fh2);
+        core::unlink($f);
+
+        my str $sp = sprintf("|%*d|%.*f|%5s|%.2s|", 4, 7, 2, 3.14159, "éé", "aé");
+        my str $uc = ucfirst("éab") . ":" . lcfirst("Éab");
+        my str $rep = "é" x 3;
+
+        my scalar $eo = R11EachLeakObj::new();
+        while (1) {
+            my scalar $p = each(%{$eo});
+            if (size($p) == 0) { last; }
+        }
+        my int $mg = ("Hello hello" =~ m/hello/gi) ? 1 : 0;
+        if ($mg != 1 || length($rep) != 3 || core::byte_length($rd) != 4 || core::byte_length($rd1) != 4 || length($sp) < 5 || length($uc) != 7) {
+            die("vm leak check failed");
+        }
+    }
+    say("R11_VM_LEAK_OK");
+    return 0;
+}

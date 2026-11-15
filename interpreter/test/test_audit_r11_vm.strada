@@ -1,0 +1,84 @@
+#!/usr/bin/env strada
+# Cycle 11 compiled / --tree-walk / --vm parity suite (R11-VM1..R11-VM6, R11-VM8..R11-VM10)
+
+package R11EachObj;
+func new() scalar {
+    my hash %h = ("v" => 42);
+    return bless(\%h, "R11EachObj");
+}
+
+package main;
+
+func main() int {
+    my int $pid = core::getpid();
+    my str $f1 = "/tmp/r11_vm_parity_" . $pid . "_1.bin";
+    my str $f2 = "/tmp/r11_vm_parity_" . $pid . "_2.bin";
+    my str $dir = "/tmp/r11_vm_dir_" . $pid;
+    my str $orig_cwd = core::getcwd();
+
+    # R11-VM1 + R11-VM5 + R11-VM6 + R11-VM8: open(+>, +<), fwrite, seek, fread, rewind
+    my scalar $fh = core::open($f1, "+>");
+    my int $nw = core::fwrite($fh, "a" . chr(0) . "bcdef", 4);
+    my int $sk1 = core::seek($fh, 0, "SEEK_SET");
+    my str $rd2 = core::fread($fh, 10);
+    my int $rw1 = core::rewind($fh);
+    core::close($fh);
+
+    my scalar $fh2 = core::open($f1, "+<");
+    my int $sk2 = core::seek($fh2, 2, "SEEK_CUR");
+    my int $nw2 = core::fwrite($fh2, "Z");
+    my int $rw2 = core::rewind($fh2);
+    my str $rd_full = core::fread($fh2, 10);
+    core::close($fh2);
+
+    my scalar $fh3 = core::open($f1, "r");
+    my str $rd1 = core::fread($fh3);
+    core::close($fh3);
+    say("VM_IO=" . $nw . ":" . $sk1 . ":" . core::byte_length($rd2) . ":" . byte_at($rd2, 1) . ":" . $rw1
+        . "|" . $sk2 . ":" . $nw2 . ":" . $rw2 . ":" . core::byte_length($rd_full) . ":" . byte_at($rd_full, 2)
+        . "|" . core::byte_length($rd1));
+
+    # R11-VM6 + R11-VM8: POSIX 0/-1 returns for mkdir, chdir, chmod, rename, unlink, rmdir
+    my int $mk = core::mkdir($dir, 493);
+    my int $cd1 = core::chdir($dir);
+    my int $cd2 = core::chdir($orig_cwd);
+    my int $cm = core::chmod($f1, 420);
+    my int $rn = core::rename($f1, $f2);
+    my int $ul = core::unlink($f2);
+    my int $rm = core::rmdir($dir);
+    say("VM_FS=" . $mk . ":" . $cd1 . ":" . $cd2 . ":" . $cm . ":" . $rn . ":" . $ul . ":" . $rm);
+
+    # R11-VM2: sprintf dynamic * / .* and UTF-8 %s character width/precision
+    my str $u_ee = "éé";
+    my str $u_ae = "aé";
+    my str $sp = sprintf("|%*d|%.*f|%*d|%.*s|%5s|%.2s|", 4, 7, 2, 3.14159, -4, 7, -1, "abc", $u_ee, $u_ae);
+    say("VM_FMT=" . $sp);
+
+    # R11-VM3 + R11-VM4: UTF-8 ucfirst/lcfirst and UTF-8 string repeat
+    my str $uc_u8 = ucfirst("éab");
+    my str $lc_u8 = lcfirst("Éab");
+    my str $rep = "é" x 3;
+    say("VM_STR=" . $uc_u8 . ":" . $lc_u8 . ":" . core::byte_length($uc_u8) . ":" . core::byte_length($lc_u8)
+        . ":" . length($rep) . ":" . core::byte_length($rep));
+
+    # R11-VM9: each() on blessed hash skips internal metadata keys
+    my scalar $eo = R11EachObj::new();
+    my array @pairs = ();
+    while (1) {
+        my scalar $p = each(%{$eo});
+        if (size($p) == 0) {
+            last;
+        }
+        push(@pairs, $p->[0] . "=" . $p->[1]);
+    }
+    say("VM_EACH=" . join(",", @pairs));
+
+    # R11-VM10: m//g and m//gi regex flags in tree-walk
+    my int $m1 = ("Hello hello" =~ m/hello/g) ? 1 : 0;
+    my int $m2 = ("Hello hello" =~ m/hello/gi) ? 1 : 0;
+    my int $m3 = ("Hello world" =~ m/hello/g) ? 1 : 0;
+    my int $m4 = ("Hello world" =~ m/hello/gi) ? 1 : 0;
+    say("VM_RE=" . $m1 . ":" . $m2 . ":" . $m3 . ":" . $m4);
+
+    return 0;
+}

@@ -62,43 +62,32 @@ static void perl5_push_inc(const char *path) {
 
 static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
     if (!sv) return;
+    StradaValue *fetched = NULL;
+    StradaValue *val = v;
     if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied && v->meta->tied_obj) {
-        StradaValue *fetched = strada_tied_scalar_fetch(v);
-        if (!fetched || (!STRADA_IS_TAGGED_INT(fetched) && fetched->type == STRADA_UNDEF)) {
-            if (fetched) strada_decref(fetched);
-            sv_setsv(sv, &PL_sv_undef);
-            return;
-        }
-        char *s = strada_to_str(fetched);
-        size_t len = (fetched->type == STRADA_STR)
-            ? STRADA_STR_BYTELEN(fetched)
-            : (s ? strlen(s) : 0);
-        int is_utf8 = (fetched->type == STRADA_STR && STRADA_STR_IS_UTF8(fetched)) ? 1 : 0;
-        sv_setpvn(sv, s ? s : "", (STRLEN)len);
-        free(s);
-        strada_decref(fetched);
-        if (is_utf8) {
+        fetched = strada_tied_scalar_fetch(v);
+        val = fetched;
+    }
+    if (fetched) strada_cleanup_push(fetched);
+    if (!val || (!STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF)) {
+        sv_setsv(sv, &PL_sv_undef);
+    } else if (!STRADA_IS_TAGGED_INT(val) && val->type == STRADA_STR
+               && !(val->meta && (val->meta->blessed_package || val->meta->is_tied))) {
+        size_t len = STRADA_STR_BYTELEN(val);
+        sv_setpvn(sv, val->value.pv ? val->value.pv : "", (STRLEN)len);
+        if (STRADA_STR_IS_UTF8(val)) {
             SvUTF8_on(sv);
         } else {
             SvUTF8_off(sv);
         }
-        return;
-    }
-    if (!v || (!STRADA_IS_TAGGED_INT(v) && v->type == STRADA_UNDEF)) {
-        sv_setsv(sv, &PL_sv_undef);
-        return;
-    }
-    char *s = strada_to_str(v);
-    size_t len = (!STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR)
-        ? STRADA_STR_BYTELEN(v)
-        : (s ? strlen(s) : 0);
-    sv_setpvn(sv, s ? s : "", (STRLEN)len);
-    free(s);
-    if (!STRADA_IS_TAGGED_INT(v) && v->type == STRADA_STR && STRADA_STR_IS_UTF8(v)) {
-        SvUTF8_on(sv);
     } else {
+        char *s = strada_to_str(val);
+        size_t len = s ? strlen(s) : 0;
+        sv_setpvn(sv, s ? s : "", (STRLEN)len);
+        free(s);
         SvUTF8_off(sv);
     }
+    if (fetched) strada_cleanup_pop_decref(fetched);
 }
 
 typedef enum {

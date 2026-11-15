@@ -1945,9 +1945,7 @@ private func generate_source(str $input) str {
         $blk_end = leading_block_stmt_end($tail);
     }
 
-    my str $trimmed = $tail;
-    $trimmed =~ s/^\s+//;
-    $trimmed =~ s/\s+$//;
+    my str $trimmed = jit_strip_leading_ws_comments($tail);
 
     # Check if this is a standalone void function call (not part of a larger expression like my_void() // 42)
     my int $is_void_call = 0;
@@ -2044,19 +2042,19 @@ private func generate_source(str $input) str {
         }
         if ($is_return_stmt == 1) {
             my str $code_line = $tail;
-            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            if ($last_char ne ";") { $code_line = $tail . "\n;"; }
             $src = $src . "        " . $code_line . "\n";
             $src = $src . "        return undef;\n";
         } elsif ($is_statement == 1) {
             my str $code_line = $tail;
             if ($last_char ne ";" && $last_char ne "}") {
-                $code_line = $tail . ";";
+                $code_line = $tail . "\n;";
             }
             $src = $src . "        " . $code_line . "\n";
             $src = $src . "        return undef;\n";
         } elsif ($is_void_call == 1) {
             my str $code_line = $tail;
-            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            if ($last_char ne ";") { $code_line = $tail . "\n;"; }
             $src = $src . "        " . $code_line . "\n";
             $src = $src . "        return undef;\n";
         } else {
@@ -2067,7 +2065,7 @@ private func generate_source(str $input) str {
             if ($expr eq "") {
                 $src = $src . "        return undef;\n";
             } else {
-                $src = $src . "        return " . $expr . ";\n";
+                $src = $src . "        return " . $expr . "\n;\n";
             }
         }
         $src = $src . "    };\n";
@@ -2131,18 +2129,18 @@ private func generate_source(str $input) str {
             if ($ret_expr eq "") {
                 $src = $src . "    my scalar \$__result = undef;\n";
             } else {
-                $src = $src . "    my scalar \$__result = " . $ret_expr . ";\n";
+                $src = $src . "    my scalar \$__result = " . $ret_expr . "\n;\n";
             }
         } elsif ($is_statement == 1) {
             my str $code_line = $tail;
             if ($last_char ne ";" && $last_char ne "}") {
-                $code_line = $tail . ";";
+                $code_line = $tail . "\n;";
             }
             $src = $src . "    " . $code_line . "\n";
             $src = $src . "    my scalar \$__result = undef;\n";
         } elsif ($is_void_call == 1) {
             my str $code_line = $tail;
-            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            if ($last_char ne ";") { $code_line = $tail . "\n;"; }
             $src = $src . "    " . $code_line . "\n";
             $src = $src . "    my scalar \$__result = undef;\n";
         } else {
@@ -2153,7 +2151,7 @@ private func generate_source(str $input) str {
             if ($expr eq "") {
                 $src = $src . "    my scalar \$__result = undef;\n";
             } else {
-                $src = $src . "    my scalar \$__result = " . $expr . ";\n";
+                $src = $src . "    my scalar \$__result = " . $expr . "\n;\n";
             }
         }
 
@@ -2614,10 +2612,32 @@ private func restore_jit_state(scalar $snap) void {
     $g_current_package = $snap->{"current_package"};
 }
 
+private func jit_strip_leading_ws_comments(str $s) str {
+    my str $cur = $s;
+    while (length($cur) > 0) {
+        my str $before = $cur;
+        $cur =~ s/^\s+//;
+        if ($cur =~ /^#/) {
+            $cur =~ s/^#[^\n]*(?:\n|$)//;
+        } elsif (length($cur) >= 2 && substr($cur, 0, 2) eq "/*") {
+            my str $rest = substr($cur, 2, length($cur) - 2);
+            my int $end_cmt = index($rest, "*/");
+            if ($end_cmt >= 0) {
+                $cur = substr($rest, $end_cmt + 2, length($rest) - $end_cmt - 2);
+            } else {
+                last;
+            }
+        }
+        if ($cur eq $before) {
+            last;
+        }
+    }
+    $cur =~ s/\s+$//;
+    return $cur;
+}
+
 private func eval_inner(str $code, scalar $flags) scalar {
-    my str $input = $code;
-    $input =~ s/^\s+//;
-    $input =~ s/\s+$//;
+    my str $input = jit_strip_leading_ws_comments($code);
 
     if ($input eq "") {
         return undef;
@@ -2678,7 +2698,7 @@ private func eval_inner(str $code, scalar $flags) scalar {
         } else {
             $const_line =~ s/\s+$//;
             if (substr($const_line, length($const_line) - 1, 1) ne ";") {
-                $const_line = $const_line . ";";
+                $const_line = $const_line . "\n;";
             }
         }
         my str $tpkg = get_target_package();
@@ -2732,7 +2752,7 @@ private func eval_inner(str $code, scalar $flags) scalar {
         } else {
             $oop_stmt =~ s/\s+$//;
             if (substr($oop_stmt, length($oop_stmt) - 1, 1) ne ";") {
-                $oop_stmt = $oop_stmt . ";";
+                $oop_stmt = $oop_stmt . "\n;";
             }
         }
         my str $tpkg = get_target_package();
@@ -2789,9 +2809,7 @@ func eval(str $code) scalar {
         throw "Strada::JIT::eval: Not initialized. Call Strada::JIT::init() first.";
     }
 
-    my str $input = $code;
-    $input =~ s/^\s+//;
-    $input =~ s/\s+$//;
+    my str $input = jit_strip_leading_ws_comments($code);
 
     if ($input eq "") {
         return undef;

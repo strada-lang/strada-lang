@@ -95,7 +95,28 @@ typedef struct {
     char *buf;
     size_t len, cap;
     int oom;
+    StradaHashEntry ***orders;
+    size_t orders_len, orders_cap;
 } JsonB;
+
+static int jb_push_order(JsonB *b, StradaHashEntry **o) {
+    if (b->orders_len >= b->orders_cap) {
+        size_t ncap = b->orders_cap ? b->orders_cap * 2 : 8;
+        StradaHashEntry ***np = realloc(b->orders, ncap * sizeof(StradaHashEntry**));
+        if (!np) return 0;
+        b->orders = np;
+        b->orders_cap = ncap;
+    }
+    b->orders[b->orders_len++] = o;
+    return 1;
+}
+
+static void jb_pop_free_order(JsonB *b, StradaHashEntry **o) {
+    if (b->orders_len > 0 && b->orders[b->orders_len - 1] == o) {
+        b->orders_len--;
+    }
+    free(o);
+}
 
 static int jb_grow(JsonB *b, size_t need) {
     if (b->oom) return 0;
@@ -253,6 +274,10 @@ static void json_enc_hash(JsonB *b, StradaHash *hv, int canonical, int depth) {
     if (canonical && hv->num_entries > 0) {
         size_t n = 0;
         StradaHashEntry **order = malloc(hv->next_slot * sizeof(StradaHashEntry*));
+        if (order && !jb_push_order(b, order)) {
+            free(order);
+            order = NULL;
+        }
         if (order) {
             for (size_t i = 0; i < hv->next_slot; i++)
                 if (hv->entries[i].key) order[n++] = &hv->entries[i];
@@ -264,7 +289,7 @@ static void json_enc_hash(JsonB *b, StradaHash *hv, int canonical, int depth) {
                 jb_putc(b, ':');
                 json_enc(b, order[i]->value, canonical, depth + 1);
             }
-            free(order);
+            jb_pop_free_order(b, order);
             jb_putc(b, '}');
             return;
         }
@@ -790,6 +815,15 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
     return v ? v : strada_new_undef();
 }
 
+static void jb_free_all(JsonB *b) {
+    for (size_t i = 0; i < b->orders_len; i++) free(b->orders[i]);
+    free(b->orders);
+    b->orders = NULL;
+    b->orders_len = b->orders_cap = 0;
+    free(b->buf);
+    b->buf = NULL;
+}
+
 static StradaValue* strada_json_encode_c(StradaValue *v, int canonical) {
     JsonB b = {0};
     int mark = strada_cleanup_mark();
@@ -801,16 +835,16 @@ static StradaValue* strada_json_encode_c(StradaValue *v, int canonical) {
         } else {
             STRADA_TRY_POP();
             strada_cleanup_drain_to(mark);
-            free(b.buf);
+            jb_free_all(&b);
             strada_throw_value(strada_get_exception());
             return strada_new_undef();
         }
     } else {
         json_enc(&b, v, canonical, 0);
     }
-    if (b.oom) { free(b.buf); return strada_new_str(""); }
+    if (b.oom) { jb_free_all(&b); return strada_new_str(""); }
     StradaValue *out = jp_make_str_sv(b.buf ? b.buf : "", b.len);
-    free(b.buf);
+    jb_free_all(&b);
     return out;
 }
 }

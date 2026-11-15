@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Cycle 11 Audit regression tests: Eval + VM + Strada::JIT (R11-VM1..VM7, R11-VM11)
+
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # R11-VM1..VM6 inside Eval::eval_string & eval_string_vm
+    my str $vm_code = '
+        my str $tmp = "/tmp/r11_ev_vm_" . core::getpid() . ".bin";
+        my scalar $fh = core::open($tmp, "+>");
+        my int $nw = core::fwrite($fh, "a" . chr(0) . "bcdef", 4);
+        my int $sk1 = core::seek($fh, 0, "SEEK_SET");
+        my str $rd = core::fread($fh, 10);
+        my int $rw = core::rewind($fh);
+        core::close($fh);
+        my int $ul = core::unlink($tmp);
+        my str $sp = sprintf("|%*d|%.*f|%.*s|%5s|%.2s|", 4, 7, 2, 3.14159, -1, "abc", "éé", "aé");
+        my str $uc_u8 = ucfirst("éab");
+        my str $lc_u8 = lcfirst("Éab");
+        my str $uc_nul = ucfirst("a" . chr(0) . "b");
+        my str $uc = $uc_u8 . ":" . $lc_u8 . ":" . length($uc_u8) . ":" . core::byte_length($uc_nul) . ":" . byte_at($uc_nul, 0) . ":" . byte_at($uc_nul, 1);
+        my str $rep = "é" x 3;
+        $nw . ":" . $sk1 . ":" . core::byte_length($rd) . ":" . byte_at($rd, 1) . ":" . $rw . ":" . $ul . ":" . $sp . ":" . $uc . ":" . length($rep) . ":" . core::byte_length($rep);
+    ';
+    my scalar $tw_res = Strada::Interpreter::eval_string($vm_code);
+    my scalar $vm_res = Strada::Interpreter::eval_string_vm($vm_code);
+    my str $exp = "4:1:4:0:1:0:|   7|3.14|abc|   éé|aé|:Éab:éab:3:3:65:0:3:6";
+    check(("" . $tw_res) eq $exp && ("" . $vm_res) eq $exp,
+          "R11-VM1..VM6 Eval tree-walk & vm parity: tw=[" . $tw_res . "] vm=[" . $vm_res . "]");
+
+    # R11-VM7: eval_string_vm must reject undeclared variables
+    my int $bad_read_threw = 0;
+    try {
+        my scalar $bad_read = Strada::Interpreter::eval_string_vm('return $r11_never_declared + 1;');
+    } catch ($e1) {
+        $bad_read_threw = 1;
+    }
+    my int $bad_write_threw = 0;
+    try {
+        my scalar $bad_write = Strada::Interpreter::eval_string_vm('$r11_never_declared = 5; return 9;');
+    } catch ($e2) {
+        $bad_write_threw = 1;
+    }
+    check($bad_read_threw == 1 && $bad_write_threw == 1,
+          "R11-VM7 VM rejects undeclared read/write: read=" . $bad_read_threw . " write=" . $bad_write_threw);
+    Strada::Interpreter::reset();
+
+    # R11-VM11: Strada::JIT::eval handles leading # and /* */ comments and trailing # comments
+    Strada::JIT::init();
+    my scalar $j1 = Strada::JIT::eval("# leading comment\nfunc r11_jit_f1() int { return 42; }\nreturn r11_jit_f1();");
+    my scalar $j2 = Strada::JIT::eval("/* leading block ; { } */\npackage R11JitPkg;\nfunc val() int { return 99; }\npackage main;\nreturn R11JitPkg::val();");
+    my scalar $j3 = Strada::JIT::eval("10 + 32 # trailing comment");
+    my scalar $j4 = Strada::JIT::eval("# only a comment");
+    check(($j1 + 0) == 42 && ($j2 + 0) == 99 && ($j3 + 0) == 42 && !defined($j4),
+          "R11-VM11 Strada::JIT::eval leading/trailing comments: j1=" . $j1 . " j2=" . $j2 . " j3=" . $j3);
+
+    if ($g_fail == 0) {
+        say("R11_EVAL_JIT_OK");
+        return 0;
+    }
+    return 1;
+}

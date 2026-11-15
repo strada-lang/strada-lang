@@ -1,0 +1,294 @@
+#!/usr/bin/env strada
+# Cycle 11 Audit regression tests: R11-C1..R11-C14 + R11 runtime paths
+
+use lib "t/audit_r11/mods";
+use R11ModBase;
+
+package R11C13Target;
+before "ping" func(scalar $self) void {
+    R11C13Log::add("M>");
+}
+
+use R11ModA;
+
+# R11-C7: child attribute lazy/builder & user method override
+package R11C7Base;
+has ro int $x = 1;
+has ro str $s (default => "hi");
+func new_plain() scalar {
+    return bless({"x" => 7, "s" => "base_raw"}, "R11C7Base");
+}
+
+package R11C7Child;
+extends R11C7Base;
+has ro str $s (lazy => 1, builder => "_build_s");
+func _build_s(scalar $self) str {
+    return "built_lazy";
+}
+func x(scalar $self) str {
+    return "not-an-int";
+}
+func test_child(scalar $self) str {
+    my str $a = $self->s();
+    my str $b = $self->x();
+    return $a . ":" . $b;
+}
+
+# R11-C6 helpers
+package R11C6Foo;
+func new() scalar { return bless({}, "R11C6Foo"); }
+func tag(scalar $self) str { return "foo"; }
+
+package R11C6Bar;
+func new() scalar { return bless({}, "R11C6Bar"); }
+func tag(scalar $self) str { return "bar"; }
+
+# R11-C10: cross-package default parameter expressions
+package R11Callee;
+func helper() str {
+    return "callee_helper_ok";
+}
+func greet(str $msg = helper()) str {
+    return $msg;
+}
+
+package R11CalleeObj;
+func new() scalar { return bless({}, "R11CalleeObj"); }
+func m_def(scalar $self, str $msg = R11Callee::helper()) str {
+    return $msg;
+}
+func m_local(scalar $self, str $msg = local_h()) str {
+    return $msg;
+}
+func local_h() str {
+    return "obj_local_ok";
+}
+
+package main;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+# R11-C5: global slurp targets
+our hash %g_c5_rest;
+our array @g_c5_arr;
+
+# R11-C4: global hash for short-circuit substr ||=
+our hash %g_c4_h = ("k" => "abc", "e" => "");
+
+# R11-C3: our scalar holding hash
+our scalar $g_c3_ov = {"k" => 88};
+
+# R11-C12: compound #define integer expression
+#define R11_ADD 1 + 2
+#define R11_MUL (R11_ADD) * 4
+
+func main(int $argc, array @argv) int {
+    # R11-C1: unpinned containers across map, grep, foreach, 4-arg substr, compound assign, chomp, utf8
+    my array @c1_map = ("aa", "bb", "cc");
+    my array @c1_map_out = map { @c1_map = (); $_ . "!"; } @c1_map;
+    check(size(@c1_map_out) == 3 && join(",", @c1_map_out) eq "aa!,bb!,cc!",
+          "R11-C1 map pins input array across clearing");
+
+    my array @c1_grep = ("x", "yy", "zzz");
+    my array @c1_grep_out = grep { @c1_grep = (); length($_) >= 2; } @c1_grep;
+    check(size(@c1_grep_out) == 2 && join(",", @c1_grep_out) eq "yy,zzz",
+          "R11-C1 grep pins input array across clearing");
+
+    my array @c1_fe = ("p1", "p2", "p3");
+    my array @c1_fe_seen = ();
+    foreach my str $item (@c1_fe) {
+        push(@c1_fe_seen, $item);
+        @c1_fe = ();
+    }
+    check(size(@c1_fe_seen) == 3 && join(",", @c1_fe_seen) eq "p1,p2,p3",
+          "R11-C1 foreach pins input array across clearing");
+
+    my array @c1_sub = ("hello_" . ("x" x 32));
+    my str $c1_old = substr($c1_sub[0], 0, 5, do { @c1_sub = (); "Z"; });
+    check($c1_old eq "hello" && size(@c1_sub) == 0,
+          "R11-C1 4-arg substr pins container across repl eval");
+
+    my array @c1_comp = ("head_" . ("y" x 32));
+    $c1_comp[do { @c1_comp = (); 0; }] .= "tail";
+    check(size(@c1_comp) == 0, "R11-C1 compound array assign pins container across index eval");
+
+    my array @c1_ch = ("line\n");
+    chomp($c1_ch[do { @c1_ch = (); 0; }]);
+    check(size(@c1_ch) == 0, "R11-C1 chomp array elem safe when index clears container");
+
+    my array @c1_u8 = ("café");
+    utf8::upgrade($c1_u8[do { @c1_u8 = (); 0; }]);
+    check(size(@c1_u8) == 0, "R11-C1 utf8::upgrade elem safe when index clears container");
+
+    # R11-C2: 4-arg substr($$ref, ...)
+    my str $c2_s = "abcdef";
+    my scalar $c2_r = \$c2_s;
+    my str $c2_old = substr($$c2_r, 1, 3, "XYZ");
+    check($c2_old eq "bcd" && $c2_s eq "aXYZef",
+          "R11-C2 4-arg substr(\\$$r): old=" . $c2_old . " s=" . $c2_s);
+
+    # R11-C3: hash init & assign from borrowed array/hash elem and `our` scalar
+    my array @c3_src = ({"k" => 77});
+    {
+        my hash %c3_h = $c3_src[0];
+        check($c3_h{"k"} == 77, "R11-C3 inner hash init from array elem");
+    }
+    check($c3_src[0]{"k"} == 77, "R11-C3 source element alive after inner hash exit");
+
+    my hash %c3_h2 = ();
+    %c3_h2 = $c3_src[0];
+    %c3_h2 = ();
+    check($c3_src[0]{"k"} == 77, "R11-C3 source element alive after %h2 = $arr[0]; %h2 = ()");
+
+    {
+        my hash %c3_h3 = $g_c3_ov;
+        check($c3_h3{"k"} == 88, "R11-C3 hash init from our scalar");
+    }
+
+    # R11-C4: substr(...) ||= ... autoviv cleanup on short-circuit and non-short-circuit
+    my str $c4_sc = (substr($g_c4_h{"k"}, 0, 1) ||= "Z");
+    my str $c4_wr = (substr($g_c4_h{"e"}, 0, 0) ||= "Q");
+    check($c4_sc eq "a" && $g_c4_h{"k"} eq "abc" && $c4_wr eq "Q" && $g_c4_h{"e"} eq "Q",
+          "R11-C4 substr ||= cleanup stack & writeback: " . $c4_sc . "|" . $c4_wr . "|" . $g_c4_h{"e"});
+
+    # R11-C5: destructure slurp to `our` hash/array & binary NUL key
+    my scalar $c5_head = 0;
+    ($c5_head, %g_c5_rest) = (1, "a" . chr(0) . "b", 22, "c", 33);
+    check($c5_head == 1 && $g_c5_rest{"a" . chr(0) . "b"} == 22 && exists($g_c5_rest{"a"}) == 0 && $g_c5_rest{"c"} == 33,
+          "R11-C5 destructure our hash slurp with binary NUL key");
+    ($c5_head, @g_c5_arr) = (9, 10, 20);
+    check($c5_head == 9 && size(@g_c5_arr) == 2 && $g_c5_arr[0] == 10 && $g_c5_arr[1] == 20,
+          "R11-C5 destructure our array slurp");
+
+    # R11-C6: pre-declared foreach int coercion & closure-captured known_types reset
+    my int $c6_i = 0;
+    my array @c6_sums = ();
+    foreach $c6_i ("41", 42) {
+        push(@c6_sums, $c6_i + 1);
+    }
+    check(size(@c6_sums) == 2 && $c6_sums[0] == 42 && $c6_sums[1] == 43,
+          "R11-C6 pre-declared int foreach coerces elements");
+
+    my scalar $c6_obj = R11C6Foo::new();
+    my scalar $c6_cb = func () str { return $c6_obj->tag(); };
+    foreach $c6_obj (R11C6Bar::new()) {
+        check($c6_obj->tag() eq "bar" && $c6_cb->() eq "bar",
+              "R11-C6 foreach resets known_types for closure-boxed var");
+    }
+
+    # R11-C7: child lazy/builder & method override of parent `has` int
+    my scalar $c7_ch = R11C7Child::new();
+    my str $c7_res = $c7_ch->test_child();
+    my str $c7_direct = $c7_ch->s() . ":" . $c7_ch->x();
+    check($c7_res eq "built_lazy:not-an-int" && $c7_direct eq "built_lazy:not-an-int",
+          "R11-C7 child lazy builder & method override: " . $c7_res . " / " . $c7_direct);
+
+    # R11-C8: s/// and tr/// / y/// with embedded quote chars before #ifdef
+    my str $c8_a = "hello";
+    $c8_a =~ s/o/"/;
+    my str $c8_b = "cat";
+    $c8_b =~ tr/a/'/;
+    my str $c8_c = "box";
+    $c8_c =~ y/b/"/;
+    my int $c8_pp_ok = 1;
+#ifdef R11_C8_UNDEF_MACRO
+    $c8_pp_ok = 0;
+#endif
+    check($c8_a eq "hell\"" && $c8_b eq "c't" && $c8_c eq "\"ox" && $c8_pp_ok == 1,
+          "R11-C8 s/tr/y quote scanner does not corrupt #ifdef");
+
+    # R11-C9: do / map / grep isolate compiler lexical maps (`our` and `my` shadow inside block)
+    my str $c9_x = "lexical";
+    my int $c9_do = do {
+        our int $c9_x = 123;
+        $c9_x;
+    };
+    my int $c9_do2 = do {
+        my int $c9_x = 10;
+        $c9_x + 5;
+    };
+    my array @c9_m = map { my int $c9_x = 456; $c9_x + $_; } (1, 10);
+    my array @c9_g = grep { my int $c9_x = 789; $c9_x > 0 && $_ > 5; } (2, 20);
+    my str $c9_after = $c9_x . "_ok";
+    check($c9_do == 123 && $c9_do2 == 15 && $c9_m[0] == 457 && $c9_g[0] == 20 && $c9_after eq "lexical_ok",
+          "R11-C9 do/map/grep isolate compiler lexical maps: c9_x=" . $c9_x);
+
+    # R11-C10: cross-package default parameter expressions
+    my str $c10_a = R11Callee::greet();
+    my scalar $c10_obj = R11CalleeObj::new();
+    my str $c10_b = $c10_obj->m_def();
+    my str $c10_c = $c10_obj->m_local();
+    check($c10_a eq "callee_helper_ok" && $c10_b eq "callee_helper_ok" && $c10_c eq "obj_local_ok",
+          "R11-C10 cross-package default parameter eval: " . $c10_a . "|" . $c10_b . "|" . $c10_c);
+
+    # R11-C11: hash_get / hash_set binary-NUL keys & LTR evaluation
+    my hash %c11_h = ("a" . chr(0) . "b" => 42);
+    check(hash_get(%c11_h, "a" . chr(0) . "b") == 42 && !defined(hash_get(%c11_h, "a")),
+          "R11-C11 hash_get binary NUL key");
+    my hash %c11_m = ("k" => "old");
+    hash_set(%c11_m, do { %c11_m = (); "k"; }, "new");
+    check(scalar(keys(%c11_m)) == 0, "R11-C11 hash_set evaluates hash arg first cleanly");
+    my hash %c11_nul = ();
+    hash_set(%c11_nul, "x" . chr(0) . "y", "z" . chr(0) . "w");
+    check(core::byte_length(hash_get(%c11_nul, "x" . chr(0) . "y")) == 3 && !defined(hash_get(%c11_nul, "x")),
+          "R11-C11 hash_set/hash_get preserve embedded NUL");
+
+    # R11-C12: #define compound expression in Lexer.strada preprocessor
+    my int $c12_hit = 0;
+#if R11_ADD == 3 && R11_MUL == 12
+    $c12_hit = 1;
+#endif
+    check($c12_hit == 1, "R11-C12 #define compound integer expression in #if");
+
+    # R11-C13: nested module mod_seq_offset preserves ancestor offsets
+    R11C13Log::reset();
+    my scalar $c13_t = R11C13Target::new();
+    my str $c13_p = $c13_t->ping();
+    my str $c13_log = R11C13Log::get();
+    check($c13_p eq "base" && $c13_log eq "M>A>B>",
+          "R11-C13 nested module modifiers all invoked: " . $c13_log);
+
+    # R11-C14: main($argc, @argv) closure boxing & int typing
+    my int $orig_argc = $argc;
+    my int $argv_sz = size(@argv);
+    my scalar $inc_argc = func () void { $argc = $argc + 10; };
+    $inc_argc->();
+    check($argc == $orig_argc + 10 && $orig_argc >= 1 && $argv_sz >= 1,
+          "R11-C14 main(argc, argv) closure-boxed mutation & types");
+
+    # Runtime Strada-level checks (R11-RT1, RT4, RT5, RT6)
+    my array @rt1_flat = ("a", 10, "b", 20);
+    my scalar $rt1_href = {};
+    %{$rt1_href} = @rt1_flat;
+    check(size(@rt1_flat) == 4 && $rt1_flat[0] eq "a" && $rt1_href->{"a"} == 10 && $rt1_href->{"b"} == 20,
+          "R11-RT1 %{$ref} = @flat preserves @flat");
+    my scalar $rt1_tmp_r = {};
+    %{$rt1_tmp_r} = ["x", 77];
+    check($rt1_tmp_r->{"x"} == 77, "R11-RT1 %{$ref} = [...] safe");
+
+    my str $rt4_u = "é";
+    $rt4_u =~ s/\p{Ll}/X/;
+    my str $rt4_bin = core::pack("CC", 255, 254);
+    $rt4_bin =~ s/\xff/Z/;
+    check($rt4_u eq "X" && byte_at($rt4_bin, 0) == 90 && byte_at($rt4_bin, 1) == 254,
+          "R11-RT4 regex replace UTF-8/binary alternating");
+
+    check(sprintf("%vld", "AB") eq "65.66", "R11-RT5 %vld formatting");
+
+    my array @rt6_s = core::unpack("s>/a*", core::pack("CC", 255, 254) . "ABC");
+    my array @rt6_n = core::unpack("N/a*", core::pack("CCCC", 128, 0, 0, 1) . "abc");
+    check($rt6_s[0] eq "" && $rt6_n[0] eq "abc", "R11-RT6 unpack '/' signed & high-bit lengths");
+
+    if ($g_fail == 0) {
+        say("R11_RUNTIME_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

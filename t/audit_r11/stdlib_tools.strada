@@ -1,0 +1,60 @@
+#!/usr/bin/env strada
+# Cycle 11 Audit regression tests: R11-LIB2 (JSON canonical unwind) & R11-LIB3 (Gettext set_locale)
+
+use lib "lib";
+use JSON;
+use Gettext;
+
+package R11JsonBoom;
+use overload '""' => "to_s";
+func new() scalar { return bless({}, "R11JsonBoom"); }
+func to_s(scalar $self) str {
+    die("r11_json_boom");
+}
+
+package main;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # R11-LIB2: JSON canonical => 1 unwind safety when stringify throws
+    my str $canon = JSON::encode_opts({"b" => 2, "a" => 1}, {"canonical" => 1});
+    check($canon eq "{\"a\":1,\"b\":2}", "R11-LIB2 JSON canonical basic: " . $canon);
+
+    my int $caught = 0;
+    my hash %h = (
+        "k1" => {"nested" => R11JsonBoom::new()},
+        "k2" => [1, 2, 3]
+    );
+    try {
+        JSON::encode_opts(\%h, {"canonical" => 1});
+    } catch ($e) {
+        if (index("" . $e, "r11_json_boom") >= 0) {
+            $caught = 1;
+        }
+    }
+    my str $after_canon = JSON::encode_opts({"z" => 9, "a" => 1}, {"canonical" => 1});
+    check($caught == 1 && $after_canon eq "{\"a\":1,\"z\":9}",
+          "R11-LIB2 JSON canonical exception unwind leaves JSON usable");
+
+    # R11-LIB3: Gettext::set_locale invalid locale preserves previous locale instead of ""
+    Gettext::set_locale("C");
+    my str $before = Gettext::get_locale();
+    Gettext::set_locale("nonexistent_invalid_locale_r11_xyz_999");
+    my str $after = Gettext::get_locale();
+    check($before eq "C" && $after eq "C",
+          "R11-LIB3 Gettext::set_locale invalid locale keeps C: before=" . $before . " after=" . $after);
+
+    if ($g_fail == 0) {
+        say("R11_STDLIB_OK");
+        return 0;
+    }
+    return 1;
+}

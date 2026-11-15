@@ -1,0 +1,133 @@
+#!/usr/bin/env strada
+# Cycle 11 Valgrind leak regression suite: R11-RT1..R11-RT7, R11-C1..R11-C14, R11-LIB2
+
+use lib "lib";
+use JSON;
+
+package R11LBase;
+has ro int $x = 1;
+has ro str $s (default => "hi");
+
+package R11LChild;
+extends R11LBase;
+has ro str $s (lazy => 1, builder => "_build_s");
+func _build_s(scalar $self) str { return "built"; }
+func x(scalar $self) str { return "strval"; }
+
+package R11LCallee;
+func helper() str { return "ok"; }
+func greet(str $m = helper()) str { return $m; }
+
+package R11LJsonBoom;
+use overload '""' => "to_s";
+func new() scalar { return bless({}, "R11LJsonBoom"); }
+func to_s(scalar $self) str { die("r11l_json_boom"); }
+
+package R11LObj;
+func new() scalar { return bless({"v" => 1}, "R11LObj"); }
+
+package main;
+
+our hash %g_r11l_c4 = ("k" => "abc", "e" => "");
+our scalar $g_r11l_c3 = {"k" => 5};
+our hash %g_r11l_rest;
+our array @g_r11l_arr;
+
+func main(int $argc, array @argv) int {
+    my scalar $argc_fn = func () int { $argc = $argc + 1; return $argc; };
+    if ($argc_fn->() < 2) { die("c14 leak fail"); }
+
+    for (my int $i = 0; $i < 6; $i = $i + 1) {
+        # R11-C1
+        my array @ma = ("x_" . $i, "y_" . $i);
+        my array @mo = map { @ma = (); $_ . "!"; } @ma;
+        if (size(@mo) != 2) { die("c1 map fail"); }
+        my array @ga = ("a", "bb_" . $i);
+        my array @go = grep { @ga = (); length($_) > 1; } @ga;
+        if (size(@go) != 1) { die("c1 grep fail"); }
+        my array @sa = ("hello_" . ("x" x 24));
+        if (substr($sa[0], 0, 5, do { @sa = (); "Z"; }) ne "hello") { die("c1 substr fail"); }
+
+        # R11-C2
+        my str $s2 = "abcdef";
+        my scalar $r2 = \$s2;
+        if (substr($$r2, 1, 3, "XYZ") ne "bcd" || $s2 ne "aXYZef") { die("c2 fail"); }
+
+        # R11-C3
+        my array @src = ({"k" => 77 + $i});
+        { my hash %h1 = $src[0]; }
+        { my hash %h3 = $g_r11l_c3; }
+        my hash %h2 = ();
+        %h2 = $src[0];
+        %h2 = ();
+        if ($src[0]{"k"} != 77 + $i) { die("c3 fail"); }
+
+        # R11-C4
+        my str $sc4 = (substr($g_r11l_c4{"k"}, 0, 1) ||= "Z");
+        my str $wr4 = (substr($g_r11l_c4{"e"}, 0, 0) ||= "Q");
+        $g_r11l_c4{"e"} = "";
+        if ($sc4 ne "a" || $wr4 ne "Q") { die("c4 fail"); }
+
+        # R11-C5
+        my scalar $hd = 0;
+        ($hd, %g_r11l_rest) = (1, "a" . chr(0) . "b", $i, "k", 2);
+        ($hd, @g_r11l_arr) = (1, 10, 20);
+
+        # R11-C6
+        my int $fi = 0;
+        foreach $fi ("41", 42) {
+            if (($fi + 1) < 42) { die("c6 fail"); }
+        }
+
+        # R11-C7 + C9 + C10 + C11
+        my scalar $ch = R11LChild::new();
+        if ($ch->s() ne "built" || $ch->x() ne "strval") { die("c7 fail"); }
+        my str $c9x = "lex";
+        my int $c9r = do { our int $c9x = 99; $c9x; };
+        if ($c9x ne "lex" || $c9r != 99) { die("c9 fail"); }
+        if (R11LCallee::greet() ne "ok") { die("c10 fail"); }
+        my hash %c11 = ("a" . chr(0) . "b" => $i);
+        hash_set(%c11, "x" . chr(0) . "y", "z");
+        if (hash_get(%c11, "a" . chr(0) . "b") != $i) { die("c11 fail"); }
+
+        # R11-RT1
+        my array @flat = ("k", $i, "m", 2);
+        my scalar $hr = {};
+        %{$hr} = @flat;
+        my scalar $hr2 = {};
+        %{$hr2} = ["k", $i];
+        if (size(@flat) != 4 || $hr->{"k"} != $i || $hr2->{"k"} != $i) { die("rt1 fail"); }
+
+        # R11-LIB2: JSON canonical unwind leak check
+        my hash %jh = (
+            "a" => {"b" => {"c" => R11LJsonBoom::new()}},
+            "d" => [1, 2, 3]
+        );
+        my int $jc = 0;
+        try {
+            JSON::encode_opts(\%jh, {"canonical" => 1});
+        } catch ($e) {
+            $jc = 1;
+        }
+        if ($jc != 1) { die("lib2 fail"); }
+    }
+    %g_r11l_rest = ();
+    @g_r11l_arr = ();
+
+    # R11-RT2: threaded Cycle GC reclaim leak check
+    my scalar $t1 = thread::create(func () int {
+        for (my int $j = 0; $j < 15; $j = $j + 1) {
+            my hash %a = ();
+            my hash %b = ();
+            $a{"b"} = \%b;
+            $b{"a"} = \%a;
+        }
+        core::gc_collect();
+        return 1;
+    });
+    if (thread::join($t1) != 1) { die("rt2 fail"); }
+    core::gc_collect();
+
+    say("R11_LEAKS_OK");
+    return 0;
+}

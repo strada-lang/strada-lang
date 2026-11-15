@@ -659,20 +659,43 @@ func strip_pp_comment(str $s) str {
     return trim($out);
 }
 
-func pp_kw_allows_regex(str $w) int {
+func pp_kw_allows_regex(str $line, int $ws, str $w) int {
+    if ($ws >= 1) {
+        my str $prev1 = substr($line, $ws - 1, 1);
+        if ($prev1 eq "$" || $prev1 eq "@" || $prev1 eq "%") { return 0; }
+    }
+    if ($ws >= 2) {
+        my str $prev2 = substr($line, $ws - 2, 2);
+        if ($prev2 eq "->" || $prev2 eq "::") { return 0; }
+    }
     if ($w eq "split" || $w eq "return" || $w eq "if" || $w eq "elsif" || $w eq "unless"
         || $w eq "while" || $w eq "until" || $w eq "for" || $w eq "die" || $w eq "warn"
         || $w eq "say" || $w eq "print" || $w eq "throw" || $w eq "and" || $w eq "or"
         || $w eq "not" || $w eq "eq" || $w eq "ne" || $w eq "cmp" || $w eq "m"
-        || $w eq "qr" || $w eq "s") {
+        || $w eq "qr") {
         return 1;
     }
     return 0;
 }
 
+func pp_pair_for_delim(str $d) scalar {
+    if ($d eq "(") { return { "open" => "(", "close" => ")", "paired" => 1 }; }
+    if ($d eq "[") { return { "open" => "[", "close" => "]", "paired" => 1 }; }
+    if ($d eq "{") { return { "open" => "{", "close" => "}", "paired" => 1 }; }
+    if ($d eq "<") { return { "open" => "<", "close" => ">", "paired" => 1 }; }
+    return undef;
+}
+
 func pp_try_start_q(str $line, int $len, int $ws, str $tok, int $can_regex) scalar {
     if ($can_regex == 0) { return undef; }
-    if ($tok ne "q" && $tok ne "qq" && $tok ne "qw" && $tok ne "qr") {
+    my int $parts = 1;
+    my int $is_rx = 0;
+    if ($tok eq "s" || $tok eq "tr" || $tok eq "y") {
+        $parts = 2;
+        $is_rx = 1;
+    } elsif ($tok eq "m" || $tok eq "qr") {
+        $is_rx = 1;
+    } elsif ($tok ne "q" && $tok ne "qq" && $tok ne "qw") {
         return undef;
     }
     if ($ws >= 1) {
@@ -695,47 +718,86 @@ func pp_try_start_q(str $line, int $len, int $ws, str $tok, int $can_regex) scal
     }
     if ($j >= $len) { return undef; }
     my str $d = substr($line, $j, 1);
-    if ($d eq "(") { return { "open" => "(", "close" => ")", "next_i" => $j + 1 }; }
-    if ($d eq "[") { return { "open" => "[", "close" => "]", "next_i" => $j + 1 }; }
-    if ($d eq "{") { return { "open" => "{", "close" => "}", "next_i" => $j + 1 }; }
+    my scalar $pair = pp_pair_for_delim($d);
+    if (defined($pair)) {
+        return { "open" => $pair->{"open"}, "close" => $pair->{"close"}, "next_i" => $j + 1, "parts" => $parts, "is_rx" => $is_rx };
+    }
     if ($had_ws == 1) { return undef; }
     my str $nxt = "";
     if ($j + 1 < $len) { $nxt = substr($line, $j + 1, 1); }
-    if ($d eq "/") { return { "open" => "/", "close" => "/", "next_i" => $j + 1 }; }
+    if ($d eq "/") {
+        return { "open" => "/", "close" => "/", "next_i" => $j + 1, "parts" => $parts, "is_rx" => $is_rx };
+    }
+    if ($tok eq "s" || $tok eq "tr" || $tok eq "y") { return undef; }
     if ($d eq "!" && $nxt ne "=" && $nxt ne "~") {
-        return { "open" => "!", "close" => "!", "next_i" => $j + 1 };
+        return { "open" => "!", "close" => "!", "next_i" => $j + 1, "parts" => $parts, "is_rx" => $is_rx };
     }
     if ($d eq "|" && $nxt ne "|") {
-        return { "open" => "|", "close" => "|", "next_i" => $j + 1 };
-    }
-    if ($d eq "<" && $nxt ne "=" && $nxt ne "<") {
-        return { "open" => "<", "close" => ">", "next_i" => $j + 1 };
+        return { "open" => "|", "close" => "|", "next_i" => $j + 1, "parts" => $parts, "is_rx" => $is_rx };
     }
     return undef;
 }
 
-func pp_advance_q_body(str $line, int $len, int $i, scalar $open_ref, scalar $close_ref, scalar $depth_ref) int {
-    while ($i < $len && $$depth_ref > 0) {
-        my str $ch = substr($line, $i, 1);
-        if ($ch eq "\\") {
-            $i = $i + 2;
-            next;
+func pp_advance_q_body(str $line, int $len, int $i, scalar $open_ref, scalar $close_ref, scalar $depth_ref, scalar $parts_ref, int $is_rx) int {
+    while ($i < $len && ($$depth_ref > 0 || $$parts_ref > 0)) {
+        if ($$depth_ref == 0 && $$parts_ref > 0) {
+            while ($i < $len && (substr($line, $i, 1) eq " " || substr($line, $i, 1) eq "\t" || substr($line, $i, 1) eq "\r")) {
+                $i++;
+            }
+            if ($i >= $len) { return $i; }
+            my str $d2 = substr($line, $i, 1);
+            my scalar $p2 = pp_pair_for_delim($d2);
+            if (defined($p2)) {
+                $$open_ref = $p2->{"open"};
+                $$close_ref = $p2->{"close"};
+            } else {
+                $$open_ref = $d2;
+                $$close_ref = $d2;
+            }
+            $$depth_ref = 1;
+            $i++;
         }
-        if ($ch eq $$close_ref) {
-            $$depth_ref = $$depth_ref - 1;
-            if ($$depth_ref == 0) {
-                $$open_ref = "";
-                $$close_ref = "";
+        while ($i < $len && $$depth_ref > 0) {
+            my str $ch = substr($line, $i, 1);
+            if ($ch eq "\\") {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq $$close_ref) {
+                $$depth_ref = $$depth_ref - 1;
+                $i++;
+                if ($$depth_ref == 0) {
+                    $$parts_ref = $$parts_ref - 1;
+                    if ($$parts_ref > 0) {
+                        if ($$open_ref eq $$close_ref) {
+                            $$depth_ref = 1;
+                        } else {
+                            $$open_ref = "";
+                            $$close_ref = "";
+                            last;
+                        }
+                    } else {
+                        $$open_ref = "";
+                        $$close_ref = "";
+                        if ($is_rx == 1) {
+                            while ($i < $len) {
+                                my int $fc = ord(substr($line, $i, 1));
+                                if (($fc >= 97 && $fc <= 122) || ($fc >= 65 && $fc <= 90)) {
+                                    $i++;
+                                } else {
+                                    last;
+                                }
+                            }
+                        }
+                    }
+                }
+                next;
+            }
+            if ($$open_ref ne $$close_ref && $ch eq $$open_ref) {
+                $$depth_ref = $$depth_ref + 1;
             }
             $i++;
-            next;
         }
-        if ($$open_ref ne $$close_ref && $ch eq $$open_ref) {
-            $$depth_ref = $$depth_ref + 1;
-            $i++;
-            next;
-        }
-        $i++;
     }
     return $i;
 }
@@ -749,11 +811,13 @@ func find_c_block_kw(str $line) int {
     my str $q_open = "";
     my str $q_close = "";
     my int $q_depth = 0;
+    my int $q_parts = 0;
+    my int $q_is_rx = 0;
     my int $can_regex = 1;
     while ($i < $len) {
-        if ($q_depth > 0) {
-            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth);
-            if ($q_depth == 0) { $can_regex = 0; }
+        if ($q_depth > 0 || $q_parts > 0) {
+            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth, \$q_parts, $q_is_rx);
+            if ($q_depth == 0 && $q_parts == 0) { $can_regex = 0; }
             next;
         }
         my str $ch = substr($line, $i, 1);
@@ -834,10 +898,12 @@ func find_c_block_kw(str $line) int {
                 $q_open = $qi->{"open"};
                 $q_close = $qi->{"close"};
                 $q_depth = 1;
+                $q_parts = $qi->{"parts"};
+                $q_is_rx = $qi->{"is_rx"};
                 $i = $qi->{"next_i"};
                 next;
             }
-            $can_regex = pp_kw_allows_regex($tok);
+            $can_regex = pp_kw_allows_regex($line, $ws, $tok);
             next;
         }
         if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
@@ -921,11 +987,13 @@ func pp_detect_heredoc_tags(str $line) scalar {
     my str $q_open = "";
     my str $q_close = "";
     my int $q_depth = 0;
+    my int $q_parts = 0;
+    my int $q_is_rx = 0;
     my int $can_regex = 1;
     while ($i < $len) {
-        if ($q_depth > 0) {
-            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth);
-            if ($q_depth == 0) { $can_regex = 0; }
+        if ($q_depth > 0 || $q_parts > 0) {
+            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth, \$q_parts, $q_is_rx);
+            if ($q_depth == 0 && $q_parts == 0) { $can_regex = 0; }
             next;
         }
         my str $ch = substr($line, $i, 1);
@@ -1050,10 +1118,12 @@ func pp_detect_heredoc_tags(str $line) scalar {
                 $q_open = $qi->{"open"};
                 $q_close = $qi->{"close"};
                 $q_depth = 1;
+                $q_parts = $qi->{"parts"};
+                $q_is_rx = $qi->{"is_rx"};
                 $i = $qi->{"next_i"};
                 next;
             }
-            $can_regex = pp_kw_allows_regex($tok);
+            $can_regex = pp_kw_allows_regex($line, $ws, $tok);
             next;
         }
         if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
@@ -1067,7 +1137,8 @@ func pp_detect_heredoc_tags(str $line) scalar {
 }
 
 func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref,
-                          scalar $q_open_ref, scalar $q_close_ref, scalar $q_depth_ref) void {
+                          scalar $q_open_ref, scalar $q_close_ref, scalar $q_depth_ref,
+                          scalar $q_parts_ref, scalar $q_is_rx_ref) void {
     my int $len = length($line);
     my int $i = 0;
     my int $can_regex = 1;
@@ -1096,9 +1167,12 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             $i = $i + 1;
             next;
         }
-        if ($$q_depth_ref > 0) {
-            $i = pp_advance_q_body($line, $len, $i, $q_open_ref, $q_close_ref, $q_depth_ref);
-            if ($$q_depth_ref == 0) { $can_regex = 0; }
+        if ($$q_depth_ref > 0 || $$q_parts_ref > 0) {
+            $i = pp_advance_q_body($line, $len, $i, $q_open_ref, $q_close_ref, $q_depth_ref, $q_parts_ref, $$q_is_rx_ref);
+            if ($$q_depth_ref == 0 && $$q_parts_ref == 0) {
+                $$q_is_rx_ref = 0;
+                $can_regex = 0;
+            }
             next;
         }
         my str $ch = substr($line, $i, 1);
@@ -1146,10 +1220,12 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
                 $$q_open_ref = $qi->{"open"};
                 $$q_close_ref = $qi->{"close"};
                 $$q_depth_ref = 1;
+                $$q_parts_ref = $qi->{"parts"};
+                $$q_is_rx_ref = $qi->{"is_rx"};
                 $i = $qi->{"next_i"};
                 next;
             }
-            $can_regex = pp_kw_allows_regex($tok);
+            $can_regex = pp_kw_allows_regex($line, $ws, $tok);
             next;
         }
         if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
@@ -1189,6 +1265,8 @@ func preprocess(str $filename) str {
     my str $ml_q_open = "";
     my str $ml_q_close = "";
     my int $ml_q_depth = 0;
+    my int $ml_q_parts = 0;
+    my int $ml_q_is_rx = 0;
     my array @heredoc_tags = ();
     my array @pending_heredocs = ();
     my array @c_pp_entry = ();
@@ -1235,9 +1313,9 @@ func preprocess(str $filename) str {
             $i++;
             next;
         }
-        if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0) {
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth);
-            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && $ml_q_depth == 0 && size(@pending_heredocs) > 0) {
+        if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0 || $ml_q_parts > 0) {
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx);
+            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && $ml_q_depth == 0 && $ml_q_parts == 0 && size(@pending_heredocs) > 0) {
                 my int $pi = 0;
                 while ($pi < size(@pending_heredocs)) {
                     push(@heredoc_tags, $pending_heredocs[$pi]);
@@ -1568,8 +1646,8 @@ func preprocess(str $filename) str {
             }
         } else {
             my scalar $hd_list = pp_detect_heredoc_tags($line);
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth);
-            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0) {
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth, \$ml_q_parts, \$ml_q_is_rx);
+            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0 || $ml_q_parts > 0) {
                 my int $hi = 0;
                 while ($hi < size($hd_list)) {
                     push(@pending_heredocs, $hd_list->[$hi]);

@@ -433,6 +433,18 @@ static const char *resolve_global_var_key(CompCtx *ctx, const char *name) {
     return find_const_var_ptr(name);
 }
 
+static void vm_report_undeclared_var(CompCtx *ctx, StradaValue *node, const char *sigil, const char *name) {
+    int line = (int)ast_int(node, "line");
+    if (line > 0) {
+        fprintf(stderr, "VM compile error (line %d): undeclared variable '%s%s'\n",
+                line, sigil ? sigil : "$", name ? name : "");
+    } else {
+        fprintf(stderr, "VM compile error: undeclared variable '%s%s'\n",
+                sigil ? sigil : "$", name ? name : "");
+    }
+    ctx->errors++;
+}
+
 static int lookup_enum_for_ctx(CompCtx *ctx, const char *name, int64_t *out_val) {
     if (!name || !name[0]) return 0;
     if (find_enum_val(name, out_val)) return 1;
@@ -1839,6 +1851,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
                         vm_chunk_emit_i64(ctx->chunk, eval);
                     } else {
+                        vm_report_undeclared_var(ctx, node, sigil, name);
                         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
                     }
                 }
@@ -3118,6 +3131,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "tell") == 0) bid = BUILTIN_CORE_TELL;
             else if (strcmp(fn, "rewind") == 0) bid = BUILTIN_CORE_REWIND;
             else if (strcmp(fn, "flush") == 0) bid = BUILTIN_CORE_FLUSH;
+            else if (strcmp(fn, "fwrite") == 0) bid = BUILTIN_CORE_FWRITE;
+            else if (strcmp(fn, "fread") == 0) bid = BUILTIN_CORE_FREAD;
             else if (strcmp(fn, "slurp") == 0) bid = BUILTIN_CORE_SLURP;
             else if (strcmp(fn, "spew") == 0) bid = BUILTIN_CORE_SPEW;
             else if (strcmp(fn, "qx") == 0) bid = BUILTIN_CORE_QX;
@@ -4022,6 +4037,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
                     break;
                 }
+                vm_report_undeclared_var(ctx, target, vsigil, vname);
                 compile_expr(ctx, value);
                 break;
             }
@@ -4142,6 +4158,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit_u16(ctx->chunk, target_idx);
                     }
                 } else {
+                    vm_report_undeclared_var(ctx, operand, vsigil, vname);
                     vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
                 }
             }
