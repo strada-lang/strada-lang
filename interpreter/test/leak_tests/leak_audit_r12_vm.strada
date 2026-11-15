@@ -1,0 +1,61 @@
+package R12VmLeakBox;
+func m(scalar $self) str { return "base"; }
+around "m" func(scalar $orig, scalar $self) str { return "[" . $orig->($self) . "]"; }
+around "m" func(scalar $orig, scalar $self) str { return "{" . $orig->($self) . "}"; }
+func ctx(scalar $self) dynamic {
+    if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+    if (core::wantarray()) { my array @a = ("A"); return @a; }
+    return core::wantscalar() ? "S" : "0";
+}
+
+package main;
+
+our int $boot = late_fn(20);
+func late_fn(int $x) int { return $x + 2; }
+
+func ctx_f() dynamic {
+    if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+    if (core::wantarray()) { my array @a = ("A"); return @a; }
+    return core::wantscalar() ? "S" : "0";
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 15) {
+        # Dynamic inline cache exercise with temporary blessed objects
+        my scalar $dyn = bless({"i" => $i}, "R12VmLeakBox");
+        $dyn->m();
+        my scalar $s = $dyn->ctx();
+        my array @a = $dyn->ctx();
+        my hash %h = $dyn->ctx();
+        my array @t1 = (1 ? ctx_f() : ("X"));
+        my scalar $t2 = (1 ? ctx_f() : "X");
+        my array @mp = map {
+            my hash %tmp = ("k" => $_);
+            ($_, $tmp{"k"} * 2);
+        } (1, 2, 3);
+        my ($x, @rest) = @mp;
+        my ($k, %hrest) = ("tag", "a", 1, "b", 2);
+        my str $sp = sprintf("%b|%#B|%2$s:%1$d|%*.*d", 13, 5, 5, 3, 7);
+        my scalar $sl = core::slurp("/no_such_r12_leak_path");
+        my str $ch = "hi\r\n\r\n";
+        chomp($ch);
+        my str $tr = trim("\x0b\x0c ok \x0c\x0b");
+        my array @sr = sort("b\x00z", "b\x00a");
+        my array @rg = (5..1);
+        my str $kept = "";
+        foreach ("keep") {
+            foreach my str $it ("u", "v") { }
+            $kept = $_;
+        }
+        my scalar $nf = 42;
+        $nf->();
+        try {
+            my scalar $exc_call = ctx_f();
+            throw "boom";
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("R12_VM_LEAKS_OK:" . $boot);
+    return 0;
+}

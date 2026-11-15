@@ -231,6 +231,8 @@ typedef enum {
     OP_ISWEAK_SLOT,     /* u8 kind, u16 slot_or_str — push 1 if slot holds live weakref else 0 */
     OP_CLEAR_LOCALS,    /* u16 from_slot, u16 to_slot — set frame->locals[from..to-1] = undef */
     OP_FIELD_ACCESS,    /* u16 field_str_idx, u8 argc — $obj->field without parens */
+    OP_MAP_PUSH,        /* pop src, pop dst_array — append elements if array (else push src incl. undef) */
+    OP_SET_CALL_CTX,    /* u8 ctx (0=scalar, 1=array, 2=hash) — set pending call context */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -513,6 +515,8 @@ enum {
 
     /* Misc core */
     BUILTIN_CORE_WANTARRAY,
+    BUILTIN_CORE_WANTSCALAR,
+    BUILTIN_CORE_WANTHASH,
     BUILTIN_CORE_SELECT_FDS,
     BUILTIN_CORE_SET_BYTE,
     BUILTIN_CORE_BYTE_SUBSTR,
@@ -941,6 +945,7 @@ typedef struct {
     VMClosure *closure;  /* non-NULL if called as closure */
     int global_save_depth;
     int passed_argc;
+    uint8_t call_context;
 } VMFrame;
 
 /* VM state */
@@ -980,8 +985,8 @@ typedef struct VM {
     char *script_name;
     /* Inline method cache for OOP dispatch */
     struct {
-        const char *class_name;  /* pointer compare (interned) */
-        const char *method;      /* pointer compare (str_consts) */
+        char *class_name;        /* owned copy */
+        char *method;            /* owned copy */
         int func_idx;
     } method_cache[32];
     /* Mark-sweep GC state */
@@ -997,6 +1002,7 @@ typedef struct VM {
     int end_ran;
     int refcount;
     int locals_detached;
+    uint8_t pending_call_context;
 } VM;
 
 /* Program API */

@@ -437,6 +437,9 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"fe_cl_depths"} = \@fe_cl_depths;
     $cg{"fe_cl_count"} = 0;
     $cg{"func_has_try"} = 0;     # Track if current function contains any try blocks (for volatile vars)
+    $cg{"func_has_goto"} = 0;    # Track if current function contains any goto statements (for decl hoisting)
+    my hash %empty_predecl_goto = ();
+    $cg{"predeclared_goto_vars"} = \%empty_predecl_goto;
     # Track label-to-scope-depth for proper cleanup on labeled break/continue/redo
     my hash %label_depths = ();
     $cg{"label_depths"} = \%label_depths;
@@ -978,7 +981,7 @@ func gen_finally_upto(scalar $cg, int $upto) void {
     while ($i >= $upto) {
         my scalar $fb = $blocks->[$i];
         $cg->{"finally_count"} = $i;     # hide this + inner entries
-        gen_block($cg, $fb);
+        gen_block_local_scoped($cg, $fb);
         emit($cg, "\n");
         $cg->{"finally_count"} = $n;     # restore
         $i = $i - 1;
@@ -1029,7 +1032,7 @@ func emit_try_unwind_to(scalar $cg, int $target_td) void {
                 $cg->{"finally_count"} = $cg->{"finally_count"} - 1;
             }
             emit_indent($cg);
-            gen_block($cg, $fb);
+            gen_block_local_scoped($cg, $fb);
             emit($cg, "\n");
         }
         $ti = $ti - 1;
@@ -1257,6 +1260,47 @@ func leave_callee_pkg(scalar $cg, scalar $saved) void {
 }
 
 # Resolve the most-derived `has` attribute for $method in $pkg's MRO if it is safe
+# DFS left-to-right MRO traversal with cycle/diamond deduplication.
+func cg_dfs_mro_rec(scalar $inh, int $ic, str $pkg, int $match_c_safe, scalar $mro, scalar $seen) void {
+    my str $skey = $pkg;
+    if ($match_c_safe == 1) {
+        $skey = pkg_c_safe($pkg);
+    }
+    if (length($pkg) == 0 || $seen->{$skey}) {
+        return;
+    }
+    $seen->{$skey} = 1;
+    push($mro, $pkg);
+    my str $cur_c = "";
+    if ($match_c_safe == 1) {
+        $cur_c = pkg_c_safe($pkg);
+    }
+    my int $ii = 0;
+    while ($ii < $ic) {
+        my str $ch = "" . $inh->[$ii]->{"child"};
+        my int $hit = 0;
+        if ($ch eq $pkg) {
+            $hit = 1;
+        } elsif ($match_c_safe == 1 && pkg_c_safe($ch) eq $cur_c) {
+            $hit = 1;
+        }
+        if ($hit == 1) {
+            my str $pp = "" . $inh->[$ii]->{"parent"};
+            cg_dfs_mro_rec($inh, $ic, $pp, $match_c_safe, $mro, $seen);
+        }
+        $ii = $ii + 1;
+    }
+}
+
+func cg_dfs_mro(scalar $cg, str $start_pkg, int $match_c_safe) scalar {
+    my array @mro = ();
+    my hash %seen = ();
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+    cg_dfs_mro_rec($inh, $ic, $start_pkg, $match_c_safe, \@mro, \%seen);
+    return \@mro;
+}
+
 # for direct-hash inline access (no modifiers, no user overrides, no lazy/builder
 # on either the matched attribute or any subclass override). Returns the attr hash
 # or 0 otherwise.
@@ -1272,34 +1316,11 @@ func resolve_inline_self_attr(scalar $cg, str $pkg, str $method) scalar {
     my int $ha_count = $cg->{"has_attr_count"} + 0;
     if (!$ha_attrs || $ha_count == 0) { return 0; }
 
-    my array @mro = ();
-    push(@mro, $pkg);
-    my scalar $inh = $cg->{"inherits"};
-    my int $ic = $cg->{"inherit_count"} + 0;
-    my int $mi = 0;
-    while ($mi < size(@mro)) {
-        my str $cp = $mro[$mi];
-        my int $ii = 0;
-        while ($ii < $ic) {
-            if (("" . $inh->[$ii]->{"child"}) eq $cp) {
-                my str $pp = "" . $inh->[$ii]->{"parent"};
-                my int $seen = 0;
-                my int $si = 0;
-                while ($si < size(@mro)) {
-                    if ($mro[$si] eq $pp) { $seen = 1; last; }
-                    $si = $si + 1;
-                }
-                if ($seen == 0) { push(@mro, $pp); }
-            }
-            $ii = $ii + 1;
-        }
-        $mi = $mi + 1;
-    }
-
+    my scalar $mro_ref = cg_dfs_mro($cg, $pkg, 0);
     my scalar $matched = 0;
-    $mi = 0;
-    while ($mi < size(@mro) && !$matched) {
-        my str $mpkg = $mro[$mi];
+    my int $mi = 0;
+    while ($mi < size(@{$mro_ref}) && !$matched) {
+        my str $mpkg = $mro_ref->[$mi];
         my int $hi = 0;
         while ($hi < $ha_count) {
             my scalar $attr = $ha_attrs->[$hi];
@@ -2344,27 +2365,30 @@ func emit_overload_binary_fallback(scalar $cg, str $op) void {
 
 # Emit string comparison fallback for overloaded ops
 func emit_overload_strcmp_fallback(scalar $cg, str $op) void {
-    emit($cg, "({ char *__sl = strada_to_str_ss(__ol_l); char *__sr = strada_to_str_ss(__ol_r); ");
-    if ($op eq "eq") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) == 0); ");
-    } elsif ($op eq "ne") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) != 0); ");
-    } elsif ($op eq "lt") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) < 0); ");
-    } elsif ($op eq "gt") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) > 0); ");
-    } elsif ($op eq "le") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) <= 0); ");
-    } elsif ($op eq "ge") {
-        emit($cg, "int __r = (strcmp(__sl, __sr) >= 0); ");
-    } elsif ($op eq "cmp") {
-        emit($cg, "int __c = strcmp(__sl, __sr); int __r = (__c < 0) ? -1 : ((__c > 0) ? 1 : 0); ");
-    } elsif ($op eq "<=>") {
+    emit($cg, "({ ");
+    if ($op eq "<=>") {
         emit($cg, "double __nl = strada_to_num(__ol_l); double __nr = strada_to_num(__ol_r); int __r = (__nl < __nr) ? -1 : ((__nl > __nr) ? 1 : 0); ");
+    } elsif ($op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge" || $op eq "cmp") {
+        emit($cg, "int __c = strada_sv_strcmp(__ol_l, __ol_r); ");
+        if ($op eq "eq") {
+            emit($cg, "int __r = (__c == 0); ");
+        } elsif ($op eq "ne") {
+            emit($cg, "int __r = (__c != 0); ");
+        } elsif ($op eq "lt") {
+            emit($cg, "int __r = (__c < 0); ");
+        } elsif ($op eq "gt") {
+            emit($cg, "int __r = (__c > 0); ");
+        } elsif ($op eq "le") {
+            emit($cg, "int __r = (__c <= 0); ");
+        } elsif ($op eq "ge") {
+            emit($cg, "int __r = (__c >= 0); ");
+        } else {
+            emit($cg, "int __r = (__c < 0) ? -1 : ((__c > 0) ? 1 : 0); ");
+        }
     } else {
         emit($cg, "int __r = 0; ");
     }
-    emit($cg, "strada_cstr_free(__sl); strada_cstr_free(__sr); strada_new_int(__r); })");
+    emit($cg, "strada_new_int(__r); })");
 }
 
 func is_array_sigil_var(scalar $node) int {
@@ -3226,6 +3250,42 @@ func stmt_has_try(scalar $stmt) int {
     return 0;
 }
 
+# Scan a statement or expression subtree to check if it contains any goto
+# statements (stopping at NODE_ANON_FUNC boundaries). Used so functions with
+# goto hoist `my`/`const` C slot declarations and cleanup pushes to the top
+# of their enclosing C block, avoiding jumps over uninitialized locals or
+# repeated cleanup pushes on backward jumps.
+func stmt_has_goto(scalar $stmt) int {
+    if (!$stmt) { return 0; }
+    my str $rt = reftype($stmt);
+    if ($rt eq "ARRAY") {
+        my int $len = size($stmt);
+        my int $i = 0;
+        while ($i < $len) {
+            if (stmt_has_goto($stmt->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    my int $type = $stmt->{"type"} + 0;
+    if ($type == NODE_GOTO()) { return 1; }
+    if ($type == NODE_ANON_FUNC()) { return 0; }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
+    my scalar $ks = keys(%{$stmt});
+    my int $kn = size($ks);
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $stmt->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (stmt_has_goto($v) == 1) { return 1; }
+        }
+        $k = $k + 1;
+    }
+    return 0;
+}
+
 # Recursive check across any AST subtree (including NODE_DO_EXPR / NODE_ANON_FUNC) for try/catch
 func ast_any_try(scalar $n) int {
     my str $rt = reftype($n);
@@ -3538,6 +3598,20 @@ func func_body_has_try(scalar $body) int {
     my int $i = 0;
     while ($i < $count) {
         if (stmt_has_try($stmts->[$i]) == 1) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Check if a function body contains any goto statements
+func func_body_has_goto(scalar $body) int {
+    my scalar $stmts = $body->{"statements"};
+    my int $count = $body->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $count) {
+        if (stmt_has_goto($stmts->[$i]) == 1) {
             return 1;
         }
         $i = $i + 1;
@@ -3858,35 +3932,14 @@ func inline_ctor_missing_required(scalar $cg, str $c_pkg, scalar $args, int $arg
     my scalar $inh = $cg->{"inherits"};
     my int $ic = $cg->{"inherit_count"} + 0;
 
-    # BFS child -> ancestors so overridden attributes follow MRO order.
-    my array @pkg_chain = ();
-    my hash %seen_pkg = ();
-    push(@pkg_chain, $rq_pkg);
-    $seen_pkg{$rq_pkg} = 1;
-    my int $qi = 0;
-    while ($qi < scalar(@pkg_chain)) {
-        my str $cur_p = $pkg_chain[$qi];
-        my str $cur_c = pkg_c_safe($cur_p);
-        my int $ii = 0;
-        while ($ii < $ic) {
-            my str $ch = "" . $inh->[$ii]->{"child"};
-            if ($ch eq $cur_p || pkg_c_safe($ch) eq $cur_c) {
-                my str $par = "" . $inh->[$ii]->{"parent"};
-                if (length($par) > 0 && !$seen_pkg{$par}) {
-                    $seen_pkg{$par} = 1;
-                    push(@pkg_chain, $par);
-                }
-            }
-            $ii = $ii + 1;
-        }
-        $qi = $qi + 1;
-    }
+    # DFS child -> ancestors so overridden attributes follow MRO order.
+    my scalar $pkg_chain_ref = cg_dfs_mro($cg, $rq_pkg, 1);
 
     my hash %seen_attr = ();
     my int $pi = 0;
-    my int $pn = scalar(@pkg_chain);
+    my int $pn = size(@{$pkg_chain_ref});
     while ($pi < $pn) {
-        my str $cur_p = $pkg_chain[$pi];
+        my str $cur_p = $pkg_chain_ref->[$pi];
         my str $cur_c = pkg_c_safe($cur_p);
         my int $rq_i = 0;
         while ($rq_i < $rq_n) {

@@ -4324,41 +4324,28 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             }
                         }
                     }
-                    # If not found in this class, check parent classes
+                    # If not found in this class, check parent classes in left-to-right DFS MRO order
                     if (length($resolved_fn) == 0) {
-                        my scalar $inh_list3 = $cg->{"inherits"};
-                        my int $inh_ct3 = $cg->{"inherit_count"};
-                        my array @check_pkgs = ();
-                        push(@check_pkgs, $known_pkg);
-                        my int $cp_len = 1;
-                        my int $cpi = 0;
-                        while ($cpi < $cp_len) {
-                            my str $cpkg = $check_pkgs[$cpi];
-                            my int $pi3 = 0;
-                            while ($pi3 < $inh_ct3) {
-                                my str $ichild3 = $inh_list3->[$pi3]->{"child"};
-                                if ($ichild3 eq $cpkg) {
-                                    my str $ipar3 = $inh_list3->[$pi3]->{"parent"};
-                                    push(@check_pkgs, $ipar3);
-                                    $cp_len = $cp_len + 1;
-                                    my str $parent_fn = $ipar3 . "_" . $method;
-                                    my int $pci = index($parent_fn, "::");
-                                    while ($pci >= 0) {
-                                        $parent_fn = substr($parent_fn, 0, $pci) . "_" . substr($parent_fn, $pci + 2, length($parent_fn) - $pci - 2);
-                                        $pci = index($parent_fn, "::");
-                                    }
-                                    if ($all_funcs && length($resolved_fn) == 0) {
-                                        my str $pf_check = "" . $all_funcs->{$parent_fn};
-                                        if (length($pf_check) > 0) {
-                                            my int $pf_ret = $all_funcs->{$parent_fn} + 0;
-                                            if ($pf_ret >= 0) {
-                                                $resolved_fn = $parent_fn;
-                                                $resolved_ret_type = $pf_ret;
-                                            }
-                                        }
+                        my scalar $mro_ref = cg_dfs_mro($cg, $known_pkg, 0);
+                        my int $cp_len = size(@{$mro_ref});
+                        my int $cpi = 1;
+                        while ($cpi < $cp_len && length($resolved_fn) == 0) {
+                            my str $ipar3 = $mro_ref->[$cpi];
+                            my str $parent_fn = $ipar3 . "_" . $method;
+                            my int $pci = index($parent_fn, "::");
+                            while ($pci >= 0) {
+                                $parent_fn = substr($parent_fn, 0, $pci) . "_" . substr($parent_fn, $pci + 2, length($parent_fn) - $pci - 2);
+                                $pci = index($parent_fn, "::");
+                            }
+                            if ($all_funcs) {
+                                my str $pf_check = "" . $all_funcs->{$parent_fn};
+                                if (length($pf_check) > 0) {
+                                    my int $pf_ret = $all_funcs->{$parent_fn} + 0;
+                                    if ($pf_ret >= 0) {
+                                        $resolved_fn = $parent_fn;
+                                        $resolved_ret_type = $pf_ret;
                                     }
                                 }
-                                $pi3 = $pi3 + 1;
                             }
                             $cpi = $cpi + 1;
                         }
@@ -5068,6 +5055,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "int __local_do_mark_" . $do_id . " = strada_local_depth_get();\n");
             local_mark_push($cg, $cg->{"scope_depth"}, "__local_do_mark_" . $do_id);
         }
+        my scalar $do_saved_goto = goto_hoist_stmts_decls($cg, $do_stmts, $do_n);
         my int $di = 0;
         while ($di < $do_n) {
             my scalar $dstmt = $do_stmts->[$di];
@@ -5089,6 +5077,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             $di = $di + 1;
         }
+        goto_hoist_restore($cg, $do_saved_goto);
         # Scope cleanup (local decrefs) BEFORE yielding — the result is
         # already owned/incref'd so it survives.
         if ($do_has_local == 1) {
@@ -5267,25 +5256,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my int $se_push = cleanup_push_useful($cg);
             if ($ret_mode == 1) {
                 emit_subst_r_begin($cg, $expr->{"target"});
-                if ($se_push == 1) { emit($cg, "strada_cleanup_push(__subst_tv); "); }
             } else {
                 emit_subst_target_begin_mode($cg, $expr->{"target"}, 1);
-                if ($se_push == 1) { emit($cg, "strada_cleanup_push(__subst_tv); "); }
-                emit($cg, "if (!__subst_tv || STRADA_IS_TAGGED_INT(__subst_tv) || __subst_tv->type != STRADA_STR || !__subst_tv->value.pv) { ");
-                emit($cg, "StradaValue *__re_s0 = strada_to_str_sv(__subst_tv); ");
-                if ($se_push == 1) {
-                    emit($cg, "strada_cleanup_pop_decref(__subst_tv); __subst_tv = __re_s0; strada_cleanup_push(__subst_tv); ");
-                } else {
-                    emit($cg, "strada_decref(__subst_tv); __subst_tv = __re_s0; ");
-                }
-                emit($cg, "} ");
             }
+            if ($se_push == 1) { emit($cg, "strada_cleanup_push(__subst_tv); "); }
+            emit($cg, "if (!__subst_tv || STRADA_IS_TAGGED_INT(__subst_tv) || __subst_tv->type != STRADA_STR || !__subst_tv->value.pv) { ");
+            emit($cg, "StradaValue *__re_s0 = strada_to_str_sv(__subst_tv); ");
+            if ($se_push == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__subst_tv); __subst_tv = __re_s0; strada_cleanup_push(__subst_tv); ");
+            } else {
+                emit($cg, "strada_decref(__subst_tv); __subst_tv = __re_s0; ");
+            }
+            emit($cg, "} ");
             emit($cg, "const char *__re_src = (__subst_tv && !STRADA_IS_TAGGED_INT(__subst_tv) && __subst_tv->value.pv) ? __subst_tv->value.pv : \"\"; ");
             my int $subst_e_interp = regex_pattern_has_interp($pattern);
             if ($subst_e_interp == 1) {
                 gen_subst_pattern_prelude($cg, $pattern);
                 emit($cg, " ");
             }
+            emit($cg, "strada_regex_set_subject_for_sv(__subst_tv); ");
             if ($subst_e_interp == 1) {
                 emit($cg, "StradaValue *__re_matches = strada_regex_find_all(__re_src, __subst_pat, ");
             } else {
@@ -5296,7 +5285,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "NULL");
             }
-            emit($cg, ", " . $global . "); ");
+            emit($cg, ", " . $global . "); strada_regex_clear_subject_len(); ");
             if ($subst_e_interp == 1) {
                 if ($se_push == 1) { emit($cg, "strada_cleanup_pop_decref(__subst_pstr); "); }
                 else { emit($cg, "strada_decref(__subst_pstr); "); }
@@ -5314,7 +5303,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $eval_expr) == 1) {
                 emit($cg, "strada_decref(__re_repl); ");
             }
-            emit($cg, "} StradaValue *__re_built = strada_regex_build_result(__re_src, __re_matches, __re_repls); ");
+            emit($cg, "} strada_regex_set_subject_for_sv(__subst_tv); StradaValue *__re_built = strada_regex_build_result(__re_src, __re_matches, __re_repls); strada_regex_clear_subject_len(); ");
             if ($se_push == 1) {
                 emit($cg, "strada_cleanup_pop_decref(__re_repls); ");
                 emit($cg, "strada_cleanup_pop_decref(__re_matches); ");
@@ -5401,6 +5390,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($subst_interp == 1) {
             gen_subst_pattern_prelude($cg, $pattern);
         }
+        emit($cg, "int __subst_rep_utf8 = 0; ");
         if ($subst_rep_interp == 1) {
             emit($cg, "StradaValue *__subst_rsv = ");
             gen_regex_interpolated_pattern($cg, $replacement);
@@ -5410,6 +5400,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($sb_push == 1) { emit($cg, "strada_cleanup_pop_decref(__subst_rsv); strada_cleanup_push(__subst_rstr); "); }
             else { emit($cg, "strada_decref(__subst_rsv); "); }
             emit($cg, "const char *__subst_rep = (__subst_rstr && !STRADA_IS_TAGGED_INT(__subst_rstr) && __subst_rstr->value.pv) ? __subst_rstr->value.pv : \"\"; ");
+            emit($cg, "__subst_rep_utf8 = (__subst_rstr && !STRADA_IS_TAGGED_INT(__subst_rstr) && __subst_rstr->type == STRADA_STR && STRADA_STR_IS_UTF8(__subst_rstr)) ? 1 : 0; ");
+        } else {
+            my int $rep_bytes = bytes($replacement);
+            my int $rbi = 0;
+            while ($rbi < $rep_bytes) {
+                if (char_at($replacement, $rbi) >= 128) {
+                    emit($cg, "__subst_rep_utf8 = 1; ");
+                    last;
+                }
+                $rbi = $rbi + 1;
+            }
         }
         emit($cg, "char *__subst_res = NULL; size_t __subst_outlen = 0; __subst_cnt = (int64_t)strada_regex_replace_capture_len(__subst_src, __subst_slen, __subst_utf8, ");
         if ($subst_interp == 1) {
@@ -5428,7 +5429,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "NULL");
         }
         emit($cg, ", " . $global . ", &__subst_res, &__subst_outlen); strada_regex_clear_subject_len(); ");
-        emit($cg, "StradaValue *__subst_nsv = (__subst_cnt > 0 && __subst_res) ? strada_new_str_charflag_len(__subst_res, __subst_outlen, __subst_src, __subst_slen) : NULL; free(__subst_res); ");
+        emit($cg, "StradaValue *__subst_nsv = (__subst_cnt > 0 && __subst_res) ? strada_new_str_len_utf8_flag(__subst_res, __subst_outlen, (__subst_utf8 || __subst_rep_utf8)) : NULL; free(__subst_res); ");
         if ($subst_rep_interp == 1) {
             if ($sb_push == 1) { emit($cg, "strada_cleanup_pop_decref(__subst_rstr); "); }
             else { emit($cg, "strada_decref(__subst_rstr); "); }
@@ -7572,7 +7573,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $m_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
-        $cg->{"loop_redo_depth"} = $saved_map_depth + 2;
+        $cg->{"loop_redo_depth"} = $saved_map_depth + 1;
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
@@ -7602,6 +7603,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $stmts = $block->{"statements"};
         my int $stmt_count = $block->{"statement_count"};
         if ($stmt_count > 0) {
+            my scalar $map_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $stmt_count);
             my int $i = 0;
             while ($i < $stmt_count - 1) {
                 gen_statement($cg, $stmts->[$i]);
@@ -7632,6 +7634,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 gen_statement($cg, $last_stmt);
             }
+            goto_hoist_restore($cg, $map_saved_goto);
         }
         scope_pop($cg);
         if ($map_has_local == 1) {
@@ -7892,7 +7895,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $g_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
-        $cg->{"loop_redo_depth"} = $saved_grep_depth + 2;
+        $cg->{"loop_redo_depth"} = $saved_grep_depth + 1;
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
@@ -7922,6 +7925,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $stmts = $block->{"statements"};
         my int $stmt_count = $block->{"statement_count"};
         if ($stmt_count > 0) {
+            my scalar $grep_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $stmt_count);
             my int $gi = 0;
             while ($gi < $stmt_count - 1) {
                 gen_statement($cg, $stmts->[$gi]);
@@ -7941,6 +7945,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 gen_statement($cg, $last_stmt);
             }
+            goto_hoist_restore($cg, $grep_saved_goto);
         }
         scope_pop($cg);
         if ($grep_has_local == 1) {
@@ -8148,6 +8153,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"current_redo_label"} = "";
 
         my int $saved_func_has_try = $cg->{"func_has_try"};
+        my int $saved_func_has_goto = $cg->{"func_has_goto"} + 0;
+        my scalar $saved_predeclared_goto = $cg->{"predeclared_goto_vars"};
         my int $saved_func_tracks_depth = $cg->{"func_tracks_depth"} + 0;
         my scalar $saved_struct_vars = $cg->{"struct_vars"};
         my scalar $saved_cand_boxed = $cg->{"cand_boxed_vars"};
@@ -8175,6 +8182,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"fn_has_tmps_mark"} = ast_has_expr_stmt_block($anon_body);
         $cg->{"loop_tmps_marks"} = [];
         $cg->{"label_tmps_marks"} = {};
+        my hash %empty_anon_goto_pd = ();
+        $cg->{"predeclared_goto_vars"} = \%empty_anon_goto_pd;
+        $cg->{"func_has_goto"} = func_body_has_goto($anon_body);
         if ($anon_has_try == 1) {
             $cg->{"func_has_try"} = 1;
         } else {
@@ -8250,11 +8260,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $body = $expr->{"body"};
         my scalar $stmts = $body->{"statements"};
         my int $stmt_count = $body->{"statement_count"};
+        my scalar $anon_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $stmt_count);
         $i = 0;
         while ($i < $stmt_count) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
+        goto_hoist_restore($cg, $anon_saved_goto);
         scope_pop($cg);
         if ($cg->{"has_local"} == 1) {
             emit_indent($cg);
@@ -8334,6 +8346,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"ret_is_num"} = $saved_ret_is_num;
 
         $cg->{"func_has_try"} = $saved_func_has_try;
+        $cg->{"func_has_goto"} = $saved_func_has_goto;
+        $cg->{"predeclared_goto_vars"} = $saved_predeclared_goto;
         $cg->{"func_tracks_depth"} = $saved_func_tracks_depth;
         $cg->{"struct_vars"} = $saved_struct_vars;
         $cg->{"cand_boxed_vars"} = $saved_cand_boxed;

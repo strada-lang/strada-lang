@@ -1,0 +1,80 @@
+use lib "lib";
+use Eval;
+
+func main() int {
+    # R12-VM16, R12-VM15, R12-VM12..14 inside Strada::Interpreter::eval
+    my scalar $r = Strada::Interpreter::eval('
+        package CtxBox;
+        has rw int $v = 0;
+        func order(scalar $self) str {
+            return "base";
+        }
+        around "order" func(scalar $orig, scalar $self) str {
+            return "[" . $orig->($self) . "]";
+        }
+        around "order" func(scalar $orig, scalar $self) str {
+            return "{" . $orig->($self) . "}";
+        }
+        func ctx_m(scalar $self) dynamic {
+            if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+            if (core::wantarray()) { my array @a = ("A"); return @a; }
+            return core::wantscalar() ? "S" : "0";
+        }
+        package main;
+        func ctx_p() dynamic {
+            if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+            if (core::wantarray()) { my array @a = ("A"); return @a; }
+            return core::wantscalar() ? "S" : "0";
+        }
+        my scalar $s = ctx_p();
+        my array @a = ctx_p();
+        my hash %h = ctx_p();
+        my array @t1 = (1 ? ctx_p() : ("X"));
+        my scalar $t2 = (1 ? ctx_p() : "X");
+        my scalar $b = CtxBox::new("v", 1);
+        my scalar $ms = $b->ctx_m();
+        my array @ma = $b->ctx_m();
+        my hash %mh = $b->ctx_m();
+        my str $ord = $b->order();
+        my scalar $nf = 42;
+        my scalar $nfr = $nf->();
+        my str $kept = "";
+        foreach ("keep") {
+            foreach my str $it ("p", "q") { }
+            $kept = $_;
+        }
+        my array @rng = (5..1);
+        $s . $a[0] . keys(%h)->[0] . $t1[0] . $t2 . "|" . $ms . $ma[0] . keys(%mh)->[0] . "|" . $ord . "|" . (defined($nfr) ? 1 : 0) . "|" . $kept . "|" . scalar(@rng);
+    ');
+    if ($r ne "SAHAS|SAH|{[base]}|0|keep|0") {
+        say("FAIL eval_jit r=" . $r);
+        return 1;
+    }
+
+    # HAVE_VM eval_string_vm coverage for R12-VM16, R12-VM1, R12-VM9
+    my scalar $vm_r = Strada::Interpreter::eval_string_vm('
+        our int $boot = late_fn(20);
+        func late_fn(int $x) int { return $x * 2; }
+        func p() dynamic {
+            if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+            if (core::wantarray()) { my array @a = ("A"); return @a; }
+            return core::wantscalar() ? "S" : "0";
+        }
+        func main() int {
+            my ($head, @tail) = (1, 2, 3);
+            my scalar $s = p();
+            my array @a = p();
+            my hash %h = p();
+            say("VM_EVAL=" . $boot . "|" . $head . "," . scalar(@tail) . "|" . $s . $a[0] . keys(%h)->[0]);
+            return 0;
+        }
+    ');
+    if (($vm_r + 0) != 0) {
+        say("FAIL vm_r=" . $vm_r);
+        return 1;
+    }
+
+    Strada::Interpreter::reset();
+    say("AUDIT_R12_EVAL_JIT_OK");
+    return 0;
+}

@@ -402,6 +402,84 @@ func gen_io_fh_two_arg(scalar $cg, scalar $fh_arg, scalar $text_arg, str $rt_fn)
     emit($cg, "STRADA_MAKE_TAGGED_INT(1); })");
 }
 
+func gen_unary_str_sv_builtin(scalar $cg, scalar $arg, str $rt_fn, str $pfx) void {
+    my int $needs_cleanup = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $needs_cleanup = needs_temp_cleanup($cg, $arg);
+    }
+    my int $u_push = cleanup_push_useful($cg);
+    emit($cg, "(({ StradaValue *" . $pfx . "_v = ");
+    gen_expression($cg, $arg);
+    emit($cg, "; ");
+    if ($u_push == 1 && $needs_cleanup == 1) { emit($cg, "strada_cleanup_push(" . $pfx . "_v); "); }
+    emit($cg, "StradaValue *" . $pfx . "_res = " . $rt_fn . "(" . $pfx . "_v); ");
+    if ($needs_cleanup == 1) {
+        if ($u_push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $pfx . "_v); "); }
+        else { emit($cg, "strada_decref(" . $pfx . "_v); "); }
+    }
+    emit($cg, $pfx . "_res; }))");
+}
+
+func gen_trim_sv_builtin(scalar $cg, scalar $arg, int $mode, str $pfx) void {
+    my int $needs_cleanup = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $needs_cleanup = needs_temp_cleanup($cg, $arg);
+    }
+    my int $t_push = cleanup_push_useful($cg);
+    emit($cg, "({ StradaValue *" . $pfx . "_v = ");
+    gen_expression($cg, $arg);
+    emit($cg, "; ");
+    if ($t_push == 1 && $needs_cleanup == 1) { emit($cg, "strada_cleanup_push(" . $pfx . "_v); "); }
+    emit($cg, "StradaValue *" . $pfx . "_r = strada_trim_sv(" . $pfx . "_v, " . $mode . "); ");
+    if ($needs_cleanup == 1) {
+        if ($t_push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $pfx . "_v); "); }
+        else { emit($cg, "strada_decref(" . $pfx . "_v); "); }
+    }
+    emit($cg, $pfx . "_r; })");
+}
+
+func gen_replace_sv_builtin(scalar $cg, scalar $args, int $is_regex, int $global, str $pfx) void {
+    my int $r_push = cleanup_push_useful($cg);
+    my int $a0_temp = 0;
+    my int $a1_temp = 0;
+    my int $a2_temp = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $a0_temp = needs_temp_cleanup($cg, $args->[0]);
+        $a1_temp = needs_temp_cleanup($cg, $args->[1]);
+        $a2_temp = needs_temp_cleanup($cg, $args->[2]);
+    }
+    emit($cg, "({ StradaValue *" . $pfx . "_a0 = ");
+    gen_expression($cg, $args->[0]);
+    emit($cg, "; ");
+    if ($r_push == 1 && $a0_temp == 1) { emit($cg, "strada_cleanup_push(" . $pfx . "_a0); "); }
+    emit($cg, "StradaValue *" . $pfx . "_a1 = ");
+    gen_expression($cg, $args->[1]);
+    emit($cg, "; ");
+    if ($r_push == 1 && $a1_temp == 1) { emit($cg, "strada_cleanup_push(" . $pfx . "_a1); "); }
+    emit($cg, "StradaValue *" . $pfx . "_a2 = ");
+    gen_expression($cg, $args->[2]);
+    emit($cg, "; ");
+    if ($r_push == 1 && $a2_temp == 1) { emit($cg, "strada_cleanup_push(" . $pfx . "_a2); "); }
+    if ($is_regex == 1) {
+        emit($cg, "StradaValue *" . $pfx . "_sv = strada_regex_replace_sv(" . $pfx . "_a0, " . $pfx . "_a1, " . $pfx . "_a2, NULL, " . $global . "); ");
+    } else {
+        emit($cg, "StradaValue *" . $pfx . "_sv = strada_replace_sv(" . $pfx . "_a0, " . $pfx . "_a1, " . $pfx . "_a2, " . $global . "); ");
+    }
+    if ($a2_temp == 1) {
+        if ($r_push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $pfx . "_a2); "); }
+        else { emit($cg, "strada_decref(" . $pfx . "_a2); "); }
+    }
+    if ($a1_temp == 1) {
+        if ($r_push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $pfx . "_a1); "); }
+        else { emit($cg, "strada_decref(" . $pfx . "_a1); "); }
+    }
+    if ($a0_temp == 1) {
+        if ($r_push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $pfx . "_a0); "); }
+        else { emit($cg, "strada_decref(" . $pfx . "_a0); "); }
+    }
+    emit($cg, $pfx . "_sv; })");
+}
+
 func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "say") {
             my int $argc = $expr->{"arg_count"};
@@ -4593,38 +4671,12 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
         }
 
         if ($name eq "uc" || $name eq "upper") {
-            # uc returns allocated memory, strada_to_str also allocates - both need freeing
-            my scalar $args = $expr->{"args"};
-            my scalar $arg0 = $args->[0];
-            my int $needs_cleanup = needs_temp_cleanup($cg, $arg0);
-            emit($cg, "(({ StradaValue *__uc_tmp = ");
-            gen_expression($cg, $arg0);
-            emit($cg, "; char *__uc_in = strada_to_str_ss(__uc_tmp); ");
-            emit($cg, "char *__uc_out = strada_uc(__uc_in); ");
-            emit($cg, "StradaValue *__uc_res = strada_new_str(__uc_out); ");
-            emit($cg, "strada_cstr_free(__uc_in); free(__uc_out); ");
-            if ($needs_cleanup == 1) {
-                emit($cg, "strada_decref(__uc_tmp); ");
-            }
-            emit($cg, "__uc_res; }))");
+            gen_unary_str_sv_builtin($cg, $expr->{"args"}->[0], "strada_uc_sv", "__uc");
             return 1;
         }
 
         if ($name eq "lc" || $name eq "lower") {
-            # lc returns allocated memory, strada_to_str also allocates - both need freeing
-            my scalar $args = $expr->{"args"};
-            my scalar $arg0 = $args->[0];
-            my int $needs_cleanup = needs_temp_cleanup($cg, $arg0);
-            emit($cg, "(({ StradaValue *__lc_tmp = ");
-            gen_expression($cg, $arg0);
-            emit($cg, "; char *__lc_in = strada_to_str_ss(__lc_tmp); ");
-            emit($cg, "char *__lc_out = strada_lc(__lc_in); ");
-            emit($cg, "StradaValue *__lc_res = strada_new_str(__lc_out); ");
-            emit($cg, "strada_cstr_free(__lc_in); free(__lc_out); ");
-            if ($needs_cleanup == 1) {
-                emit($cg, "strada_decref(__lc_tmp); ");
-            }
-            emit($cg, "__lc_res; }))");
+            gen_unary_str_sv_builtin($cg, $expr->{"args"}->[0], "strada_lc_sv", "__lc");
             return 1;
         }
         
@@ -4728,28 +4780,36 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             my int $arg_count = $expr->{"arg_count"};
             my scalar $arg0 = $args->[0];
             my scalar $arg1 = $args->[1];
-            my int $arg0_needs_cleanup = needs_temp_cleanup($cg, $arg0);
-            my int $arg1_needs_cleanup = needs_temp_cleanup($cg, $arg1);
+            my int $r_push = cleanup_push_useful($cg);
+            my int $arg0_needs_cleanup = 0;
+            my int $arg1_needs_cleanup = 0;
+            if ($cg->{"cleanup_enabled"} == 1) {
+                $arg0_needs_cleanup = needs_temp_cleanup($cg, $arg0);
+                $arg1_needs_cleanup = needs_temp_cleanup($cg, $arg1);
+            }
 
             emit($cg, "(({ StradaValue *__ridx_str = ");
             gen_expression($cg, $arg0);
-            emit($cg, "; StradaValue *__ridx_sub = ");
+            emit($cg, "; ");
+            if ($r_push == 1 && $arg0_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__ridx_str); "); }
+            emit($cg, "StradaValue *__ridx_sub = ");
             gen_expression($cg, $arg1);
-            emit($cg, "; char *__ridx_s1 = strada_to_str_ss(__ridx_str); ");
-            emit($cg, "char *__ridx_s2 = strada_to_str_ss(__ridx_sub); ");
+            emit($cg, "; ");
+            if ($r_push == 1 && $arg1_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__ridx_sub); "); }
             if ($arg_count >= 3) {
-                emit($cg, "int __ridx_pos = (int)(");
+                emit($cg, "int64_t __ridx_pos = (int64_t)(");
                 emit_int_operand($cg, $args->[2]);
-                emit($cg, "); StradaValue *__ridx_res = strada_new_int(strada_rindex_from(__ridx_s1, __ridx_s2, __ridx_pos)); ");
+                emit($cg, "); StradaValue *__ridx_res = strada_new_int(strada_rindex_sv(__ridx_str, __ridx_sub, __ridx_pos, 1)); ");
             } else {
-                emit($cg, "StradaValue *__ridx_res = strada_new_int(strada_rindex(__ridx_s1, __ridx_s2)); ");
-            }
-            emit($cg, "strada_cstr_free(__ridx_s1); strada_cstr_free(__ridx_s2); ");
-            if ($arg0_needs_cleanup == 1) {
-                emit($cg, "strada_decref(__ridx_str); ");
+                emit($cg, "StradaValue *__ridx_res = strada_new_int(strada_rindex_sv(__ridx_str, __ridx_sub, 0, 0)); ");
             }
             if ($arg1_needs_cleanup == 1) {
-                emit($cg, "strada_decref(__ridx_sub); ");
+                if ($r_push == 1) { emit($cg, "strada_cleanup_pop_decref(__ridx_sub); "); }
+                else { emit($cg, "strada_decref(__ridx_sub); "); }
+            }
+            if ($arg0_needs_cleanup == 1) {
+                if ($r_push == 1) { emit($cg, "strada_cleanup_pop_decref(__ridx_str); "); }
+                else { emit($cg, "strada_decref(__ridx_str); "); }
             }
             emit($cg, "__ridx_res; }))");
             return 1;
@@ -6251,37 +6311,13 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
 
         # ucfirst - uppercase first letter
         if ($name eq "ucfirst") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg0 = $args->[0];
-            my int $needs_cleanup = needs_temp_cleanup($cg, $arg0);
-            emit($cg, "(({ StradaValue *__ucf_tmp = ");
-            gen_expression($cg, $arg0);
-            emit($cg, "; char *__ucf_in = strada_to_str_ss(__ucf_tmp); ");
-            emit($cg, "char *__ucf_out = strada_ucfirst(__ucf_in); ");
-            emit($cg, "StradaValue *__ucf_res = strada_new_str(__ucf_out); ");
-            emit($cg, "strada_cstr_free(__ucf_in); free(__ucf_out); ");
-            if ($needs_cleanup == 1) {
-                emit($cg, "strada_decref(__ucf_tmp); ");
-            }
-            emit($cg, "__ucf_res; }))");
+            gen_unary_str_sv_builtin($cg, $expr->{"args"}->[0], "strada_ucfirst_sv", "__ucf");
             return 1;
         }
 
         # lcfirst - lowercase first letter
         if ($name eq "lcfirst") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg0 = $args->[0];
-            my int $needs_cleanup = needs_temp_cleanup($cg, $arg0);
-            emit($cg, "(({ StradaValue *__lcf_tmp = ");
-            gen_expression($cg, $arg0);
-            emit($cg, "; char *__lcf_in = strada_to_str_ss(__lcf_tmp); ");
-            emit($cg, "char *__lcf_out = strada_lcfirst(__lcf_in); ");
-            emit($cg, "StradaValue *__lcf_res = strada_new_str(__lcf_out); ");
-            emit($cg, "strada_cstr_free(__lcf_in); free(__lcf_out); ");
-            if ($needs_cleanup == 1) {
-                emit($cg, "strada_decref(__lcf_tmp); ");
-            }
-            emit($cg, "__lcf_res; }))");
+            gen_unary_str_sv_builtin($cg, $expr->{"args"}->[0], "strada_lcfirst_sv", "__lcf");
             return 1;
         }
         
@@ -6326,33 +6362,36 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
         # capture - regex capture
         if ($name eq "capture") {
             my scalar $args = $expr->{"args"};
-            my int $cap0_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1;
-            my int $cap1_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[1]) == 1;
-            emit($cg, "({ ");
-            if ($cap0_cl == 1) {
-                emit($cg, "StradaValue *__cap_sv0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__cap_s = strada_to_str_ss(__cap_sv0); ");
+            my int $c_push = cleanup_push_useful($cg);
+            my int $a0_temp = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1;
+            my int $a1_temp = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[1]) == 1;
+            emit($cg, "({ StradaValue *__cap_a0 = ");
+            gen_expression($cg, $args->[0]);
+            emit($cg, "; ");
+            if ($c_push == 1 && $a0_temp == 1) { emit($cg, "strada_cleanup_push(__cap_a0); "); }
+            emit($cg, "StradaValue *__cap_a1 = ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, "; ");
+            if ($c_push == 1 && $a1_temp == 1) { emit($cg, "strada_cleanup_push(__cap_a1); "); }
+            emit($cg, "StradaValue *__cap_lsv = strada_to_str_sv(__cap_a0); ");
+            if ($c_push == 1) { emit($cg, "strada_cleanup_push(__cap_lsv); "); }
+            emit($cg, "StradaValue *__cap_psv = strada_to_str_sv(__cap_a1); ");
+            if ($c_push == 1) { emit($cg, "strada_cleanup_push(__cap_psv); "); }
+            emit($cg, "strada_regex_set_subject_for_sv(__cap_lsv); ");
+            emit($cg, "StradaValue *__cap_r = strada_new_array_from_av(strada_regex_capture((__cap_lsv && __cap_lsv->value.pv) ? __cap_lsv->value.pv : \"\", (__cap_psv && __cap_psv->value.pv) ? __cap_psv->value.pv : \"\")); ");
+            emit($cg, "strada_regex_clear_subject_len(); ");
+            if ($c_push == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__cap_psv); strada_cleanup_pop_decref(__cap_lsv); ");
             } else {
-                emit($cg, "char *__cap_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
+                emit($cg, "strada_decref(__cap_psv); strada_decref(__cap_lsv); ");
             }
-            if ($cap1_cl == 1) {
-                emit($cg, "StradaValue *__cap_sv1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__cap_p = strada_to_str_ss(__cap_sv1); ");
-            } else {
-                emit($cg, "char *__cap_p = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
+            if ($a1_temp == 1) {
+                if ($c_push == 1) { emit($cg, "strada_cleanup_pop_decref(__cap_a1); "); }
+                else { emit($cg, "strada_decref(__cap_a1); "); }
             }
-            emit($cg, "StradaValue *__cap_r = strada_new_array_from_av(strada_regex_capture(__cap_s, __cap_p)); strada_cstr_free(__cap_p); strada_cstr_free(__cap_s); ");
-            if ($cap0_cl == 1) {
-                emit($cg, "strada_decref(__cap_sv0); ");
-            }
-            if ($cap1_cl == 1) {
-                emit($cg, "strada_decref(__cap_sv1); ");
+            if ($a0_temp == 1) {
+                if ($c_push == 1) { emit($cg, "strada_cleanup_pop_decref(__cap_a0); "); }
+                else { emit($cg, "strada_decref(__cap_a0); "); }
             }
             emit($cg, "__cap_r; })");
             return 1;
@@ -6395,67 +6434,11 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
                 }
                 if ($has_meta == 0) { $use_fast = 1; }
             }
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__rp_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__rp_s = strada_to_str_ss(__rp_a0); ");
-            } else {
-                emit($cg, "char *__rp_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
             if ($use_fast == 1) {
-                # Fast path: literal non-regex pattern — use strstr-based replace
-                my str $escaped_pat = $pat_arg->{"value"};
-                if ($a2_temp == 1) {
-                    emit($cg, "StradaValue *__rp_a2 = ");
-                    gen_expression($cg, $args->[2]);
-                    emit($cg, "; char *__rp_r = strada_to_str_ss(__rp_a2); ");
-                } else {
-                    emit($cg, "char *__rp_r = strada_to_str_ss(");
-                    gen_expression($cg, $args->[2]);
-                    emit($cg, "); ");
-                }
-                emit($cg, "char *__rp_res = strada_replace_first(__rp_s, \"");
-                emit_escaped_string($cg, $escaped_pat);
-                emit($cg, "\", __rp_r); StradaValue *__rp_sv = strada_new_str(__rp_res); free(__rp_res); strada_cstr_free(__rp_r); strada_cstr_free(__rp_s); ");
-                if ($a0_temp == 1) { emit($cg, "strada_decref(__rp_a0); "); }
-                if ($a2_temp == 1) { emit($cg, "strada_decref(__rp_a2); "); }
+                gen_replace_sv_builtin($cg, $args, 0, 0, "__rp");
             } else {
-                # Regex path
-                if ($a1_temp == 1) {
-                    emit($cg, "StradaValue *__rp_a1 = ");
-                    gen_expression($cg, $args->[1]);
-                    emit($cg, "; char *__rp_p = strada_to_str_ss(__rp_a1); ");
-                } else {
-                    emit($cg, "char *__rp_p = strada_to_str_ss(");
-                    gen_expression($cg, $args->[1]);
-                    emit($cg, "); ");
-                }
-                if ($a2_temp == 1) {
-                    emit($cg, "StradaValue *__rp_a2 = ");
-                    gen_expression($cg, $args->[2]);
-                    emit($cg, "; char *__rp_r = strada_to_str_ss(__rp_a2); ");
-                } else {
-                    emit($cg, "char *__rp_r = strada_to_str_ss(");
-                    gen_expression($cg, $args->[2]);
-                    emit($cg, "); ");
-                }
-                emit($cg, "char *__rp_res = strada_regex_replace(__rp_s, __rp_p, __rp_r, NULL); StradaValue *__rp_sv = strada_new_str(__rp_res); free(__rp_res); strada_cstr_free(__rp_r); strada_cstr_free(__rp_p); strada_cstr_free(__rp_s); ");
-                if ($a0_temp == 1) { emit($cg, "strada_decref(__rp_a0); "); }
-                if ($a1_temp == 1) { emit($cg, "strada_decref(__rp_a1); "); }
-                if ($a2_temp == 1) { emit($cg, "strada_decref(__rp_a2); "); }
+                gen_replace_sv_builtin($cg, $args, 1, 0, "__rp");
             }
-            emit($cg, "__rp_sv; })");
             return 1;
         }
         
@@ -7032,43 +7015,19 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
         
         # trim - trim whitespace
         if ($name eq "trim") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg = $args->[0];
-            emit($cg, "({ StradaValue *__tr_v = ");
-            gen_expression($cg, $arg);
-            emit($cg, "; char *__tr_s = strada_to_str_ss(__tr_v); StradaValue *__tr_r = strada_new_str_take(strada_trim(__tr_s)); strada_cstr_free(__tr_s); ");
-            if (needs_temp_cleanup($cg, $arg) == 1) {
-                emit($cg, "strada_decref(__tr_v); ");
-            }
-            emit($cg, "__tr_r; })");
+            gen_trim_sv_builtin($cg, $expr->{"args"}->[0], 0, "__tr");
             return 1;
         }
 
         # ltrim - trim left whitespace
         if ($name eq "ltrim") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg = $args->[0];
-            emit($cg, "({ StradaValue *__lt_v = ");
-            gen_expression($cg, $arg);
-            emit($cg, "; char *__lt_s = strada_to_str_ss(__lt_v); StradaValue *__lt_r = strada_new_str_take(strada_ltrim(__lt_s)); strada_cstr_free(__lt_s); ");
-            if (needs_temp_cleanup($cg, $arg) == 1) {
-                emit($cg, "strada_decref(__lt_v); ");
-            }
-            emit($cg, "__lt_r; })");
+            gen_trim_sv_builtin($cg, $expr->{"args"}->[0], 1, "__lt");
             return 1;
         }
 
         # rtrim - trim right whitespace
         if ($name eq "rtrim") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg = $args->[0];
-            emit($cg, "({ StradaValue *__rt_v = ");
-            gen_expression($cg, $arg);
-            emit($cg, "; char *__rt_s = strada_to_str_ss(__rt_v); StradaValue *__rt_r = strada_new_str_take(strada_rtrim(__rt_s)); strada_cstr_free(__rt_s); ");
-            if (needs_temp_cleanup($cg, $arg) == 1) {
-                emit($cg, "strada_decref(__rt_v); ");
-            }
-            emit($cg, "__rt_r; })");
+            gen_trim_sv_builtin($cg, $expr->{"args"}->[0], 2, "__rt");
             return 1;
         }
         
@@ -7146,13 +7105,18 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "repeat") {
             my scalar $args = $expr->{"args"};
             my scalar $arg = $args->[0];
+            my int $rp_push = cleanup_push_useful($cg);
+            my int $rp_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1;
             emit($cg, "({ StradaValue *__rp_v = ");
             gen_expression($cg, $arg);
-            emit($cg, "; char *__rp_s = strada_to_str_ss(__rp_v); int64_t __rp_n = ");
+            emit($cg, "; ");
+            if ($rp_push == 1 && $rp_cl == 1) { emit($cg, "strada_cleanup_push(__rp_v); "); }
+            emit($cg, "int64_t __rp_n = ");
             emit_int_operand($cg, $args->[1]);
-            emit($cg, "; StradaValue *__rp_r = strada_new_str_take(strada_repeat(__rp_s, __rp_n)); strada_cstr_free(__rp_s); ");
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {
-                emit($cg, "strada_decref(__rp_v); ");
+            emit($cg, "; StradaValue *__rp_r = strada_repeat_sv(__rp_v, __rp_n); ");
+            if ($rp_cl == 1) {
+                if ($rp_push == 1) { emit($cg, "strada_cleanup_pop_decref(__rp_v); "); }
+                else { emit($cg, "strada_decref(__rp_v); "); }
             }
             emit($cg, "__rp_r; })");
             return 1;
@@ -7160,236 +7124,31 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
         
         # replace_all - replace all occurrences
         if ($name eq "replace_all") {
-            my scalar $args = $expr->{"args"};
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__ra_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__ra_s = strada_to_str_ss(__ra_a0); ");
-            } else {
-                emit($cg, "char *__ra_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__ra_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__ra_f = strada_to_str_ss(__ra_a1); ");
-            } else {
-                emit($cg, "char *__ra_f = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
-            }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__ra_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__ra_r = strada_to_str_ss(__ra_a2); ");
-            } else {
-                emit($cg, "char *__ra_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__ra_res = strada_replace_all(__ra_s, __ra_f, __ra_r); StradaValue *__ra_sv = strada_new_str(__ra_res); free(__ra_res); strada_cstr_free(__ra_r); strada_cstr_free(__ra_f); strada_cstr_free(__ra_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__ra_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__ra_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__ra_a2); "); }
-            emit($cg, "__ra_sv; })");
+            gen_replace_sv_builtin($cg, $expr->{"args"}, 0, 1, "__ra");
             return 1;
         }
         
         # str_replace - plain string replacement (all occurrences), alias for replace_all
         if ($name eq "str_replace") {
-            my scalar $args = $expr->{"args"};
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__sr_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__sr_s = strada_to_str_ss(__sr_a0); ");
-            } else {
-                emit($cg, "char *__sr_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__sr_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__sr_f = strada_to_str_ss(__sr_a1); ");
-            } else {
-                emit($cg, "char *__sr_f = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
-            }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__sr_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__sr_r = strada_to_str_ss(__sr_a2); ");
-            } else {
-                emit($cg, "char *__sr_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__sr_res = strada_replace_all(__sr_s, __sr_f, __sr_r); StradaValue *__sr_sv = strada_new_str(__sr_res); free(__sr_res); strada_cstr_free(__sr_r); strada_cstr_free(__sr_f); strada_cstr_free(__sr_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__sr_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__sr_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__sr_a2); "); }
-            emit($cg, "__sr_sv; })");
+            gen_replace_sv_builtin($cg, $expr->{"args"}, 0, 1, "__sr");
             return 1;
         }
 
         # str_replace_first - plain string replacement (first occurrence only)
         if ($name eq "str_replace_first") {
-            my scalar $args = $expr->{"args"};
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__sf_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__sf_s = strada_to_str_ss(__sf_a0); ");
-            } else {
-                emit($cg, "char *__sf_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__sf_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__sf_f = strada_to_str_ss(__sf_a1); ");
-            } else {
-                emit($cg, "char *__sf_f = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
-            }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__sf_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__sf_r = strada_to_str_ss(__sf_a2); ");
-            } else {
-                emit($cg, "char *__sf_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__sf_res = strada_replace_first(__sf_s, __sf_f, __sf_r); StradaValue *__sf_sv = strada_new_str(__sf_res); free(__sf_res); strada_cstr_free(__sf_r); strada_cstr_free(__sf_f); strada_cstr_free(__sf_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__sf_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__sf_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__sf_a2); "); }
-            emit($cg, "__sf_sv; })");
+            gen_replace_sv_builtin($cg, $expr->{"args"}, 0, 0, "__sf");
             return 1;
         }
 
         # regex_replace - regex replacement (first match)
         if ($name eq "regex_replace") {
-            my scalar $args = $expr->{"args"};
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__rr_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__rr_s = strada_to_str_ss(__rr_a0); ");
-            } else {
-                emit($cg, "char *__rr_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__rr_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__rr_p = strada_to_str_ss(__rr_a1); ");
-            } else {
-                emit($cg, "char *__rr_p = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
-            }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__rr_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__rr_r = strada_to_str_ss(__rr_a2); ");
-            } else {
-                emit($cg, "char *__rr_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__rr_res = strada_regex_replace(__rr_s, __rr_p, __rr_r, NULL); StradaValue *__rr_sv = strada_new_str(__rr_res); free(__rr_res); strada_cstr_free(__rr_r); strada_cstr_free(__rr_p); strada_cstr_free(__rr_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__rr_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__rr_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__rr_a2); "); }
-            emit($cg, "__rr_sv; })");
+            gen_replace_sv_builtin($cg, $expr->{"args"}, 1, 0, "__rr");
             return 1;
         }
 
         # regex_replace_all - regex replacement (all matches)
         if ($name eq "regex_replace_all") {
-            my scalar $args = $expr->{"args"};
-            my int $a0_temp = 0;
-            my int $a1_temp = 0;
-            my int $a2_temp = 0;
-            if ($cg->{"cleanup_enabled"} == 1) {
-                $a0_temp = needs_temp_cleanup($cg, $args->[0]);
-                $a1_temp = needs_temp_cleanup($cg, $args->[1]);
-                $a2_temp = needs_temp_cleanup($cg, $args->[2]);
-            }
-            emit($cg, "({ ");
-            if ($a0_temp == 1) {
-                emit($cg, "StradaValue *__rx_a0 = ");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "; char *__rx_s = strada_to_str_ss(__rx_a0); ");
-            } else {
-                emit($cg, "char *__rx_s = strada_to_str_ss(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, "); ");
-            }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__rx_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__rx_p = strada_to_str_ss(__rx_a1); ");
-            } else {
-                emit($cg, "char *__rx_p = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
-            }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__rx_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__rx_r = strada_to_str_ss(__rx_a2); ");
-            } else {
-                emit($cg, "char *__rx_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__rx_res = strada_regex_replace_all(__rx_s, __rx_p, __rx_r, NULL); StradaValue *__rx_sv = strada_new_str(__rx_res); free(__rx_res); strada_cstr_free(__rx_r); strada_cstr_free(__rx_p); strada_cstr_free(__rx_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__rx_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__rx_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__rx_a2); "); }
-            emit($cg, "__rx_sv; })");
+            gen_replace_sv_builtin($cg, $expr->{"args"}, 1, 1, "__rx");
             return 1;
         }
 
@@ -7581,6 +7340,9 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                 if ($bl_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__bless_psv); strada_cleanup_pop(); "); }
                 else { emit($cg, "strada_decref(__bless_psv); "); }
                 emit($cg, "__bless_r; })");
+            }
+            if ($args->[0]->{"type"} == NODE_VARIABLE() && length("" . $args->[0]->{"name"}) > 0) {
+                $cg->{"known_types"}->{escape_c_keyword($args->[0]->{"name"})} = "";
             }
             return 1;
         }

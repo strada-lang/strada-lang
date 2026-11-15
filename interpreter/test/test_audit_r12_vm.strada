@@ -1,0 +1,109 @@
+package AroundBox;
+func order(scalar $self) str { return "base"; }
+around "order" func(scalar $orig, scalar $self) str { return "[" . $orig->($self) . "]"; }
+around "order" func(scalar $orig, scalar $self) str { return "{" . $orig->($self) . "}"; }
+func ctx_m(scalar $self) dynamic {
+    if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+    if (core::wantarray()) { my array @a = ("A"); return @a; }
+    return core::wantscalar() ? "S" : "0";
+}
+
+package main;
+
+our int $g_boot = after_fn(20);
+our int $g_beg = 0;
+BEGIN { $g_beg = after_fn(21); }
+END { say("END=" . after_fn(2)); }
+
+func after_fn(int $x) int { return $x * 2; }
+
+func ctx_fn() dynamic {
+    if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+    if (core::wantarray()) { my array @a = ("A"); return @a; }
+    return core::wantscalar() ? "S" : "0";
+}
+
+func use_map(array @in) str {
+    my int $outer = 99;
+    my array @res = map {
+        my array @pair = ($_, $_ * 10);
+        @pair;
+    } @in;
+    return scalar(@res) . ":" . $res[0] . "," . $res[1] . "," . $res[2] . "," . $res[3] . "|" . $outer;
+}
+
+func main() int {
+    # R12-VM1: globals/BEGIN/END calling later funcs
+    say("VM1=" . $g_boot . "," . $g_beg);
+
+    # R12-VM3 & R12-VM10: map local cleanup & array flattening
+    say("VM3_10=" . use_map([1, 2]));
+
+    # R12-VM4: numeric coercion & div
+    my scalar $h1 = {};
+    my scalar $h2 = {};
+    my int $eqh = ($h1 == $h2) ? 1 : 0;
+    my num $hex = "0x5" + 1;
+    my num $bad = "hello" + 0;
+    my num $div = 7 / 2;
+    say("VM4=" . $eqh . "|" . $hex . "|" . $bad . "|" . $div);
+
+    # R12-VM5: sprintf extensions
+    my str $sp = sprintf("%b|%#B|%2$s:%1$d|%*.*d", 13, 5, 5, 3, 7);
+    say("VM5=" . $sp);
+
+    # R12-VM6: slurp missing returns undef
+    my scalar $sl = core::slurp("/no_such_r12_file_xyz_123");
+    say("VM6=" . (defined($sl) ? 1 : 0));
+
+    # R12-VM7: chomp strips at most one line ending
+    my str $ch1 = "a\n\n";
+    chomp($ch1);
+    my str $ch2 = "b\r\n\r\n";
+    chomp($ch2);
+    say("VM7=" . length($ch1) . "," . length($ch2));
+
+    # R12-VM8: trim \v \f & NUL-safe default sort
+    my str $tr = trim("\x0b\x0c  ok  \x0c\x0b");
+    my array @nuls = sort("a\x00z", "a\x00a");
+    say("VM8=" . $tr . "|" . ord(substr($nuls[0], 2, 1)) . "," . ord(substr($nuls[1], 2, 1)));
+
+    # R12-VM9: slurpy destructuring
+    my ($d_a, @d_r) = (10, 20, 30);
+    my ($d_k, %d_h) = ("tag", "x", 1, "y", 2);
+    say("VM9=" . $d_a . ":" . scalar(@d_r) . "|" . $d_k . ":" . $d_h{"x"} . "," . $d_h{"y"});
+
+    # R12-VM11: anon func with array param
+    my scalar $afn = func(array @arr) int { return scalar(@arr); };
+    say("VM11=" . $afn->([10, 20, 30]));
+
+    # R12-VM12: non-closure call returns undef & C-style for shared var
+    my scalar $nf = 42;
+    my scalar $nfr = $nf->();
+    my array @cfns = ();
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        push(@cfns, func() int { return $i; });
+    }
+    say("VM12=" . (defined($nfr) ? 1 : 0) . "|" . $cfns[0]->() . "," . $cfns[1]->() . "," . $cfns[2]->());
+
+    # R12-VM13 & R12-VM14: descending range empty & foreach my $x preserves outer $_
+    my array @dr = (5..1);
+    my str $kept = "";
+    foreach ("kept") {
+        foreach my str $it ("p", "q") { }
+        $kept = $_;
+    }
+    say("VM13_14=" . scalar(@dr) . "|" . $kept);
+
+    # R12-VM15 & R12-VM16: around LIFO & wantarray/wantscalar/wanthash
+    my scalar $b = bless({}, "AroundBox");
+    my scalar $cs = ctx_fn();
+    my array @ca = ctx_fn();
+    my hash %ch = ctx_fn();
+    my str $fe_c = "";
+    foreach my str $fv (ctx_fn()) { $fe_c = $fe_c . $fv; }
+    my scalar $ms = $b->ctx_m();
+    say("VM15_16=" . $b->order() . "|" . $cs . $ca[0] . keys(%ch)->[0] . $fe_c . "|" . $ms);
+
+    return 0;
+}

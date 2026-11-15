@@ -1436,8 +1436,8 @@ private func split_pipe_stages(str $content) array {
 
 # True if a stage-0 tag expression (without pipes) already emits escaped HTML.
 private func stage0_is_escaped(str $stage0) int {
-    my str $slc = lc(trim($stage0));
-    if ($slc eq "dump" || (length($slc) >= 5 && substr($slc, 0, 5) eq "dump ")) {
+    my str $st = trim($stage0);
+    if (length($st) > 5 && substr($st, 0, 5) eq "dump ") {
         return 1;
     }
     return 0;

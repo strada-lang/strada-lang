@@ -907,6 +907,52 @@ func print_usage() void {
     say("  -h, --help    Show this help message");
 }
 
+func eval_has_entry_func(str $src) int {
+    if (length($src) == 0) { return 0; }
+    my scalar $toks = lex_tokenize($src);
+    my int $n = size($toks);
+    my int $brace_depth = 0;
+    my str $cur_pkg = "main";
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $t = $toks->[$i];
+        my str $tt = $t->{"type"};
+        if ($tt eq "LBRACE") {
+            $brace_depth = $brace_depth + 1;
+        } elsif ($tt eq "RBRACE") {
+            if ($brace_depth > 0) { $brace_depth = $brace_depth - 1; }
+        } elsif ($brace_depth == 0) {
+            if ($tt eq "PACKAGE" && $i + 1 < $n) {
+                my int $pi = $i + 1;
+                my str $pkg = "";
+                while ($pi < $n) {
+                    my scalar $ptok = $toks->[$pi];
+                    my str $pt = $ptok->{"type"};
+                    if ($pt eq "SEMI" || $pt eq "LBRACE") { last; }
+                    if (($pt eq "IDENT" || $pt eq "DOUBLE_COLON") && defined($ptok->{"value"})) {
+                        $pkg = $pkg . $ptok->{"value"};
+                    }
+                    $pi = $pi + 1;
+                }
+                if (length($pkg) > 0) { $cur_pkg = $pkg; }
+                $i = $pi;
+                next;
+            }
+            if (($tt eq "FUNC" || ($tt eq "IDENT" && defined($t->{"value"}) && $t->{"value"} eq "fn")) && $i + 2 < $n) {
+                my scalar $nt = $toks->[$i + 1];
+                my scalar $at = $toks->[$i + 2];
+                if ($cur_pkg eq "main" && $nt->{"type"} eq "IDENT" && defined($nt->{"value"}) &&
+                    ($nt->{"value"} eq "main" || $nt->{"value"} eq "run") &&
+                    $at->{"type"} eq "LPAREN") {
+                    return 1;
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # Parse a -e code snippet into an AST program (wrapping top-level or bare statements in main)
 func parse_eval_program(str $code) scalar {
     my str $trimmed = str_trim($code);
@@ -917,21 +963,20 @@ func parse_eval_program(str $code) scalar {
         $trimmed = $trimmed . ";";
     }
 
+    my scalar $units = Strada::Interpreter::split_eval_units($trimmed, "main");
+    my str $top_src = $units->{"top"};
+    my str $body_src = $units->{"body"};
+    my str $body_pkg = $units->{"body_pkg"};
     my str $source = $trimmed;
-    if (index($trimmed, "func main") < 0 && index($trimmed, "fn main") < 0 &&
-        index($trimmed, "func run") < 0 && index($trimmed, "fn run") < 0) {
-        my scalar $units = Strada::Interpreter::split_eval_units($trimmed, "main");
-        my str $top_src = $units->{"top"};
-        my str $body_src = $units->{"body"};
-        my str $body_pkg = $units->{"body_pkg"};
-        if (length($body_src) == 0) {
+    if (length($body_src) == 0) {
+        if (eval_has_entry_func($top_src) == 0) {
             $source = $top_src . "\npackage main;\nfunc main() int { return 0; }\n";
-        } elsif ($body_pkg ne "main") {
-            $source = $top_src . "\npackage " . $body_pkg . ";\nfunc __eval_body__() void {\n" . $body_src . "\n}\npackage main;\nfunc main() int { " . $body_pkg . "::__eval_body__(); return 0; }\n";
-        } else {
-            my str $pfx = (length($top_src) > 0) ? ($top_src . "\npackage main;\n") : "";
-            $source = $pfx . "func main() int {\n" . $body_src . "\nreturn 0;\n}\n";
         }
+    } elsif ($body_pkg ne "main") {
+        $source = $top_src . "\npackage " . $body_pkg . ";\nfunc __eval_body__() void {\n" . $body_src . "\n}\npackage main;\nfunc main() int { " . $body_pkg . "::__eval_body__(); return 0; }\n";
+    } else {
+        my str $pfx = (length($top_src) > 0) ? ($top_src . "\npackage main;\n") : "";
+        $source = $pfx . "func main() int {\n" . $body_src . "\nreturn 0;\n}\n";
     }
 
     my str $exe_root = get_exe_root();

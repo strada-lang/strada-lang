@@ -1,0 +1,58 @@
+use lib "lib";
+use Eval;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 3) {
+        Strada::Interpreter::eval('
+            package R12EvBox;
+            has rw int $v = 0;
+            func m(scalar $self) dynamic {
+                if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+                if (core::wantarray()) { my array @a = ("A"); return @a; }
+                return core::wantscalar() ? "S" : "0";
+            }
+            around "m" func(scalar $orig, scalar $self) dynamic {
+                return $orig->($self);
+            }
+            package main;
+            func f() dynamic {
+                if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+                if (core::wantarray()) { my array @a = ("A"); return @a; }
+                return core::wantscalar() ? "S" : "0";
+            }
+            my scalar $s = f();
+            my array @a = f();
+            my hash %h = f();
+            my scalar $b = R12EvBox::new("v", 1);
+            my array @mb = $b->m();
+            my ($h1, @t1) = (1, 2, 3);
+            my ($k1, %hm1) = ("k", "x", 10);
+            my array @mp = map { ($_, $_ + 1); } (1, 2);
+            my array @rg = (5..1);
+            my scalar $nf = 1;
+            $nf->();
+        ');
+        Strada::Interpreter::reset();
+        Strada::Interpreter::eval_string_vm('
+            our int $v = late_fn(5);
+            func late_fn(int $x) int { return $x * 2; }
+            func p() dynamic {
+                if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+                if (core::wantarray()) { my array @a = ("A"); return @a; }
+                return core::wantscalar() ? "S" : "0";
+            }
+            func main() int {
+                my scalar $s = p();
+                my array @a = p();
+                my hash %h = p();
+                my ($hd, @tl) = (1, 2, 3);
+                my array @mp = map { my array @x = ($_, $_ + 1); @x; } (1, 2);
+                return $v + scalar(@tl) + scalar(@mp) - 16;
+            }
+        ');
+        $i = $i + 1;
+    }
+    say("R12_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

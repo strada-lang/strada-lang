@@ -3213,6 +3213,19 @@ func parse_our_decl(scalar $parser) scalar {
     return $decl;
 }
 
+func qual_our_key(str $name, str $sigil) str {
+    if ($sigil ne "@" && $sigil ne "%") {
+        return $name;
+    }
+    my int $lpos = rindex($name, "::");
+    if ($lpos < 0) {
+        return $sigil . $name;
+    }
+    my str $pkg_part = substr($name, 0, $lpos);
+    my str $var_part = substr($name, $lpos + 2, length($name) - $lpos - 2);
+    return $pkg_part . "::" . $sigil . $var_part;
+}
+
 # local $var; or local $var = expr;
 # Saves current value of an 'our' variable and restores on scope exit
 func parse_local_decl(scalar $parser) scalar {
@@ -3255,7 +3268,7 @@ func parse_local_decl(scalar $parser) scalar {
         $decl->{"is_hash_elem"} = 1;
         $decl->{"hash_key"} = $key_expr;
         if ($is_pkg_qualified == 1) {
-            $decl->{"our_key"} = $name;
+            $decl->{"our_key"} = qual_our_key($name, "%");
         }
 
         # Optional initialization
@@ -3271,7 +3284,7 @@ func parse_local_decl(scalar $parser) scalar {
     my scalar $decl = ast_new_local_decl($name, $sigil, 0);
     ast_set_line($decl, $decl_line);
     if ($is_pkg_qualified == 1) {
-        $decl->{"our_key"} = $name;
+        $decl->{"our_key"} = qual_our_key($name, $sigil);
     }
 
     # Optional initialization
@@ -3631,6 +3644,7 @@ func parse_return_stmt(scalar $parser) scalar {
         my scalar $ret_node = ast_new_return_stmt($value);
         ast_set_line($ret_node, $ret_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $ret_node);
         my scalar $ret_if = ast_new_if_stmt($mod_cond, $mod_block);
         ast_set_line($ret_if, $ret_line);
@@ -3643,6 +3657,7 @@ func parse_return_stmt(scalar $parser) scalar {
         my scalar $ret_node = ast_new_return_stmt($value);
         ast_set_line($ret_node, $ret_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $ret_node);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
         my scalar $ret_unless = ast_new_if_stmt($neg_cond, $mod_block);
@@ -3796,6 +3811,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $last_node = ast_new_last($label);
             ast_set_line($last_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $last_node);
             my scalar $last_if = ast_new_if_stmt($mod_cond, $mod_block);
             ast_set_line($last_if, $stmt_line);
@@ -3808,6 +3824,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $last_node = ast_new_last($label);
             ast_set_line($last_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $last_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
             my scalar $last_unless = ast_new_if_stmt($neg_cond, $mod_block);
@@ -3837,6 +3854,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $next_node = ast_new_next($label);
             ast_set_line($next_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $next_node);
             my scalar $next_if = ast_new_if_stmt($mod_cond, $mod_block);
             ast_set_line($next_if, $stmt_line);
@@ -3849,6 +3867,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $next_node = ast_new_next($label);
             ast_set_line($next_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $next_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
             my scalar $next_unless = ast_new_if_stmt($neg_cond, $mod_block);
@@ -3878,6 +3897,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $redo_node = ast_new_redo($label);
             ast_set_line($redo_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $redo_node);
             my scalar $redo_if = ast_new_if_stmt($mod_cond, $mod_block);
             ast_set_line($redo_if, $stmt_line);
@@ -3890,6 +3910,7 @@ func parse_statement(scalar $parser) scalar {
             my scalar $redo_node = ast_new_redo($label);
             ast_set_line($redo_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
+            $mod_block->{"is_modifier_block"} = 1;
             ast_add_statement($mod_block, $redo_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
             my scalar $redo_unless = ast_new_if_stmt($neg_cond, $mod_block);
@@ -4066,6 +4087,7 @@ func parse_statement(scalar $parser) scalar {
         if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $mod_if = ast_new_if_stmt($mod_cond, $mod_block);
         ast_set_line($mod_if, $stmt_line);
@@ -4081,6 +4103,7 @@ func parse_statement(scalar $parser) scalar {
         if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
         my scalar $mod_unless = ast_new_if_stmt($neg_cond, $mod_block);
@@ -4097,6 +4120,7 @@ func parse_statement(scalar $parser) scalar {
         if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $mod_while = ast_new_while_stmt($mod_cond, $mod_block, "");
         ast_set_line($mod_while, $stmt_line);
@@ -4112,6 +4136,7 @@ func parse_statement(scalar $parser) scalar {
         if (!$expr_stmt) { $expr_stmt = ast_new_expr_stmt($expr); }
         ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
+        $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
         my scalar $mod_until = ast_new_while_stmt($neg_cond, $mod_block, "");
@@ -5930,15 +5955,20 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                 push(@functions, $fn_info);
                 $fn_count = $fn_count + 1;
 
-                # Extract package name from function name (e.g., Counter_new -> Counter)
-                my str $fn_name = $fn_info->{"name"};
-                my int $us_pos = index($fn_name, "_");
-                if ($us_pos > 0) {
-                    my str $pkg = substr($fn_name, 0, $us_pos);
-                    # Only add if first char is uppercase (looks like a class name)
-                    my str $first = substr($pkg, 0, 1);
-                    if ($first ge "A" && $first le "Z") {
-                        $packages{$pkg} = 1;
+                my str $opkg = "" . $fn_info->{"orig_pkg"};
+                if (length($opkg) > 0 && $opkg ne "main") {
+                    $packages{$opkg} = 1;
+                } else {
+                    # Extract package name from function name (e.g., Counter_new -> Counter)
+                    my str $fn_name = $fn_info->{"name"};
+                    my int $us_pos = index($fn_name, "_");
+                    if ($us_pos > 0) {
+                        my str $pkg = substr($fn_name, 0, $us_pos);
+                        # Only add if first char is uppercase (looks like a class name)
+                        my str $first = substr($pkg, 0, 1);
+                        if ($first ge "A" && $first le "Z") {
+                            $packages{$pkg} = 1;
+                        }
                     }
                 }
             } elsif (length($line) > 5 && substr($line, 0, 5) eq "link:") {
@@ -6077,12 +6107,17 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
 
     # Build list of OOP init function names
     my array @oop_inits = ();
+    my hash %seen_oop_inits = ();
     my scalar $pkg_keys = keys(%packages);
     my int $pkg_count = size($pkg_keys);
     my int $pi = 0;
     while ($pi < $pkg_count) {
         my str $pkg = $pkg_keys->[$pi];
-        push(@oop_inits, "__" . $pkg . "_oop_init");
+        my str $oop_fn = "__" . sanitize_name($pkg) . "_oop_init";
+        if (!exists($seen_oop_inits{$oop_fn})) {
+            $seen_oop_inits{$oop_fn} = 1;
+            push(@oop_inits, $oop_fn);
+        }
         $pi = $pi + 1;
     }
     $lib_info{"oop_init_funcs"} = \@oop_inits;
@@ -7363,6 +7398,22 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
 
 # Flush auto-constructor for a package that has `has` attributes
 # Called at package boundaries and at end of file
+func collect_mro_dfs(scalar $inherits, int $inh_count, str $pkg, scalar $out_chain, scalar $seen) void {
+    if (length($pkg) == 0 || exists($seen->{$pkg})) {
+        return;
+    }
+    $seen->{$pkg} = 1;
+    push($out_chain, $pkg);
+    my int $ii = 0;
+    while ($ii < $inh_count) {
+        my scalar $entry = $inherits->[$ii];
+        if ($entry->{"child"} eq $pkg) {
+            collect_mro_dfs($inherits, $inh_count, $entry->{"parent"}, $out_chain, $seen);
+        }
+        $ii = $ii + 1;
+    }
+}
+
 func flush_has_constructor(scalar $program, str $pkg) void {
     if (length($pkg) == 0 || $pkg eq "main") {
         return;
@@ -7372,41 +7423,13 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $all_attrs = $program->{"has_attrs"};
     my int $attr_count = $program->{"has_attr_count"};
 
-    # Build list of packages to include: this pkg + all parents
+    # Build list of packages to include in left-to-right DFS MRO order
     my array @pkg_chain = ();
-    push(@pkg_chain, $pkg);
-    my int $chain_len = 1;
-
-    # Find parents from inherits list
+    my hash %seen_mro = ();
     my scalar $inherits = $program->{"inherits"};
     my int $inh_count = $program->{"inherit_count"};
-    # Simple breadth-first: check direct parents, then their parents
-    my int $chain_i = 0;
-    while ($chain_i < $chain_len) {
-        my str $check_pkg = $pkg_chain[$chain_i];
-        my int $ii = 0;
-        while ($ii < $inh_count) {
-            my scalar $entry = $inherits->[$ii];
-            if ($entry->{"child"} eq $check_pkg) {
-                my str $parent = $entry->{"parent"};
-                # Add parent if not already in chain
-                my int $already = 0;
-                my int $ci = 0;
-                while ($ci < $chain_len) {
-                    if ($pkg_chain[$ci] eq $parent) {
-                        $already = 1;
-                    }
-                    $ci = $ci + 1;
-                }
-                if ($already == 0) {
-                    push(@pkg_chain, $parent);
-                    $chain_len = $chain_len + 1;
-                }
-            }
-            $ii = $ii + 1;
-        }
-        $chain_i = $chain_i + 1;
-    }
+    collect_mro_dfs($inherits, $inh_count, $pkg, \@pkg_chain, \%seen_mro);
+    my int $chain_len = size(@pkg_chain);
 
     # Walk @pkg_chain in MRO order (child first, then parents) and deduplicate
     # by attribute name so child class `has` declarations override inherited

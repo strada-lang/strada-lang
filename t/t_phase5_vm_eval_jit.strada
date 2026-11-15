@@ -84,7 +84,7 @@ func test_eval_module() void {
     ');
     ok(($r2 + 0) == 101010, "Eval local restored on block, next/last, and before catch");
 
-    # 3. Per-iteration loop lexical environments for closures
+    # 3. Loop lexical environments for closures (C-style for shares loop var; foreach binds per-iteration)
     my scalar $r3 = Strada::Interpreter::eval('
         my array @fns = ();
         for (my int $i = 0; $i < 3; $i = $i + 1) {
@@ -97,7 +97,7 @@ func test_eval_module() void {
         }
         $fns[0]->() * 100000 + $fns[1]->() * 10000 + $fns[2]->() * 1000 + $fns2[0]->() * 100 + $fns2[1]->() + ($fns2[2]->() == 30 ? 0 : 1);
     ');
-    ok(($r3 + 0) == 12000 + 1000 + 20, "Eval per-iteration loop closure capture");
+    ok(($r3 + 0) == 333000 + 1000 + 20, "Eval loop closure capture (for shared vs foreach per-iteration)");
 
     # 4. sys::* builtin aliases and core::refcount
     my scalar $r4 = Strada::Interpreter::eval('

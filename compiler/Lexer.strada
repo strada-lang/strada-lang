@@ -1251,7 +1251,30 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         $sc = $sc + 1;
                     }
                     my str $kw = substr_bytes($src, $ws, $sc - $ws);
+                    my int $kw_c_ok = 1;
                     if ($kw eq "__C__") {
+                        if ($ws > 0) {
+                            my int $pbc = char_at($src, $ws - 1);
+                            if ($pbc == '$' || $pbc == '@' || $pbc == '%') {
+                                $kw_c_ok = 0;
+                            } else {
+                                my int $bwi = $ws - 1;
+                                while ($bwi >= 0 && (char_at($src, $bwi) == ' ' || char_at($src, $bwi) == '\t')) {
+                                    $bwi = $bwi - 1;
+                                }
+                                if ($bwi >= 1) {
+                                    my int $op_a = char_at($src, $bwi - 1);
+                                    my int $op_b = char_at($src, $bwi);
+                                    if (($op_a == '-' && $op_b == '>') || ($op_a == ':' && $op_b == ':')) {
+                                        $kw_c_ok = 0;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        $kw_c_ok = 0;
+                    }
+                    if ($kw_c_ok == 1) {
                         while ($sc < $len) {
                             my int $wc = char_at($src, $sc);
                             if ($wc == '\n') { $line = $line + 1; $sc = $sc + 1; }
@@ -1259,12 +1282,13 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                             else { last; }
                         }
                         if ($sc < $len && char_at($src, $sc) == '{') {
-                            # Skip entire __C__ { ... } block (tracking braces, C strings, C comments, and C #if/#ifdef/#ifndef...#endif)
+                            # Skip entire __C__ { ... } block (tracking braces, C strings, C comments, and C #if/#elif/#else/#endif)
                             my int $c_line = $line;
                             $sc = $sc + 1;
                             my int $c_depth = 1;
-                            my int $c_pp_nest = 0;
-                            while ($sc < $len && ($c_depth > 0 || $c_pp_nest > 0)) {
+                            my array @c_pp_entry = ();
+                            my array @c_pp_max = ();
+                            while ($sc < $len && ($c_depth > 0 || size(@c_pp_entry) > 0)) {
                                 my int $k = char_at($src, $sc);
                                 if ($k == '\n') {
                                     $line = $line + 1;
@@ -1277,9 +1301,25 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                                         while ($cp < $len && (char_at($src, $cp) == ' ' || char_at($src, $cp) == '\t')) { $cp = $cp + 1; }
                                         my str $cw = lex_pp_word_at($src, $cp, $len);
                                         if ($cw eq "if" || $cw eq "ifdef" || $cw eq "ifndef") {
-                                            $c_pp_nest = $c_pp_nest + 1;
-                                        } elsif ($cw eq "endif" && $c_pp_nest > 0) {
-                                            $c_pp_nest = $c_pp_nest - 1;
+                                            push(@c_pp_entry, $c_depth);
+                                            push(@c_pp_max, $c_depth);
+                                        } elsif ($cw eq "elif" || $cw eq "else") {
+                                            if (size(@c_pp_entry) > 0) {
+                                                my int $ctop = size(@c_pp_entry) - 1;
+                                                if ($c_depth > $c_pp_max[$ctop]) {
+                                                    $c_pp_max[$ctop] = $c_depth;
+                                                }
+                                                $c_depth = $c_pp_entry[$ctop];
+                                            }
+                                        } elsif ($cw eq "endif") {
+                                            if (size(@c_pp_entry) > 0) {
+                                                my int $ctop = size(@c_pp_entry) - 1;
+                                                my int $cm = $c_pp_max[$ctop];
+                                                if ($c_depth > $cm) { $cm = $c_depth; }
+                                                $c_depth = $cm;
+                                                pop(@c_pp_entry);
+                                                pop(@c_pp_max);
+                                            }
                                         }
                                     }
                                 } elsif ($k == '"' || $k == '\'') {
@@ -1313,7 +1353,8 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                                     $c_depth = $c_depth + 1;
                                     $sc = $sc + 1;
                                 } elsif ($k == '}') {
-                                    if ($c_depth > 0) { $c_depth = $c_depth - 1; }
+                                    $c_depth = $c_depth - 1;
+                                    if ($c_depth < 0) { $c_depth = 0; }
                                     $sc = $sc + 1;
                                 } else {
                                     $sc = $sc + 1;
@@ -3044,12 +3085,47 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
 
     my scalar $sb = sb_new();
     my int $depth = 1;
+    my array @c_pp_entry = ();
+    my array @c_pp_max = ();
 
-    while (!lex_at_end($lexer) && $depth > 0) {
+    while (!lex_at_end($lexer) && ($depth > 0 || size(@c_pp_entry) > 0)) {
         my int $ch = lex_current_code($lexer);
 
+        if ($ch == '\n') {
+            sb_append($sb, "\n");
+            lex_advance($lexer);
+            my str $csrc = $lexer->{"source"};
+            my int $clen = $lexer->{"source_len"};
+            my int $cp = $lexer->{"pos"};
+            while ($cp < $clen && (char_at($csrc, $cp) == ' ' || char_at($csrc, $cp) == '\t')) { $cp = $cp + 1; }
+            if ($cp < $clen && char_at($csrc, $cp) == '#') {
+                $cp = $cp + 1;
+                while ($cp < $clen && (char_at($csrc, $cp) == ' ' || char_at($csrc, $cp) == '\t')) { $cp = $cp + 1; }
+                my str $cw = lex_pp_word_at($csrc, $cp, $clen);
+                if ($cw eq "if" || $cw eq "ifdef" || $cw eq "ifndef") {
+                    push(@c_pp_entry, $depth);
+                    push(@c_pp_max, $depth);
+                } elsif ($cw eq "elif" || $cw eq "else") {
+                    if (size(@c_pp_entry) > 0) {
+                        my int $ctop = size(@c_pp_entry) - 1;
+                        if ($depth > $c_pp_max[$ctop]) {
+                            $c_pp_max[$ctop] = $depth;
+                        }
+                        $depth = $c_pp_entry[$ctop];
+                    }
+                } elsif ($cw eq "endif") {
+                    if (size(@c_pp_entry) > 0) {
+                        my int $ctop = size(@c_pp_entry) - 1;
+                        my int $cm = $c_pp_max[$ctop];
+                        if ($depth > $cm) { $cm = $depth; }
+                        $depth = $cm;
+                        pop(@c_pp_entry);
+                        pop(@c_pp_max);
+                    }
+                }
+            }
         # Handle C-style strings - don't count braces inside strings
-        if ($ch == '"') {
+        } elsif ($ch == '"') {
             sb_append($sb, lex_current_char($lexer));
             lex_advance($lexer);
             while (!lex_at_end($lexer)) {
@@ -3132,7 +3208,8 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
             lex_advance($lexer);
         } elsif ($ch == '}') {
             $depth = $depth - 1;
-            if ($depth > 0) {
+            if ($depth < 0) { $depth = 0; }
+            if ($depth > 0 || size(@c_pp_entry) > 0) {
                 sb_append($sb, "}");
             }
             lex_advance($lexer);
@@ -3459,7 +3536,7 @@ func lex_next_token(scalar $lexer) scalar {
         }
 
         # __C__ { ... } - raw C code block
-        if ($text eq "__C__" && $saved_after_sigil == 0 && $saved_after_arrow == 0) {
+        if ($text eq "__C__" && $saved_after_sigil == 0 && $saved_after_arrow == 0 && $saved_after_member_arrow == 0) {
             return lex_read_c_block($lexer, $token_line);
         }
 

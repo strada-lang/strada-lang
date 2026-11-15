@@ -882,6 +882,24 @@ func find_c_block_kw(str $line) int {
             }
             my str $tok = substr($line, $ws, $i - $ws);
             if ($tok eq "__C__") {
+                my int $prev_ok = 1;
+                if ($ws > 0) {
+                    my str $pc = substr($line, $ws - 1, 1);
+                    if ($pc eq "\$" || $pc eq "@" || $pc eq "%") {
+                        $prev_ok = 0;
+                    } else {
+                        my int $bi = $ws - 1;
+                        while ($bi >= 0 && (substr($line, $bi, 1) eq " " || substr($line, $bi, 1) eq "\t")) {
+                            $bi--;
+                        }
+                        if ($bi >= 1) {
+                            my str $op2 = substr($line, $bi - 1, 2);
+                            if ($op2 eq "->" || $op2 eq "::") {
+                                $prev_ok = 0;
+                            }
+                        }
+                    }
+                }
                 my int $next_ok = 1;
                 if ($i < $len) {
                     my str $nc = substr($line, $i, 1);
@@ -889,7 +907,7 @@ func find_c_block_kw(str $line) int {
                         $next_ok = 0;
                     }
                 }
-                if ($next_ok == 1) {
+                if ($prev_ok == 1 && $next_ok == 1) {
                     return $ws;
                 }
             }

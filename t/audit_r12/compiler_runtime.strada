@@ -1,0 +1,251 @@
+package R12C2Obj;
+has ro int $val = 10;
+func call_c(scalar $self, int $delta) int {
+    return $self->val() + $delta;
+}
+
+package R12DropCount;
+our int $destroyed = 0;
+func new(int $tag) scalar {
+    return bless({"tag" => $tag}, "R12DropCount");
+}
+func get_destroyed() int { return $destroyed; }
+func reset_destroyed() void { $destroyed = 0; }
+func DESTROY(scalar $self) void {
+    $destroyed = $destroyed + 1;
+}
+
+# R12-C8: DFS MRO diamond (D -> B -> A, D -> C)
+package R12MroA;
+func m(scalar $self) str { return "A"; }
+
+package R12MroB;
+extends R12MroA;
+
+package R12MroC;
+func m(scalar $self) str { return "C"; }
+
+package R12MroD;
+extends R12MroB, R12MroC;
+
+# R12-C11: bless invalidates known_types
+package R12BoxA;
+has ro int $id = 1;
+func tag(scalar $self) str { return "BoxA"; }
+
+package R12BoxB;
+has ro int $id = 2;
+func tag(scalar $self) str { return "BoxB"; }
+
+package R12OverCmp;
+use overload '""' => "as_str";
+func as_str(scalar $self) str { return $self->{"v"}; }
+
+package R12LongPkgName::SegmentOneTwoThreeFourFiveSixSevenEightNineZero::LeafClassAlphaBetaGamma;
+func ping(scalar $self) int { return 77; }
+
+package main;
+
+# R12-C10: file-scope same-name our variables with different sigils
+our int $g_shared_our = 11;
+our array @g_shared_our = (22, 33);
+our hash %g_shared_our = ("k" => 44);
+
+our int $g_r12_local = 10;
+
+func test_r12_c1_c2() int {
+    # R12-C1: inactive preprocessor branch with __C__ block containing unbalanced '{' in strings & #else
+#if 0
+    __C__ {
+        const char *brace = "{";
+        int x = 1;
+    }
+#else
+    my int $active_branch = 5;
+#endif
+    # R12-C2: identifier named $__C__
+    my int $__C__ = 7;
+    my scalar $obj = R12C2Obj::new("val", 30);
+    my int $m = $obj->call_c($__C__);
+    if ($active_branch != 5 || $m != 37) { return 1; }
+    return 0;
+}
+
+func test_r12_c3_c4_c14_c15_c16() int {
+    # R12-C3: uc/lc/ucfirst/lcfirst embedded NUL + UTF-8 flag preservation
+    my str $nul_lo = "a\x00b";
+    my str $u = uc($nul_lo);
+    my str $u2 = upper($nul_lo);
+    if (length($u) != 3 || ord(substr($u, 0, 1)) != 65 || ord(substr($u, 1, 1)) != 0 || ord(substr($u, 2, 1)) != 66) { return 10; }
+    if ($u ne $u2) { return 11; }
+    my str $l = lc("A\x00B");
+    my str $l2 = lower("A\x00B");
+    if (length($l) != 3 || ord(substr($l, 0, 1)) != 97 || ord(substr($l, 1, 1)) != 0 || ord(substr($l, 2, 1)) != 98) { return 12; }
+    if ($l ne $l2) { return 13; }
+    my str $uf = ucfirst("a\x00b");
+    my str $lf = lcfirst("A\x00B");
+    if (length($uf) != 3 || ord(substr($uf, 0, 1)) != 65 || ord(substr($uf, 2, 1)) != 98) { return 14; }
+    if (length($lf) != 3 || ord(substr($lf, 0, 1)) != 97 || ord(substr($lf, 2, 1)) != 66) { return 15; }
+
+    my str $raw_bin = core::pack("C3", 0xff, 0, ord("a"));
+    my str $raw_uc = uc($raw_bin);
+    if (utf8::is_utf8($raw_uc) != 0 || length($raw_uc) != 3 || ord(substr($raw_uc, 2, 1)) != 65) { return 16; }
+
+    # R12-C4: s/// and s///e UTF-8 + embedded NUL
+    my str $sub = "é\x00x";
+    $sub =~ s/x/Y/;
+    if (utf8::is_utf8($sub) != 1 || length($sub) != 3 || core::byte_length($sub) != 4 || ord(substr($sub, 1, 1)) != 0 || substr($sub, 2, 1) ne "Y") { return 20; }
+    my str $se = "ab\x00cd";
+    $se =~ s/b/uc("z")/e;
+    if (length($se) != 5 || ord(substr($se, 1, 1)) != 90 || ord(substr($se, 2, 1)) != 0) { return 21; }
+
+    # R12-C14: rindex, trim/ltrim/rtrim, repeat, replace/replace_all NUL & UTF-8
+    my int $ri = rindex("ab\x00cd\x00ef", "\x00");
+    if ($ri != 5) { return 30; }
+    my str $tr_in = "\x0b\x0c  hi\x00!  \x0c\x0b";
+    my str $tr_out = trim($tr_in);
+    if (length($tr_out) != 4 || ord(substr($tr_out, 2, 1)) != 0 || substr($tr_out, 3, 1) ne "!") { return 31; }
+    my str $rep = repeat("x\x00y", 2);
+    if (length($rep) != 6 || ord(substr($rep, 1, 1)) != 0 || ord(substr($rep, 4, 1)) != 0) { return 32; }
+    my str $rpa = replace_all("a\x00b\x00a", "a", "Z");
+    if (length($rpa) != 5 || ord(substr($rpa, 0, 1)) != 90 || ord(substr($rpa, 1, 1)) != 0 || ord(substr($rpa, 4, 1)) != 90) { return 33; }
+
+    # R12-C15: overload string comparison fallback preserves NULs on unblessed strings
+    my str $ns1 = "a\x00x";
+    my str $ns2 = "a\x00y";
+    my scalar $o1 = bless({"v" => $ns1}, "R12OverCmp");
+    my str $plain = "" . $o1;
+    if (length($plain) != 3) { return 40; }
+    if ($ns1 eq $ns2 || !($ns1 lt $ns2)) { return 41; }
+
+    # R12-C16: capture() UTF-8 & embedded NUL
+    my str $cu = "éa";
+    my array @caps = capture($cu, "^(\\p{Ll})(.)");
+    if (scalar(@caps) != 3 || $caps[1] ne "é" || $caps[2] ne "a") { return 50; }
+    return 0;
+}
+
+func test_r12_c5_c6_c7_c8_c9_c10_c11() int {
+    # R12-C5: range foreach with non-int variable types
+    my str $cat = "";
+    foreach my str $rs (1..3) {
+        $cat = $cat . $rs;
+    }
+    my num $nsum = 0.0;
+    foreach my num $rn (1..3) {
+        $nsum = $nsum + $rn;
+    }
+    if ($cat ne "123" || $nsum < 5.9 || $nsum > 6.1) { return 60; }
+
+    # R12-C6: next LABEL & forward goto clean block locals
+    R12DropCount::reset_destroyed();
+    my int $k = 0;
+    OUTER_LBL: while ($k < 3) {
+        $k = $k + 1;
+        my scalar $d = R12DropCount::new($k);
+        if ($k < 3) {
+            next OUTER_LBL;
+        }
+        if ($k < 0) {
+            last OUTER_LBL;
+        }
+    }
+    if (R12DropCount::get_destroyed() != 3) { return 70; }
+
+    {
+        my scalar $dg = R12DropCount::new(99);
+        goto FWD_DONE;
+    }
+    FWD_DONE:
+    if (R12DropCount::get_destroyed() != 4) { return 71; }
+
+    # R12-C7: single-statement local block and finally local restore
+    $g_r12_local = 10;
+    if (1) { local $g_r12_local = 77; }
+    if ($g_r12_local != 10) { return 80; }
+    try {
+        throw "r12_boom";
+    } catch ($e) {
+    } finally {
+        local $g_r12_local = 88;
+    }
+    if ($g_r12_local != 10) { return 81; }
+
+    # R12-C8: DFS MRO (R12MroD -> R12MroB -> R12MroA before R12MroC)
+    my scalar $d = bless({}, "R12MroD");
+    if ($d->m() ne "A") { return 90; }
+
+    # R12-C9: redo inside map / grep cleans block locals
+    my int $m_tries = 0;
+    my int $g_tries = 0;
+    my int $d_before = R12DropCount::get_destroyed();
+    my array @mapped = map {
+        my scalar $tmp = R12DropCount::new($_);
+        $m_tries = $m_tries + 1;
+        if ($m_tries == 1) {
+            redo;
+        }
+        $_ * 2;
+    } (3, 4);
+    if ($m_tries != 3 || scalar(@mapped) != 2 || $mapped[0] != 6 || $mapped[1] != 8) { return 100; }
+    if (R12DropCount::get_destroyed() - $d_before != 3) { return 101; }
+
+    my array @grepped = grep {
+        my scalar $tmp = R12DropCount::new($_);
+        $g_tries = $g_tries + 1;
+        if ($g_tries == 1) {
+            redo;
+        }
+        $_ > 3;
+    } (3, 5);
+    if ($g_tries != 3 || scalar(@grepped) != 1 || $grepped[0] != 5) { return 102; }
+    if (R12DropCount::get_destroyed() - $d_before != 6) { return 103; }
+
+    # R12-C10: our multi-sigil collision check at root & non-root block
+    if ($g_shared_our != 11 || $g_shared_our[1] != 33 || $g_shared_our{"k"} != 44) { return 110; }
+    if (1) {
+        our int $blk_our = 101;
+        our array @blk_our = (102, 103);
+        our hash %blk_our = ("x" => 104);
+        if ($blk_our != 101 || $blk_our[1] != 103 || $blk_our{"x"} != 104) { return 111; }
+    }
+
+    # R12-C11: bless invalidates known_types
+    my scalar $bx = R12BoxA::new();
+    if (!$bx->isa("R12BoxA") || $bx->tag() ne "BoxA") { return 120; }
+    bless($bx, "R12BoxB");
+    if ($bx->isa("R12BoxA") || !$bx->isa("R12BoxB") || $bx->tag() ne "BoxB") { return 121; }
+
+    # R12-RT5..RT8 compiled Strada surface verification
+    my str $bigA = repeat("A", 1500);
+    my str $vbig = sprintf("%vd", $bigA);
+    if (length($vbig) != 4499) { return 130; }
+    my str $vw = sprintf("%v1500d", "A");
+    if (length($vw) != 1500) { return 131; }
+    my str $vs = sprintf("%*vd", 99, "AB");
+    if ($vs ne "659966") { return 132; }
+
+    my array @u0 = core::unpack("(C)0", "AB");
+    my array @us = core::unpack("(C)*", "");
+    my array @un = core::unpack("(a(C)2)2", "A\x01\x02B\x03\x04");
+    if (scalar(@u0) != 0 || scalar(@us) != 0 || scalar(@un) != 6 || $un[0] ne "A" || $un[2] != 2 || $un[3] ne "B" || $un[5] != 4) { return 133; }
+    my str $pq = core::pack("q/a*", "hello");
+    my array @uq = core::unpack("q/a*", $pq);
+    if (scalar(@uq) != 1 || $uq[0] ne "hello") { return 134; }
+
+    my scalar $lp = bless({}, "R12LongPkgName::SegmentOneTwoThreeFourFiveSixSevenEightNineZero::LeafClassAlphaBetaGamma");
+    if ($lp->ping() != 77) { return 135; }
+
+    return 0;
+}
+
+func main() int {
+    my int $r1 = test_r12_c1_c2();
+    if ($r1 != 0) { say("FAIL r1=" . $r1); return 1; }
+    my int $r2 = test_r12_c3_c4_c14_c15_c16();
+    if ($r2 != 0) { say("FAIL r2=" . $r2); return 1; }
+    my int $r3 = test_r12_c5_c6_c7_c8_c9_c10_c11();
+    if ($r3 != 0) { say("FAIL r3=" . $r3); return 1; }
+    say("AUDIT_R12_COMPILER_RUNTIME_OK");
+    return 0;
+}

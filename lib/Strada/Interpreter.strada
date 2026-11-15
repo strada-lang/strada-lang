@@ -1266,6 +1266,8 @@ func interp_new() scalar {
     $interp{"filename"} = "<input>";
     $interp{"call_depth"} = 0;
     $interp{"max_call_depth"} = 1000;
+    $interp{"next_call_context"} = 0;
+    $interp{"active_call_context"} = 0;
     # OOP state
     my hash %inherits = ();
     $interp{"inherits"} = \%inherits;
@@ -1336,32 +1338,53 @@ func interp_new() scalar {
 # For variadic native functions (is_variadic=1), the args from variadic_idx onward
 # are packed into a single array argument, matching how the C code generator handles them.
 func call_native(scalar $interp, scalar $nf, scalar $args) scalar {
-    my int $is_variadic = $nf->{"is_variadic"};
-    if ($is_variadic == 1) {
-        # Pack args: fixed args stay, variadic args get packed into one array
-        my int $param_count = $nf->{"param_count"};
-        my int $variadic_idx = $param_count - 1;  # Last param is the variadic one
-        my array @packed = ();
-        my int $i = 0;
-
-        # Copy fixed args before the variadic param
-        while ($i < $variadic_idx && $i < size($args)) {
-            push(@packed, $args->[$i]);
-            $i = $i + 1;
-        }
-
-        # Pack remaining args into a single array for the variadic param
-        my array @va_arr = ();
-        while ($i < size($args)) {
-            push(@va_arr, $args->[$i]);
-            $i = $i + 1;
-        }
-        push(@packed, \@va_arr);
-
-        return native_call($nf->{"fn_ptr"}, \@packed, size(\@packed), $nf->{"ret_is_void"});
+    my int $nc_ctx = $interp->{"next_call_context"};
+    $interp->{"next_call_context"} = 0;
+    my int $prev_c_ctx = 0;
+    __C__ {
+        int pctx = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0);
+        strada_decref(prev_c_ctx);
+        prev_c_ctx = strada_new_int(pctx);
+        strada_set_call_context((int)strada_to_int(nc_ctx));
     }
+    my scalar $res = undef;
+    try {
+        my int $is_variadic = $nf->{"is_variadic"};
+        if ($is_variadic == 1) {
+            # Pack args: fixed args stay, variadic args get packed into one array
+            my int $param_count = $nf->{"param_count"};
+            my int $variadic_idx = $param_count - 1;  # Last param is the variadic one
+            my array @packed = ();
+            my int $i = 0;
 
-    return native_call($nf->{"fn_ptr"}, $args, size($args), $nf->{"ret_is_void"});
+            # Copy fixed args before the variadic param
+            while ($i < $variadic_idx && $i < size($args)) {
+                push(@packed, $args->[$i]);
+                $i = $i + 1;
+            }
+
+            # Pack remaining args into a single array for the variadic param
+            my array @va_arr = ();
+            while ($i < size($args)) {
+                push(@va_arr, $args->[$i]);
+                $i = $i + 1;
+            }
+            push(@packed, \@va_arr);
+
+            $res = native_call($nf->{"fn_ptr"}, \@packed, size(\@packed), $nf->{"ret_is_void"});
+        } else {
+            $res = native_call($nf->{"fn_ptr"}, $args, size($args), $nf->{"ret_is_void"});
+        }
+    } catch ($e) {
+        __C__ {
+            strada_set_call_context((int)strada_to_int(prev_c_ctx));
+        }
+        throw($e);
+    }
+    __C__ {
+        strada_set_call_context((int)strada_to_int(prev_c_ctx));
+    }
+    return $res;
 }
 
 # Call a native function pointer with an array of StradaValue* arguments.
@@ -3230,6 +3253,8 @@ func interp_resolve_obj_pkg(scalar $obj) str {
 }
 
 func interp_invoke_method_call(scalar $interp, scalar $obj, str $method, scalar $args_ref, scalar $env, int $is_dyn) scalar {
+    my int $meth_ctx = $interp->{"next_call_context"};
+    $interp->{"next_call_context"} = 0;
     # Get object's class
     my str $pkg = interp_resolve_obj_pkg($obj);
     my int $argc = size($args_ref) - 1;
@@ -3467,10 +3492,13 @@ func interp_invoke_method_call(scalar $interp, scalar $obj, str $method, scalar 
     }
 
     my str $err_prefix = ($is_dyn == 1) ? "Undefined dynamic method: " : "Undefined method: ";
+    $interp->{"next_call_context"} = $meth_ctx;
     return interp_dispatch_method($interp, $obj, $pkg, $method, $args_ref, 0, $err_prefix);
 }
 
 func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, scalar $args, int $allow_hash_field, str $err_prefix) scalar {
+    my int $meth_ctx = $interp->{"next_call_context"};
+    $interp->{"next_call_context"} = 0;
     my scalar $func_info = undef;
     if (length($pkg) > 0) {
         $func_info = interp_resolve_method($interp, $pkg, $method);
@@ -3483,6 +3511,7 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
         my str $native_name = $pkg . "_" . $method;
         if (exists($interp->{"native_funcs"}, $native_name)) {
             my scalar $nf = $interp->{"native_funcs"}->{$native_name};
+            $interp->{"next_call_context"} = $meth_ctx;
             return call_native($interp, $nf, $args);
         }
     }
@@ -3498,6 +3527,7 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
                 push(@al_args, $args->[$ali]);
                 $ali = $ali + 1;
             }
+            $interp->{"next_call_context"} = $meth_ctx;
             return call_user_func($interp, $al_func, \@al_args);
         }
     }
@@ -3505,6 +3535,7 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
     if (defined($func_info)) {
         my int $mod_count = size($interp->{"method_modifiers"});
         if ($mod_count == 0) {
+            $interp->{"next_call_context"} = $meth_ctx;
             return call_user_func($interp, $func_info, $args);
         }
 
@@ -3538,8 +3569,8 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
 
         my array @around_mods = ();
         my scalar $result = undef;
-        $ci = 0;
-        while ($ci < size(\@mod_classes)) {
+        $ci = size(\@mod_classes) - 1;
+        while ($ci >= 0) {
             my str $mcls = $mod_classes[$ci];
             my int $mi = 0;
             while ($mi < $mod_count) {
@@ -3552,20 +3583,21 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
                 }
                 $mi = $mi + 1;
             }
-            $ci = $ci + 1;
+            $ci = $ci - 1;
         }
 
-        if (size(\@around_mods) > 0) {
+        my int $around_n = size(\@around_mods);
+        if ($around_n > 0) {
             my hash %base_orig = ();
             $base_orig{"__orig_func__"} = $func_info;
             my scalar $chain = \%base_orig;
-            my int $ami = size(\@around_mods) - 1;
-            while ($ami >= 1) {
+            my int $ami = 0;
+            while ($ami < $around_n - 1) {
                 my hash %wrap = ();
                 $wrap{"__around_func__"} = $around_mods[$ami];
                 $wrap{"__next_orig__"} = $chain;
                 $chain = \%wrap;
-                $ami = $ami - 1;
+                $ami = $ami + 1;
             }
             my array @around_args = ();
             push(@around_args, $chain);
@@ -3574,8 +3606,10 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
                 push(@around_args, $args->[$aai]);
                 $aai = $aai + 1;
             }
-            $result = call_user_func($interp, $around_mods[0], \@around_args);
+            $interp->{"next_call_context"} = $meth_ctx;
+            $result = call_user_func($interp, $around_mods[$around_n - 1], \@around_args);
         } else {
+            $interp->{"next_call_context"} = $meth_ctx;
             $result = call_user_func($interp, $func_info, $args);
         }
 
@@ -3989,62 +4023,204 @@ func interp_sprintf_arr(scalar $interp, scalar $args, int $argc) str {
     }
     my str $fmt = "" . interp_stringify_val($interp, $args->[0]);
     my int $flen = length($fmt);
-    my int $fi = 0;
-    my int $si = 1;
+    my int $rc = $argc - 1;
     my array @rest = ();
+    my int $ri = 1;
+    while ($ri < $argc) {
+        my scalar $a = $args->[$ri];
+        if (defined($a) && ref($a) eq "ARRAY") {
+            $a = interp_arr_len($interp, $a);
+        }
+        push(@rest, $a);
+        $ri = $ri + 1;
+    }
+
+    my int $fi = 0;
+    my int $si = 0;
     while ($fi < $flen) {
         if (substr($fmt, $fi, 1) eq "%" && $fi + 1 < $flen) {
             $fi = $fi + 1;
-            my str $nc = substr($fmt, $fi, 1);
-            if ($nc eq "%") {
+            if (substr($fmt, $fi, 1) eq "%") {
                 $fi = $fi + 1;
                 next;
             }
-            while ($fi < $flen && index("-+ #0", substr($fmt, $fi, 1)) >= 0) { $fi = $fi + 1; }
-            while ($fi < $flen) {
-                my str $dc = substr($fmt, $fi, 1);
-                if ($dc ge "0" && $dc le "9") { $fi = $fi + 1; } else { last; }
-            }
-            if ($fi < $flen && substr($fmt, $fi, 1) eq ".") {
-                $fi = $fi + 1;
-                while ($fi < $flen) {
-                    my str $pc = substr($fmt, $fi, 1);
-                    if ($pc ge "0" && $pc le "9") { $fi = $fi + 1; } else { last; }
+
+            # Optional POSIX/Perl positional spec: %N$
+            my int $positional = 0;
+            my int $pos_idx = -1;
+            if ($fi < $flen) {
+                my str $c0 = substr($fmt, $fi, 1);
+                if ($c0 ge "0" && $c0 le "9") {
+                    my int $pc = $fi;
+                    my int $pn = 0;
+                    while ($pc < $flen) {
+                        my str $dc = substr($fmt, $pc, 1);
+                        if ($dc ge "0" && $dc le "9") {
+                            if ($pn <= 100000000) { $pn = $pn * 10 + (0 + $dc); }
+                            $pc = $pc + 1;
+                        } else {
+                            last;
+                        }
+                    }
+                    if ($pc < $flen && substr($fmt, $pc, 1) eq "\$") {
+                        $positional = 1;
+                        $pos_idx = $pn - 1;
+                        $fi = $pc + 1;
+                    }
                 }
             }
-            while ($fi < $flen && (substr($fmt, $fi, 1) eq "l" || substr($fmt, $fi, 1) eq "h")) { $fi = $fi + 1; }
+
+            # Optional Perl vector flag: v or *v
+            my int $vec_flag = 0;
+            if ($fi < $flen && substr($fmt, $fi, 1) eq "v") {
+                $vec_flag = 1;
+                $fi = $fi + 1;
+            } elsif ($fi + 1 < $flen && substr($fmt, $fi, 2) eq "*v") {
+                $vec_flag = 1;
+                $fi = $fi + 2;
+                if ($si < $rc) {
+                    $rest[$si] = interp_stringify_val($interp, $rest[$si]);
+                    $si = $si + 1;
+                }
+            }
+
+            while ($fi < $flen && index("-+ #0", substr($fmt, $fi, 1)) >= 0) { $fi = $fi + 1; }
+
+            # Width: * / *N$ / digits
+            if ($fi < $flen && substr($fmt, $fi, 1) eq "*") {
+                $fi = $fi + 1;
+                my int $wpos = -1;
+                if ($fi < $flen) {
+                    my str $wc0 = substr($fmt, $fi, 1);
+                    if ($wc0 ge "0" && $wc0 le "9") {
+                        my int $wc = $fi;
+                        my int $wn = 0;
+                        while ($wc < $flen) {
+                            my str $wdc = substr($fmt, $wc, 1);
+                            if ($wdc ge "0" && $wdc le "9") {
+                                if ($wn <= 100000000) { $wn = $wn * 10 + (0 + $wdc); }
+                                $wc = $wc + 1;
+                            } else {
+                                last;
+                            }
+                        }
+                        if ($wc < $flen && substr($fmt, $wc, 1) eq "\$") {
+                            $wpos = $wn - 1;
+                            $fi = $wc + 1;
+                        }
+                    }
+                }
+                my int $widx = -1;
+                if ($wpos >= 0) {
+                    $widx = $wpos;
+                } elsif ($si < $rc) {
+                    $widx = $si;
+                    $si = $si + 1;
+                }
+                if ($widx >= 0 && $widx < $rc && $interp->{"has_overloads"} == 1) {
+                    my scalar $wovl = check_overload($interp, $rest[$widx], "0+");
+                    if (defined($wovl)) {
+                        my array @wargs = ($rest[$widx]);
+                        $rest[$widx] = call_user_func($interp, $wovl, \@wargs);
+                    }
+                }
+            } else {
+                while ($fi < $flen) {
+                    my str $dc = substr($fmt, $fi, 1);
+                    if ($dc ge "0" && $dc le "9") { $fi = $fi + 1; } else { last; }
+                }
+            }
+
+            # Precision: .* / .*N$ / .digits
+            if ($fi < $flen && substr($fmt, $fi, 1) eq ".") {
+                $fi = $fi + 1;
+                if ($fi < $flen && substr($fmt, $fi, 1) eq "*") {
+                    $fi = $fi + 1;
+                    my int $ppos = -1;
+                    if ($fi < $flen) {
+                        my str $pc0 = substr($fmt, $fi, 1);
+                        if ($pc0 ge "0" && $pc0 le "9") {
+                            my int $pc = $fi;
+                            my int $pn = 0;
+                            while ($pc < $flen) {
+                                my str $pdc = substr($fmt, $pc, 1);
+                                if ($pdc ge "0" && $pdc le "9") {
+                                    if ($pn <= 100000000) { $pn = $pn * 10 + (0 + $pdc); }
+                                    $pc = $pc + 1;
+                                } else {
+                                    last;
+                                }
+                            }
+                            if ($pc < $flen && substr($fmt, $pc, 1) eq "\$") {
+                                $ppos = $pn - 1;
+                                $fi = $pc + 1;
+                            }
+                        }
+                    }
+                    my int $pidx = -1;
+                    if ($ppos >= 0) {
+                        $pidx = $ppos;
+                    } elsif ($si < $rc) {
+                        $pidx = $si;
+                        $si = $si + 1;
+                    }
+                    if ($pidx >= 0 && $pidx < $rc && $interp->{"has_overloads"} == 1) {
+                        my scalar $povl = check_overload($interp, $rest[$pidx], "0+");
+                        if (defined($povl)) {
+                            my array @pargs = ($rest[$pidx]);
+                            $rest[$pidx] = call_user_func($interp, $povl, \@pargs);
+                        }
+                    }
+                } else {
+                    while ($fi < $flen) {
+                        my str $pc = substr($fmt, $fi, 1);
+                        if ($pc ge "0" && $pc le "9") { $fi = $fi + 1; } else { last; }
+                    }
+                }
+            }
+
+            # Length modifier lookahead matching strada_sprintf_sv_args
+            if ($fi < $flen) {
+                my str $lm = substr($fmt, $fi, 1);
+                if ($lm eq "h" || $lm eq "l" || $lm eq "L" || $lm eq "z" || $lm eq "j" || $lm eq "t") {
+                    my int $ml = 1;
+                    if ($fi + 1 < $flen) {
+                        my str $lm2 = substr($fmt, $fi, 2);
+                        if ($lm2 eq "hh" || $lm2 eq "ll") { $ml = 2; }
+                    }
+                    if ($fi + $ml < $flen && index("diuoxXn", substr($fmt, $fi + $ml, 1)) >= 0) {
+                        $fi = $fi + $ml;
+                    }
+                }
+            }
+
             if ($fi >= $flen) { last; }
             my str $conv = substr($fmt, $fi, 1);
             $fi = $fi + 1;
-            if ($si < $argc) {
-                my scalar $arg = $args->[$si];
+            if ($conv eq chr(0)) {
+                next;
+            }
+            my int $tidx = -1;
+            if ($positional == 1) {
+                $tidx = $pos_idx;
+            } elsif ($si < $rc) {
+                $tidx = $si;
                 $si = $si + 1;
-                if (defined($arg) && ref($arg) eq "ARRAY") {
-                    $arg = interp_arr_len($interp, $arg);
-                } elsif ($conv eq "s") {
-                    $arg = interp_stringify_val($interp, $arg);
-                } elsif ($interp->{"has_overloads"} == 1 &&
-                         ($conv eq "d" || $conv eq "i" || $conv eq "u" || $conv eq "x" || $conv eq "X" ||
-                          $conv eq "o" || $conv eq "f" || $conv eq "e" || $conv eq "E" || $conv eq "g" || $conv eq "G")) {
-                    my scalar $novl = check_overload($interp, $arg, "0+");
+            }
+            if ($tidx >= 0 && $tidx < $rc) {
+                if ($vec_flag == 1 || $conv eq "s") {
+                    $rest[$tidx] = interp_stringify_val($interp, $rest[$tidx]);
+                } elsif ($interp->{"has_overloads"} == 1 && index("diuoxXfFeEgGaAbBc", $conv) >= 0) {
+                    my scalar $novl = check_overload($interp, $rest[$tidx], "0+");
                     if (defined($novl)) {
-                        my array @nargs = ($arg);
-                        $arg = call_user_func($interp, $novl, \@nargs);
+                        my array @nargs = ($rest[$tidx]);
+                        $rest[$tidx] = call_user_func($interp, $novl, \@nargs);
                     }
                 }
-                push(@rest, $arg);
             }
         } else {
             $fi = $fi + 1;
         }
-    }
-    while ($si < $argc) {
-        my scalar $arg = $args->[$si];
-        if (defined($arg) && ref($arg) eq "ARRAY") {
-            $arg = interp_arr_len($interp, $arg);
-        }
-        push(@rest, $arg);
-        $si = $si + 1;
     }
     my scalar $rest_ref = \@rest;
     my str $res = "";
@@ -5937,13 +6113,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- core:: context functions ----
     if ($bid == BI::SYS_WANTSCALAR) {
-        return 1;
+        return ($interp->{"active_call_context"} == 0) ? 1 : 0;
     }
     if ($bid == BI::SYS_WANTARRAY) {
-        return 0;
+        return ($interp->{"active_call_context"} == 1) ? 1 : 0;
     }
     if ($bid == BI::SYS_WANTHASH) {
-        return 0;
+        return ($interp->{"active_call_context"} == 2) ? 1 : 0;
     }
     if ($bid == BI::SYS_GET_RECURSION_LIMIT) {
         return $interp->{"max_call_depth"};
@@ -6868,6 +7044,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 # ============================================================
 
 func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
+    my int $call_ctx = $interp->{"next_call_context"};
+    $interp->{"next_call_context"} = 0;
+
     my scalar $params = $func_info->{"params"};
     my int $param_count = $func_info->{"param_count"};
     my scalar $body = $func_info->{"body"};
@@ -6891,6 +7070,8 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
 
     # Save local stack depth before binding params so throwing default values unwind cleanly
     my int $local_depth = size($interp->{"local_stack"});
+    my int $saved_active_ctx = $interp->{"active_call_context"};
+    $interp->{"active_call_context"} = $call_ctx;
     my scalar $result = undef;
 
     try {
@@ -6986,9 +7167,11 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
 
         # Execute body (skip if default-value expression triggered a signal)
         if ($interp->{"signal"} == SIG::NONE) {
+            $interp->{"active_call_context"} = $call_ctx;
             $result = eval_block($interp, $body, $func_env);
         }
     } catch ($e) {
+        $interp->{"active_call_context"} = $saved_active_ctx;
         # Always unwind dynamic local() bindings, call_stack and call_depth on throw
         interp_unwind_locals($interp, $local_depth);
         pop($interp->{"call_stack"});
@@ -7015,6 +7198,7 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
     # Restore local variables from dynamic scope stack
     interp_unwind_locals($interp, $local_depth);
 
+    $interp->{"active_call_context"} = $saved_active_ctx;
     pop($interp->{"call_stack"});
     $interp->{"call_depth"} = $interp->{"call_depth"} - 1;
     return $result;
@@ -7062,7 +7246,15 @@ func eval_bool(scalar $interp, scalar $node, scalar $env) scalar {
 # Extended Evaluator (sparse NI types > 37)
 # ============================================================
 
-func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) scalar {
+func eval_node_in_ctx(scalar $interp, scalar $node, scalar $env, int $call_ctx) scalar {
+    my int $saved = $interp->{"next_call_context"};
+    $interp->{"next_call_context"} = $call_ctx;
+    my scalar $res = eval_node($interp, $node, $env);
+    $interp->{"next_call_context"} = $saved;
+    return $res;
+}
+
+func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, int $eval_ctx) scalar {
 
     # --- Undef ---
     if ($type == NI::UNDEF) {
@@ -7082,7 +7274,8 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $init = undef;
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
-            $init = eval_node($interp, $node->{"init"}, $env);
+            my int $our_ctx = ($var_type == TI::ARRAY) ? 1 : (($var_type == TI::HASH) ? 2 : 0);
+            $init = eval_node_in_ctx($interp, $node->{"init"}, $env, $our_ctx);
             if ($interp->{"signal"} != SIG::NONE) { return undef; }
             if ($var_type == TI::ARRAY && ref($init) ne "ARRAY") {
                 if (!defined($init) || (ref($init) eq "HASH" && size(keys($init)) == 0)) {
@@ -7190,9 +7383,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     if ($type == NI::TERNARY) {
         my scalar $cond = eval_node($interp, $node->{"condition"}, $env);
         if (interp_is_truthy($interp, $cond)) {
-            return eval_node($interp, $node->{"true_expr"}, $env);
+            return eval_node_in_ctx($interp, $node->{"true_expr"}, $env, $eval_ctx);
         }
-        return eval_node($interp, $node->{"false_expr"}, $env);
+        return eval_node_in_ctx($interp, $node->{"false_expr"}, $env, $eval_ctx);
     }
 
     # --- Do-While Statement ---
@@ -7237,7 +7430,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
     if ($type == NI::FOREACH_STMT) {
         my str $label = $node->{"label"};
         my scalar $result = undef;
-        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $arr = eval_node_in_ctx($interp, $node->{"array"}, $env, 1);
         my int $arr_len = interp_arr_len($interp, $arr);
 
         # Determine iteration variable name
@@ -7260,7 +7453,6 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             my scalar $body_env = env_new($env);
             if ($has_lex_decl == 1 || $var_name eq "_") {
                 env_set($body_env, $var_name, $elem);
-                env_set($body_env, "_", $elem);
             } else {
                 my scalar $vslot = interp_find_var_slot($interp, $env, $var_name);
                 if (defined($vslot)) {
@@ -7274,7 +7466,6 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                 } else {
                     env_set($env, $var_name, $elem);
                 }
-                env_set($body_env, "_", $elem);
             }
 
             my int $should_break = 0;
@@ -7370,19 +7561,55 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                 push(@chained_args, $args[$cai]);
                 $cai = $cai + 1;
             }
+            $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $closure->{"__around_func__"}, \@chained_args);
         }
 
         if (ref($closure) eq "HASH" && exists($closure, "__orig_func__")) {
+            $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $closure->{"__orig_func__"}, \@args);
         }
 
         if (ref($closure) eq "HASH" && exists($closure, "params")) {
             # It's a function info hash (from anonymous func)
+            $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $closure, \@args);
         }
 
-        die("Cannot call non-function value");
+        my scalar $native_cl_res = undef;
+        my int $is_native_cl = 0;
+        my int $prev_c_ctx = 0;
+        my scalar $args_ref = \@args;
+        __C__ {
+            if (closure && !STRADA_IS_TAGGED_INT(closure) &&
+                (closure->type == STRADA_CLOSURE || closure->type == STRADA_CPOINTER)) {
+                int pctx = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0);
+                strada_decref(prev_c_ctx);
+                prev_c_ctx = strada_new_int(pctx);
+                strada_decref(is_native_cl);
+                is_native_cl = strada_new_int(1);
+                strada_set_call_context((int)strada_to_int(eval_ctx));
+            }
+        }
+        if ($is_native_cl == 1) {
+            try {
+                __C__ {
+                    strada_decref(native_cl_res);
+                    native_cl_res = strada_closure_call_array(closure, args_ref);
+                }
+            } catch ($e) {
+                __C__ {
+                    strada_set_call_context((int)strada_to_int(prev_c_ctx));
+                }
+                throw($e);
+            }
+            __C__ {
+                strada_set_call_context((int)strada_to_int(prev_c_ctx));
+            }
+            return $native_cl_res;
+        }
+
+        return undef;
     }
 
     # --- Anonymous Function ---
@@ -7414,20 +7641,13 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                 push(@result, $ri);
                 $ri = $ri + 1;
             }
-        } else {
-            # Descending range
-            my int $ri = $start;
-            while ($ri >= $end) {
-                push(@result, $ri);
-                $ri = $ri - 1;
-            }
         }
         return \@result;
     }
 
     # --- Map ---
     if ($type == NI::MAP) {
-        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $arr = eval_node_in_ctx($interp, $node->{"array"}, $env, 1);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $arr_len = interp_arr_len($interp, $arr);
@@ -7459,7 +7679,16 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                         last;
                     }
                 }
-                push(@result, $val);
+                if (ref($val) eq "ARRAY") {
+                    my int $vi = 0;
+                    my int $vn = interp_arr_len($interp, $val);
+                    while ($vi < $vn) {
+                        push(@result, interp_arr_get($interp, $val, $vi));
+                        $vi = $vi + 1;
+                    }
+                } else {
+                    push(@result, $val);
+                }
                 $mi = $mi + 1;
             }
         } catch ($mg_e) {
@@ -7473,7 +7702,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
     # --- Grep ---
     if ($type == NI::GREP) {
-        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $arr = eval_node_in_ctx($interp, $node->{"array"}, $env, 1);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $arr_len = interp_arr_len($interp, $arr);
@@ -7522,7 +7751,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
     # --- Sort ---
     if ($type == NI::SORT) {
-        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $arr = eval_node_in_ctx($interp, $node->{"array"}, $env, 1);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         my scalar $block = $node->{"block"};
         my int $srt_has_blk = 0;
@@ -7655,15 +7884,37 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $vars = $node->{"vars"};
         my int $var_count = $node->{"var_count"};
         my int $is_decl = $node->{"is_decl"};
-        my scalar $init = eval_node($interp, $node->{"init"}, $env);
+        my scalar $init = eval_node_in_ctx($interp, $node->{"init"}, $env, 1);
         my int $init_sz = (ref($init) eq "ARRAY") ? interp_arr_len($interp, $init) : 0;
 
         my int $di = 0;
         while ($di < $var_count) {
             my scalar $var_info = $vars->[$di];
             my str $vname = $var_info->{"name"};
+            my str $vsigil = "";
+            if (exists($var_info, "sigil") && defined($var_info->{"sigil"})) {
+                $vsigil = "" . $var_info->{"sigil"};
+            }
             my scalar $val = undef;
-            if ($di < $init_sz) {
+            if ($vsigil eq "%" && $di == $var_count - 1) {
+                my hash %slurp_h = ();
+                my int $dj = $di;
+                while ($dj + 1 < $init_sz) {
+                    my str $hk = "" . interp_arr_get($interp, $init, $dj);
+                    my scalar $hv = interp_arr_get($interp, $init, $dj + 1);
+                    $slurp_h{$hk} = $hv;
+                    $dj = $dj + 2;
+                }
+                $val = \%slurp_h;
+            } elsif ($vsigil eq "@") {
+                my array @slurp_a = ();
+                my int $dj = $di;
+                while ($dj < $init_sz) {
+                    push(@slurp_a, interp_arr_get($interp, $init, $dj));
+                    $dj = $dj + 1;
+                }
+                $val = \@slurp_a;
+            } elsif ($di < $init_sz) {
                 $val = interp_arr_get($interp, $init, $di);
             }
 
@@ -7844,6 +8095,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             while ($pi < size($parents)) {
                 my scalar $fi = interp_resolve_method($interp, $parents->[$pi], $method);
                 if (defined($fi)) {
+                    $interp->{"next_call_context"} = $eval_ctx;
                     return call_user_func($interp, $fi, \@args);
                 }
                 $pi = $pi + 1;
@@ -7860,6 +8112,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
                         push(@al_args, $args[$ali]);
                         $ali = $ali + 1;
                     }
+                    $interp->{"next_call_context"} = $eval_ctx;
                     return call_user_func($interp, $al_fi, \@al_args);
                 }
                 $pi = $pi + 1;
@@ -7908,6 +8161,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             }
         }
 
+        $interp->{"next_call_context"} = $eval_ctx;
         return interp_invoke_method_call($interp, $obj, $method, \@args, $env, 1);
     }
 
@@ -8102,6 +8356,10 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 }
 
 func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
+    my int $eval_ctx = $interp->{"next_call_context"};
+    if ($eval_ctx != 0) {
+        $interp->{"next_call_context"} = 0;
+    }
     if (!defined($node)) {
         return undef;
     }
@@ -8109,7 +8367,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     my int $type = $node->{"type"};
 
     if ($type > 37) {
-        return eval_node_extended($interp, $node, $env, $type);
+        return eval_node_extended($interp, $node, $env, $type, $eval_ctx);
     }
 
     # --- Variables (most frequently evaluated - check first) ---
@@ -8247,7 +8505,8 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my scalar $init = undef;
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
-            $init = eval_node($interp, $node->{"init"}, $env);
+            my int $decl_ctx = ($var_type == TI::ARRAY) ? 1 : (($var_type == TI::HASH) ? 2 : 0);
+            $init = eval_node_in_ctx($interp, $node->{"init"}, $env, $decl_ctx);
             if ($interp->{"signal"} != SIG::NONE) { return undef; }
             # Array variable initialized with empty () produces empty hash from parser,
             # undef produces empty array, and scalar init wraps as 1-element array
@@ -8429,7 +8688,13 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             eval_lvalue_write($interp, $prep, $rhs, $env);
             return $rhs;
         }
-        $rhs = eval_node($interp, $node->{"value"}, $env);
+        my int $assign_ctx = 0;
+        if (defined($target) && $target->{"type"} == NI::VARIABLE) {
+            my str $asig = $target->{"sigil"};
+            if ($asig eq "@") { $assign_ctx = 1; }
+            elsif ($asig eq "%") { $assign_ctx = 2; }
+        }
+        $rhs = eval_node_in_ctx($interp, $node->{"value"}, $env, $assign_ctx);
         if ($interp->{"signal"} != SIG::NONE) { return undef; }
         assign_to($interp, $target, $rhs, $env);
         return $rhs;
@@ -8584,17 +8849,6 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 }
             }
             if ($should_break) { last; }
-
-            # Snapshot for_env so closures capturing this iteration's loop var don't see later updates
-            my scalar $next_for_env = env_new($env);
-            my scalar $fkeys = keys($for_env->{"vars"});
-            my int $fki = 0;
-            while ($fki < size($fkeys)) {
-                my str $fk = $fkeys->[$fki];
-                $next_for_env->{"vars"}->{$fk} = $for_env->{"vars"}->{$fk};
-                $fki = $fki + 1;
-            }
-            $for_env = $next_for_env;
 
             # Update
             if (defined($node->{"update"}) && $node->{"update"} != 0) {
@@ -9029,6 +9283,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # Check user-defined functions
         my scalar $func_info = interp_get_func($interp, $name);
         if (defined($func_info)) {
+            $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $func_info, \@args);
         }
 
@@ -9037,12 +9292,14 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             my str $sanitized = sanitize_name($name);
             $func_info = interp_get_func($interp, $sanitized);
             if (defined($func_info)) {
+                $interp->{"next_call_context"} = $eval_ctx;
                 return call_user_func($interp, $func_info, \@args);
             }
 
             # Check native functions (import_lib)
             if (exists($interp->{"native_funcs"}, $sanitized)) {
                 my scalar $nf = $interp->{"native_funcs"}->{$sanitized};
+                $interp->{"next_call_context"} = $eval_ctx;
                 return call_native($interp, $nf, \@args);
             }
         }
@@ -9050,6 +9307,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # Check native functions by original name
         if (exists($interp->{"native_funcs"}, $name)) {
             my scalar $nf = $interp->{"native_funcs"}->{$name};
+            $interp->{"next_call_context"} = $eval_ctx;
             return call_native($interp, $nf, \@args);
         }
 
@@ -9060,6 +9318,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         while ($fki < size($fkeys)) {
             my str $fk = $fkeys->[$fki];
             if (length($fk) > length($suffix) && substr($fk, length($fk) - length($suffix), length($suffix)) eq $suffix) {
+                $interp->{"next_call_context"} = $eval_ctx;
                 return call_user_func($interp, $interp->{"functions"}->{$fk}, \@args);
             }
             $fki = $fki + 1;
@@ -9108,6 +9367,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
+        $interp->{"next_call_context"} = $eval_ctx;
         return interp_invoke_method_call($interp, $obj, $method, \@args, $env, 0);
     }
 
@@ -9449,6 +9709,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my str $pkg = interp_resolve_obj_pkg($obj);
         my array @args = ();
         push(@args, $obj);
+        $interp->{"next_call_context"} = $eval_ctx;
         return interp_dispatch_method($interp, $obj, $pkg, $field, \@args, 1, "Undefined field/method: ");
     }
 

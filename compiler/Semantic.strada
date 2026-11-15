@@ -137,8 +137,15 @@ func scope_lookup_var(scalar $scope, str $name) scalar {
 func scope_lookup_var_sigil(scalar $scope, str $name, str $sigil) scalar {
     my hash %result = ();
     my scalar $current = $scope;
+    my str $skey = $sigil . ":" . $name;
     while (is_valid_scope($current) == 1) {
         my scalar $vars = $current->{"vars"};
+        my scalar $svar_info = $vars->{$skey};
+        if (is_valid_node($svar_info) == 1) {
+            $result{"found"} = 1;
+            $result{"info"} = $svar_info;
+            return \%result;
+        }
         my scalar $var_info = $vars->{$name};
         if (is_valid_node($var_info) == 1) {
             if ($var_info->{"sigil"} eq $sigil) {
@@ -186,8 +193,14 @@ func scope_mark_used(scalar $scope, str $name) void {
 # Mark a variable with matching sigil as used
 func scope_mark_used_sigil(scalar $scope, str $name, str $sigil) void {
     my scalar $current = $scope;
+    my str $skey = $sigil . ":" . $name;
     while (is_valid_scope($current) == 1) {
         my scalar $vars = $current->{"vars"};
+        my scalar $svar_info = $vars->{$skey};
+        if (is_valid_node($svar_info) == 1) {
+            $svar_info->{"used"} = 1;
+            return;
+        }
         my scalar $var_info = $vars->{$name};
         if (is_valid_node($var_info) == 1) {
             if ($var_info->{"sigil"} eq $sigil) {
@@ -227,7 +240,11 @@ func scope_check_unused(scalar $ctx, scalar $scope) void {
         my str $name = $var_names->[$i];
         my scalar $info = $vars->{$name};
         if ($info->{"used"} == 0) {
-            semantic_warn($ctx, "unused variable '" . $info->{"sigil"} . $name . "'", $info->{"line"});
+            my str $wname = $name;
+            if (length($wname) > 2 && substr($wname, 1, 1) eq ":") {
+                $wname = substr($wname, 2, length($wname) - 2);
+            }
+            semantic_warn($ctx, "unused variable '" . $info->{"sigil"} . $wname . "'", $info->{"line"});
         }
     }
 }
@@ -1052,10 +1069,32 @@ func sem_sanitize_pkg(str $pkg) str {
     return $res;
 }
 
+func sem_our_key(str $opkg, str $sigil, str $name) str {
+    if ($sigil eq "@") {
+        return $opkg . "::@" . $name;
+    }
+    if ($sigil eq "%") {
+        return $opkg . "::%" . $name;
+    }
+    return $opkg . "::" . $name;
+}
+
+func sem_our_cname(str $opkg, str $sigil, str $name) str {
+    my str $sp = sem_sanitize_pkg($opkg);
+    if ($sigil eq "@") {
+        return "__our_arr_" . $sp . "__" . $name;
+    }
+    if ($sigil eq "%") {
+        return "__our_hash_" . $sp . "__" . $name;
+    }
+    return "__our_" . $sp . "__" . $name;
+}
+
 func sem_alloc_local_cname(scalar $ctx, scalar $scope, str $name) str {
     my scalar $p = $scope->{"parent"};
     while (is_valid_scope($p) == 1) {
-        if (exists($p->{"vars"}->{$name})) {
+        my scalar $pvars = $p->{"vars"};
+        if (exists($pvars->{$name}) || exists($pvars->{"$:" . $name}) || exists($pvars->{"@:" . $name}) || exists($pvars->{"%:" . $name})) {
             my int $id = ($ctx->{"local_shadow_id"} + 0) + 1;
             $ctx->{"local_shadow_id"} = $id;
             return $name . "__lsh" . $id;
@@ -1091,8 +1130,8 @@ func register_globals(scalar $ctx, scalar $ast) void {
         if ($gvar_type == NODE_OUR_DECL()) {
             my str $opkg = "" . $gvar->{"package"};
             if (length($opkg) == 0) { $opkg = "main"; }
-            $gvar->{"our_key"} = $opkg . "::" . $name;
-            $gvar->{"name"} = "__our_" . sem_sanitize_pkg($opkg) . "__" . $name;
+            $gvar->{"our_key"} = sem_our_key($opkg, $sigil, $name);
+            $gvar->{"name"} = sem_our_cname($opkg, $sigil, $name);
         }
 
         # File-level `my`/const variables are lexical, as in Perl: the same
@@ -2274,8 +2313,11 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
-        if (exists($scope_vars->{$name})) {
+        if (exists($scope_vars->{$name}) || exists($scope_vars->{$sigil . ":" . $name})) {
             my scalar $prev_info = $scope_vars->{$name};
+            if (!defined($prev_info)) {
+                $prev_info = $scope_vars->{$sigil . ":" . $name};
+            }
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
         }
@@ -2370,8 +2412,8 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my int $var_type = $stmt->{"var_type"};
         my str $opkg = "" . $ctx->{"cur_pkg"};
         if (length($opkg) == 0) { $opkg = "main"; }
-        my str $our_key = $opkg . "::" . $name;
-        my str $our_cname = "__our_" . sem_sanitize_pkg($opkg) . "__" . $name;
+        my str $our_key = sem_our_key($opkg, $sigil, $name);
+        my str $our_cname = sem_our_cname($opkg, $sigil, $name);
 
         my scalar $current_scope = $ctx->{"scope"};
         my str $our_shadow = sem_alloc_local_cname($ctx, $current_scope, $name);
@@ -2383,9 +2425,11 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         $stmt->{"our_key"} = $our_key;
         $stmt->{"name"} = $our_cname;
 
-        # Add variable to scope so subsequent references are valid
-        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
-        my scalar $oinfo = $current_scope->{"vars"}->{$name};
+        # Add variable to scope keyed by sigil:name so `our $x`, `our @x`,
+        # `our %x` in the same function/block never clobber one another.
+        my str $skey = $sigil . ":" . $name;
+        scope_add_var($current_scope, $skey, $sigil, $var_type, $line);
+        my scalar $oinfo = $current_scope->{"vars"}->{$skey};
         $oinfo->{"is_our"} = 1;
         $oinfo->{"c_name"} = $our_cname;
         $oinfo->{"our_key"} = $our_key;
@@ -2876,6 +2920,8 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     for (my int $ii = 0; $ii < $inh_n; $ii = $ii + 1) {
         my str $ich = "" . $inhs->[$ii]->{"child"};
         if (length($ich) > 0) { $ctx->{"known_packages"}->{$ich} = 1; }
+        my str $ipar = "" . $inhs->[$ii]->{"parent"};
+        if (length($ipar) > 0) { $ctx->{"known_packages"}->{$ipar} = 1; }
     }
     register_globals($ctx, $ast);
     register_import_lib_functions($ctx, $ast);

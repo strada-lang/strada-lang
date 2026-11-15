@@ -658,6 +658,7 @@ StradaValue* strada_new_str_lit(const char *s, size_t len);  /* String literal (
 StradaValue* strada_new_str_len_utf8(const char *s, size_t len);  /* Set SVf_UTF8 flag */
 StradaValue* strada_new_str_charflag(const char *s, const char *flag_src); /* UTF-8 flag iff flag_src is valid UTF-8 */
 StradaValue* strada_new_str_charflag_len(const char *s, size_t len, const char *flag_src, size_t flag_len);
+StradaValue* strada_new_str_len_utf8_flag(const char *s, size_t len, int want_utf8);
 void         strada_set_utf8_flag(StradaValue *sv, int on);     /* Toggle UTF-8 flag */
 void         strada_array_set_utf8_flag(StradaValue *arr_sv, int on); /* Stamp every STRADA_STR element */
 size_t       byte_to_char_offset(const char *s, size_t byte_offset);
@@ -1002,6 +1003,7 @@ StradaValue* strada_new_bool(int b);
 int strada_is_bool(StradaValue *sv);
 int strada_rindex(const char *haystack, const char *needle);
 int strada_rindex_from(const char *haystack, const char *needle, int max_char_pos);
+int64_t strada_rindex_sv(StradaValue *haystack_sv, StradaValue *needle_sv, int64_t offset, int has_offset);
 char* strada_upper(const char *str);
 char* strada_lower(const char *str);
 char* strada_uc(const char *str);  /* Alias for upper */
@@ -1014,12 +1016,19 @@ char* strada_uc_ascii(const char *str);
 char* strada_lc_ascii(const char *str);
 char* strada_ucfirst_ascii(const char *str);
 char* strada_lcfirst_ascii(const char *str);
+StradaValue* strada_uc_sv(StradaValue *sv);
+StradaValue* strada_lc_sv(StradaValue *sv);
+StradaValue* strada_ucfirst_sv(StradaValue *sv);
+StradaValue* strada_lcfirst_sv(StradaValue *sv);
 char* strada_trim(const char *str);
 char* strada_ltrim(const char *str);
 char* strada_rtrim(const char *str);
+StradaValue* strada_trim_sv(StradaValue *sv, int mode);
 char* strada_reverse(const char *str);
 StradaValue* strada_reverse_sv(StradaValue *sv);  /* Generic reverse for strings and arrays */
 char* strada_repeat(const char *str, int count);
+StradaValue* strada_repeat_sv(StradaValue *sv, int64_t count);
+StradaValue* strada_replace_sv(StradaValue *str_sv, StradaValue *find_sv, StradaValue *repl_sv, int global);
 char* strada_chr(int code);
 StradaValue* strada_chr_sv(int code);  /* Binary-safe version that handles NUL bytes */
 StradaValue* strada_byte_chr(int code); /* core::byte(n): single raw byte, never UTF-8 */
@@ -1667,6 +1676,7 @@ char* strada_regex_replace(const char *str, const char *pattern, const char *rep
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
 int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement, const char *flags, int global, char **result_out);
 int strada_regex_replace_capture_len(const char *str, size_t subject_length, int is_utf8, const char *pattern, const char *replacement, const char *flags, int global, char **result_out, size_t *out_len);
+StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv, StradaValue *repl_sv, const char *flags, int global);
 StradaArray* strada_string_split(const char *str, const char *delim);
 StradaArray* strada_regex_split(const char *str, const char *pattern);
 StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit);

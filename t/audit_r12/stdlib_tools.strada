@@ -1,0 +1,26 @@
+use lib "lib";
+use Forma;
+
+func main() int {
+    # R12-LIB1: Forma::stage0_is_escaped must match case-sensitive "dump " dispatch in render_string
+    my str $xss = "<script>alert(1)</script>";
+    Forma::register_helper("DUMP", func(scalar $args, scalar $vars) str {
+        return $vars->{"payload"};
+    });
+
+    my str $out_upper = Forma::render_string_safe("{{DUMP payload | upper}}", {"payload" => $xss});
+    if (index($out_upper, "<SCRIPT>") >= 0 || index($out_upper, "&lt;SCRIPT&gt;") < 0) {
+        say("FAIL forma uppercase DUMP bypassed escape: " . $out_upper);
+        return 1;
+    }
+
+    my str $out_dump = Forma::render_string_safe("{{dump item | trim}}", {"item" => "<b>x</b>"});
+    if (index($out_dump, "<pre class=\"forma-dump\">") < 0 || index($out_dump, "&lt;b&gt;") < 0) {
+        say("FAIL forma lowercase dump broken: " . $out_dump);
+        return 1;
+    }
+
+    Forma::clear_helpers();
+    say("AUDIT_R12_STDLIB_TOOLS_OK");
+    return 0;
+}

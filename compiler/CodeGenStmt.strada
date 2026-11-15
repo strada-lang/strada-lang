@@ -59,12 +59,13 @@ func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) v
 # A bare block or an if/elsif/else block: `local` inside it is undone when the
 # block ends, as in Perl. (Loops restore per iteration, and the function exit
 # restores everything, but a plain block restored nothing: the localized value
-# stayed in force for the rest of the function.) A one-statement block is left
-# alone: that is the shape of `local $x = 1 if COND;`, whose local belongs to
-# the enclosing scope.
+# stayed in force for the rest of the function.) Statement-modifier blocks
+# (e.g. `local $x = 1 if COND;`) are marked `is_modifier_block` so their local
+# still belongs to the enclosing scope, while single-statement explicit `{ }`
+# blocks are scoped normally.
 func gen_block_local_scoped(scalar $cg, scalar $block) void {
     my int $bl_scoped = 0;
-    if ($block && $block->{"type"} == NODE_BLOCK() && $block->{"statement_count"} > 1) {
+    if ($block && $block->{"type"} == NODE_BLOCK() && ($block->{"is_modifier_block"} + 0) != 1) {
         $bl_scoped = stmt_has_local($block);
     }
     if ($bl_scoped != 1) {
@@ -79,6 +80,182 @@ func gen_block_local_scoped(scalar $cg, scalar $block) void {
     gen_block($cg, $block);
     local_mark_pop($cg);
     emit($cg, " strada_local_restore_to(" . $bl_var . "); }");
+}
+
+func cg_our_key(str $pkg, str $sigil, str $name) str {
+    if ($sigil eq "@") { return $pkg . "::@" . $name; }
+    if ($sigil eq "%") { return $pkg . "::%" . $name; }
+    return $pkg . "::" . $name;
+}
+
+func resolve_our_decl_key(scalar $node, str $default_pkg) str {
+    my str $our_key = "" . $node->{"our_key"};
+    if (length($our_key) > 0) { return $our_key; }
+    my str $pkg = $default_pkg;
+    if (length($pkg) == 0) { $pkg = "main"; }
+    return cg_our_key($pkg, "" . $node->{"sigil"}, "" . $node->{"name"});
+}
+
+func collect_import_oop_inits_from(scalar $items, int $count, str $fallback_key, scalar $seen, scalar $res) void {
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $item = $items->[$i];
+        my scalar $inits = $item->{"oop_init_funcs"};
+        my int $added = 0;
+        if ($inits) {
+            my int $ic = size($inits);
+            my int $j = 0;
+            while ($j < $ic) {
+                my str $fn = "" . $inits->[$j];
+                if (length($fn) > 0 && ($seen->{$fn} + 0) == 0) {
+                    $seen->{$fn} = 1;
+                    push($res, $fn);
+                }
+                if (length($fn) > 0) { $added = 1; }
+                $j = $j + 1;
+            }
+        }
+        if ($added == 0) {
+            my str $fb = "" . $item->{$fallback_key};
+            if (length($fb) == 0 && defined($item->{"arch_name"})) {
+                $fb = "" . $item->{"arch_name"};
+            }
+            if (length($fb) > 0) {
+                my str $fn = "__" . sanitize_name($fb) . "_oop_init";
+                if (($seen->{$fn} + 0) == 0) {
+                    $seen->{$fn} = 1;
+                    push($res, $fn);
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+}
+
+func collect_import_oop_inits(scalar $cg) scalar {
+    my array @res = ();
+    my hash %seen = ();
+    my int $impo_count = $cg->{"import_object_count"} + 0;
+    if ($impo_count > 0) {
+        collect_import_oop_inits_from($cg->{"import_objects"}, $impo_count, "obj_name", \%seen, \@res);
+    }
+    my int $impa_count = $cg->{"import_archive_count"} + 0;
+    if ($impa_count > 0) {
+        collect_import_oop_inits_from($cg->{"import_archives"}, $impa_count, "lib_name", \%seen, \@res);
+    }
+    return \@res;
+}
+
+func resolve_var_decl_struct_name(scalar $cg, scalar $stmt) str {
+    my str $var_st_name = "" . $stmt->{"struct_name"};
+    if (length($var_st_name) == 0 && $stmt->{"init"}) {
+        my scalar $sinit = $stmt->{"init"};
+        if ($sinit->{"type"} == NODE_CALL()) {
+            my scalar $sfi = resolve_callee_func_info($cg, "" . $sinit->{"name"});
+            if ($sfi) { $var_st_name = "" . $sfi->{"return_struct_name"}; }
+        } elsif ($sinit->{"type"} == NODE_VARIABLE()) {
+            $var_st_name = "" . $cg->{"struct_vars"}->{escape_c_keyword($sinit->{"name"})};
+        }
+    }
+    return $var_st_name;
+}
+
+# When func_has_goto == 1, hoist top-level my/const slot declarations and
+# cleanup registrations to the entry of their enclosing C block so any goto
+# within the block neither skips initialization/cleanup_push nor re-pushes
+# cleanup slots / leaks prior values on backward jumps.
+func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
+    my scalar $saved = $cg->{"predeclared_goto_vars"};
+    if (($cg->{"func_has_goto"} + 0) != 1) {
+        return $saved;
+    }
+    my hash %hoisted = ();
+    $cg->{"predeclared_goto_vars"} = \%hoisted;
+    if (!$stmts || $stmt_count <= 0) {
+        return $saved;
+    }
+    my int $hi = 0;
+    while ($hi < $stmt_count) {
+        my scalar $hs = $stmts->[$hi];
+        if ($hs) {
+            my int $ht = $hs->{"type"} + 0;
+            if ($ht == NODE_VAR_DECL() || $ht == NODE_CONST_DECL()) {
+                my str $c_name = escape_c_keyword($hs->{"name"});
+                if (($hoisted{$c_name} + 0) == 0) {
+                    my int $box_scalar = 0;
+                    if ($ht == NODE_VAR_DECL()) {
+                        my str $sigil = $hs->{"sigil"};
+                        my int $vt = $hs->{"var_type"};
+                        my str $vst = resolve_var_decl_struct_name($cg, $hs);
+                        if ($sigil ne "%" && $sigil ne "@" && $vt != TYPE_HASH() && $vt != TYPE_ARRAY()) {
+                            if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($vst) == 0) {
+                                $box_scalar = 1;
+                            }
+                        }
+                    }
+                    if ($box_scalar == 1) {
+                        emit_indent($cg);
+                        if ($cg->{"func_has_try"} == 1) {
+                            emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc();\n");
+                        } else {
+                            emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc();\n");
+                        }
+                        emit_indent($cg);
+                        emit($cg, "(*__cell_" . $c_name . ") = NULL;\n");
+                        my str $decl_track = "@cell:" . $c_name;
+                        scope_track_var($cg, $decl_track);
+                        if (cleanup_push_useful($cg) == 1) {
+                            emit_indent($cg);
+                            emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . ");\n");
+                        } else {
+                            scope_mark_no_push($cg, $decl_track);
+                        }
+                        $hoisted{$c_name} = 2;
+                    } else {
+                        emit_indent($cg);
+                        emit_sv_ptr_decl($cg, $c_name);
+                        emit($cg, " = NULL;\n");
+                        scope_track_var($cg, $c_name);
+                        if (cleanup_push_useful($cg) == 1) {
+                            emit_indent($cg);
+                            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                        } else {
+                            scope_mark_no_push($cg, $c_name);
+                        }
+                        $hoisted{$c_name} = 1;
+                    }
+                }
+            }
+        }
+        $hi = $hi + 1;
+    }
+    return $saved;
+}
+
+func goto_hoist_restore(scalar $cg, scalar $saved) void {
+    $cg->{"predeclared_goto_vars"} = $saved;
+}
+
+func emit_var_decl_target_slot(scalar $cg, str $c_name, str $target_lval, int $box_scalar, int $predecl) void {
+    if ($predecl > 0) {
+        emit($cg, "strada_decref(" . $target_lval . "); " . $target_lval . " = NULL;\n");
+        emit_indent($cg);
+        emit($cg, $target_lval);
+        return;
+    }
+    if ($box_scalar == 1) {
+        if ($cg->{"func_has_try"} == 1) {
+            emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc(); ");
+        } else {
+            emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc(); ");
+        }
+        if (cleanup_push_useful($cg) == 1) {
+            emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . "); ");
+        }
+        emit($cg, $target_lval);
+    } else {
+        emit_var_decl_slot_prologue($cg, $c_name);
+    }
 }
 
 func copy_type_map(scalar $src) scalar {
@@ -282,11 +459,14 @@ func gen_block(scalar $cg, scalar $block) void {
     my scalar $saved_struct_vars = copy_type_map($cg->{"struct_vars"});
 
     my scalar $stmts = $block->{"statements"};
+    my int $stmt_cnt = $block->{"statement_count"};
+    my scalar $saved_goto_predecl = goto_hoist_stmts_decls($cg, $stmts, $stmt_cnt);
     my int $i = 0;
-    while ($i < $block->{"statement_count"}) {
+    while ($i < $stmt_cnt) {
         gen_statement($cg, $stmts->[$i]);
         $i = $i + 1;
     }
+    goto_hoist_restore($cg, $saved_goto_predecl);
 
     $cg->{"int_vars"} = \%saved_int_vars;
     $cg->{"num_vars"} = \%saved_num_vars;
@@ -402,19 +582,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         # Track native struct type before declaring variable (affects cell boxing)
-        my str $var_st_name = "" . $stmt->{"struct_name"};
-        if (length($var_st_name) == 0 && $stmt->{"init"}) {
-            my scalar $sinit = $stmt->{"init"};
-            if ($sinit->{"type"} == NODE_CALL()) {
-                my scalar $sfi = resolve_callee_func_info($cg, "" . $sinit->{"name"});
-                if ($sfi) { $var_st_name = "" . $sfi->{"return_struct_name"}; }
-            } elsif ($sinit->{"type"} == NODE_VARIABLE()) {
-                $var_st_name = "" . $cg->{"struct_vars"}->{escape_c_keyword($sinit->{"name"})};
-            }
-        }
+        my str $var_st_name = resolve_var_decl_struct_name($cg, $stmt);
+        my int $predecl = $cg->{"predeclared_goto_vars"}->{$c_name} + 0;
         my int $box_scalar = 0;
         my str $target_lval = $c_name;
-        if ($sigil ne "%" && $sigil ne "@" && $var_type != TYPE_HASH() && $var_type != TYPE_ARRAY()) {
+        if ($predecl == 2) {
+            $box_scalar = 1;
+            $target_lval = "(*__cell_" . $c_name . ")";
+        } elsif ($predecl == 0 && $sigil ne "%" && $sigil ne "@" && $var_type != TYPE_HASH() && $var_type != TYPE_ARRAY()) {
             if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($var_st_name) == 0) {
                 $box_scalar = 1;
                 $target_lval = "(*__cell_" . $c_name . ")";
@@ -423,17 +598,19 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # Track the slot (and whether its cleanup push was elided) BEFORE
         # evaluating $init so any throw/return/goto/loop-control inside the
         # initializer sees the exact runtime cleanup stack state.
-        my str $decl_track = $c_name;
-        if ($box_scalar == 1) {
-            $decl_track = "@cell:" . $c_name;
-        }
-        scope_track_var($cg, $decl_track);
-        if (cleanup_push_useful($cg) == 0) {
-            scope_mark_no_push($cg, $decl_track);
+        if ($predecl == 0) {
+            my str $decl_track = $c_name;
+            if ($box_scalar == 1) {
+                $decl_track = "@cell:" . $c_name;
+            }
+            scope_track_var($cg, $decl_track);
+            if (cleanup_push_useful($cg) == 0) {
+                scope_mark_no_push($cg, $decl_track);
+            }
         }
 
         if ($sigil eq "%" || $var_type == TYPE_HASH()) {
-            emit_var_decl_slot_prologue($cg, $c_name);
+            emit_var_decl_target_slot($cg, $c_name, $target_lval, 0, $predecl);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 my scalar $init = $stmt->{"init"};
@@ -492,7 +669,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, ")");
             }
         } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
-            emit_var_decl_slot_prologue($cg, $c_name);
+            emit_var_decl_target_slot($cg, $c_name, $target_lval, 0, $predecl);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 # Handle empty () which parser returns as anon_hash
@@ -587,19 +764,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, ")");
             }
         } else {
-            if ($box_scalar == 1) {
-                if ($cg->{"func_has_try"} == 1) {
-                    emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc(); ");
-                } else {
-                    emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc(); ");
-                }
-                if (cleanup_push_useful($cg) == 1) {
-                    emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . "); ");
-                }
-                emit($cg, "(*__cell_" . $c_name . ")");
-            } else {
-                emit_var_decl_slot_prologue($cg, $c_name);
-            }
+            emit_var_decl_target_slot($cg, $c_name, $target_lval, $box_scalar, $predecl);
             my str $saved_decl_boxed = "" . $cg->{"declaring_boxed_var"};
             if ($box_scalar == 1) {
                 $cg->{"declaring_boxed_var"} = $c_name;
@@ -746,13 +911,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"active_boxed_vars"}->{$c_name} = 0;
         $cg->{"func_locals_seen"}->{$c_name} = 1;
 
-        # Track variable and push-elision state before evaluating $init
-        scope_track_var($cg, $c_name);
+        my int $cd_predecl = $cg->{"predeclared_goto_vars"}->{$c_name} + 0;
+        if ($cd_predecl > 0) {
+            emit_indent($cg);
+            emit($cg, "strada_decref(" . $c_name . "); " . $c_name . " = NULL;\n");
+            emit_indent($cg);
+            emit($cg, $c_name);
+        } else {
+            # Track variable and push-elision state before evaluating $init
+            scope_track_var($cg, $c_name);
 
-        emit_indent($cg);
-        my int $cd_pushed = emit_var_decl_slot_prologue($cg, $c_name);
-        if ($cd_pushed == 0) {
-            scope_mark_no_push($cg, $c_name);
+            emit_indent($cg);
+            my int $cd_pushed = emit_var_decl_slot_prologue($cg, $c_name);
+            if ($cd_pushed == 0) {
+                scope_mark_no_push($cg, $c_name);
+            }
         }
         emit($cg, " = ");
         gen_expression($cg, $init);
@@ -765,14 +938,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my str $var_name = $stmt->{"name"};
         my str $c_name = escape_c_keyword($var_name);
         my str $sigil = $stmt->{"sigil"};
-        my str $our_key = "" . $stmt->{"our_key"};
-        if (length($our_key) == 0) {
-            my str $pkg = $cg->{"package"};
-            if (length($pkg) == 0) {
-                $pkg = "main";
-            }
-            $our_key = $pkg . "::" . $var_name;
-        }
+        my str $our_key = resolve_our_decl_key($stmt, "" . $cg->{"package"});
 
         if ($sigil eq "@" || $sigil eq "%") {
             # Array/hash our: create local C variable backed by global registry
@@ -854,13 +1020,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my str $var_name = $stmt->{"name"};
         my str $c_name = escape_c_keyword($var_name);
         my str $sigil = $stmt->{"sigil"};
+        my str $loc_sigil = $sigil;
+        if ($stmt->{"is_hash_elem"} == 1) {
+            $loc_sigil = "%";
+        }
 
         # Determine package-qualified name (supporting local $Pkg::var and local %Pkg::h{k}!)
         my str $pkg = $cg->{"package"};
         if (length($pkg) == 0) {
             $pkg = "main";
         }
-        my str $our_key = $pkg . "::" . $var_name;
+        my str $our_key = cg_our_key($pkg, $loc_sigil, $var_name);
         my int $is_global_hash = 0;
 
         my scalar $our_vars_ref = $cg->{"our_vars"};
@@ -869,7 +1039,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $our_key = "" . $stmt->{"our_key"};
             $is_global_hash = 1;
         } elsif (index($var_name, "::") >= 0) {
-            $our_key = $var_name;
+            my int $rcol = rindex($var_name, "::");
+            my str $qpkg = substr($var_name, 0, $rcol);
+            my str $qnm = substr($var_name, $rcol + 2, length($var_name) - $rcol - 2);
+            $our_key = cg_our_key($qpkg, $loc_sigil, $qnm);
             $is_global_hash = 1;
         } elsif (length($our_check) > 0) {
             $our_key = $our_check;
@@ -1316,10 +1489,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, ") {\n");
         }
         indent($cg);
-        scope_push($cg);
         if (length($label) > 0) {
-            $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
+            $cg->{"label_next_depths"}->{$label} = $cg->{"loop_break_depth"};
         }
+        scope_push($cg);
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             my int $wt_id = $cg->{"tmp_counter"} + 0;
             $cg->{"tmp_counter"} = $wt_id + 1;
@@ -1360,11 +1533,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my scalar $w_saved_sv = copy_type_map($cg->{"struct_vars"});
         my int $w_shadow = our_shadow_mark($cg);
         my scalar $stmts = $body->{"statements"};
+        my int $w_cnt = $body->{"statement_count"};
+        my scalar $w_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $w_cnt);
         my int $i = 0;
-        while ($i < $body->{"statement_count"}) {
+        while ($i < $w_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
+        goto_hoist_restore($cg, $w_saved_goto);
         $cg->{"int_vars"} = $w_saved_iv;
         $cg->{"num_vars"} = $w_saved_nv;
         $cg->{"active_boxed_vars"} = $w_saved_bv;
@@ -1372,12 +1548,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"known_types"} = $w_saved_kt;
         $cg->{"struct_vars"} = $w_saved_sv;
         our_shadow_restore($cg, $w_shadow);
-
-        if (length($label) > 0) {
-            emit_indent($cg);
-            emit($cg, $label);
-            emit($cg, "_continue: ;\n");
-        }
 
         if ($while_body_has_local == 1) {
             local_mark_pop($cg);
@@ -1389,6 +1559,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         scope_pop($cg);
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
         dedent($cg);
         emit_indent($cg);
         emit($cg, "}\n");
@@ -1447,10 +1622,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit_indent($cg);
         emit($cg, "do {\n");
         indent($cg);
-        scope_push($cg);
         if (length($label) > 0) {
-            $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
+            $cg->{"label_next_depths"}->{$label} = $cg->{"loop_break_depth"};
         }
+        scope_push($cg);
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             my int $wt_id = $cg->{"tmp_counter"} + 0;
             $cg->{"tmp_counter"} = $wt_id + 1;
@@ -1494,11 +1669,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my scalar $dw_saved_sv = copy_type_map($cg->{"struct_vars"});
         my int $dw_shadow = our_shadow_mark($cg);
         my scalar $stmts = $body->{"statements"};
+        my int $dw_cnt = $body->{"statement_count"};
+        my scalar $dw_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $dw_cnt);
         my int $i = 0;
-        while ($i < $body->{"statement_count"}) {
+        while ($i < $dw_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
+        goto_hoist_restore($cg, $dw_saved_goto);
         $cg->{"int_vars"} = $dw_saved_iv;
         $cg->{"num_vars"} = $dw_saved_nv;
         $cg->{"active_boxed_vars"} = $dw_saved_bv;
@@ -1506,12 +1684,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"known_types"} = $dw_saved_kt;
         $cg->{"struct_vars"} = $dw_saved_sv;
         our_shadow_restore($cg, $dw_shadow);
-
-        if (length($label) > 0) {
-            emit_indent($cg);
-            emit($cg, $label);
-            emit($cg, "_continue: ;\n");
-        }
 
         if ($dw_body_has_local == 1) {
             local_mark_pop($cg);
@@ -1522,6 +1694,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
         dedent($cg);
         emit_indent($cg);
         emit($cg, "} while (");
@@ -1587,10 +1764,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         invalidate_written_known_types($cg, $stmt->{"body"});
         my scalar $for_saved_kt = copy_type_map($cg->{"known_types"});
 
+        my scalar $saved_for_predecl = $cg->{"predeclared_goto_vars"};
         if ($stmt->{"init"}) {
             my scalar $init = $stmt->{"init"};
             if ($init->{"type"} == NODE_VAR_DECL()) {
                 $has_var_decl = 1;
+                my hash %empty_for_pd = ();
+                $cg->{"predeclared_goto_vars"} = \%empty_for_pd;
                 emit_indent($cg);
                 emit($cg, "{\n");
                 indent($cg);
@@ -1603,6 +1783,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 }
                 gen_statement($cg, $init);
             }
+        }
+        if (length($label) > 0) {
+            $cg->{"label_next_depths"}->{$label} = $cg->{"loop_break_depth"};
         }
 
         emit_indent($cg);
@@ -1638,9 +1821,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit($cg, ") {\n");
         indent($cg);
         scope_push($cg);
-        if (length($label) > 0) {
-            $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
-        }
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             my int $wt_id = $cg->{"tmp_counter"} + 0;
             $cg->{"tmp_counter"} = $wt_id + 1;
@@ -1675,17 +1855,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
         }
         my scalar $stmts = $body->{"statements"};
+        my int $for_cnt = $body->{"statement_count"};
+        my scalar $for_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $for_cnt);
         my int $i = 0;
-        while ($i < $body->{"statement_count"}) {
+        while ($i < $for_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
-
-        if (length($label) > 0) {
-            emit_indent($cg);
-            emit($cg, $label);
-            emit($cg, "_continue: ;\n");
-        }
+        goto_hoist_restore($cg, $for_saved_goto);
 
         if ($for_body_has_local == 1) {
             local_mark_pop($cg);
@@ -1696,6 +1873,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
         dedent($cg);
         emit_indent($cg);
         emit($cg, "}\n");
@@ -1708,6 +1890,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if ($has_var_decl == 1) {
             scope_pop($cg);
+            $cg->{"predeclared_goto_vars"} = $saved_for_predecl;
             dedent($cg);
             emit_indent($cg);
             emit($cg, "}\n");
@@ -1784,6 +1967,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             indent($cg);
             scope_push($cg);
             $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+            if (length($label) > 0) {
+                $cg->{"label_next_depths"}->{$label} = $cg->{"loop_break_depth"};
+            }
 
             emit_indent($cg);
             emit($cg, "int64_t __fr_start_" . $foreach_id . " = ");
@@ -1831,10 +2017,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             my scalar $fr_saved_kt = copy_type_map($cg->{"known_types"});
             my scalar $fr_saved_sv = copy_type_map($cg->{"struct_vars"});
             my int $fr_shadow = our_shadow_mark($cg);
+            my int $fr_decl_num = 0;
             if ($var_decl) {
+                my int $fr_vtype = $var_decl->{"var_type"};
                 our_shadow_begin($cg, $var_name);
-                $cg->{"int_vars"}->{$var_name} = 1;
-                $cg->{"num_vars"}->{$var_name} = "";
+                if ($fr_vtype == TYPE_INT()) {
+                    $cg->{"int_vars"}->{$var_name} = 1;
+                } else {
+                    $cg->{"int_vars"}->{$var_name} = "";
+                }
+                if ($fr_vtype == TYPE_NUM()) {
+                    $cg->{"num_vars"}->{$var_name} = 1;
+                    $fr_decl_num = 1;
+                } else {
+                    $cg->{"num_vars"}->{$var_name} = "";
+                }
                 $cg->{"active_boxed_vars"}->{$var_name} = $fr_box;
                 $cg->{"func_locals_seen"}->{$var_name} = 1;
                 $cg->{"known_types"}->{$var_name} = "";
@@ -1861,9 +2058,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             emit_indent($cg);
             my int $fr_always_tagged = 0;
-            if (expr_is_always_tagged_int($cg, $array_expr->{"start"}) == 1 &&
+            if ($fr_decl_num == 0 &&
+                expr_is_always_tagged_int($cg, $array_expr->{"start"}) == 1 &&
                 expr_is_always_tagged_int($cg, $array_expr->{"end"}) == 1) {
                 $fr_always_tagged = 1;
+            }
+            my str $fr_ctor = "strada_new_int_il(__fr_i_" . $foreach_id . ")";
+            if ($fr_decl_num == 1) {
+                $fr_ctor = "strada_new_num((double)__fr_i_" . $foreach_id . ")";
             }
             if (!$var_decl) {
                 if (length($fe_our_key) > 0) {
@@ -1879,7 +2081,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 } else {
                     emit($cg, "StradaValue **__cell_" . $var_name . " = strada_cell_alloc(); ");
                 }
-                emit($cg, "*__cell_" . $var_name . " = strada_new_int_il(__fr_i_" . $foreach_id . ");\n");
+                emit($cg, "*__cell_" . $var_name . " = " . $fr_ctor . ";\n");
                 if ($cg->{"cleanup_enabled"} == 1) {
                     scope_track_var($cg, "@cell:" . $var_name);
                     if (cleanup_push_useful($cg) == 1) {
@@ -1890,7 +2092,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     }
                 }
             } else {
-                emit($cg, $var_name . " = strada_new_int_il(__fr_i_" . $foreach_id . ");\n");
+                emit($cg, $var_name . " = " . $fr_ctor . ";\n");
                 if ($cg->{"cleanup_enabled"} == 1 && ($fr_always_tagged == 0 || node_writes_var($body, $stmt->{"var_name"}) == 1 || node_is_leaf_safe($cg, $body) == 0)) {
                     scope_track_var($cg, $var_name);
                     if (cleanup_push_useful($cg) == 1) {
@@ -1926,22 +2128,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
 
             scope_push($cg);
-            if (length($label) > 0) {
-                $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
-            }
 
             my scalar $fr_stmts = $body->{"statements"};
+            my int $fr_cnt = $body->{"statement_count"};
+            my scalar $fr_saved_goto = goto_hoist_stmts_decls($cg, $fr_stmts, $fr_cnt);
             my int $fr_i = 0;
-            while ($fr_i < $body->{"statement_count"}) {
+            while ($fr_i < $fr_cnt) {
                 gen_statement($cg, $fr_stmts->[$fr_i]);
                 $fr_i = $fr_i + 1;
             }
+            goto_hoist_restore($cg, $fr_saved_goto);
 
-            if (length($label) > 0) {
-                emit_indent($cg);
-                emit($cg, $label);
-                emit($cg, "_continue: ;\n");
-            }
             scope_pop($cg);
             if ($fr_body_has_local == 1) {
                 local_mark_pop($cg);
@@ -1956,6 +2153,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 pop($cg->{"loop_tmps_marks"});
             }
             scope_pop($cg);
+            if (length($label) > 0) {
+                emit_indent($cg);
+                emit($cg, $label);
+                emit($cg, "_continue: ;\n");
+            }
             dedent($cg);
             emit_indent($cg);
             emit($cg, "}\n");
@@ -1993,6 +2195,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         indent($cg);
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        if (length($label) > 0) {
+            $cg->{"label_next_depths"}->{$label} = $cg->{"loop_break_depth"};
+        }
 
         emit_indent($cg);
         emit($cg, "StradaValue *__foreach_arr_" . $foreach_id . " = ");
@@ -2269,22 +2474,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         scope_push($cg);
-        if (length($label) > 0) {
-            $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
-        }
 
         my scalar $stmts = $body->{"statements"};
+        my int $fe_cnt = $body->{"statement_count"};
+        my scalar $fe_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $fe_cnt);
         my int $i = 0;
-        while ($i < $body->{"statement_count"}) {
+        while ($i < $fe_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
-
-        if (length($label) > 0) {
-            emit_indent($cg);
-            emit($cg, $label);
-            emit($cg, "_continue: ;\n");
-        }
+        goto_hoist_restore($cg, $fe_saved_goto);
 
         scope_pop($cg);
         if ($fe_body_has_local == 1) {
@@ -2296,6 +2495,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
         dedent($cg);
         emit_indent($cg);
         emit($cg, "}\n");
@@ -2830,11 +3034,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Generate try block
         my scalar $stmts = $try_block->{"statements"};
+        my int $try_cnt = $try_block->{"statement_count"};
+        my scalar $try_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $try_cnt);
         my int $i = 0;
-        while ($i < $try_block->{"statement_count"}) {
+        while ($i < $try_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
+        goto_hoist_restore($cg, $try_saved_goto);
         $cg->{"int_vars"} = $try_saved_iv;
         $cg->{"num_vars"} = $try_saved_nv;
         $cg->{"active_boxed_vars"} = $try_saved_bv;
@@ -2866,7 +3073,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # Normal completion path. Hide this entry while emitting its
             # own block (control flow inside finally sees only OUTER ones).
             $cg->{"finally_count"} = $fin_idx;
-            gen_block($cg, $finally_block);
+            gen_block_local_scoped($cg, $finally_block);
             emit($cg, "\n");
             $cg->{"finally_count"} = $fin_idx + 1;
         }
@@ -3011,11 +3218,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             # Generate catch block statements
             my scalar $catch_stmts = $catch_block->{"statements"};
+            my int $catch_cnt = $catch_block->{"statement_count"};
+            my scalar $ct_saved_goto = goto_hoist_stmts_decls($cg, $catch_stmts, $catch_cnt);
             my int $j = 0;
-            while ($j < $catch_block->{"statement_count"}) {
+            while ($j < $catch_cnt) {
                 gen_statement($cg, $catch_stmts->[$j]);
                 $j = $j + 1;
             }
+            goto_hoist_restore($cg, $ct_saved_goto);
             $try_merged_kt = intersect_type_maps($try_merged_kt, $cg->{"known_types"});
             $cg->{"int_vars"} = $ct_saved_iv;
             $cg->{"num_vars"} = $ct_saved_nv;
@@ -3068,7 +3278,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"known_types"} = copy_type_map($try_merged_kt);
             $cg->{"struct_vars"} = copy_type_map($try_saved_sv);
             $cg->{"finally_count"} = $fin_idx;
-            gen_block($cg, $finally_block);
+            gen_block_local_scoped($cg, $finally_block);
             emit($cg, "\n");
             emit_indent($cg);
             emit($cg, "} else {\n");
@@ -3096,7 +3306,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"known_types"} = copy_type_map($catch_entry_kt);
             $cg->{"struct_vars"} = copy_type_map($try_saved_sv);
             $cg->{"finally_count"} = $fin_idx;
-            gen_block($cg, $finally_block);
+            gen_block_local_scoped($cg, $finally_block);
             emit($cg, "\n");
             if ($cg->{"cleanup_enabled"} == 1) {
                 if ($fin_sd > 0) {
@@ -3375,11 +3585,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             my int $sw_shadow = our_shadow_mark($cg);
             my scalar $block = $blocks->[$i];
             my scalar $stmts = $block->{"statements"};
+            my int $sw_cnt = $block->{"statement_count"};
+            my scalar $sw_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $sw_cnt);
             my int $j = 0;
-            while ($j < $block->{"statement_count"}) {
+            while ($j < $sw_cnt) {
                 gen_statement($cg, $stmts->[$j]);
                 $j = $j + 1;
             }
+            goto_hoist_restore($cg, $sw_saved_goto);
             if ($sw_has_merged == 0) {
                 $sw_merged_kt = copy_type_map($cg->{"known_types"});
                 $sw_has_merged = 1;
@@ -3418,11 +3631,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"struct_vars"} = copy_type_map($sw_entry_sv);
             my int $swd_shadow = our_shadow_mark($cg);
             my scalar $def_stmts = $default_block->{"statements"};
+            my int $swd_cnt = $default_block->{"statement_count"};
+            my scalar $swd_saved_goto = goto_hoist_stmts_decls($cg, $def_stmts, $swd_cnt);
             my int $k = 0;
-            while ($k < $default_block->{"statement_count"}) {
+            while ($k < $swd_cnt) {
                 gen_statement($cg, $def_stmts->[$k]);
                 $k = $k + 1;
             }
+            goto_hoist_restore($cg, $swd_saved_goto);
             if ($sw_has_merged == 0) {
                 $sw_merged_kt = copy_type_map($cg->{"known_types"});
                 $sw_has_merged = 1;
@@ -3523,6 +3739,13 @@ func gen_function(scalar $cg, scalar $fn) void {
     } else {
         $cg->{"func_has_try"} = 0;
     }
+    if (func_body_has_goto($fn_body) == 1) {
+        $cg->{"func_has_goto"} = 1;
+    } else {
+        $cg->{"func_has_goto"} = 0;
+    }
+    my hash %empty_fn_goto_pd = ();
+    $cg->{"predeclared_goto_vars"} = \%empty_fn_goto_pd;
 
     my hash %cand_boxed = ();
     collect_safe_boxed_vars($fn_body, \%cand_boxed);
@@ -3634,19 +3857,16 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "\n");
         }
 
-        # Also call OOP init for each imported .o file's package. The weak
-        # forward decl above lets these resolve to NULL when the .o has no
-        # methods; main() guards each call with a NULL check.
-        my int $impo_count = $cg->{"import_object_count"};
-        if ($impo_count > 0) {
-            my scalar $impo_objs = $cg->{"import_objects"};
-            emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+        # Also call OOP init for each imported .o / .a module's packages. The
+        # weak forward decls above let these resolve to NULL when a module has
+        # no methods; main() guards each call with a NULL check.
+        my scalar $imp_oop_inits = collect_import_oop_inits($cg);
+        if (size($imp_oop_inits) > 0) {
+            emit($cg, "    /* OOP init for imported .o/.a modules (weak) */\n");
             my int $impo_i = 0;
-            while ($impo_i < $impo_count) {
-                my scalar $impo = $impo_objs->[$impo_i];
-                my str $impo_name = $impo->{"obj_name"};
-                my str $c_impo = sanitize_name($impo_name);
-                emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+            while ($impo_i < size($imp_oop_inits)) {
+                my str $imp_oop_fn = $imp_oop_inits->[$impo_i];
+                emit($cg, "    if (" . $imp_oop_fn . ") " . $imp_oop_fn . "();\n");
                 $impo_i = $impo_i + 1;
             }
             emit($cg, "\n");
@@ -3679,12 +3899,7 @@ func gen_function(scalar $cg, scalar $fn) void {
 
                 # Handle our declarations - use global registry
                 if ($gvar_type == NODE_OUR_DECL()) {
-                    my str $our_key = "" . $gvar->{"our_key"};
-                    if (length($our_key) == 0) {
-                        my str $pkg = $gvar->{"package"};
-                        if (length($pkg) == 0) { $pkg = "main"; }
-                        $our_key = $pkg . "::" . $name;
-                    }
+                    my str $our_key = resolve_our_decl_key($gvar, "" . $gvar->{"package"});
                     if ($init) {
                         emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", ");
                         emit_our_global_init($cg, $init, $sigil, $var_type);
@@ -3875,11 +4090,14 @@ func gen_function(scalar $cg, scalar $fn) void {
         }
         my scalar $stmts = $body->{"statements"};
         prescan_goto_labels($cg, $stmts, 1, 0);
+        my int $main_cnt = $body->{"statement_count"};
+        my scalar $main_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $main_cnt);
         my int $i = 0;
-        while ($i < $body->{"statement_count"}) {
+        while ($i < $main_cnt) {
             gen_statement($cg, $stmts->[$i]);
             $i = $i + 1;
         }
+        goto_hoist_restore($cg, $main_saved_goto);
         scope_pop($cg);
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             emit($cg, "    strada_tmps_free(__fn_tmps_mark);\n");
@@ -3891,6 +4109,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"in_main"} = 0;
         $cg->{"func_tracks_depth"} = 0;
         $cg->{"fn_has_tmps_mark"} = 0;
+        $cg->{"func_has_goto"} = 0;
     } else {
         # Private functions get static prefix (file-scope only).
         # When this TU also defines `main`, the export_info table is
@@ -4183,11 +4402,13 @@ func gen_function(scalar $cg, scalar $fn) void {
         my scalar $stmts = $body->{"statements"};
         prescan_goto_labels($cg, $stmts, 1, 0);
         my int $b_sc = $body->{"statement_count"} + 0;
+        my scalar $fn_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $b_sc);
         my int $stmt_i = 0;
         while ($stmt_i < $b_sc) {
             gen_statement($cg, $stmts->[$stmt_i]);
             $stmt_i = $stmt_i + 1;
         }
+        goto_hoist_restore($cg, $fn_saved_goto);
         my int $ends_with_return = 0;
         if ($b_sc > 0 && $stmts->[$b_sc - 1]->{"type"} == NODE_RETURN_STMT()) {
             $ends_with_return = 1;
@@ -4276,6 +4497,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"current_fn_package"} = "";
         $cg->{"func_tracks_depth"} = 0;
         $cg->{"fn_has_tmps_mark"} = 0;
+        $cg->{"func_has_goto"} = 0;
 
         # Clear func_params
         $cg->{"func_params"} = {};
@@ -4307,12 +4529,21 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     emit($cg, "    (void)__captures;\n");
 
     my int $saved_func_has_try = $cg->{"func_has_try"};
+    my int $saved_func_has_goto = $cg->{"func_has_goto"};
+    my scalar $saved_predeclared_goto = $cg->{"predeclared_goto_vars"};
     my scalar $async_body = $fn->{"body"};
     if (func_body_has_try($async_body) == 1) {
         $cg->{"func_has_try"} = 1;
     } else {
         $cg->{"func_has_try"} = 0;
     }
+    if (func_body_has_goto($async_body) == 1) {
+        $cg->{"func_has_goto"} = 1;
+    } else {
+        $cg->{"func_has_goto"} = 0;
+    }
+    my hash %empty_async_goto_pd = ();
+    $cg->{"predeclared_goto_vars"} = \%empty_async_goto_pd;
 
     my scalar $saved_async_cand_boxed = $cg->{"cand_boxed_vars"};
     my scalar $saved_async_active_boxed = $cg->{"active_boxed_vars"};
@@ -4509,11 +4740,14 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     }
     my scalar $body = $fn->{"body"};
     my scalar $stmts = $body->{"statements"};
+    my int $async_cnt = $body->{"statement_count"};
+    my scalar $async_saved_goto = goto_hoist_stmts_decls($cg, $stmts, $async_cnt);
     my int $stmt_i = 0;
-    while ($stmt_i < $body->{"statement_count"}) {
+    while ($stmt_i < $async_cnt) {
         gen_statement($cg, $stmts->[$stmt_i]);
         $stmt_i = $stmt_i + 1;
     }
+    goto_hoist_restore($cg, $async_saved_goto);
     scope_pop($cg);
     if ($cg->{"has_local"} == 1) {
         emit_indent($cg);
@@ -4561,6 +4795,8 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
     $cg->{"current_redo_label"} = $saved_cur_redo_lbl;
     $cg->{"func_has_try"} = $saved_func_has_try;
+    $cg->{"func_has_goto"} = $saved_func_has_goto;
+    $cg->{"predeclared_goto_vars"} = $saved_predeclared_goto;
     $cg->{"func_tracks_depth"} = $saved_async_tracks_depth;
     $cg->{"struct_vars"} = $saved_async_struct_vars;
     $cg->{"cand_boxed_vars"} = $saved_async_cand_boxed;
@@ -4639,6 +4875,8 @@ func gen_program(scalar $cg, scalar $program) void {
     # whose __<pkg>_oop_init() must be called at process start.
     $cg->{"import_objects"} = $program->{"import_objects"};
     $cg->{"import_object_count"} = $program->{"import_object_count"};
+    $cg->{"import_archives"} = $program->{"import_archives"};
+    $cg->{"import_archive_count"} = $program->{"import_archive_count"};
 
     # Store overload info
     $cg->{"has_overloads"} = $program->{"has_overloads"};
@@ -5035,12 +5273,7 @@ func gen_program(scalar $cg, scalar $program) void {
             my scalar $ogvar = $our_globals->[$og];
             if ($ogvar->{"type"} == NODE_OUR_DECL()) {
                 my str $og_name = $ogvar->{"name"};
-                my str $og_key = "" . $ogvar->{"our_key"};
-                if (length($og_key) == 0) {
-                    my str $og_pkg = $ogvar->{"package"};
-                    if (length($og_pkg) == 0) { $og_pkg = "main"; }
-                    $og_key = $og_pkg . "::" . $og_name;
-                }
+                my str $og_key = resolve_our_decl_key($ogvar, "" . $ogvar->{"package"});
                 my scalar $our_vars_pre = $cg->{"our_vars"};
                 $our_vars_pre->{escape_c_keyword($og_name)} = $og_key;
             }
@@ -5181,8 +5414,124 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"import_calls"} = $program->{"import_calls"};
     $cg->{"import_call_count"} = $program->{"import_call_count"};
 
-    my int $split_fwd_start = 0;
+    my int $doing_split = 0;
     if (length("" . $cg->{"split_dir"}) > 0) {
+        $doing_split = 1;
+    }
+
+    # Generate import_lib wrapper infrastructure BEFORE $split_fwd_start when
+    # splitting so static handles, function pointers, and _ensure(void) stay
+    # strictly in shard_00.c while per-wrapper STRADA_SHARD_HIDDEN prototypes
+    # are recorded into split_fn_proto_map for any shard that calls them.
+    my int $import_lib_count = $program->{"import_lib_count"};
+    if ($import_lib_count > 0) {
+        my scalar $import_libs = $program->{"import_libs"};
+        my scalar $il_pmap = $cg->{"split_fn_proto_map"};
+
+        emit($cg, "/* import_lib: static library handles and function pointers */\n");
+
+        my int $lib_idx = 0;
+        while ($lib_idx < $import_lib_count) {
+            my scalar $lib_info = $import_libs->[$lib_idx];
+            my str $lib_name = $lib_info->{"lib_name"};
+            my str $safe_lib = sanitize_name($lib_name);
+
+            # Static handle for the library
+            emit($cg, "static void *__import_lib_" . $safe_lib . "_handle = NULL;\n");
+            # Set by __import_lib_<lib>_ensure() when the loaded .so's
+            # metadata fingerprint matches what we compiled against;
+            # gates devirtualized direct calls in the method wrappers.
+            emit($cg, "static int __import_lib_" . $safe_lib . "_devirt_ok = 0;\n");
+            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void);\n");
+
+            # Static function pointers for each function
+            my scalar $lib_funcs = $lib_info->{"functions"};
+            my int $fn_idx = 0;
+            my int $fn_count = $lib_info->{"function_count"};
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $lib_funcs->[$fn_idx];
+                my str $fn_name = sanitize_name($fn_info->{"name"});
+                emit($cg, "static void *__import_lib_" . $safe_lib . "_fn_" . $fn_name . " = NULL;\n");
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $lib_idx = $lib_idx + 1;
+        }
+        emit($cg, "\n");
+
+        # Forward declarations for wrapper functions
+        emit($cg, "/* import_lib: wrapper function forward declarations */\n");
+        my str $wrap_fwd_prefix = "static ";
+        if ($doing_split == 1) {
+            $wrap_fwd_prefix = "STRADA_SHARD_HIDDEN ";
+        }
+        $lib_idx = 0;
+        while ($lib_idx < $import_lib_count) {
+            my scalar $lib_info = $import_libs->[$lib_idx];
+            my scalar $lib_funcs = $lib_info->{"functions"};
+            my int $fn_idx = 0;
+            my int $fn_count = $lib_info->{"function_count"};
+
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $lib_funcs->[$fn_idx];
+                my str $fn_name = sanitize_name($fn_info->{"name"});
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+                my int $il_pstart = 0;
+                if ($doing_split == 1) {
+                    $il_pstart = sb_length($cg->{"output_sb"});
+                }
+
+                # Single-TU mode uses `static` so the wrapper is not a global
+                # symbol (avoiding interposition from the .so under -rdynamic).
+                # Split-dir mode uses STRADA_SHARD_HIDDEN (hidden visibility)
+                # so shard_00.c's wrapper is callable across shards within the
+                # linked binary without being exported into .dynsym.
+                emit($cg, $wrap_fwd_prefix . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $p = 0;
+                while ($p < $param_count) {
+                    if ($p > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$p];
+                    my int $ptype = $param->{"param_type"};
+                    emit($cg, type_to_c($ptype) . " " . escape_c_keyword($param->{"name"}));
+                    $p = $p + 1;
+                }
+
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+
+                emit($cg, ");\n");
+                if ($doing_split == 1) {
+                    my str $il_ps = sb_to_string($cg->{"output_sb"});
+                    $il_pmap->{$fn_name} = substr_bytes($il_ps, $il_pstart, bytes($il_ps) - $il_pstart);
+                }
+
+                # Register in functions context so calls work correctly
+                my hash %func_info = ();
+                $func_info{"name"} = $fn_name;
+                $func_info{"return_type"} = $ret_type;
+                $func_info{"param_count"} = $param_count;
+                $func_info{"params"} = $params;
+                $func_info{"is_import_lib"} = 1;
+                $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
+                $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $cg->{"functions"}->{$fn_name} = \%func_info;
+
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $lib_idx = $lib_idx + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    my int $split_fwd_start = 0;
+    if ($doing_split == 1) {
         $split_fwd_start = sb_length($cg->{"output_sb"});
     }
 
@@ -5264,103 +5613,6 @@ func gen_program(scalar $cg, scalar $program) void {
         }
     }
 
-    # Generate import_lib wrapper infrastructure
-    my int $import_lib_count = $program->{"import_lib_count"};
-    if ($import_lib_count > 0) {
-        my scalar $import_libs = $program->{"import_libs"};
-
-        emit($cg, "/* import_lib: static library handles and function pointers */\n");
-
-        my int $lib_idx = 0;
-        while ($lib_idx < $import_lib_count) {
-            my scalar $lib_info = $import_libs->[$lib_idx];
-            my str $lib_name = $lib_info->{"lib_name"};
-            my str $safe_lib = sanitize_name($lib_name);
-
-            # Static handle for the library
-            emit($cg, "static void *__import_lib_" . $safe_lib . "_handle = NULL;\n");
-            # Set by __import_lib_<lib>_ensure() when the loaded .so's
-            # metadata fingerprint matches what we compiled against;
-            # gates devirtualized direct calls in the method wrappers.
-            emit($cg, "static int __import_lib_" . $safe_lib . "_devirt_ok = 0;\n");
-            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void);\n");
-
-            # Static function pointers for each function
-            my scalar $lib_funcs = $lib_info->{"functions"};
-            my int $fn_idx = 0;
-            my int $fn_count = $lib_info->{"function_count"};
-            while ($fn_idx < $fn_count) {
-                my scalar $fn_info = $lib_funcs->[$fn_idx];
-                my str $fn_name = sanitize_name($fn_info->{"name"});
-                emit($cg, "static void *__import_lib_" . $safe_lib . "_fn_" . $fn_name . " = NULL;\n");
-                $fn_idx = $fn_idx + 1;
-            }
-
-            $lib_idx = $lib_idx + 1;
-        }
-        emit($cg, "\n");
-
-        # Forward declarations for wrapper functions
-        emit($cg, "/* import_lib: wrapper function forward declarations */\n");
-        $lib_idx = 0;
-        while ($lib_idx < $import_lib_count) {
-            my scalar $lib_info = $import_libs->[$lib_idx];
-            my scalar $lib_funcs = $lib_info->{"functions"};
-            my int $fn_idx = 0;
-            my int $fn_count = $lib_info->{"function_count"};
-
-            while ($fn_idx < $fn_count) {
-                my scalar $fn_info = $lib_funcs->[$fn_idx];
-                my str $fn_name = sanitize_name($fn_info->{"name"});
-                my int $ret_type = $fn_info->{"return_type"};
-                my int $param_count = $fn_info->{"param_count"};
-                my scalar $params = $fn_info->{"params"};
-
-                # static: the wrapper must NOT be a global symbol. The .so
-                # defines the same-named real function, and its internal
-                # calls (e.g. its registered dispatch wrappers) would
-                # interpose to OUR wrapper under -rdynamic — harmless
-                # extra hop before, infinite recursion now that the
-                # wrapper can re-enter dynamic dispatch on a fingerprint
-                # mismatch. Wrappers are only called from this TU.
-                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
-
-                my int $p = 0;
-                while ($p < $param_count) {
-                    if ($p > 0) {
-                        emit($cg, ", ");
-                    }
-                    my scalar $param = $params->[$p];
-                    my int $ptype = $param->{"param_type"};
-                    emit($cg, type_to_c($ptype) . " " . escape_c_keyword($param->{"name"}));
-                    $p = $p + 1;
-                }
-
-                if ($param_count == 0) {
-                    emit($cg, "void");
-                }
-
-                emit($cg, ");\n");
-
-                # Register in functions context so calls work correctly
-                my hash %func_info = ();
-                $func_info{"name"} = $fn_name;
-                $func_info{"return_type"} = $ret_type;
-                $func_info{"param_count"} = $param_count;
-                $func_info{"params"} = $params;
-                $func_info{"is_import_lib"} = 1;
-                $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
-                $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
-                $cg->{"functions"}->{$fn_name} = \%func_info;
-
-                $fn_idx = $fn_idx + 1;
-            }
-
-            $lib_idx = $lib_idx + 1;
-        }
-        emit($cg, "\n");
-    }
-
     # Generate import_object extern declarations (for statically linked object files)
     my int $import_object_count = $program->{"import_object_count"};
     if ($import_object_count > 0) {
@@ -5419,24 +5671,24 @@ func gen_program(scalar $cg, scalar $program) void {
             $obj_idx = $obj_idx + 1;
         }
         emit($cg, "\n");
+    }
 
-        # Imported .o modules may contain OOP method registrations whose
-        # __<pkg>_oop_init() needs to be called from main() to populate the
-        # runtime's method-dispatch table. Locally-defined packages already
-        # get oop_init calls via the pkg_list path; for imported .o we don't
-        # know at parse-time whether the module has methods, so emit a weak
-        # forward declaration and let main() call it iff defined. Without
-        # this, calls through OOP method dispatch on imported types
-        # silently no-op or segfault, because the method table never got
-        # populated.
-        emit($cg, "/* import_object: weak OOP init forward declarations */\n");
-        my int $oop_obj_idx = 0;
-        while ($oop_obj_idx < $import_object_count) {
-            my scalar $obj_info_o = $import_objects->[$oop_obj_idx];
-            my str $obj_name_o = $obj_info_o->{"obj_name"};
-            my str $c_oop_obj = sanitize_name($obj_name_o);
-            emit($cg, "__attribute__((weak)) void __" . $c_oop_obj . "_oop_init(void);\n");
-            $oop_obj_idx = $oop_obj_idx + 1;
+    # Imported .o and .a modules may contain OOP method registrations whose
+    # __<pkg>_oop_init() needs to be called from main() / global constructor to
+    # populate the runtime's method-dispatch table. Locally-defined packages already
+    # get oop_init calls via the pkg_list path; for imported .o/.a we don't know
+    # at parse-time whether every package in a module has methods, so emit a weak
+    # forward declaration and let main() / global constructor call it iff defined.
+    # Without this, calls through OOP method dispatch on imported types silently
+    # no-op or segfault, because the method table never got populated.
+    my scalar $imp_oop_decls = collect_import_oop_inits($cg);
+    if (size($imp_oop_decls) > 0) {
+        emit($cg, "/* import_object / import_archive: weak OOP init forward declarations */\n");
+        my int $oop_decl_idx = 0;
+        while ($oop_decl_idx < size($imp_oop_decls)) {
+            my str $oop_decl_fn = $imp_oop_decls->[$oop_decl_idx];
+            emit($cg, "__attribute__((weak)) void " . $oop_decl_fn . "(void);\n");
+            $oop_decl_idx = $oop_decl_idx + 1;
         }
         emit($cg, "\n");
     }
@@ -5728,7 +5980,7 @@ func gen_program(scalar $cg, scalar $program) void {
     }
     check_override_signatures($cg, $program);
 
-    my int $doing_split = 0;
+    $doing_split = 0;
     if (length("" . $cg->{"split_dir"}) > 0) { $doing_split = 1; }
     my array @split_codes = ();
     my array @split_pkgs = ();
@@ -5881,9 +6133,12 @@ func gen_program(scalar $cg, scalar $program) void {
                 my int $param_count = $fn_info->{"param_count"};
                 my scalar $params = $fn_info->{"params"};
 
-                # Function signature (static — see the forward-decl note
-                # on symbol interposition)
-                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
+                # Function signature (static in single-TU, STRADA_SHARD_HIDDEN in split-dir)
+                my str $wrap_def_prefix = "static ";
+                if ($doing_split == 1) {
+                    $wrap_def_prefix = "STRADA_SHARD_HIDDEN ";
+                }
+                emit($cg, $wrap_def_prefix . type_to_c($ret_type) . " " . $fn_name . "(");
 
                 my int $p = 0;
                 while ($p < $param_count) {
@@ -6075,6 +6330,9 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"func_param_names"} = [];
                 $cg->{"func_param_count"} = 0;
                 $cg->{"func_has_try"} = func_body_has_try($begin_body);
+                $cg->{"func_has_goto"} = func_body_has_goto($begin_body);
+                my hash %empty_b_goto_pd = ();
+                $cg->{"predeclared_goto_vars"} = \%empty_b_goto_pd;
                 $cg->{"has_local"} = 0;
                 $cg->{"c_ret_is_sv"} = 0;
                 $cg->{"ret_is_int"} = 0;
@@ -6095,17 +6353,20 @@ func gen_program(scalar $cg, scalar $program) void {
                     emit($cg, "    int __local_saved_depth = strada_local_depth_get();\n");
                     $cg->{"has_local"} = 1;
                 }
+                my scalar $begin_saved_goto = goto_hoist_stmts_decls($cg, $begin_stmts, $begin_stmt_count);
                 my int $bs = 0;
                 while ($bs < $begin_stmt_count) {
                     gen_statement($cg, $begin_stmts->[$bs]);
                     $bs = $bs + 1;
                 }
+                goto_hoist_restore($cg, $begin_saved_goto);
                 scope_pop($cg);
                 if ($cg->{"has_local"} == 1) {
                     emit($cg, "    strada_local_restore_to(__local_saved_depth);\n");
                 }
                 $cg->{"has_local"} = 0;
                 $cg->{"func_has_try"} = 0;
+                $cg->{"func_has_goto"} = 0;
                 emit($cg, "}\n\n");
                 $bi = $bi + 1;
             }
@@ -6133,6 +6394,9 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"func_param_names"} = [];
                 $cg->{"func_param_count"} = 0;
                 $cg->{"func_has_try"} = func_body_has_try($end_body);
+                $cg->{"func_has_goto"} = func_body_has_goto($end_body);
+                my hash %empty_e_goto_pd = ();
+                $cg->{"predeclared_goto_vars"} = \%empty_e_goto_pd;
                 $cg->{"has_local"} = 0;
                 $cg->{"c_ret_is_sv"} = 0;
                 $cg->{"ret_is_int"} = 0;
@@ -6153,17 +6417,20 @@ func gen_program(scalar $cg, scalar $program) void {
                     emit($cg, "    int __local_saved_depth = strada_local_depth_get();\n");
                     $cg->{"has_local"} = 1;
                 }
+                my scalar $end_saved_goto = goto_hoist_stmts_decls($cg, $end_stmts, $end_stmt_count);
                 my int $es = 0;
                 while ($es < $end_stmt_count) {
                     gen_statement($cg, $end_stmts->[$es]);
                     $es = $es + 1;
                 }
+                goto_hoist_restore($cg, $end_saved_goto);
                 scope_pop($cg);
                 if ($cg->{"has_local"} == 1) {
                     emit($cg, "    strada_local_restore_to(__local_saved_depth);\n");
                 }
                 $cg->{"has_local"} = 0;
                 $cg->{"func_has_try"} = 0;
+                $cg->{"func_has_goto"} = 0;
                 emit($cg, "}\n\n");
                 $ei = $ei + 1;
             }
@@ -6680,16 +6947,13 @@ func gen_global_constructor(scalar $cg) void {
     # in case the .o has no OOP methods and didn't emit an init). Same fix as
     # in main() — without this, shared-library builds whose `use`d modules
     # have methods won't have those methods registered at dlopen time.
-    my int $impo_count = $cg->{"import_object_count"};
-    if ($impo_count > 0) {
-        my scalar $impo_objs = $cg->{"import_objects"};
-        emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+    my scalar $imp_oop_ctor_inits = collect_import_oop_inits($cg);
+    if (size($imp_oop_ctor_inits) > 0) {
+        emit($cg, "    /* OOP init for imported .o/.a modules (weak) */\n");
         my int $impo_i = 0;
-        while ($impo_i < $impo_count) {
-            my scalar $impo = $impo_objs->[$impo_i];
-            my str $impo_name = $impo->{"obj_name"};
-            my str $c_impo = sanitize_name($impo_name);
-            emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+        while ($impo_i < size($imp_oop_ctor_inits)) {
+            my str $imp_oop_fn = $imp_oop_ctor_inits->[$impo_i];
+            emit($cg, "    if (" . $imp_oop_fn . ") " . $imp_oop_fn . "();\n");
             $impo_i = $impo_i + 1;
         }
         emit($cg, "\n");
@@ -6721,12 +6985,7 @@ func gen_global_constructor(scalar $cg) void {
 
             # Handle our declarations - use global registry
             if ($gvar_type == NODE_OUR_DECL()) {
-                my str $our_key = "" . $gvar->{"our_key"};
-                if (length($our_key) == 0) {
-                    my str $pkg = $gvar->{"package"};
-                    if (length($pkg) == 0) { $pkg = "main"; }
-                    $our_key = $pkg . "::" . $name;
-                }
+                my str $our_key = resolve_our_decl_key($gvar, "" . $gvar->{"package"});
                 if ($init) {
                     emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", ");
                     emit_our_global_init($cg, $init, $sigil, $var_type);

@@ -1,0 +1,103 @@
+use lib "lib";
+use Forma;
+
+package R12LeakDrop;
+func new() scalar { return bless({"v" => 1}, "R12LeakDrop"); }
+func DESTROY(scalar $self) void { }
+
+package R12LeakTied;
+func TIESCALAR(scalar ...@args) scalar { return bless({"v" => 42}, "R12LeakTied"); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $val) void { $self->{"v"} = $val; }
+func DESTROY(scalar $self) void { }
+
+package R12LeakBoxA;
+func tag(scalar $self) str { return "A"; }
+package R12LeakBoxB;
+func tag(scalar $self) str { return "B"; }
+
+package R12LeakLongPkg::AlphaBetaGammaDelta::EpsilonZetaEtaThetaIotaKappaLambdaMuNuXiOmicron;
+func ping(scalar $self) int { return 1; }
+
+package main;
+
+our int $g_r12_leak = 10;
+
+func main() int {
+    # 1. Cycle GC: dead cycle holding tied scalar + reentry DESTROY
+    my int $iter = 0;
+    while ($iter < 10) {
+        my scalar $a = {};
+        my scalar $b = {};
+        my scalar $t = undef;
+        tie($t, "R12LeakTied");
+        $a->{"b"} = $b;
+        $a->{"t"} = $t;
+        $b->{"a"} = $a;
+        $a->{"k"} = "v";
+        core::gc_collect();
+        $iter = $iter + 1;
+    }
+
+    # 2. String builtins / sprintf %v / join / pack / unpack / s///
+    my int $si = 0;
+    while ($si < 10) {
+        my str $big = repeat("A", 1500);
+        my str $vd = sprintf("%vd", $big);
+        my str $vw = sprintf("%v1500d", "A");
+        my str $vs = sprintf("%*vd", 99, "AB");
+        my str $bin = "a\x00b";
+        my str $uc_b = uc($bin);
+        my str $lc_b = lc("A\x00B");
+        my str $tr_b = trim("\x0b\x0c " . $bin . " \x0c\x0b");
+        my str $u8 = "é\x00x";
+        $u8 =~ s/x/Y/;
+        my array @c = capture("éa", "^(\\p{Ll})(.)");
+        my str $pq = core::pack("q/a*", "payload_" . $si);
+        my array @uq = core::unpack("(C)0(a(C)2)1q/a*", "A\x01\x02" . $pq);
+        my scalar $lp = bless({}, "R12LeakLongPkg::AlphaBetaGammaDelta::EpsilonZetaEtaThetaIotaKappaLambdaMuNuXiOmicron");
+        $lp->ping();
+        $si = $si + 1;
+    }
+
+    # 3. Control-flow cleanup: next LABEL, forward goto, redo in map/grep, finally local, bless
+    my int $k = 0;
+    LBL: while ($k < 4) {
+        $k = $k + 1;
+        my scalar $d = R12LeakDrop::new();
+        if ($k < 4) { next LBL; }
+    }
+    {
+        my scalar $dg = R12LeakDrop::new();
+        goto LEAK_FWD;
+    }
+    LEAK_FWD:
+    my int $tries = 0;
+    my array @mm = map {
+        my scalar $o = R12LeakDrop::new();
+        $tries = $tries + 1;
+        if ($tries == 1) { redo; }
+        $_ + 1;
+    } (1, 2);
+    my int $gtries = 0;
+    my array @gg = grep {
+        my scalar $o = R12LeakDrop::new();
+        $gtries = $gtries + 1;
+        if ($gtries == 1) { redo; }
+        $_ > 1;
+    } (1, 2);
+
+    try { throw "e"; } catch ($e) { } finally { local $g_r12_leak = 99; }
+    my scalar $bx = bless({}, "R12LeakBoxA");
+    bless($bx, "R12LeakBoxB");
+    $bx->tag();
+
+    # 4. Forma safe mode
+    Forma::register_helper("DUMP", func(scalar $a, scalar $v) str { return $v->{"p"}; });
+    Forma::render_string_safe("{{DUMP p | upper}}", {"p" => "<b>hi</b>"});
+    Forma::clear_helpers();
+
+    core::gc_collect();
+    say("R12_LEAKS_OK");
+    return 0;
+}
