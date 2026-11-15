@@ -1,0 +1,187 @@
+#!/usr/bin/env strada
+# Cycle 10 compiled / --tree-walk / --vm parity suite (R10-VM1..R10-VM9, R10-C5)
+
+package R10NS::Base;
+func new(int $v) scalar {
+    my hash %h = ("v" => $v);
+    return bless(\%h, "R10NS::Base");
+}
+func calc(scalar $self, int $n) int {
+    return $self->{"v"} + $n;
+}
+
+package R10NS::Child;
+extends R10NS::Base;
+our str $g_mod_log = "";
+func reset_log() void { $g_mod_log = ""; }
+func get_log() str { return $g_mod_log; }
+func new(int $v) scalar {
+    my hash %h = ("v" => $v);
+    return bless(\%h, "R10NS::Child");
+}
+before "calc" func(scalar $self, int $n) void {
+    $g_mod_log = $g_mod_log . "B" . $n . ":";
+}
+after "calc" func(scalar $self, int $n) void {
+    $g_mod_log = $g_mod_log . ":A" . $n;
+}
+around "calc" func(scalar $orig, scalar $self, int $n) int {
+    $g_mod_log = $g_mod_log . "R>";
+    my int $r = $orig->($self, $n);
+    $g_mod_log = $g_mod_log . "<R";
+    return $r * 10;
+}
+
+package R10HasCls;
+has ro int $ro;
+func ping(scalar $self) str { return "pong"; }
+
+package main;
+
+func nul_vis(str $s) str {
+    my int $n = core::byte_length($s);
+    my str $out = "";
+    my int $i = 0;
+    while ($i < $n) {
+        my int $b = byte_at($s, $i);
+        if ($b == 0) {
+            $out = $out . "<NUL>";
+        } else {
+            $out = $out . chr($b);
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+func main() int {
+    # R10-VM1: for / foreach / try-catch / destructure fresh lexical cells in loops
+    my array @for_fns = ();
+    for (my int $fi = 0; $fi < 3; $fi = $fi + 1) {
+        my int $fv = $fi;
+        push(@for_fns, func() int { return $fv; });
+    }
+    say("VM1_FOR=" . $for_fns[0]->() . "," . $for_fns[1]->() . "," . $for_fns[2]->());
+
+    my array @fe_fns = ();
+    foreach my int $fx ((10, 20, 30)) {
+        push(@fe_fns, func() int { return $fx; });
+    }
+    say("VM1_FE=" . $fe_fns[0]->() . "," . $fe_fns[1]->() . "," . $fe_fns[2]->());
+
+    my array @try_fns = ();
+    my int $fin_sum = 0;
+    for (my int $ti = 0; $ti < 3; $ti = $ti + 1) {
+        try {
+            if ($ti < 2) { throw "err" . $ti; }
+        } catch ($te) {
+            push(@try_fns, func() str { return "" . $te; });
+        } finally {
+            $fin_sum = $fin_sum + 1;
+        }
+    }
+    say("VM1_TRY=" . $try_fns[0]->() . "," . $try_fns[1]->() . ":" . $fin_sum);
+
+    my array @dest_fns = ();
+    my array @pairs = ([1, 2], [3, 4]);
+    foreach my scalar $pr (@pairs) {
+        my ($da, $db) = @{$pr};
+        push(@dest_fns, func() str { return $da . ":" . $db; });
+    }
+    say("VM1_DEST=" . $dest_fns[0]->() . "," . $dest_fns[1]->());
+
+    # R10-VM2: modifiers on namespaced packages (R10NS::Child)
+    R10NS::Child::reset_log();
+    my scalar $ns_obj = R10NS::Child::new(20);
+    my int $ns_res = $ns_obj->calc(5);
+    say("VM2=" . $ns_res . "|" . R10NS::Child::get_log());
+
+    # R10-VM3: sprintf %ld/%lld/%lu/%lx/%lo, %c >= 0x80 UTF-8, NULs, %s width/prec
+    my str $sp_num = sprintf("%ld:%lld:%lu:%lx:%lo", 42, -1234567890123, 77, 255, 63);
+    my str $sp_chr = sprintf("%c", 233);
+    my str $sp_utf = sprintf("%s", "café");
+    my str $sp_nul = sprintf("A" . chr(0) . "%6s" . chr(0) . "%-5.2s", "xy", "hello");
+    say("VM3_NUM=" . $sp_num);
+    say("VM3_U8=" . length($sp_chr) . ":" . core::byte_length($sp_chr) . ":" . $sp_chr . "|" . length($sp_utf) . ":" . core::byte_length($sp_utf));
+    say("VM3_NUL=" . core::byte_length($sp_nul) . ":" . nul_vis($sp_nul));
+
+    # R10-VM4: print / say on FH with embedded NUL bytes
+    my str $tmp4 = "/tmp/r10_vm4_" . core::getpid() . ".bin";
+    my scalar $ofh = core::open($tmp4, "w");
+    say($ofh, "X" . chr(0) . "Y");
+    print($ofh, "Z" . chr(0) . "W");
+    core::close($ofh);
+    my str $fh_buf = core::slurp($tmp4);
+    core::unlink($tmp4);
+    say("VM4_FH=" . core::byte_length($fh_buf) . ":" . nul_vis($fh_buf));
+
+    # R10-VM5: 2-arg vs 3-arg split, negative limit, NUL subject, UTF-8
+    my str $sp2 = join("|", split(",", "a,b,,"));
+    my str $spp = join("|", split(",", "a,b,c,d", 2));
+    my str $spn = join("|", split(",", "a,b,,", -1));
+    my array @sp_nul_arr = split(",", "a" . chr(0) . "b,c");
+    my array @sp_u8 = split(":", "café:bar");
+    say("VM5=" . $sp2 . "#" . $spp . "#" . $spn . "#" . size(@sp_nul_arr) . ":" . core::byte_length($sp_nul_arr[0]) . ":" . byte_at($sp_nul_arr[0], 1) . "#" . length($sp_u8[0]) . ":" . core::byte_length($sp_u8[0]));
+
+    # R10-VM6: multi-arg die(), NUL + UTF-8 die(), ref die()
+    my str $d_multi = "";
+    my str $d_nul = "";
+    my str $d_u8 = "";
+    my str $d_ref = "";
+    try { die("d1", "-", "d2"); } catch ($e) { $d_multi = "" . $e; }
+    try { die("n" . chr(0) . "m"); } catch ($e) {
+        $d_nul = core::byte_length("" . $e) . ":" . byte_at("" . $e, 1);
+    }
+    try { die("café"); } catch ($e) {
+        $d_u8 = length("" . $e) . ":" . core::byte_length("" . $e);
+    }
+    try { die({"code" => 77}); } catch ($e) {
+        $d_ref = ref($e) . ":" . $e->{"code"};
+    }
+    say("VM6=" . $d_multi . "|" . $d_nul . "|" . $d_u8 . "|" . $d_ref);
+
+    # R10-VM7: method calls on missing key & unblessed hash must throw (not return hash value)
+    my scalar $ho = R10HasCls::new("ro", 123);
+    $ho->{"extra"} = "secret";
+    my int $err_blessed = 0;
+    try { $ho->extra(); } catch ($e) { $err_blessed = 1; }
+    my scalar $uh = {"k" => "raw"};
+    my int $err_unblessed = 0;
+    try { $uh->k(); } catch ($e) { $err_unblessed = 1; }
+    say("VM7=" . $ho->ro() . ":" . $ho->ping() . ":" . $err_blessed . ":" . $err_unblessed);
+
+    # R10-VM8: large (>= 65536 byte) hash keys without 16-bit keylen truncation collision
+    my str $big_pfx = "k" x 65536;
+    my hash %bh = ();
+    $bh{$big_pfx . "ONE"} = 111;
+    $bh{$big_pfx . "TWO"} = 222;
+    my int $kcnt1 = scalar(keys(%bh));
+    my int $v1 = $bh{$big_pfx . "ONE"};
+    my int $v2 = $bh{$big_pfx . "TWO"};
+    delete($bh{$big_pfx . "ONE"});
+    my int $ex1 = exists($bh{$big_pfx . "ONE"});
+    my int $ex2 = exists($bh{$big_pfx . "TWO"});
+    say("VM8=" . $kcnt1 . ":" . $v1 . ":" . $v2 . ":" . $ex1 . ":" . $ex2 . ":" . $bh{$big_pfx . "TWO"});
+
+    # R10-VM9: regex $1, captures(), named_captures() with NUL & UTF-8
+    my str $rbin = "a" . chr(0) . "b";
+    my int $rm1 = ($rbin =~ /(a.b)/) ? 1 : 0;
+    my str $c1 = $1;
+    my array @caps = captures();
+    my int $rm2 = ($rbin =~ /(?<tok>a.b)/) ? 1 : 0;
+    my hash %ncaps = named_captures();
+    my str $nc_tok = $ncaps{"tok"};
+    my str $ru8 = "café!";
+    my int $rm3 = ($ru8 =~ /(café)/) ? 1 : 0;
+    my str $c3 = $1;
+    my array @caps3 = captures();
+    say("VM9_NUL=" . $rm1 . ":" . core::byte_length($c1) . ":" . byte_at($c1, 1) . ":" . core::byte_length($caps[1]) . "|" . $rm2 . ":" . core::byte_length($nc_tok) . ":" . byte_at($nc_tok, 1));
+    say("VM9_U8=" . $rm3 . ":" . length($c3) . ":" . core::byte_length($c3) . ":" . length($caps3[1]));
+
+    # R10-C5: qw nested delimiters & escapes parity
+    my array @q1 = qw(foo (bar) baz);
+    my array @q2 = qw{a \{ \} b};
+    say("C5=" . join(",", @q1) . "|" . join(",", @q2));
+
+    return 0;
+}

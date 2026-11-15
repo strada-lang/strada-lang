@@ -2583,24 +2583,57 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
     my scalar $word_sb = sb_new();
     my int $word_len = 0;
     my int $count = 0;
+    my int $depth = 1;  # Track paired delimiters like qw(a (b) c)
 
     while (!lex_at_end($lexer)) {
         my str $ch = lex_current_char($lexer);
 
         if ($ch eq $close) {
-            # End of qw - save last word if any
-            if ($word_len > 0) {
-                push(@words, sb_to_string($word_sb));
-                $count = $count + 1;
-            }
-            lex_advance($lexer);  # Skip close delimiter
+            $depth = $depth - 1;
+            if ($depth == 0) {
+                # End of qw - save last word if any
+                if ($word_len > 0) {
+                    push(@words, sb_to_string($word_sb));
+                    $count = $count + 1;
+                }
+                lex_advance($lexer);  # Skip close delimiter
 
-            my hash %token = ();
-            $token{"type"} = "QW_LITERAL";
-            $token{"words"} = \@words;
-            $token{"word_count"} = $count;
-            $token{"line"} = $token_line;
-            return \%token;
+                my hash %token = ();
+                $token{"type"} = "QW_LITERAL";
+                $token{"words"} = \@words;
+                $token{"word_count"} = $count;
+                $token{"line"} = $token_line;
+                return \%token;
+            }
+            sb_append($word_sb, $ch);
+            $word_len = $word_len + 1;
+            lex_advance($lexer);
+            next;
+        }
+
+        if ($open ne $close && $ch eq $open) {
+            $depth = $depth + 1;
+            sb_append($word_sb, $ch);
+            $word_len = $word_len + 1;
+            lex_advance($lexer);
+            next;
+        }
+
+        if ($ch eq "\\") {
+            lex_advance($lexer);
+            if (lex_at_end($lexer)) {
+                last;
+            }
+            my str $esc = lex_current_char($lexer);
+            if ($esc eq $close || $esc eq $open || $esc eq "\\") {
+                sb_append($word_sb, $esc);
+            } else {
+                sb_append($word_sb, "\\");
+                sb_append($word_sb, $esc);
+            }
+            $word_len = $word_len + 1;
+            lex_advance($lexer);
+            next;
         }
 
         if ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") {

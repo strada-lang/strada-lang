@@ -130,11 +130,36 @@ private func process_emphasis(str $text) str {
     return $result;
 }
 
+private func restore_tokens(str $s, str $pfx, str $sfx, scalar $toks) str {
+    my str $res = $s;
+    my int $ti = size(@$toks) - 1;
+    while ($ti >= 0) {
+        my str $ph = $pfx . $ti . $sfx;
+        my int $search_from = 0;
+        my int $ppos = index($res, $ph, $search_from);
+        while ($ppos >= 0) {
+            my str $b = substr($res, 0, $ppos);
+            my str $val = $toks->[$ti];
+            my str $a = substr($res, $ppos + length($ph), length($res) - $ppos - length($ph));
+            $res = $b . $val . $a;
+            $search_from = $ppos + length($val);
+            $ppos = index($res, $ph, $search_from);
+        }
+        $ti = $ti - 1;
+    }
+    return $res;
+}
+
 # Process inline formatting (code, images, links, bold, italic)
 private func process_inline(str $line) str {
     my str $result = $line;
     my str $sentinel = core::byte(1);
+    my str $tok_pfx = $sentinel . "MDTOK";
+    while (index($line, $tok_pfx) >= 0) {
+        $tok_pfx = $tok_pfx . "X";
+    }
     my array @tokens = ();
+    my array @raw_tokens = ();
 
     # 1. Extract inline `code` spans into protected placeholders first
     my int $search_pos = 0;
@@ -150,8 +175,9 @@ private func process_inline(str $line) str {
         my str $before = substr($result, 0, $start);
         my str $code = substr($result, $start + 1, $end - $start - 1);
         my str $after = substr($result, $end + 1, length($result) - $end - 1);
-        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        my str $tok = $tok_pfx . size(@tokens) . $sentinel;
         push(@tokens, "<code>" . ::html_escape($code) . "</code>");
+        push(@raw_tokens, "`" . $code . "`");
         $result = $before . $tok . $after;
         $search_pos = length($before) + length($tok);
     }
@@ -178,11 +204,12 @@ private func process_inline(str $line) str {
             next;
         }
         my str $before = substr($result, 0, $bang);
-        my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
-        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+        my str $alt = ::restore_tokens(substr($result, $bang + 2, $close_bracket - $bang - 2), $tok_pfx, $sentinel, \@raw_tokens);
+        my str $url = ::restore_tokens(substr($result, $open_paren + 1, $close_paren - $open_paren - 1), $tok_pfx, $sentinel, \@raw_tokens);
         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        my str $tok = $tok_pfx . size(@tokens) . $sentinel;
         push(@tokens, "<img src=\"" . ::safe_url($url) . "\" alt=\"" . ::attr_escape($alt) . "\">");
+        push(@raw_tokens, "![" . $alt . "](" . $url . ")");
         $result = $before . $tok . $after;
         $search_pos = length($before) + length($tok);
     }
@@ -209,11 +236,13 @@ private func process_inline(str $line) str {
             next;
         }
         my str $before = substr($result, 0, $open_bracket);
-        my str $text = ::process_emphasis(::html_escape(substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1)));
-        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+        my str $raw_text = substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1);
+        my str $text = ::process_emphasis(::html_escape($raw_text));
+        my str $url = ::restore_tokens(substr($result, $open_paren + 1, $close_paren - $open_paren - 1), $tok_pfx, $sentinel, \@raw_tokens);
         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        my str $tok = $tok_pfx . size(@tokens) . $sentinel;
         push(@tokens, "<a href=\"" . ::safe_url($url) . "\">" . $text . "</a>");
+        push(@raw_tokens, "[" . ::restore_tokens($raw_text, $tok_pfx, $sentinel, \@raw_tokens) . "](" . $url . ")");
         $result = $before . $tok . $after;
         $search_pos = length($before) + length($tok);
     }
@@ -222,14 +251,7 @@ private func process_inline(str $line) str {
     $result = ::process_emphasis(::html_escape($result));
 
     # 5. Restore placeholders in reverse order (so code spans inside link text restore cleanly)
-    my int $ti = size(@tokens) - 1;
-    while ($ti >= 0) {
-        my str $tok = $sentinel . "MDTOK" . $ti . $sentinel;
-        $result = replace_all($result, $tok, $tokens[$ti]);
-        $ti = $ti - 1;
-    }
-
-    return $result;
+    return ::restore_tokens($result, $tok_pfx, $sentinel, \@tokens);
 }
 
 # Count leading characters

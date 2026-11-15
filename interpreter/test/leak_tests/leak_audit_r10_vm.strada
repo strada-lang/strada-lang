@@ -1,0 +1,88 @@
+#!/usr/bin/env strada
+# Cycle 10 VM & Tree-Walk Valgrind leak regression suite: R10-VM1..R10-VM9
+
+package R10LV::Base;
+func new(int $v) scalar {
+    my hash %h = ("v" => $v, "pad" => ("p" x 32));
+    return bless(\%h, "R10LV::Base");
+}
+func calc(scalar $self, int $n) int { return $self->{"v"} + $n; }
+
+package R10LV::Child;
+extends R10LV::Base;
+our str $g_log = "";
+func get_log() str { return $g_log; }
+func new(int $v) scalar {
+    my hash %h = ("v" => $v, "pad" => ("q" x 32));
+    return bless(\%h, "R10LV::Child");
+}
+before "calc" func(scalar $self, int $n) void { $g_log = "B"; }
+after "calc" func(scalar $self, int $n) void { $g_log = $g_log . "A"; }
+around "calc" func(scalar $orig, scalar $self, int $n) int { return $orig->($self, $n) + 1; }
+
+package main;
+
+func main() int {
+    for (my int $iter = 0; $iter < 4; $iter = $iter + 1) {
+        # R10-VM1
+        my array @fns = ();
+        for (my int $i = 0; $i < 3; $i = $i + 1) {
+            my int $v = $i;
+            push(@fns, func() int { return $v; });
+        }
+        if ($fns[0]->() + $fns[1]->() + $fns[2]->() != 3) { die("vm1 for"); }
+
+        my array @tfns = ();
+        for (my int $k = 0; $k < 2; $k = $k + 1) {
+            try { throw "e" . $k; } catch ($e) {
+                push(@tfns, func() str { return "" . $e; });
+            } finally {
+                my str $f = "fin" . $k;
+            }
+        }
+        if ($tfns[0]->() ne "e0" || $tfns[1]->() ne "e1") { die("vm1 try"); }
+
+        # R10-VM2
+        my scalar $ns = R10LV::Child::new(10);
+        if ($ns->calc(5) != 16 || R10LV::Child::get_log() ne "BA") { die("vm2"); }
+
+        # R10-VM3 & R10-VM4
+        my str $sp = sprintf("%lld:%c:%s", -1234567890, 233, "a" . chr(0) . "b");
+        if (core::byte_length($sp) < 10 || length(sprintf("%c", 233)) != 1) { die("vm3"); }
+        my str $tmp4 = "/tmp/r10_vm_leak_" . core::getpid() . ".bin";
+        my scalar $ofh = core::open($tmp4, "w");
+        say($ofh, "A" . chr(0) . "B");
+        core::close($ofh);
+        my str $obuf = core::slurp($tmp4);
+        core::unlink($tmp4);
+        if (core::byte_length($obuf) != 4) { die("vm4"); }
+
+        # R10-VM5 & R10-VM6
+        my array @sp3 = split(",", "a,b,,", -1);
+        if (size(@sp3) != 4) { die("vm5"); }
+        try { die("d1", "d2"); } catch ($e) {
+            if ("" . $e ne "d1d2") { die("vm6"); }
+        }
+
+        # R10-VM7
+        my scalar $uh = {"k" => "v"};
+        my int $threw = 0;
+        try { $uh->k(); } catch ($e) { $threw = 1; }
+        if ($threw != 1) { die("vm7"); }
+
+        # R10-VM8
+        my str $pfx = "x" x 65536;
+        my hash %bh = ();
+        $bh{$pfx . "1"} = 10;
+        $bh{$pfx . "2"} = 20;
+        if ($bh{$pfx . "1"} != 10 || $bh{$pfx . "2"} != 20) { die("vm8"); }
+
+        # R10-VM9
+        my str $rbin = "p" . chr(0) . "q";
+        if (!($rbin =~ /(?<t>p.q)/)) { die("vm9 match"); }
+        my hash %nc = named_captures();
+        if (core::byte_length($1) != 3 || core::byte_length($nc{"t"}) != 3) { die("vm9 cap"); }
+    }
+    say("R10_VM_LEAKS_OK");
+    return 0;
+}

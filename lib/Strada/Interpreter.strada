@@ -4508,6 +4508,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return join($args->[0], $ja);
     }
     if ($bid == BI::SPLIT) {
+        if ($argc >= 3) {
+            return split($args->[0], $args->[1], $args->[2]);
+        }
         return split($args->[0], $args->[1]);
     }
     if ($bid == BI::CHOMP) {
@@ -4737,14 +4740,28 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- Misc ----
     if ($bid == BI::DIE) {
-        if ($argc >= 1) {
+        if ($argc == 1) {
             die($args->[0]);
+        }
+        if ($argc > 1) {
+            my str $msg = "";
+            my int $di = 0;
+            while ($di < $argc) {
+                $msg = $msg . $args->[$di];
+                $di = $di + 1;
+            }
+            die($msg);
         }
         die("Died");
     }
     if ($bid == BI::WARN) {
         if ($argc >= 1) {
-            my str $msg = "" . $args->[0];
+            my str $msg = "";
+            my int $wi = 0;
+            while ($wi < $argc) {
+                $msg = $msg . $args->[$wi];
+                $wi = $wi + 1;
+            }
             if (length($msg) == 0 || substr($msg, length($msg) - 1, 1) ne "\n") {
                 $msg = $msg . "\n";
             }
@@ -8147,7 +8164,21 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
     # --- Literals ---
     if ($type == NI::STR_LITERAL) {
-        return $node->{"value"};
+        if (exists($node, "__sv_lit")) {
+            return $node->{"__sv_lit"};
+        }
+        my scalar $raw = $node->{"value"};
+        my scalar $sv_lit = $raw;
+        __C__ {
+            if (raw && !STRADA_IS_TAGGED_INT(raw) && raw->type == STRADA_STR && raw->value.pv) {
+                size_t vlen = STRADA_STR_BYTELEN(raw);
+                StradaValue *lit = strada_new_str_lit(raw->value.pv, vlen);
+                strada_decref(sv_lit);
+                sv_lit = lit;
+            }
+        }
+        $node->{"__sv_lit"} = $sv_lit;
+        return $sv_lit;
     }
     if ($type == NI::INT_LITERAL) {
         if (exists($node, "__iv")) {
@@ -10131,6 +10162,89 @@ func get_eval_backend() str {
     return $g_eval_backend;
 }
 
+func eval_vm_make_return_undef() scalar {
+    my hash %undef_node = ();
+    $undef_node{"type"} = NI::UNDEF;
+    my hash %ret_u = ();
+    $ret_u{"type"} = NI::RETURN_STMT;
+    $ret_u{"value"} = \%undef_node;
+    return \%ret_u;
+}
+
+func eval_vm_rewrite_tail_return(scalar $block) void {
+    if (!defined($block)) { return; }
+    my scalar $stmts = $block->{"statements"};
+    if (!defined($stmts)) { return; }
+    my int $scnt = size($stmts);
+    if ($scnt <= 0) {
+        push($stmts, eval_vm_make_return_undef());
+        $block->{"statement_count"} = 1;
+        return;
+    }
+    my scalar $last_stmt = $stmts->[$scnt - 1];
+    if (!defined($last_stmt)) {
+        push($stmts, eval_vm_make_return_undef());
+        $block->{"statement_count"} = $scnt + 1;
+        return;
+    }
+    my int $ltype = $last_stmt->{"type"};
+    if ($ltype == NI::EXPR_STMT) {
+        my hash %ret_node = ();
+        $ret_node{"type"} = NI::RETURN_STMT;
+        $ret_node{"value"} = $last_stmt->{"expr"};
+        $stmts->[$scnt - 1] = \%ret_node;
+        return;
+    }
+    if ($ltype == NI::RETURN_STMT) {
+        return;
+    }
+    if ($ltype == NI::VAR_DECL || $ltype == NI::OUR_DECL) {
+        my str $vn = $last_stmt->{"name"};
+        my str $vsig = $last_stmt->{"sigil"};
+        if ($ltype == NI::OUR_DECL && defined($last_stmt->{"package"})) {
+            my str $pkg = $last_stmt->{"package"};
+            if (length($pkg) > 0 && $pkg ne "main" && index($vn, "::") < 0) {
+                $vn = $pkg . "::" . $vn;
+            }
+        }
+        my hash %var_node = ();
+        $var_node{"type"} = NI::VARIABLE;
+        $var_node{"name"} = $vn;
+        $var_node{"sigil"} = $vsig;
+        my hash %ret_v = ();
+        $ret_v{"type"} = NI::RETURN_STMT;
+        $ret_v{"value"} = \%var_node;
+        push($stmts, \%ret_v);
+        $block->{"statement_count"} = $scnt + 1;
+        return;
+    }
+    if ($ltype == NI::BLOCK) {
+        eval_vm_rewrite_tail_return($last_stmt);
+        push($stmts, eval_vm_make_return_undef());
+        $block->{"statement_count"} = $scnt + 1;
+        return;
+    }
+    if ($ltype == NI::IF_STMT) {
+        eval_vm_rewrite_tail_return($last_stmt->{"then_block"});
+        my scalar $eblocks = $last_stmt->{"elsif_blocks"};
+        my int $ecnt = $last_stmt->{"elsif_count"};
+        my int $ei = 0;
+        while ($ei < $ecnt) {
+            eval_vm_rewrite_tail_return($eblocks->[$ei]);
+            $ei = $ei + 1;
+        }
+        my scalar $else_blk = $last_stmt->{"else_block"};
+        if ($else_blk) {
+            eval_vm_rewrite_tail_return($else_blk);
+        }
+        push($stmts, eval_vm_make_return_undef());
+        $block->{"statement_count"} = $scnt + 1;
+        return;
+    }
+    push($stmts, eval_vm_make_return_undef());
+    $block->{"statement_count"} = $scnt + 1;
+}
+
 # Evaluate code using the bytecode VM backend (falls back to tree-walk when
 # the binary was not built with -DHAVE_VM).
 func eval_string_vm(str $code) scalar {
@@ -10265,35 +10379,7 @@ func eval_string_vm(str $code) scalar {
                     }
                     $si = $si + 1;
                 }
-                if ($scnt > 0) {
-                    my scalar $last_stmt = $stmts->[$scnt - 1];
-                    if (defined($last_stmt)) {
-                        my int $ltype = $last_stmt->{"type"};
-                        if ($ltype == NI::EXPR_STMT) {
-                            my scalar $expr_node = $last_stmt->{"expr"};
-                            my hash %ret_node = ();
-                            $ret_node{"type"} = NI::RETURN_STMT;
-                            $ret_node{"value"} = $expr_node;
-                            $stmts->[$scnt - 1] = \%ret_node;
-                        } elsif ($ltype != NI::RETURN_STMT) {
-                            my hash %undef_node = ();
-                            $undef_node{"type"} = NI::UNDEF;
-                            my hash %ret_u = ();
-                            $ret_u{"type"} = NI::RETURN_STMT;
-                            $ret_u{"value"} = \%undef_node;
-                            push($stmts, \%ret_u);
-                            $body->{"statement_count"} = $scnt + 1;
-                        }
-                    }
-                } else {
-                    my hash %undef_node = ();
-                    $undef_node{"type"} = NI::UNDEF;
-                    my hash %ret_u = ();
-                    $ret_u{"type"} = NI::RETURN_STMT;
-                    $ret_u{"value"} = \%undef_node;
-                    push($stmts, \%ret_u);
-                    $body->{"statement_count"} = 1;
-                }
+                eval_vm_rewrite_tail_return($body);
             }
         } elsif ((defined($pfn->{"bare_name"}) && $pfn->{"bare_name"} eq "__strada_eval_top_start__") || $pfn->{"name"} eq "__strada_eval_sep____strada_eval_top_start__") {
             $seen_top_start = 1;

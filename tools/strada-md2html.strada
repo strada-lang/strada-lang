@@ -146,11 +146,36 @@ func sanitize_url(str $u) str {
     return html_escape($u);
 }
 
+func restore_tokens(str $s, str $pfx, str $sfx, scalar $toks) str {
+    my str $res = $s;
+    my int $ti = size(@$toks) - 1;
+    while ($ti >= 0) {
+        my str $ph = $pfx . $ti . $sfx;
+        my int $search_from = 0;
+        my int $ppos = index($res, $ph, $search_from);
+        while ($ppos >= 0) {
+            my str $b = substr($res, 0, $ppos);
+            my str $val = $toks->[$ti];
+            my str $a = substr($res, $ppos + length($ph), length($res) - $ppos - length($ph));
+            $res = $b . $val . $a;
+            $search_from = $ppos + length($val);
+            $ppos = index($res, $ph, $search_from);
+        }
+        $ti = $ti - 1;
+    }
+    return $res;
+}
+
 func process_inline(str $line) str {
     my str $result = $line;
     my array @tokens = ();
+    my array @raw_tokens = ();
     my str $soh = chr(1);
     my str $stx = chr(2);
+    my str $tok_pfx = $soh . "T";
+    while (index($line, $tok_pfx) >= 0) {
+        $tok_pfx = $tok_pfx . "X";
+    }
 
     # 1. Extract inline `code` spans into protected tokens
     my int $done = 0;
@@ -168,8 +193,9 @@ func process_inline(str $line) str {
                 my str $code = substr($result, $start + 1, $end - $start - 1);
                 my str $after = substr($result, $end + 1, length($result) - $end - 1);
                 my int $tidx = size(@tokens);
-                my str $ph = $soh . "T" . $tidx . $stx;
+                my str $ph = $tok_pfx . $tidx . $stx;
                 push(@tokens, "<code>" . html_escape($code) . "</code>");
+                push(@raw_tokens, "`" . $code . "`");
                 $result = $before . $ph . $after;
                 $search_from = length($before) + length($ph);
             }
@@ -197,12 +223,13 @@ func process_inline(str $line) str {
                         $done = 1;
                     } else {
                         my str $before = substr($result, 0, $bang);
-                        my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
-                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+                        my str $alt = restore_tokens(substr($result, $bang + 2, $close_bracket - $bang - 2), $tok_pfx, $stx, \@raw_tokens);
+                        my str $url = restore_tokens(substr($result, $open_paren + 1, $close_paren - $open_paren - 1), $tok_pfx, $stx, \@raw_tokens);
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
                         my int $tidx = size(@tokens);
-                        my str $ph = $soh . "T" . $tidx . $stx;
+                        my str $ph = $tok_pfx . $tidx . $stx;
                         push(@tokens, "<img src=\"" . sanitize_url($url) . "\" alt=\"" . html_escape($alt) . "\">");
+                        push(@raw_tokens, "![" . $alt . "](" . $url . ")");
                         $result = $before . $ph . $after;
                         $search_from = length($before) + length($ph);
                     }
@@ -233,11 +260,12 @@ func process_inline(str $line) str {
                     } else {
                         my str $before = substr($result, 0, $open_bracket);
                         my str $text = substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1);
-                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+                        my str $url = restore_tokens(substr($result, $open_paren + 1, $close_paren - $open_paren - 1), $tok_pfx, $stx, \@raw_tokens);
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
                         my int $tidx = size(@tokens);
-                        my str $ph = $soh . "T" . $tidx . $stx;
+                        my str $ph = $tok_pfx . $tidx . $stx;
                         push(@tokens, "<a href=\"" . sanitize_url($url) . "\">" . process_inline_emph(prose_escape($text)) . "</a>");
+                        push(@raw_tokens, "[" . restore_tokens($text, $tok_pfx, $stx, \@raw_tokens) . "](" . $url . ")");
                         $result = $before . $ph . $after;
                         $search_from = length($before) + length($ph);
                     }
@@ -250,20 +278,7 @@ func process_inline(str $line) str {
     $result = process_inline_emph(prose_escape($result));
 
     # 5. Restore protected tokens in reverse order (so nested tokens inside links expand)
-    my int $ti = size(@tokens) - 1;
-    while ($ti >= 0) {
-        my str $ph = $soh . "T" . $ti . $stx;
-        my int $ppos = index($result, $ph);
-        while ($ppos >= 0) {
-            my str $b = substr($result, 0, $ppos);
-            my str $a = substr($result, $ppos + length($ph), length($result) - $ppos - length($ph));
-            $result = $b . $tokens[$ti] . $a;
-            $ppos = index($result, $ph);
-        }
-        $ti = $ti - 1;
-    }
-
-    return $result;
+    return restore_tokens($result, $tok_pfx, $stx, \@tokens);
 }
 
 # Count leading characters

@@ -531,6 +531,13 @@ func unquote_key(str $k) str {
 
 # Parse a YAML value (handles quotes, numbers, booleans)
 func parse_value(str $s) scalar {
+    return YAML::parse_value_d($s, 0);
+}
+
+func parse_value_d(str $s, int $depth) scalar {
+    if ($depth >= 64) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     my str $trimmed = YAML::strip_comment($s);
     my int $len = length($trimmed);
 
@@ -558,12 +565,12 @@ func parse_value(str $s) scalar {
 
     # Check for inline hash { ... }
     if ($first eq "{") {
-        return YAML::parse_inline_hash($trimmed);
+        return YAML::parse_inline_hash_d($trimmed, $depth);
     }
 
     # Check for inline array [ ... ]
     if ($first eq "[") {
-        return YAML::parse_inline_array($trimmed);
+        return YAML::parse_inline_array_d($trimmed, $depth);
     }
 
     # Check for boolean/null values (case-insensitive YAML 1.1)
@@ -763,6 +770,13 @@ func split_inline_items(str $s) array {
 }
 
 func parse_inline_hash(str $s) scalar {
+    return YAML::parse_inline_hash_d($s, 0);
+}
+
+func parse_inline_hash_d(str $s, int $depth) scalar {
+    if ($depth >= 64) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     YAML::verify_outer_flow_enclosure($s, "{", "}", "mapping");
     my scalar $result = {};
     my int $len = length($s);
@@ -783,7 +797,7 @@ func parse_inline_hash(str $s) scalar {
             if ($colon_pos + 1 < length($part)) {
                 $val_str = substr($part, $colon_pos + 1, length($part) - $colon_pos - 1);
             }
-            my scalar $val = YAML::parse_value($val_str);
+            my scalar $val = YAML::parse_value_d($val_str, $depth + 1);
             $result->{$key} = $val;
         }
 
@@ -795,6 +809,13 @@ func parse_inline_hash(str $s) scalar {
 
 # Parse inline array [ item1, item2 ]
 func parse_inline_array(str $s) scalar {
+    return YAML::parse_inline_array_d($s, 0);
+}
+
+func parse_inline_array_d(str $s, int $depth) scalar {
+    if ($depth >= 64) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     YAML::verify_outer_flow_enclosure($s, "[", "]", "sequence");
     my scalar $result = [];
     my int $len = length($s);
@@ -807,7 +828,7 @@ func parse_inline_array(str $s) scalar {
     while ($i < $count) {
         my str $part = YAML::trim($parts[$i]);
         if (length($part) > 0) {
-            push($result, YAML::parse_value($part));
+            push($result, YAML::parse_value_d($part, $depth + 1));
         }
         $i = $i + 1;
     }
@@ -1330,6 +1351,13 @@ func Dump(scalar $data) str {
 
 # Dump a value with indentation
 func dump_value(scalar $value, int $indent) str {
+    return YAML::dump_value_d($value, $indent, 0);
+}
+
+func dump_value_d(scalar $value, int $indent, int $depth) str {
+    if ($depth >= 64 || $indent > 512) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     if (!defined($value)) {
         return "~";
     }
@@ -1337,11 +1365,11 @@ func dump_value(scalar $value, int $indent) str {
     my str $rtype = ref($value);
 
     if ($rtype eq "HASH") {
-        return YAML::dump_hash($value, $indent);
+        return YAML::dump_hash_d($value, $indent, $depth);
     }
 
     if ($rtype eq "ARRAY") {
-        return YAML::dump_array($value, $indent);
+        return YAML::dump_array_d($value, $indent, $depth);
     }
 
     # Scalar value
@@ -1497,6 +1525,13 @@ func format_key(str $k) str {
 
 # Dump hash
 func dump_hash(scalar $hval, int $indent) str {
+    return YAML::dump_hash_d($hval, $indent, 0);
+}
+
+func dump_hash_d(scalar $hval, int $indent, int $depth) str {
+    if ($depth >= 64 || $indent > 512) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     my str $result = "";
     my array @keys = keys($hval);
     my int $count = size(@keys);
@@ -1515,17 +1550,17 @@ func dump_hash(scalar $hval, int $indent) str {
                 $result = $result . $pad . $qkey . ": {}\n";
             } else {
                 $result = $result . $pad . $qkey . ":\n";
-                $result = $result . YAML::dump_value($val, $indent + 2);
+                $result = $result . YAML::dump_value_d($val, $indent + 2, $depth + 1);
             }
         } elsif ($rtype eq "ARRAY") {
             if (size($val) == 0) {
                 $result = $result . $pad . $qkey . ": []\n";
             } else {
                 $result = $result . $pad . $qkey . ":\n";
-                $result = $result . YAML::dump_value($val, $indent + 2);
+                $result = $result . YAML::dump_value_d($val, $indent + 2, $depth + 1);
             }
         } else {
-            $result = $result . $pad . $qkey . ": " . YAML::dump_value($val, 0) . "\n";
+            $result = $result . $pad . $qkey . ": " . YAML::dump_value_d($val, 0, $depth + 1) . "\n";
         }
 
         $i = $i + 1;
@@ -1536,6 +1571,13 @@ func dump_hash(scalar $hval, int $indent) str {
 
 # Dump array
 func dump_array(scalar $arr, int $indent) str {
+    return YAML::dump_array_d($arr, $indent, 0);
+}
+
+func dump_array_d(scalar $arr, int $indent, int $depth) str {
+    if ($depth >= 64 || $indent > 512) {
+        throw "YAML: maximum nesting depth (64) exceeded";
+    }
     my str $result = "";
     my int $count = size($arr);
     my int $i = 0;
@@ -1560,17 +1602,17 @@ func dump_array(scalar $arr, int $indent) str {
                         $result = $result . $pad . "- " . $qfirst_key . ": {}\n";
                     } else {
                         $result = $result . $pad . "- " . $qfirst_key . ":\n";
-                        $result = $result . YAML::dump_value($first_val, $indent + 4);
+                        $result = $result . YAML::dump_value_d($first_val, $indent + 4, $depth + 1);
                     }
                 } elsif ($first_rtype eq "ARRAY") {
                     if (size($first_val) == 0) {
                         $result = $result . $pad . "- " . $qfirst_key . ": []\n";
                     } else {
                         $result = $result . $pad . "- " . $qfirst_key . ":\n";
-                        $result = $result . YAML::dump_value($first_val, $indent + 4);
+                        $result = $result . YAML::dump_value_d($first_val, $indent + 4, $depth + 1);
                     }
                 } else {
-                    $result = $result . $pad . "- " . $qfirst_key . ": " . YAML::dump_value($first_val, 0) . "\n";
+                    $result = $result . $pad . "- " . $qfirst_key . ": " . YAML::dump_value_d($first_val, 0, $depth + 1) . "\n";
                 }
 
                 # Rest of keys
@@ -1587,17 +1629,17 @@ func dump_array(scalar $arr, int $indent) str {
                             $result = $result . $pad . "  " . $qkey . ": {}\n";
                         } else {
                             $result = $result . $pad . "  " . $qkey . ":\n";
-                            $result = $result . YAML::dump_value($kval, $indent + 4);
+                            $result = $result . YAML::dump_value_d($kval, $indent + 4, $depth + 1);
                         }
                     } elsif ($krtype eq "ARRAY") {
                         if (size($kval) == 0) {
                             $result = $result . $pad . "  " . $qkey . ": []\n";
                         } else {
                             $result = $result . $pad . "  " . $qkey . ":\n";
-                            $result = $result . YAML::dump_value($kval, $indent + 4);
+                            $result = $result . YAML::dump_value_d($kval, $indent + 4, $depth + 1);
                         }
                     } else {
-                        $result = $result . $pad . "  " . $qkey . ": " . YAML::dump_value($kval, 0) . "\n";
+                        $result = $result . $pad . "  " . $qkey . ": " . YAML::dump_value_d($kval, 0, $depth + 1) . "\n";
                     }
 
                     $j = $j + 1;
@@ -1610,10 +1652,10 @@ func dump_array(scalar $arr, int $indent) str {
                 $result = $result . $pad . "- []\n";
             } else {
                 $result = $result . $pad . "-\n";
-                $result = $result . YAML::dump_array($val, $indent + 2);
+                $result = $result . YAML::dump_array_d($val, $indent + 2, $depth + 1);
             }
         } else {
-            $result = $result . $pad . "- " . YAML::dump_value($val, 0) . "\n";
+            $result = $result . $pad . "- " . YAML::dump_value_d($val, 0, $depth + 1) . "\n";
         }
 
         $i = $i + 1;

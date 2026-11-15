@@ -663,15 +663,11 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                         if ($sr_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__sr_rp); "); }
                         else { emit($cg, "strada_decref(__sr_rp); "); }
                     }
-                    if ($cg->{"uses_tie"} == 1) {
-                        emit($cg, "if (strada_scalar_is_tied(" . $vref . ")) { ");
-                        if ($sr_sp == 1) { emit($cg, "strada_cleanup_push(__sr_old); strada_cleanup_push(__sr_new); "); }
-                        emit($cg, "strada_tied_scalar_store(" . $vref . ", __sr_new); ");
-                        if ($sr_sp == 1) { emit($cg, "strada_cleanup_pop(); strada_cleanup_pop(); "); }
-                        emit($cg, "strada_decref(__sr_new); } else { strada_decref(" . $vref . "); " . $vref . " = __sr_new; } ");
-                    } else {
-                        emit($cg, "strada_decref(" . $vref . "); " . $vref . " = __sr_new; ");
-                    }
+                    emit($cg, "if (strada_scalar_is_tied(" . $vref . ")) { ");
+                    if ($sr_sp == 1) { emit($cg, "strada_cleanup_push(__sr_old); strada_cleanup_push(__sr_new); "); }
+                    emit($cg, "strada_tied_scalar_store(" . $vref . ", __sr_new); ");
+                    if ($sr_sp == 1) { emit($cg, "strada_cleanup_pop(); strada_cleanup_pop(); "); }
+                    emit($cg, "strada_decref(__sr_new); } else { strada_decref(" . $vref . "); " . $vref . " = __sr_new; } ");
                     emit($cg, "__sr_old; })");
                     return 1;
                 }
@@ -808,12 +804,17 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
             my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1 && expr_is_always_tagged_int($cg, $args->[0]) == 0;
+            my int $arr_retain = 0;
+            if ($arr_cleanup == 0 && $argc > 1) { $arr_retain = 1; }
+            my int $arr_owned = 0;
+            if ($arr_cleanup == 1 || $arr_retain == 1) { $arr_owned = 1; }
             my int $push_p = 0;
-            if ($arr_cleanup == 1 && cleanup_push_useful($cg) == 1) { $push_p = 1; }
+            if ($arr_owned == 1 && cleanup_push_useful($cg) == 1) { $push_p = 1; }
             if ($cg->{"uses_tie"} == 1) {
                 emit($cg, "({ StradaValue *__push_a = ");
                 gen_expression($cg, $args->[0]);
                 emit($cg, "; ");
+                if ($arr_retain == 1) { emit($cg, "strada_incref(__push_a); "); }
                 if ($push_p == 1) { emit($cg, "strada_cleanup_push(__push_a); "); }
                 my int $tpi = 1;
                 while ($tpi < $argc) {
@@ -831,17 +832,18 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 }
                 if ($push_p == 1) {
                     emit($cg, "strada_cleanup_pop_decref(__push_a); ");
-                } elsif ($arr_cleanup == 1) {
+                } elsif ($arr_owned == 1) {
                     emit($cg, "strada_decref(__push_a); ");
                 }
                 emit($cg, "strada_undef_static(); })");
                 return 1;
             }
             emit($cg, "({ ");
-            if ($arr_cleanup == 1) {
+            if ($arr_owned == 1) {
                 emit($cg, "StradaValue *__push_a = ");
                 gen_expression($cg, $args->[0]);
                 emit($cg, "; ");
+                if ($arr_retain == 1) { emit($cg, "strada_incref(__push_a); "); }
                 if ($push_p == 1) { emit($cg, "strada_cleanup_push(__push_a); "); }
                 emit($cg, "StradaArray *__push_av = strada_deref_array(__push_a); ");
             } else {
@@ -865,7 +867,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             }
             if ($push_p == 1) {
                 emit($cg, "strada_cleanup_pop_decref(__push_a); ");
-            } elsif ($arr_cleanup == 1) {
+            } elsif ($arr_owned == 1) {
                 emit($cg, "strada_decref(__push_a); ");
             }
             emit($cg, "strada_undef_static(); })");
@@ -964,15 +966,17 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
             my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1 && expr_is_always_tagged_int($cg, $args->[0]) == 0;
+            my int $arr_retain = 0;
+            if ($arr_cleanup == 0 && $argc > 1) { $arr_retain = 1; }
+            my int $arr_owned = 0;
+            if ($arr_cleanup == 1 || $arr_retain == 1) { $arr_owned = 1; }
             my int $unsh_p = cleanup_push_useful($cg);
             emit($cg, "({ StradaValue *__unsh_a = ");
             gen_expression($cg, $args->[0]);
             emit($cg, "; ");
-            if ($arr_cleanup == 1 && $unsh_p == 1) {
+            if ($arr_retain == 1) { emit($cg, "strada_incref(__unsh_a); "); }
+            if ($arr_owned == 1 && $unsh_p == 1) {
                 emit($cg, "strada_cleanup_push(__unsh_a); ");
-            }
-            if ($cg->{"uses_tie"} == 0) {
-                emit($cg, "StradaArray *__unsh_av = strada_deref_array(__unsh_a); ");
             }
             my array @unsh_cl = ();
             push(@unsh_cl, $arr_cleanup);
@@ -992,6 +996,9 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 }
                 $ui = $ui + 1;
             }
+            if ($cg->{"uses_tie"} == 0) {
+                emit($cg, "StradaArray *__unsh_av = strada_deref_array(__unsh_a); ");
+            }
             $ui = $argc - 1;
             while ($ui >= 1) {
                 my int $ucl2 = $unsh_cl[$ui] + 0;
@@ -1009,7 +1016,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 }
                 $ui = $ui - 1;
             }
-            if ($arr_cleanup == 1) {
+            if ($arr_owned == 1) {
                 if ($unsh_p == 1) {
                     emit($cg, "strada_cleanup_pop_decref(__unsh_a); ");
                 } else {
@@ -1047,13 +1054,28 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     $spchk = $spchk + 1;
                 }
             }
+            my int $sp_arr_retain = 0;
+            if ($sp_arr_cleanup == 0 && $argc > 1) { $sp_arr_retain = 1; }
+            my int $sp_arr_owned = 0;
+            if ($sp_arr_cleanup == 1 || $sp_arr_retain == 1) { $sp_arr_owned = 1; }
             my int $sp_push = cleanup_push_useful($cg);
             emit($cg, "({ ");
-            if ($sp_arr_cleanup == 1) {
+            if ($sp_arr_owned == 1) {
                 emit($cg, "StradaValue *__sp_a = ");
                 gen_expression($cg, $args->[0]);
                 emit($cg, "; ");
+                if ($sp_arr_retain == 1) { emit($cg, "strada_incref(__sp_a); "); }
                 if ($sp_push == 1) { emit($cg, "strada_cleanup_push(__sp_a); "); }
+            }
+            if ($argc >= 2) {
+                emit($cg, "int64_t __sp_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; ");
+            }
+            if ($argc >= 3) {
+                emit($cg, "int64_t __sp_len = ");
+                emit_int_operand($cg, $args->[2]);
+                emit($cg, "; ");
             }
             if ($sp_multi_repl == 1) {
                 emit($cg, "StradaValue *__sp_r = strada_new_array(); StradaArray *__sp_rv = strada_deref_array(__sp_r); ");
@@ -1093,20 +1115,20 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 if ($sp_push == 1) { emit($cg, "strada_cleanup_push(__sp_r); "); }
             }
             emit($cg, "StradaValue *__sp_res = strada_array_splice_sv(");
-            if ($sp_arr_cleanup == 1) {
+            if ($sp_arr_owned == 1) {
                 emit($cg, "__sp_a");
             } else {
                 gen_expression($cg, $args->[0]);
             }
             emit($cg, ", ");
             if ($argc >= 2) {
-                emit_int_operand($cg, $args->[1]);
+                emit($cg, "__sp_off");
             } else {
                 emit($cg, "0");
             }
             emit($cg, ", ");
             if ($argc >= 3) {
-                emit_int_operand($cg, $args->[2]);
+                emit($cg, "__sp_len");
             } else {
                 # INT64_MAX is the "length omitted" sentinel — distinct
                 # from negative length (Perl's "leave N at end" semantic).
@@ -1131,7 +1153,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     emit($cg, "strada_decref(__sp_r); ");
                 }
             }
-            if ($sp_arr_cleanup == 1) {
+            if ($sp_arr_owned == 1) {
                 if ($sp_push == 1) {
                     emit($cg, "strada_cleanup_pop_decref(__sp_a); ");
                 } else {
@@ -1673,39 +1695,23 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 my scalar $ex_arr_e = $arg0->{"array"};
                 if ($arg0->{"type"} == NODE_DEREF_ARRAY()) { $ex_arr_e = $arg0->{"ref"}; }
                 my int $ex_arr_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ex_arr_e) == 1;
+                my int $ex_retain = 0;
+                if ($ex_arr_cl == 0) { $ex_retain = 1; }
+                emit($cg, "({ StradaValue *__ex_a = ");
+                gen_expression($cg, $ex_arr_e);
+                emit($cg, "; ");
+                if ($ex_retain == 1) { emit($cg, "strada_incref(__ex_a); "); }
+                if ($ex_sp == 1) { emit($cg, "strada_cleanup_push(__ex_a); "); }
+                emit($cg, "int64_t __ex_idx = ");
+                emit_int_operand($cg, $arg0->{"index"});
                 if ($cg->{"uses_tie"} == 1) {
-                    emit($cg, "({ StradaValue *__ex_a = ");
-                    gen_expression($cg, $ex_arr_e);
-                    emit($cg, "; ");
-                    if ($ex_sp == 1 && $ex_arr_cl == 1) { emit($cg, "strada_cleanup_push(__ex_a); "); }
-                    emit($cg, "int64_t __ex_idx = ");
-                    emit_int_operand($cg, $arg0->{"index"});
                     emit($cg, "; int __ex_r = strada_av_exists_sv(__ex_a, __ex_idx); ");
-                    if ($ex_arr_cl == 1) {
-                        if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_a); "); }
-                        else { emit($cg, "strada_decref(__ex_a); "); }
-                    }
-                    emit($cg, "strada_new_int(__ex_r); })");
-                    return 1;
-                }
-                if ($ex_arr_cl == 1) {
-                    emit($cg, "({ StradaValue *__ex_a = ");
-                    gen_expression($cg, $ex_arr_e);
-                    emit($cg, "; ");
-                    if ($ex_sp == 1) { emit($cg, "strada_cleanup_push(__ex_a); "); }
-                    emit($cg, "int64_t __ex_idx = ");
-                    emit_int_operand($cg, $arg0->{"index"});
-                    emit($cg, "; int __ex_r = strada_array_exists_idx(strada_deref_array(__ex_a), __ex_idx); ");
-                    if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_a); "); }
-                    else { emit($cg, "strada_decref(__ex_a); "); }
-                    emit($cg, "strada_new_int(__ex_r); })");
                 } else {
-                    emit($cg, "({ StradaArray *__ex_av = strada_deref_array(");
-                    gen_expression($cg, $ex_arr_e);
-                    emit($cg, "); int64_t __ex_idx = ");
-                    emit_int_operand($cg, $arg0->{"index"});
-                    emit($cg, "; strada_new_int(strada_array_exists_idx(__ex_av, __ex_idx)); })");
+                    emit($cg, "; int __ex_r = strada_array_exists_idx(strada_deref_array(__ex_a), __ex_idx); ");
                 }
+                if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_a); "); }
+                else { emit($cg, "strada_decref(__ex_a); "); }
+                emit($cg, "strada_new_int(__ex_r); })");
                 return 1;
             }
 
@@ -1788,24 +1794,19 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
                 my scalar $dl_arr_e = $arg0->{"array"};
                 if ($arg0->{"type"} == NODE_DEREF_ARRAY()) { $dl_arr_e = $arg0->{"ref"}; }
                 my int $dl_arr_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dl_arr_e) == 1;
-                if ($dl_arr_cl == 1) {
-                    emit($cg, "({ StradaValue *__del_a = ");
-                    gen_expression($cg, $dl_arr_e);
-                    emit($cg, "; ");
-                    if ($del_sp == 1) { emit($cg, "strada_cleanup_push(__del_a); "); }
-                    emit($cg, "int64_t __del_idx = ");
-                    emit_int_operand($cg, $arg0->{"index"});
-                    emit($cg, "; StradaValue *__del_r = strada_av_delete_take_idx(__del_a, __del_idx); ");
-                    if ($del_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__del_a); "); }
-                    else { emit($cg, "strada_decref(__del_a); "); }
-                    emit($cg, "__del_r; })");
-                } else {
-                    emit($cg, "({ StradaValue *__del_a = ");
-                    gen_expression($cg, $dl_arr_e);
-                    emit($cg, "; int64_t __del_idx = ");
-                    emit_int_operand($cg, $arg0->{"index"});
-                    emit($cg, "; strada_av_delete_take_idx(__del_a, __del_idx); })");
-                }
+                my int $dl_retain = 0;
+                if ($dl_arr_cl == 0) { $dl_retain = 1; }
+                emit($cg, "({ StradaValue *__del_a = ");
+                gen_expression($cg, $dl_arr_e);
+                emit($cg, "; ");
+                if ($dl_retain == 1) { emit($cg, "strada_incref(__del_a); "); }
+                if ($del_sp == 1) { emit($cg, "strada_cleanup_push(__del_a); "); }
+                emit($cg, "int64_t __del_idx = ");
+                emit_int_operand($cg, $arg0->{"index"});
+                emit($cg, "; StradaValue *__del_r = strada_av_delete_take_idx(__del_a, __del_idx); ");
+                if ($del_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__del_a); "); }
+                else { emit($cg, "strada_decref(__del_a); "); }
+                emit($cg, "__del_r; })");
                 return 1;
             }
 
@@ -6089,6 +6090,7 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
             my scalar $arg = $args->[0];
             my int $wt = $arg->{"type"};
             # For variable references, pass address of variable
+            my int $wk_sp = cleanup_push_useful($cg);
             if ($wt == NODE_VARIABLE()) {
                 my str $wk_cname = escape_c_keyword($arg->{"name"});
                 my str $wk_our = "" . $cg->{"our_vars"}->{$wk_cname};
@@ -6102,40 +6104,58 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
                 # NODE_HASH_ACCESS uses `hash`; NODE_DEREF_HASH uses `ref`.
                 my scalar $wk_hv_e = $arg->{"hash"};
                 if ($wt == NODE_DEREF_HASH()) { $wk_hv_e = $arg->{"ref"}; }
+                my int $wk_hcl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $wk_hv_e) == 1;
+                my int $wk_kcl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg->{"key"}) == 1;
                 emit($cg, "({ StradaValue *__wk_hsv = ");
                 gen_expression($cg, $wk_hv_e);
-                emit($cg, "; StradaHash *__wk_hv = strada_deref_hash(__wk_hsv); StradaValue *__wk_kv = ");
+                emit($cg, "; ");
+                if ($wk_hcl == 0) { emit($cg, "strada_incref(__wk_hsv); "); }
+                if ($wk_sp == 1) { emit($cg, "strada_cleanup_push(__wk_hsv); "); }
+                emit($cg, "StradaValue *__wk_kv = ");
                 gen_expression($cg, $arg->{"key"});
-                emit($cg, "; char *__wk_key = strada_to_str_ss(__wk_kv); strada_weaken_hv_entry(__wk_hv, __wk_key); strada_cstr_free(__wk_key); ");
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg->{"key"}) == 1) {
-                    emit($cg, "strada_decref(__wk_kv); ");
+                emit($cg, "; ");
+                if ($wk_kcl == 1 && $wk_sp == 1) { emit($cg, "strada_cleanup_push(__wk_kv); "); }
+                emit($cg, "char *__wk_key = strada_to_str_ss(__wk_kv); strada_weaken_hv_entry(strada_deref_hash(__wk_hsv), __wk_key); strada_cstr_free(__wk_key); ");
+                if ($wk_kcl == 1) {
+                    if ($wk_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__wk_kv); "); }
+                    else { emit($cg, "strada_decref(__wk_kv); "); }
                 }
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $wk_hv_e) == 1) {
-                    emit($cg, "strada_decref(__wk_hsv); ");
-                }
+                if ($wk_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__wk_hsv); "); }
+                else { emit($cg, "strada_decref(__wk_hsv); "); }
                 emit($cg, "strada_undef_static(); })");
             } elsif ($wt == NODE_SUBSCRIPT() || $wt == NODE_DEREF_ARRAY()) {
                 my scalar $wk_arr_e = $arg->{"array"};
                 if ($wt == NODE_DEREF_ARRAY()) { $wk_arr_e = $arg->{"ref"}; }
+                my int $wk_acl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $wk_arr_e) == 1;
+                my int $wk_icl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg->{"index"}) == 1;
                 emit($cg, "({ StradaValue *__wk_asv = ");
                 gen_expression($cg, $wk_arr_e);
-                emit($cg, "; StradaValue *__wk_iv = ");
+                emit($cg, "; ");
+                if ($wk_acl == 0) { emit($cg, "strada_incref(__wk_asv); "); }
+                if ($wk_sp == 1) { emit($cg, "strada_cleanup_push(__wk_asv); "); }
+                emit($cg, "StradaValue *__wk_iv = ");
                 gen_expression($cg, $arg->{"index"});
-                emit($cg, "; strada_array_weaken_elem(__wk_asv, strada_to_int(__wk_iv)); ");
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg->{"index"}) == 1) {
-                    emit($cg, "strada_decref(__wk_iv); ");
+                emit($cg, "; ");
+                if ($wk_icl == 1 && $wk_sp == 1) { emit($cg, "strada_cleanup_push(__wk_iv); "); }
+                emit($cg, "strada_array_weaken_elem(__wk_asv, strada_to_int(__wk_iv)); ");
+                if ($wk_icl == 1) {
+                    if ($wk_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__wk_iv); "); }
+                    else { emit($cg, "strada_decref(__wk_iv); "); }
                 }
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $wk_arr_e) == 1) {
-                    emit($cg, "strada_decref(__wk_asv); ");
-                }
+                if ($wk_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__wk_asv); "); }
+                else { emit($cg, "strada_decref(__wk_asv); "); }
                 emit($cg, "strada_undef_static(); })");
             } else {
                 # Fallback for other expression types - weaken in a temp variable
+                my int $wk_tcl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1;
                 emit($cg, "({ StradaValue *__wk_tmp = ");
                 gen_expression($cg, $arg);
-                emit($cg, "; strada_weaken(&__wk_tmp); ");
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {
-                    emit($cg, "strada_decref(__wk_tmp); ");
+                emit($cg, "; ");
+                if ($wk_tcl == 1 && $wk_sp == 1) { emit($cg, "strada_cleanup_push(__wk_tmp); "); }
+                emit($cg, "strada_weaken(&__wk_tmp); ");
+                if ($wk_tcl == 1) {
+                    if ($wk_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__wk_tmp); "); }
+                    else { emit($cg, "strada_decref(__wk_tmp); "); }
                 }
                 emit($cg, "strada_undef_static(); })");
             }

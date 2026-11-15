@@ -167,6 +167,8 @@ TESTS=(
     "test_audit_r8_eval_jit_leaks"
     "test_audit_r9_leaks"
     "test_audit_r9_eval_jit_leaks"
+    "test_audit_r10_leaks"
+    "test_audit_r10_eval_jit_leaks"
     "test_mem_simplify"
 )
 

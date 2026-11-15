@@ -1,0 +1,74 @@
+#!/usr/bin/env strada
+# Cycle 10 Audit regression tests: R10-LIB1..R10-LIB4
+
+use lib "lib";
+use Markdown;
+use LWP_SSL;
+use Template;
+use Template::Exception;
+use YAML;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # R10-LIB1: Markdown sentinel collision & HTML attribute quote breakout
+    my str $md_atk = "`x\" data-test=\"1` [k](https://example.com/" . core::byte(1) . "MDTOK0" . core::byte(1) . ")";
+    my str $md_html = Markdown::to_html($md_atk);
+    check(index($md_html, "data-test=\"1\">") < 0 && index($md_html, "<a href=\"https://example.com/<code>") < 0,
+          "R10-LIB1 Markdown sentinel stripped / code quotes escaped: " . $md_html);
+
+    my str $md_self = "`" . core::byte(1) . "MDTOK0" . core::byte(1) . "`";
+    my str $md_self_html = Markdown::to_html($md_self);
+    check(index($md_self_html, "<code>") >= 0 && index($md_self_html, "</code>") >= 0,
+          "R10-LIB1 Markdown self-sentinel safe: " . $md_self_html);
+
+    # R10-LIB2: LWP_SSL chunked parser integer overflow / DoS rejection
+    check(LWP_SSL::_parse_hex_len("7fffffffffffffff") == -1,
+          "R10-LIB2 LWP_SSL::_parse_hex_len rejects INT64_MAX");
+    check(LWP_SSL::_parse_hex_len("4000000000000000") == -1,
+          "R10-LIB2 LWP_SSL::_parse_hex_len rejects >= 0x4000000000000000");
+    my str $bad_chunked = "7fffffffffffffff\r\nhello\r\n0\r\n\r\n";
+    my str $dec_bad = LWP_SSL::_decode_chunked($bad_chunked);
+    my int $st_bad = LWP_SSL::_chunked_state($bad_chunked, 0);
+    my hash %resp_bad = LWP_SSL::parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" . $bad_chunked);
+    my str $dec_ok = LWP_SSL::_decode_chunked("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+    check($dec_bad eq "" && $st_bad == -1 && ($resp_bad{"body"} // "") eq "" && $dec_ok eq "hello world",
+          "R10-LIB2 LWP_SSL chunked parser safely rejects overflow and decodes valid");
+
+    # R10-LIB3: Template fractional modulus divisor throws Template::Exception("undef", "division by zero")
+    my int $got_tt_exc = 0;
+    try {
+        Template::render("[% 5 % 0.5 %]", {});
+    } catch ($e) {
+        if (Template::Exception::is_exception($e) == 1 && $e->{"type"} eq "undef" && index($e->{"info"}, "division by zero") >= 0) {
+            $got_tt_exc = 1;
+        }
+    }
+    my str $tt_caught = Template::render("[% TRY %][% 5 mod -0.25 %][% CATCH undef %]caught:[% error.info %][% END %]", {});
+    check($got_tt_exc == 1 && $tt_caught eq "caught:division by zero",
+          "R10-LIB3 Template fractional modulus divisor throws Template::Exception: " . $got_tt_exc . "|" . $tt_caught);
+
+    # R10-LIB4: YAML flow collection nesting depth limit
+    my str $deep_arr = ("[" x 200) . ("]" x 200);
+    my str $deep_hash = ("{a: " x 200) . "1" . ("}" x 200);
+    my int $y1_err = 0;
+    my int $y2_err = 0;
+    try { YAML::Load($deep_arr); } catch ($e) { $y1_err = 1; }
+    try { YAML::Load($deep_hash); } catch ($e) { $y2_err = 1; }
+    my scalar $yok = YAML::Load("[1, {a: [2, 3]}]");
+    check($y1_err == 1 && $y2_err == 1 && ref($yok) eq "ARRAY" && $yok->[1]->{"a"}->[1] == 3,
+          "R10-LIB4 YAML flow collection depth limit enforced");
+
+    if ($g_fail == 0) {
+        say("R10_STDLIB_OK");
+        return 0;
+    }
+    return 1;
+}

@@ -1588,7 +1588,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if (length($sa_our) > 0) {
                                 emit($cg, "StradaValue *__sa_tv = strada_global_get_cstr(" . c_str_lit($sa_our) . "); ");
-                                if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
+                                if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
                                 emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
                                 if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                                 emit($cg, "strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
@@ -4378,20 +4378,28 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                     if (length($resolved_fn) > 0 && has_method_modifier($cg, $method) == 1) {
                         $resolved_fn = "";
                     }
+                    my scalar $rf_i = 0;
+                    if (length($resolved_fn) > 0) {
+                        $rf_i = $cg->{"functions"}->{$resolved_fn};
+                        if ($rf_i && ($rf_i->{"is_variadic"} + 0) == 1) {
+                            $resolved_fn = "";
+                        }
+                    }
                     if (length($resolved_fn) > 0) {
                         my int $is_void = $resolved_ret_type == TYPE_VOID();
-                        # Pad explicit args up to the resolved method's param count
-                        # (minus self), emitting each missing trailing param's
-                        # default expression. Without this, devirtualizing a method
-                        # that has default parameters passed too few C args and gcc
-                        # errored. We gen_expression the default directly here (the
-                        # dynamic-dispatch wrapper can't, being emitted as C text).
+                        # Clamp/pad explicit args to the resolved method's C
+                        # parameter list: 0-param functions take no self/args,
+                        # and fixed-arity methods discard excess args after
+                        # evaluating them left-to-right for side effects.
+                        my int $pass_self = 1;
                         my int $eff = $arg_count;
                         my scalar $rf_params = 0;
-                        my scalar $rf_i = $cg->{"functions"}->{$resolved_fn};
                         if ($rf_i) {
-                            my int $rf_pc = $rf_i->{"param_count"};
-                            if ($rf_pc - 1 > $eff) {
+                            my int $rf_pc = $rf_i->{"param_count"} + 0;
+                            if ($rf_pc == 0) {
+                                $pass_self = 0;
+                                $eff = 0;
+                            } else {
                                 $eff = $rf_pc - 1;
                                 $rf_params = $rf_i->{"params"};
                             }
@@ -4413,17 +4421,40 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             push(@dv_nodes, $nd);
                             $kk = $kk + 1;
                         }
-                        my int $dv_in_try = cleanup_push_useful($cg);
-                        if ($eff == 0) {
+                        if ($eff == 0 && $arg_count == 0) {
                             if ($meth_obj_cleanup == 1) {
                                 my str $dv_tm0 = next_tmps_var($cg);
-                                emit($cg, "({ size_t " . $dv_tm0 . " = strada_tmps_mark(); StradaValue *__dv_obj = strada_mortal(");
-                                gen_expression($cg, $meth_target);
-                                emit($cg, "); ");
-                                if ($is_void == 1) {
-                                    emit($cg, $resolved_fn . "(__dv_obj); strada_tmps_free(" . $dv_tm0 . "); (StradaValue*)NULL; })");
+                                emit($cg, "({ size_t " . $dv_tm0 . " = strada_tmps_mark(); ");
+                                if ($pass_self == 1) {
+                                    emit($cg, "StradaValue *__dv_obj = strada_mortal(");
+                                    gen_expression($cg, $meth_target);
+                                    emit($cg, "); ");
                                 } else {
-                                    emit($cg, "StradaValue *__dv_res = " . $resolved_fn . "(__dv_obj); strada_tmps_free(" . $dv_tm0 . "); __dv_res; })");
+                                    emit($cg, "(void)strada_mortal(");
+                                    gen_expression($cg, $meth_target);
+                                    emit($cg, "); ");
+                                }
+                                if ($is_void == 1) {
+                                    if ($pass_self == 1) {
+                                        emit($cg, $resolved_fn . "(__dv_obj); strada_tmps_free(" . $dv_tm0 . "); (StradaValue*)NULL; })");
+                                    } else {
+                                        emit($cg, $resolved_fn . "(); strada_tmps_free(" . $dv_tm0 . "); (StradaValue*)NULL; })");
+                                    }
+                                } else {
+                                    if ($pass_self == 1) {
+                                        emit($cg, "StradaValue *__dv_res = " . $resolved_fn . "(__dv_obj); strada_tmps_free(" . $dv_tm0 . "); __dv_res; })");
+                                    } else {
+                                        emit($cg, "StradaValue *__dv_res = " . $resolved_fn . "(); strada_tmps_free(" . $dv_tm0 . "); __dv_res; })");
+                                    }
+                                }
+                            } elsif ($pass_self == 0) {
+                                emit($cg, "({ (void)(");
+                                gen_expression($cg, $meth_target);
+                                emit($cg, "); " . $resolved_fn . "(); ");
+                                if ($is_void == 1) {
+                                    emit($cg, "(StradaValue*)NULL; })");
+                                } else {
+                                    emit($cg, "})");
                                 }
                             } elsif ($is_void == 1) {
                                 emit($cg, "({ " . $resolved_fn . "(");
@@ -4439,10 +4470,20 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             my str $dv_tm = next_tmps_var($cg);
                             emit($cg, "({ size_t " . $dv_tm . " = strada_tmps_mark(); ");
                             my int $dv_snap_obj = $meth_obj_cleanup;
-                            if ($cg->{"cleanup_enabled"} == 1 && $dv_snap_obj == 0 && expr_is_always_tagged_int($cg, $meth_target) == 0) {
+                            if ($pass_self == 1 && $cg->{"cleanup_enabled"} == 1 && $dv_snap_obj == 0 && expr_is_always_tagged_int($cg, $meth_target) == 0) {
                                 $dv_snap_obj = 2;
                             }
-                            if ($dv_snap_obj >= 1) {
+                            if ($pass_self == 0) {
+                                if ($meth_obj_cleanup == 1) {
+                                    emit($cg, "(void)strada_mortal(");
+                                    gen_expression($cg, $meth_target);
+                                    emit($cg, "); ");
+                                } else {
+                                    emit($cg, "(void)(");
+                                    gen_expression($cg, $meth_target);
+                                    emit($cg, "); ");
+                                }
+                            } elsif ($dv_snap_obj >= 1) {
                                 if ($cg->{"cleanup_enabled"} == 1) {
                                     if ($dv_snap_obj == 2) {
                                         emit($cg, "StradaValue *__dv_obj = strada_mortal_copy(");
@@ -4481,20 +4522,40 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                                 emit($cg, "; ");
                                 $da = $da + 1;
                             }
+                            my int $ex = $eff;
+                            while ($ex < $arg_count) {
+                                my scalar $exn = $args->[$ex];
+                                my int $ex_mo = 0;
+                                if ($cg->{"cleanup_enabled"} == 1 && expr_is_always_tagged_int($cg, $exn) == 0) {
+                                    if (needs_temp_cleanup($cg, $exn) == 1) { $ex_mo = 1; }
+                                }
+                                if ($ex_mo == 1) {
+                                    emit($cg, "(void)strada_mortal(");
+                                    gen_expression($cg, $exn);
+                                    emit($cg, "); ");
+                                } else {
+                                    emit($cg, "(void)(");
+                                    gen_expression($cg, $exn);
+                                    emit($cg, "); ");
+                                }
+                                $ex = $ex + 1;
+                            }
                             if ($is_void == 1) {
                                 emit($cg, $resolved_fn . "(");
                             } else {
                                 emit($cg, "StradaValue *__dv_res = " . $resolved_fn . "(");
                             }
-                            if ($dv_snap_obj >= 1) {
-                                emit($cg, "__dv_obj");
-                            } else {
-                                gen_expression($cg, $meth_target);
-                            }
-                            my int $da2 = 0;
-                            while ($da2 < $eff) {
-                                emit($cg, ", __dv_a" . $da2);
-                                $da2 = $da2 + 1;
+                            if ($pass_self == 1) {
+                                if ($dv_snap_obj >= 1) {
+                                    emit($cg, "__dv_obj");
+                                } else {
+                                    gen_expression($cg, $meth_target);
+                                }
+                                my int $da2 = 0;
+                                while ($da2 < $eff) {
+                                    emit($cg, ", __dv_a" . $da2);
+                                    $da2 = $da2 + 1;
+                                }
                             }
                             emit($cg, "); strada_tmps_free(" . $dv_tm . "); ");
                             if ($is_void == 1) {

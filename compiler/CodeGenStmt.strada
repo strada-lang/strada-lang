@@ -4693,11 +4693,13 @@ func gen_program(scalar $cg, scalar $program) void {
     my int $fni = 0;
     while ($fni < $program->{"function_count"}) {
         my scalar $fn2 = $funcs->[$fni];
-        my str $fn2_name = sanitize_name($fn2->{"name"});
-        if ($fn2->{"is_variadic"} == 1) {
-            $all_func_names{$fn2_name} = -1;
-        } else {
-            $all_func_names{$fn2_name} = $fn2->{"return_type"};
+        if ($fn2->{"type"} != NODE_EXTERN_FUNC()) {
+            my str $fn2_name = sanitize_name($fn2->{"name"});
+            if ($fn2->{"is_variadic"} == 1) {
+                $all_func_names{$fn2_name} = -1;
+            } else {
+                $all_func_names{$fn2_name} = $fn2->{"return_type"};
+            }
         }
         $fni = $fni + 1;
     }

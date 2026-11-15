@@ -457,7 +457,7 @@ func _parse_hex_len(str $line) int {
         elsif ($o >= 97 && $o <= 102) { $d = $o - 97 + 10; }
         elsif ($o >= 65 && $o <= 70) { $d = $o - 65 + 10; }
         else { return -1; }
-        if ($n > 576460752303423487) { return -1; }
+        if ($n > 288230376151711743) { return -1; }
         $n = ($n * 16) + $d;
         $digits = $digits + 1;
         $i = $i + 1;
@@ -484,7 +484,7 @@ func _decode_chunked(str $raw_body) str {
         if ($chunk_len == 0) {
             last;
         }
-        if ($pos + $chunk_len > $total) {
+        if ($chunk_len > $total - $pos) {
             $out = $out . core::byte_substr($raw_body, $pos, $total - $pos);
             last;
         }
@@ -513,7 +513,7 @@ func _chunked_state(str $raw, int $pos) int {
             }
             return (core::byte_index($raw, "\r\n\r\n", $pos) >= 0) ? 1 : 0;
         }
-        if ($pos + $chunk_len + 2 > $total) { return 0; }
+        if ($total - $pos < 2 || $chunk_len > $total - $pos - 2) { return 0; }
         if (core::byte_substr($raw, $pos + $chunk_len, 2) ne "\r\n") { return -1; }
         $pos = $pos + $chunk_len + 2;
     }

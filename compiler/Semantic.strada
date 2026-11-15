@@ -1054,7 +1054,7 @@ func sem_sanitize_pkg(str $pkg) str {
 
 func sem_alloc_local_cname(scalar $ctx, scalar $scope, str $name) str {
     my scalar $p = $scope->{"parent"};
-    while (is_valid_scope($p) == 1 && is_valid_scope($p->{"parent"}) == 1) {
+    while (is_valid_scope($p) == 1) {
         if (exists($p->{"vars"}->{$name})) {
             my int $id = ($ctx->{"local_shadow_id"} + 0) + 1;
             $ctx->{"local_shadow_id"} = $id;

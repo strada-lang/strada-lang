@@ -1643,6 +1643,7 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
  * NUL bytes. Set BEFORE the regex_match_* call, CLEAR after (or before the
  * next call with a different subject). Thread-local. */
 void strada_regex_set_subject_len(size_t n);
+void strada_regex_set_subject_utf8(int is_utf8);
 void strada_regex_clear_subject_len(void);
 void strada_regex_set_subject_for_sv(StradaValue *sv);
 

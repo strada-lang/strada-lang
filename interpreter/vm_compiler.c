@@ -2097,7 +2097,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         compile_expr(ctx, ast_get(node, "object"));
         if (field && field[0]) {
             size_t midx = vm_chunk_add_str_const(ctx->chunk, field);
-            vm_chunk_emit(ctx->chunk, OP_METHOD_CALL);
+            vm_chunk_emit(ctx->chunk, OP_FIELD_ACCESS);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)midx);
             vm_chunk_emit(ctx->chunk, 0);
         }
@@ -5400,6 +5400,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
+        emit_clear_locals_range(ctx->chunk, saved_for_lc, ctx->local_count);
         ctx->local_count = saved_for_lc;
         break;
     }
@@ -5423,6 +5424,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         int saved_fe_lc = ctx->local_count;
 
         int arr_slot = ctx_add_local(ctx, "__fe_arr", '$');
+        vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)arr_slot);
         vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)arr_slot);
 
@@ -5430,6 +5433,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
         vm_chunk_emit_i64(ctx->chunk, 0);
         int idx_slot = ctx_add_local(ctx, "__fe_i", '$');
+        vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
         vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
 
@@ -5506,6 +5511,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
+        emit_clear_locals_range(ctx->chunk, saved_fe_lc, ctx->local_count);
         ctx->local_count = saved_fe_lc;
         break;
     }
@@ -5738,10 +5744,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
                     int saved_catch_lc = ctx->local_count;
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
+                    vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
                     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    emit_clear_locals_range(ctx->chunk, saved_catch_lc, ctx->local_count);
                     ctx->local_count = saved_catch_lc;
 
                     if (has_finally) {
@@ -5755,10 +5764,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     /* Untyped catch-all */
                     int saved_catch_lc = ctx->local_count;
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
+                    vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
                     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    emit_clear_locals_range(ctx->chunk, saved_catch_lc, ctx->local_count);
                     ctx->local_count = saved_catch_lc;
 
                     if (has_finally) {
@@ -5786,13 +5798,16 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             patch_u16(ctx, finally_rethrow_patch, (uint16_t)ctx->chunk->code_len);
             int saved_fin_lc = ctx->local_count;
             int fin_exc_slot = ctx_add_local(ctx, "__fin_exc", '$');
+            vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)fin_exc_slot);
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)fin_exc_slot);
             compile_block(ctx, finally_block);
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)fin_exc_slot);
-            vm_chunk_emit(ctx->chunk, OP_THROW);
+            emit_clear_locals_range(ctx->chunk, saved_fin_lc, ctx->local_count);
             ctx->local_count = saved_fin_lc;
+            vm_chunk_emit(ctx->chunk, OP_THROW);
         }
 
         /* Normal exit path (try completed or catch handled): run finally if present */
@@ -5832,6 +5847,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         /* Compile source expression */
         compile_expr(ctx, source);
         int src_slot = ctx_add_local(ctx, "__destr_src", '$');
+        vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)src_slot);
         vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)src_slot);
 
@@ -5881,6 +5898,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 }
             }
         }
+        vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)src_slot);
         break;
     }
 
@@ -6328,6 +6347,33 @@ static int find_func_before(VMProgram *prog, const char *name, int limit) {
     return -1;
 }
 
+static int find_vm_method_impl(VMProgram *prog, const char *cls, const char *method, int max_count) {
+    char cand[280];
+    snprintf(cand, sizeof(cand), "%s_%s", cls, method);
+    int idx = (max_count >= 0) ? find_func_before(prog, cand, max_count) : vm_program_find_func(prog, cand);
+    if (idx >= 0) return idx;
+    snprintf(cand, sizeof(cand), "%s::%s", cls, method);
+    idx = (max_count >= 0) ? find_func_before(prog, cand, max_count) : vm_program_find_func(prog, cand);
+    if (idx >= 0) return idx;
+    if (strchr(cls, ':')) {
+        char sanitized[280];
+        int si = 0;
+        snprintf(cand, sizeof(cand), "%s_%s", cls, method);
+        for (int fi = 0; cand[fi] && si < 278; fi++) {
+            if (cand[fi] == ':' && cand[fi + 1] == ':') {
+                sanitized[si++] = '_';
+                fi++;
+            } else {
+                sanitized[si++] = cand[fi];
+            }
+        }
+        sanitized[si] = '\0';
+        idx = (max_count >= 0) ? find_func_before(prog, sanitized, max_count) : vm_program_find_func(prog, sanitized);
+        if (idx >= 0) return idx;
+    }
+    return -1;
+}
+
 typedef struct {
     const char *cls;
     const char *method;
@@ -6388,9 +6434,7 @@ static void synthesize_modifier_wrappers(VMProgram *prog) {
                         break;
                     }
                 }
-                char impl_name[256];
-                snprintf(impl_name, sizeof(impl_name), "%s_%s", mro[k], method);
-                if (vm_program_find_func(prog, impl_name) >= 0) has_impl = 1;
+                if (find_vm_method_impl(prog, mro[k], method, -1) >= 0) has_impl = 1;
             }
             if (has_mod && has_impl) {
                 targets[tgt_count].cls = cls;
@@ -6416,28 +6460,7 @@ static void synthesize_modifier_wrappers(VMProgram *prog) {
 
         int raw_orig = -1;
         for (int k = 0; k < mro_n && raw_orig < 0; k++) {
-            char cand[280];
-            snprintf(cand, sizeof(cand), "%s_%s", mro[k], method);
-            raw_orig = find_func_before(prog, cand, pre_wrap_count);
-            if (raw_orig < 0) {
-                snprintf(cand, sizeof(cand), "%s::%s", mro[k], method);
-                raw_orig = find_func_before(prog, cand, pre_wrap_count);
-            }
-            if (raw_orig < 0 && strchr(mro[k], ':')) {
-                char sanitized[280];
-                int si = 0;
-                snprintf(cand, sizeof(cand), "%s_%s", mro[k], method);
-                for (int fi = 0; cand[fi] && si < 278; fi++) {
-                    if (cand[fi] == ':' && cand[fi + 1] == ':') {
-                        sanitized[si++] = '_';
-                        fi++;
-                    } else {
-                        sanitized[si++] = cand[fi];
-                    }
-                }
-                sanitized[si] = '\0';
-                raw_orig = find_func_before(prog, sanitized, pre_wrap_count);
-            }
+            raw_orig = find_vm_method_impl(prog, mro[k], method, pre_wrap_count);
         }
         if (raw_orig < 0) continue;
 

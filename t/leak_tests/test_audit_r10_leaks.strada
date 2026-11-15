@@ -1,0 +1,161 @@
+#!/usr/bin/env strada
+# Cycle 10 Valgrind leak regression suite: R10-RT1..R10-RT7, R10-C1..R10-C5, R10-LIB1..R10-LIB4
+
+use lib "lib";
+use Markdown;
+use LWP_SSL;
+use Template;
+use Template::Exception;
+use YAML;
+
+my int $r10l_c1_my = 50;
+our int $r10l_c1_our = 60;
+const int R10L_C1_K = 70;
+
+our int $r10l_boom_armed = 0;
+our int $r10l_cyc_count = 0;
+our array @r10l_res_keep = ();
+our array @r10l_arr = ();
+our hash %r10l_h = ();
+our str $r10l_pin_s = "";
+
+func r10l_take_boom() int {
+    if ($r10l_boom_armed == 1) {
+        $r10l_boom_armed = 0;
+        return 1;
+    }
+    return 0;
+}
+func r10l_inc_cyc() void { $r10l_cyc_count = $r10l_cyc_count + 1; }
+
+package R10LBoom;
+func new() scalar {
+    my hash %h = ("pad" => ("b" x 32));
+    return bless(\%h, "R10LBoom");
+}
+func DESTROY(scalar $self) void {
+    if (main::r10l_take_boom() == 1) {
+        die($self);
+    }
+}
+
+package R10LCyc;
+func new() scalar {
+    my hash %h = ("pad" => ("c" x 32));
+    return bless(\%h, "R10LCyc");
+}
+func DESTROY(scalar $self) void {
+    main::r10l_inc_cyc();
+    my hash %x = ();
+    my hash %y = ();
+    $x{"y"} = \%y;
+    $y{"x"} = \%x;
+    die("r10l_cyc_exc");
+}
+
+package R10LDv;
+has ro int $x;
+func zero() int { return 19; }
+func add_one(scalar $self, int $v) int { return $self->{"x"} + $v; }
+
+package R10LTieStr;
+func TIESCALAR(str $cls, str $v) scalar {
+    my hash %h = ("val" => $v);
+    return bless(\%h, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"val"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"val"} = "" . $v; }
+
+package main;
+
+func r10l_pin_mut() str {
+    $r10l_pin_s = "NEW_BUF_" . ("n" x 48);
+    return "ZZ";
+}
+
+func r10l_clear_arr() str {
+    @r10l_arr = ();
+    return "item_" . ("i" x 24);
+}
+
+func r10l_clear_idx() int {
+    @r10l_arr = ();
+    return 0;
+}
+
+func r10l_clear_hash() str {
+    %r10l_h = ();
+    return "k";
+}
+
+func main() int {
+    # R10-RT1 & R10-RT5: cyclic DESTROY throw + die $self
+    $r10l_cyc_count = 0;
+    for (my int $i = 0; $i < 6; $i = $i + 1) {
+        $r10l_boom_armed = 1;
+        try {
+            my scalar $b = R10LBoom::new();
+            $b = undef;
+        } catch ($e) {
+            if (blessed($e) ne "R10LBoom") { die("rt1 boom leak fail"); }
+        }
+
+        try {
+            my scalar $c = R10LCyc::new();
+            my hash %p = ();
+            $c->{"p"} = \%p;
+            $p{"c"} = $c;
+            $c = undef;
+            %p = ();
+            core::gc_collect();
+        } catch ($e) {
+            if (index("" . $e, "r10l_cyc_exc") < 0) { die("rt5 cyc fail"); }
+        }
+    }
+    if ($r10l_cyc_count != 6) { die("rt5 destroy count mismatch: " . $r10l_cyc_count); }
+
+    # R10-C1..C5, LIB1..LIB4 under Valgrind
+    for (my int $j = 0; $j < 3; $j = $j + 1) {
+        my int $r10l_c1_my = $r10l_c1_my + $j;
+        my int $r10l_c1_our = $r10l_c1_our + $j;
+        const int R10L_C1_K = R10L_C1_K + 1;
+        if ($r10l_c1_my < 50 || $r10l_c1_our < 60 || R10L_C1_K != 71) { die("c1 fail"); }
+
+        my scalar $dv = R10LDv::new("x", $j);
+        if ($dv->zero() != 19 || $dv->add_one(4, 99) != $j + 4) { die("c2 fail"); }
+
+        my str $ts = "";
+        tie($ts, "R10LTieStr", "abcdef_" . $j);
+        my str $old = substr($ts, 1, 2, "XY");
+        substr($ts, 0, 1) = "Q";
+        my str $after_ts = "" . $ts;
+        untie($ts);
+        if ($old ne "bc" || index($after_ts, "QXYdef_") != 0) { die("c3 fail"); }
+
+        $r10l_pin_s = "hello_pin_" . $j . ("x" x 32);
+        if (substr($r10l_pin_s, 0, 5, r10l_pin_mut()) ne "hello") { die("c3 pin fail"); }
+
+        @r10l_arr = ("a" . ("m" x 20), "b" . ("n" x 20));
+        push(@r10l_arr, r10l_clear_arr());
+        unshift(@r10l_arr, r10l_clear_arr());
+        if (exists($r10l_arr[r10l_clear_idx()]) != 0) { die("c4 fail"); }
+
+        %r10l_h = ("k" => {"sub" => 1});
+        core::weaken($r10l_h{r10l_clear_hash()});
+
+        my array @qw_arr = qw(foo (bar) \{ \});
+        if (size(@qw_arr) != 4) { die("c5 fail"); }
+
+        my str $mh = Markdown::to_html("`a\"b` [x](https://ex/" . core::byte(1) . "MDTOK0" . core::byte(1) . ")");
+        if (length($mh) == 0) { die("lib1 fail"); }
+        if (LWP_SSL::_parse_hex_len("7fffffffffffffff") != -1) { die("lib2 fail"); }
+        my str $tt_out = Template::render("[% TRY %][% 5 % 0.5 %][% CATCH undef %][% error.info %][% END %]", {});
+        if ($tt_out ne "division by zero") { die("lib3 fail"); }
+        my int $ye = 0;
+        try { YAML::Load(("[" x 80) . ("]" x 80)); } catch ($e) { $ye = 1; }
+        if ($ye != 1) { die("lib4 fail"); }
+    }
+
+    say("R10_LEAKS_OK");
+    return 0;
+}

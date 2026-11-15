@@ -1,0 +1,206 @@
+#!/usr/bin/env strada
+# Cycle 10 Audit regression tests: R10-C1..R10-C5
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+# R10-C1: file-level root scope my/our/const shadowed with self-referencing initializers
+my int $c1_my = 100;
+our int $c1_our = 200;
+const int C1_CONST = 300;
+
+func test_c1_shadow() int {
+    my int $c1_my = $c1_my + 7;
+    my int $c1_our = $c1_our + 9;
+    const int C1_CONST = C1_CONST + 5;
+    if ($c1_my != 107 || $c1_our != 209 || C1_CONST != 305) {
+        return 0;
+    }
+    if (1) {
+        my int $c1_my = $c1_my + 10;
+        if ($c1_my != 117) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+# R10-C2: devirtualized method calls (0-param & fixed-arity excess args)
+package R10DvPkg;
+has ro int $x;
+
+func zero() int {
+    return 77;
+}
+
+func fixed_one(scalar $self, int $a) int {
+    return $self->{"x"} + $a;
+}
+
+func opt_two(scalar $self, int $a, int $b = 10) int {
+    return $self->{"x"} + $a + $b;
+}
+
+# R10-C3: tied scalar 4-arg substr, lvalue substr() = ..., and str pinning
+package R10TieStr;
+our int $g_fetches = 0;
+our int $g_stores = 0;
+
+func reset_counts() void {
+    $g_fetches = 0;
+    $g_stores = 0;
+}
+func fetches() int { return $g_fetches; }
+func stores() int { return $g_stores; }
+
+func TIESCALAR(str $cls, str $init) scalar {
+    my hash %h = ("val" => $init);
+    return bless(\%h, $cls);
+}
+
+func FETCH(scalar $self) scalar {
+    $g_fetches = $g_fetches + 1;
+    return $self->{"val"};
+}
+
+func STORE(scalar $self, scalar $v) void {
+    $g_stores = $g_stores + 1;
+    $self->{"val"} = "" . $v;
+}
+
+package main;
+
+our array @g_c4_arr = ();
+our array @g_c4_rep = ();
+our array @g_c4_ex = ();
+our array @g_c4_ex2 = ();
+our hash %g_c4_h = ();
+our array @g_c4_wa = ();
+our str $g_c3_s = "";
+
+func mut_c3_pin() str {
+    $g_c3_s = "COMPLETELY_NEW_BUFFER_" . ("x" x 64);
+    return "ZZ";
+}
+
+func mut_c4_pop_arr() str {
+    while (size(@g_c4_arr) > 0) {
+        pop(@g_c4_arr);
+    }
+    return "fresh_" . ("y" x 24);
+}
+
+func mut_c4_rep_arr() str {
+    @g_c4_rep = ();
+    return "replaced_" . ("z" x 24);
+}
+
+func mut_c4_shrink_ex() int {
+    while (size(@g_c4_ex) > 0) {
+        pop(@g_c4_ex);
+    }
+    return 0;
+}
+
+func mut_c4_rep_ex() int {
+    @g_c4_ex2 = ();
+    return 0;
+}
+
+func mut_c4_clear_hash() str {
+    %g_c4_h = ();
+    return "gone";
+}
+
+func mut_c4_shrink_wa() int {
+    @g_c4_wa = ();
+    return 0;
+}
+
+func main() int {
+    # R10-C1
+    check(test_c1_shadow() == 1 && $c1_my == 100 && $c1_our == 200 && C1_CONST == 300,
+          "R10-C1 file-level root scope my/our/const self-shadowing");
+
+    # R10-C2
+    my scalar $dv = R10DvPkg::new("x", 5);
+    my int $z1 = $dv->zero();
+    my int $f1 = $dv->fixed_one(4, 999, 888);
+    my int $o1 = $dv->opt_two(3);
+    my int $o2 = $dv->opt_two(3, 20, 999);
+    my int $z2 = R10DvPkg::new("x", 1)->zero();
+    check($z1 == 77 && $f1 == 9 && $o1 == 18 && $o2 == 28 && $z2 == 77,
+          "R10-C2 devirtualized 0-param & fixed-arity excess args: " . $z1 . ":" . $f1 . ":" . $o1 . ":" . $o2 . ":" . $z2);
+
+    # R10-C3
+    R10TieStr::reset_counts();
+    my str $ts = "";
+    tie($ts, "R10TieStr", "abcdef");
+    my str $old4 = substr($ts, 1, 3, "XYZ");
+    my int $fc_after4 = R10TieStr::fetches();
+    my int $sc_after4 = R10TieStr::stores();
+    substr($ts, 1, 3) = "PQ";
+    my str $after_lv = "" . $ts;
+    my int $sc_after_lv = R10TieStr::stores();
+    untie($ts);
+    check($old4 eq "bcd" && $fc_after4 >= 1 && $sc_after4 >= 1 && $after_lv eq "aPQef" && $sc_after_lv > $sc_after4,
+          "R10-C3 tied scalar 4-arg and lvalue substr: old=" . $old4 . " after=" . $after_lv . " sc=" . $sc_after4 . "/" . $sc_after_lv);
+
+    $g_c3_s = "hello_pin_world_" . ("p" x 40);
+    my str $old_pin = substr($g_c3_s, 0, 5, mut_c3_pin());
+    check($old_pin eq "hello" && substr($g_c3_s, 0, 2) eq "ZZ",
+          "R10-C3 substr 4-arg source pinning during mutation");
+
+    # R10-C4
+    @g_c4_arr = ("a" . ("z" x 20), "b" . ("z" x 20));
+    push(@g_c4_arr, mut_c4_pop_arr());
+    unshift(@g_c4_arr, mut_c4_pop_arr());
+    check(size(@g_c4_arr) == 1 && index($g_c4_arr[0], "fresh_") == 0,
+          "R10-C4 push/unshift retain container across in-place mutation");
+
+    @g_c4_rep = ("a" . ("r" x 20), "b" . ("r" x 20));
+    push(@g_c4_rep, mut_c4_rep_arr());
+    unshift(@g_c4_rep, mut_c4_rep_arr());
+    check(size(@g_c4_rep) == 0,
+          "R10-C4 push/unshift retain replaced container safely (no UAF)");
+
+    @g_c4_ex = ("alpha_" . ("q" x 24), "beta");
+    my int $ex_res = exists($g_c4_ex[mut_c4_shrink_ex()]);
+    check($ex_res == 0, "R10-C4 exists(@arr[mut_idx]) safe after index mutation");
+
+    @g_c4_ex2 = ("gamma_" . ("w" x 24), "delta");
+    my int $ex_res2 = exists($g_c4_ex2[mut_c4_rep_ex()]);
+    check($ex_res2 == 1, "R10-C4 exists(@arr[mut_idx]) retains pre-replacement container safely");
+
+    %g_c4_h = ("gone" => {"n" => 42});
+    core::weaken($g_c4_h{mut_c4_clear_hash()});
+    check(scalar(keys(%g_c4_h)) == 0, "R10-C4 weaken(hash{mut_key}) safe");
+
+    @g_c4_wa = ({"n" => 99});
+    core::weaken($g_c4_wa[mut_c4_shrink_wa()]);
+    check(size(@g_c4_wa) == 0, "R10-C4 weaken(arr[mut_idx]) safe");
+
+    # R10-C5
+    my array @q1 = qw(foo (bar) baz);
+    my array @q2 = qw{a \{ \} b};
+    my array @q3 = qw<x \> y>;
+    my array @q4 = qw[p [q] r];
+    my array @q5 = qw(u \) v \\ w);
+    check(size(@q1) == 3 && join(",", @q1) eq "foo,(bar),baz", "R10-C5 qw nested parens");
+    check(size(@q2) == 4 && join(",", @q2) eq "a,{,},b", "R10-C5 qw escaped braces");
+    check(size(@q3) == 3 && join(",", @q3) eq "x,>,y", "R10-C5 qw escaped angle");
+    check(size(@q4) == 3 && join(",", @q4) eq "p,[q],r", "R10-C5 qw nested brackets");
+    check(size(@q5) == 5 && $q5[1] eq ")" && $q5[3] eq "\\", "R10-C5 qw escaped paren & backslash");
+
+    if ($g_fail == 0) {
+        say("R10_RUNTIME_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

@@ -1,0 +1,57 @@
+#!/usr/bin/env strada
+# Cycle 10 Audit regression tests: R10-VM5, R10-VM6, R10-VM10 (Eval 2-way parity)
+
+use lib "lib";
+use Eval;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func check_parity(str $code, str $expected, str $label) void {
+    my scalar $tw = Strada::Interpreter::eval_with($code, "tree-walk");
+    my scalar $vm = Strada::Interpreter::eval_with($code, "vm");
+    my str $tw_s = defined($tw) ? ("" . $tw) : "<UNDEF>";
+    my str $vm_s = defined($vm) ? ("" . $vm) : "<UNDEF>";
+    check($tw_s eq $expected && $vm_s eq $expected,
+          $label . " (exp=" . $expected . " tw=" . $tw_s . " vm=" . $vm_s . ")");
+}
+
+func main() int {
+    # R10-VM10: trailing non-expression statement return parity in eval_with("tree-walk" vs "vm")
+    check_parity('if (1) { 42; }', "42", "R10-VM10 trailing if true");
+    check_parity('if (0) { 42; }', "<UNDEF>", "R10-VM10 trailing if false without else");
+    check_parity('if (0) { 1; } else { 99; }', "99", "R10-VM10 trailing if false with else");
+    check_parity('my int $x = 7;', "7", "R10-VM10 trailing my int decl");
+    check_parity('our int $y = 11;', "<UNDEF>", "R10-VM10 top-level our decl");
+    check_parity('if (1) { my int $z = 11; }', "11", "R10-VM10 trailing my int in if");
+    check_parity('our int $y2 = 12; $y2;', "12", "R10-VM10 persistent our global readback");
+    check_parity('{ 55; }', "55", "R10-VM10 trailing block");
+    check_parity('while (0) { 1; }', "<UNDEF>", "R10-VM10 trailing while");
+    check_parity('my int $a = 10; if (1) { my int $b = $a + 5; }', "15", "R10-VM10 trailing local var in if");
+
+    # R10-VM5: 3-arg split parity in eval_with
+    check_parity('join("|", split(",", "a,b,c,d", 2))', "a|b,c,d", "R10-VM5 split limit positive");
+    check_parity('join("|", split(",", "a,,", -1))', "a||", "R10-VM5 split limit negative");
+
+    # R10-VM6: multi-arg die() & structured ref die() parity in eval_with
+    my str $die_code = '
+        my str $out = "";
+        try { die("hello ", "world", "!"); } catch ($e) { $out = "" . $e; }
+        try { die({"code" => 404}); } catch ($e) { $out = $out . "|" . ref($e) . ":" . $e->{"code"}; }
+        $out;
+    ';
+    check_parity($die_code, "hello world!|HASH:404", "R10-VM6 multi-arg die & ref die");
+
+    Strada::Interpreter::reset();
+    if ($g_fail == 0) {
+        say("R10_EVAL_JIT_OK");
+        return 0;
+    }
+    return 1;
+}

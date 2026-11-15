@@ -2334,15 +2334,17 @@ private func eval_one(str $input) scalar {
         foreach my str $lp (@g_lib_paths) {
             $lib_flags = $lib_flags . " -L " . shell_quote($lp);
         }
-        my str $gcc_cmd = "./strada -O0 --shared" . $lib_flags . " " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
-        # If stradac is not in ./, try using the strada wrapper from stradac's dir
-        if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
-            my str $stradac_dir = core::dirname($g_stradac_path);
-            my str $strada_bin = $stradac_dir . "/strada";
-            if (core::is_file($strada_bin) == 1) {
-                $gcc_cmd = shell_quote($strada_bin) . " -O0 --shared" . $lib_flags . " " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
+        my str $strada_bin = "";
+        if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
+            my str $cand = core::dirname($g_stradac_path) . "/strada";
+            if (core::is_file($cand) == 1) {
+                $strada_bin = $cand;
             }
         }
+        if ($strada_bin eq "") {
+            $strada_bin = "strada";
+        }
+        my str $gcc_cmd = shell_quote($strada_bin) . " -O0 --shared" . $lib_flags . " " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
         $pipe = core::popen($gcc_cmd, "r");
         my str $output = "";
         if (defined($pipe)) {

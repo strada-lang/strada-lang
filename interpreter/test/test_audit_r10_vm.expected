@@ -1,0 +1,17 @@
+VM1_FOR=0,1,2
+VM1_FE=10,20,30
+VM1_TRY=err0,err1:3
+VM1_DEST=1:2,3:4
+VM2=250|B5:R><R:A5
+VM3_NUM=42:-1234567890123:77:ff:77
+VM3_U8=1:2:é|4:5
+VM3_NUL=14:A<NUL>    xy<NUL>he   
+VM4_FH=7:X<NUL>Y
+Z<NUL>W
+VM5=a|b#a|b,c,d#a|b||#2:3:0#4:5
+VM6=d1-d2|3:0|4:5|HASH:77
+VM7=123:pong:1:1
+VM8=2:111:222:0:1:222
+VM9_NUL=1:3:0:3|1:3:0
+VM9_U8=1:4:5:4
+C5=foo,(bar),baz|a,{,},b

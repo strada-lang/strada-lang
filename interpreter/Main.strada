@@ -1120,7 +1120,7 @@ func main() int {
     }
 
     # Eval mode (-e)
-    if (length($eval_code) > 0) {
+    if ($has_eval == 1) {
         if ($use_vm == 1) {
             try {
                 return run_eval_vm($eval_code, \@script_args);

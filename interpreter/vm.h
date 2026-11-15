@@ -230,6 +230,7 @@ typedef enum {
     OP_WEAKEN_SLOT,     /* u8 kind, u16 slot_or_str — weaken ref in slot/container, push undef */
     OP_ISWEAK_SLOT,     /* u8 kind, u16 slot_or_str — push 1 if slot holds live weakref else 0 */
     OP_CLEAR_LOCALS,    /* u16 from_slot, u16 to_slot — set frame->locals[from..to-1] = undef */
+    OP_FIELD_ACCESS,    /* u16 field_str_idx, u8 argc — $obj->field without parens */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -750,7 +751,7 @@ typedef struct {
     char *key;
     VMValue value;
     uint32_t hash;       /* cached hash value */
-    uint16_t keylen;     /* cached key length */
+    uint32_t keylen;     /* cached key length */
     uint8_t occupied;
 } VMHashEntry;
 
@@ -954,6 +955,8 @@ typedef struct VM {
     VMProgram *program;
     /* Regex captures */
     char *regex_captures[10]; /* $1-$9 (index 0 = $0/full match) */
+    size_t regex_capture_len[10]; /* byte length of regex_captures[i] (NUL-safe) */
+    uint8_t regex_capture_utf8[10]; /* character-oriented UTF-8 flag */
     char *regex_capture_names[10]; /* named-group name per group number (or NULL) */
     /* Exception handling */
     VMExcHandler *exc_stack;

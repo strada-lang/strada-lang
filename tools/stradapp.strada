@@ -670,14 +670,92 @@ func pp_kw_allows_regex(str $w) int {
     return 0;
 }
 
+func pp_try_start_q(str $line, int $len, int $ws, str $tok, int $can_regex) scalar {
+    if ($can_regex == 0) { return undef; }
+    if ($tok ne "q" && $tok ne "qq" && $tok ne "qw" && $tok ne "qr") {
+        return undef;
+    }
+    if ($ws >= 1) {
+        my str $prev1 = substr($line, $ws - 1, 1);
+        if ($prev1 eq "$" || $prev1 eq "@" || $prev1 eq "%") {
+            return undef;
+        }
+    }
+    if ($ws >= 2) {
+        my str $prev2 = substr($line, $ws - 2, 2);
+        if ($prev2 eq "->" || $prev2 eq "::") {
+            return undef;
+        }
+    }
+    my int $j = $ws + length($tok);
+    my int $had_ws = 0;
+    while ($j < $len && (substr($line, $j, 1) eq " " || substr($line, $j, 1) eq "\t")) {
+        $had_ws = 1;
+        $j++;
+    }
+    if ($j >= $len) { return undef; }
+    my str $d = substr($line, $j, 1);
+    if ($d eq "(") { return { "open" => "(", "close" => ")", "next_i" => $j + 1 }; }
+    if ($d eq "[") { return { "open" => "[", "close" => "]", "next_i" => $j + 1 }; }
+    if ($d eq "{") { return { "open" => "{", "close" => "}", "next_i" => $j + 1 }; }
+    if ($had_ws == 1) { return undef; }
+    my str $nxt = "";
+    if ($j + 1 < $len) { $nxt = substr($line, $j + 1, 1); }
+    if ($d eq "/") { return { "open" => "/", "close" => "/", "next_i" => $j + 1 }; }
+    if ($d eq "!" && $nxt ne "=" && $nxt ne "~") {
+        return { "open" => "!", "close" => "!", "next_i" => $j + 1 };
+    }
+    if ($d eq "|" && $nxt ne "|") {
+        return { "open" => "|", "close" => "|", "next_i" => $j + 1 };
+    }
+    if ($d eq "<" && $nxt ne "=" && $nxt ne "<") {
+        return { "open" => "<", "close" => ">", "next_i" => $j + 1 };
+    }
+    return undef;
+}
+
+func pp_advance_q_body(str $line, int $len, int $i, scalar $open_ref, scalar $close_ref, scalar $depth_ref) int {
+    while ($i < $len && $$depth_ref > 0) {
+        my str $ch = substr($line, $i, 1);
+        if ($ch eq "\\") {
+            $i = $i + 2;
+            next;
+        }
+        if ($ch eq $$close_ref) {
+            $$depth_ref = $$depth_ref - 1;
+            if ($$depth_ref == 0) {
+                $$open_ref = "";
+                $$close_ref = "";
+            }
+            $i++;
+            next;
+        }
+        if ($$open_ref ne $$close_ref && $ch eq $$open_ref) {
+            $$depth_ref = $$depth_ref + 1;
+            $i++;
+            next;
+        }
+        $i++;
+    }
+    return $i;
+}
+
 # Find '__C__' outside Strada string literals, comments, and regexes; returns index or -1.
 func find_c_block_kw(str $line) int {
     my int $len = length($line);
     my int $i = 0;
     my int $in_dq = 0;
     my int $in_sq = 0;
+    my str $q_open = "";
+    my str $q_close = "";
+    my int $q_depth = 0;
     my int $can_regex = 1;
     while ($i < $len) {
+        if ($q_depth > 0) {
+            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth);
+            if ($q_depth == 0) { $can_regex = 0; }
+            next;
+        }
         my str $ch = substr($line, $i, 1);
         if ($in_dq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
@@ -750,6 +828,14 @@ func find_c_block_kw(str $line) int {
                 if ($next_ok == 1) {
                     return $ws;
                 }
+            }
+            my scalar $qi = pp_try_start_q($line, $len, $ws, $tok, $can_regex);
+            if (defined($qi)) {
+                $q_open = $qi->{"open"};
+                $q_close = $qi->{"close"};
+                $q_depth = 1;
+                $i = $qi->{"next_i"};
+                next;
             }
             $can_regex = pp_kw_allows_regex($tok);
             next;
@@ -832,8 +918,16 @@ func pp_detect_heredoc_tags(str $line) scalar {
     my int $i = 0;
     my int $in_dq = 0;
     my int $in_sq = 0;
+    my str $q_open = "";
+    my str $q_close = "";
+    my int $q_depth = 0;
     my int $can_regex = 1;
     while ($i < $len) {
+        if ($q_depth > 0) {
+            $i = pp_advance_q_body($line, $len, $i, \$q_open, \$q_close, \$q_depth);
+            if ($q_depth == 0) { $can_regex = 0; }
+            next;
+        }
         my str $ch = substr($line, $i, 1);
         if ($in_dq == 1) {
             if ($ch eq "\\") { $i = $i + 2; next; }
@@ -950,7 +1044,16 @@ func pp_detect_heredoc_tags(str $line) scalar {
             while ($i < $len && is_ident_char(substr($line, $i, 1)) == 1) {
                 $i = $i + 1;
             }
-            $can_regex = pp_kw_allows_regex(substr($line, $ws, $i - $ws));
+            my str $tok = substr($line, $ws, $i - $ws);
+            my scalar $qi = pp_try_start_q($line, $len, $ws, $tok, $can_regex);
+            if (defined($qi)) {
+                $q_open = $qi->{"open"};
+                $q_close = $qi->{"close"};
+                $q_depth = 1;
+                $i = $qi->{"next_i"};
+                next;
+            }
+            $can_regex = pp_kw_allows_regex($tok);
             next;
         }
         if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
@@ -963,14 +1066,15 @@ func pp_detect_heredoc_tags(str $line) scalar {
     return \@tags;
 }
 
-func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref) void {
+func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref,
+                          scalar $q_open_ref, scalar $q_close_ref, scalar $q_depth_ref) void {
     my int $len = length($line);
     my int $i = 0;
     my int $can_regex = 1;
     while ($i < $len) {
-        my str $ch = substr($line, $i, 1);
         if ($$cmt_ref == 1) {
-            if ($ch eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            my str $chc = substr($line, $i, 1);
+            if ($chc eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
                 $$cmt_ref = 0;
                 $i = $i + 2;
                 next;
@@ -979,17 +1083,25 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             next;
         }
         if ($$dq_ref == 1) {
-            if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "\"") { $$dq_ref = 0; $can_regex = 0; }
+            my str $chd = substr($line, $i, 1);
+            if ($chd eq "\\") { $i = $i + 2; next; }
+            if ($chd eq "\"") { $$dq_ref = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
         if ($$sq_ref == 1) {
-            if ($ch eq "\\") { $i = $i + 2; next; }
-            if ($ch eq "'") { $$sq_ref = 0; $can_regex = 0; }
+            my str $chs = substr($line, $i, 1);
+            if ($chs eq "\\") { $i = $i + 2; next; }
+            if ($chs eq "'") { $$sq_ref = 0; $can_regex = 0; }
             $i = $i + 1;
             next;
         }
+        if ($$q_depth_ref > 0) {
+            $i = pp_advance_q_body($line, $len, $i, $q_open_ref, $q_close_ref, $q_depth_ref);
+            if ($$q_depth_ref == 0) { $can_regex = 0; }
+            next;
+        }
+        my str $ch = substr($line, $i, 1);
         if ($ch eq " " || $ch eq "\t" || $ch eq "\r") { $i = $i + 1; next; }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
             if ($can_regex == 1) { last; }
@@ -1028,7 +1140,16 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             while ($i < $len && is_ident_char(substr($line, $i, 1)) == 1) {
                 $i = $i + 1;
             }
-            $can_regex = pp_kw_allows_regex(substr($line, $ws, $i - $ws));
+            my str $tok = substr($line, $ws, $i - $ws);
+            my scalar $qi = pp_try_start_q($line, $len, $ws, $tok, $can_regex);
+            if (defined($qi)) {
+                $$q_open_ref = $qi->{"open"};
+                $$q_close_ref = $qi->{"close"};
+                $$q_depth_ref = 1;
+                $i = $qi->{"next_i"};
+                next;
+            }
+            $can_regex = pp_kw_allows_regex($tok);
             next;
         }
         if ($ch eq ")" || $ch eq "]" || $ch eq "}" || $ch eq "$" || $ch eq "@" || $ch eq "%") {
@@ -1065,6 +1186,9 @@ func preprocess(str $filename) str {
     my int $in_ml_dq = 0;
     my int $in_ml_sq = 0;
     my int $in_block_cmt = 0;
+    my str $ml_q_open = "";
+    my str $ml_q_close = "";
+    my int $ml_q_depth = 0;
     my array @heredoc_tags = ();
     my array @pending_heredocs = ();
     my array @c_pp_entry = ();
@@ -1111,9 +1235,9 @@ func preprocess(str $filename) str {
             $i++;
             next;
         }
-        if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
-            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && size(@pending_heredocs) > 0) {
+        if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0) {
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth);
+            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && $ml_q_depth == 0 && size(@pending_heredocs) > 0) {
                 my int $pi = 0;
                 while ($pi < size(@pending_heredocs)) {
                     push(@heredoc_tags, $pending_heredocs[$pi]);
@@ -1444,8 +1568,8 @@ func preprocess(str $filename) str {
             }
         } else {
             my scalar $hd_list = pp_detect_heredoc_tags($line);
-            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
-            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt, \$ml_q_open, \$ml_q_close, \$ml_q_depth);
+            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1 || $ml_q_depth > 0) {
                 my int $hi = 0;
                 while ($hi < size($hd_list)) {
                     push(@pending_heredocs, $hd_list->[$hi]);

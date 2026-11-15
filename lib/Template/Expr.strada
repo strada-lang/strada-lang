@@ -522,7 +522,7 @@ func eval_binop(str $op, scalar $lhs, scalar $rhs, scalar $stash) scalar {
     if ($op eq "*") { return num_result($a * $b); }
     if ($op eq "/") { if ($b == 0.0) { throw(Template::Exception::make("undef", "division by zero")); } return num_result($a / $b); }
     if ($op eq "div") { if ($b == 0.0) { throw(Template::Exception::make("undef", "division by zero")); } return int_of($a / $b); }
-    if ($op eq "%" || $op eq "mod") { if ($b == 0.0) { throw(Template::Exception::make("undef", "division by zero")); } return (int_of($a)) % (int_of($b)); }
+    if ($op eq "%" || $op eq "mod") { my int $ib = int_of($b); if ($ib == 0) { throw(Template::Exception::make("undef", "division by zero")); } return (int_of($a)) % $ib; }
     return undef;
 }
 

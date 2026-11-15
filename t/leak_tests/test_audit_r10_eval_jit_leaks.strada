@@ -1,0 +1,28 @@
+#!/usr/bin/env strada
+# Cycle 10 Eval Valgrind leak regression suite: R10-VM5, R10-VM6, R10-VM10
+
+use lib "lib";
+use Eval;
+
+func main() int {
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        for (my int $b = 0; $b < 2; $b = $b + 1) {
+            my str $backend = ($b == 0) ? "tree-walk" : "vm";
+            my scalar $v1 = Strada::Interpreter::eval_with('if (1) { 42; }', $backend);
+            my scalar $v2 = Strada::Interpreter::eval_with('if (0) { 42; }', $backend);
+            my scalar $v3 = Strada::Interpreter::eval_with('my int $x = 7;', $backend);
+            my scalar $v4 = Strada::Interpreter::eval_with('join("|", split(",", "a,b,,", -1))', $backend);
+            my scalar $v5 = Strada::Interpreter::eval_with('
+                my str $s = "";
+                try { die("x", "y"); } catch ($e) { $s = "" . $e; }
+                $s;
+            ', $backend);
+            if (($v1 + 0) != 42 || defined($v2) || ($v3 + 0) != 7 || ("" . $v4) ne "a|b||" || ("" . $v5) ne "xy") {
+                die("eval parity leak test failed on " . $backend);
+            }
+            Strada::Interpreter::reset();
+        }
+    }
+    say("R10_EVAL_LEAKS_OK");
+    return 0;
+}
