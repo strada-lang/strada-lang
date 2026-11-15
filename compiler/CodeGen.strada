@@ -705,9 +705,9 @@ func emit_scope_break_cycles(scalar $cg, str $scope_str, str $skip_list) void {
     }
 }
 
-# Helper to emit decref for vars in a scope, skipping already-cleaned names
-# Returns updated cleaned list (comma-separated) with this scope's vars added
-func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned) str {
+# Collect comma-separated variable names and emit Pass 2 cleanup in LIFO order
+# (reverse declaration order) so destructors see earlier locals still alive.
+func emit_scope_cleanup_vars(scalar $cg, str $scope_str, int $count, str $cleaned, int $track_cleaned) str {
     if ($count == 0 || length($scope_str) == 0) {
         return $cleaned;
     }
@@ -718,47 +718,75 @@ func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned
 
     emit_scope_break_cycles($cg, $scope_str, $cleaned);
 
+    my array @vars = ();
     my int $pos = 0;
     my int $len = length($scope_str);
     my str $var_name = "";
     while ($pos <= $len) {
-        if ($pos == $len) {
+        if ($pos == $len || substr($scope_str, $pos, 1) eq ",") {
             if (length($var_name) > 0) {
-                if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
-                    if (is_var_in_list($var_name, $cleaned) == 0) {
-                        emit_var_cleanup_stmt($cg, $var_name, is_var_in_list($var_name, $no_push_str));
-                    }
-                }
-                if (length($cleaned) == 0) {
-                    $cleaned = "" . $var_name;
-                } else {
-                    $cleaned = $cleaned . "," . $var_name;
-                }
+                push(@vars, $var_name);
             }
-            $pos = $pos + 1;
+            $var_name = "";
         } else {
-            my str $ch = substr($scope_str, $pos, 1);
-            if ($ch eq ",") {
-                if (length($var_name) > 0) {
-                    if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
-                        if (is_var_in_list($var_name, $cleaned) == 0) {
-                            emit_var_cleanup_stmt($cg, $var_name, is_var_in_list($var_name, $no_push_str));
-                        }
-                    }
-                    if (length($cleaned) == 0) {
-                        $cleaned = $var_name;
-                    } else {
-                        $cleaned = $cleaned . "," . $var_name;
-                    }
-                }
-                $var_name = "";
-            } else {
-                $var_name = $var_name . $ch;
-            }
-            $pos = $pos + 1;
+            $var_name = $var_name . substr($scope_str, $pos, 1);
         }
+        $pos = $pos + 1;
+    }
+
+    my int $vi = size(@vars) - 1;
+    while ($vi >= 0) {
+        my str $vn = $vars[$vi];
+        if ($in_anon == 0 || is_var_in_list($vn, $capture_str) == 0) {
+            if ($track_cleaned == 0 || is_var_in_list($vn, $cleaned) == 0) {
+                emit_var_cleanup_stmt($cg, $vn, is_var_in_list($vn, $no_push_str));
+            }
+        }
+        if ($track_cleaned == 1) {
+            if (length($cleaned) == 0) {
+                $cleaned = "" . $vn;
+            } else {
+                $cleaned = $cleaned . "," . $vn;
+            }
+        }
+        $vi = $vi - 1;
     }
     return $cleaned;
+}
+
+# Pop and decref function parameters in LIFO order (reverse parameter order)
+# matching the entry push order.
+func emit_param_cleanup_lifo(scalar $cg, int $indented, int $compact_pop_decref) void {
+    my int $pn_count = $cg->{"func_param_count"} + 0;
+    if ($pn_count <= 0) { return; }
+    my scalar $param_names = $cg->{"func_param_names"};
+    my scalar $param_skip = $cg->{"func_param_skip_wrap"};
+    my int $pn_i = $pn_count - 1;
+    while ($pn_i >= 0) {
+        my int $mode = $param_skip->[$pn_i] + 0;
+        my str $pname = $param_names->[$pn_i];
+        if ($mode == 0) {
+            if ($compact_pop_decref == 1) {
+                if ($indented == 1) { emit_indent($cg); }
+                emit($cg, "strada_cleanup_pop_decref(" . $pname . ");\n");
+            } else {
+                if ($indented == 1) { emit_indent($cg); }
+                emit($cg, "strada_cleanup_pop();\n");
+                if ($indented == 1) { emit_indent($cg); }
+                emit($cg, "strada_decref(" . $pname . ");\n");
+            }
+        } elsif ($mode == 2) {
+            if ($indented == 1) { emit_indent($cg); }
+            emit($cg, "strada_decref(" . $pname . ");\n");
+        }
+        $pn_i = $pn_i - 1;
+    }
+}
+
+# Helper to emit decref for vars in a scope, skipping already-cleaned names
+# Returns updated cleaned list (comma-separated) with this scope's vars added
+func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned) str {
+    return emit_scope_cleanup_vars($cg, $scope_str, $count, $cleaned, 1);
 }
 
 # Helper to emit decref (and cleanup-stack pop) for every var in a
@@ -769,55 +797,7 @@ func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned
 # pair each push with a matching cleanup_pop here AND decref the
 # value to release ownership.
 func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
-    if ($count == 0 || length($scope_str) == 0) {
-        return;
-    }
-    # Get capture list to skip captured variables in closures
-    my int $in_anon = $cg->{"in_anon_func"};
-    my str $capture_str = $cg->{"anon_capture_str"};
-
-    # Pass 1: break direct self-reference cycles in every var
-    # while ALL vars are still alive. Doing this after the first
-    # decref would access freed memory when vars share storage
-    # (e.g. `my $arr = deref_array(\$ref);` where both $ref and $arr
-    # point to the same array). Breaking the cycle here just clears
-    # self-ref slots inside hashes/arrays and decref's the cleared
-    # ref — never frees the var itself.
-    emit_scope_break_cycles($cg, $scope_str, "");
-
-    # Pass 2: cleanup_pop + decref each var. Vars whose push was elided
-    # (recorded in current_no_push_str) get only a decref — the matching
-    # cleanup_pop would underflow the runtime stack.
-    my str $no_push_str = $cg->{"current_no_push_str"};
-    if (!$no_push_str) { $no_push_str = ""; }
-    my int $pos = 0;
-    my int $len = length($scope_str);
-    my str $var_name = "";
-    while ($pos <= $len) {
-        if ($pos == $len) {
-            if (length($var_name) > 0) {
-                # Skip captured variables - they're accessed via __captures, not local vars
-                if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
-                    emit_var_cleanup_stmt($cg, $var_name, is_var_in_list($var_name, $no_push_str));
-                }
-            }
-            $pos = $pos + 1;
-        } else {
-            my str $ch = substr($scope_str, $pos, 1);
-            if ($ch eq ",") {
-                if (length($var_name) > 0) {
-                    # Skip captured variables
-                    if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
-                        emit_var_cleanup_stmt($cg, $var_name, is_var_in_list($var_name, $no_push_str));
-                    }
-                }
-                $var_name = "";
-            } else {
-                $var_name = $var_name . $ch;
-            }
-            $pos = $pos + 1;
-        }
-    }
+    emit_scope_cleanup_vars($cg, $scope_str, $count, "", 0);
 }
 
 # Emit cleanup for current scope without popping (for early returns)
@@ -872,29 +852,8 @@ func scope_emit_all_cleanup(scalar $cg) void {
     # foreach lists of the loops we are leaving
     emit_foreach_cleanup_from($cg, 0);
 
-    # Also pop and decref function parameters (we incref'd and pushed them at function entry)
-    # Skip for int-typed params (tagged ints are immortal) and leaf-safe bodies
-    # (the wrap was elided at entry).
-    my int $pn_count = $cg->{"func_param_count"} + 0;
-    if ($pn_count > 0) {
-        my scalar $param_names = $cg->{"func_param_names"};
-        my scalar $param_skip = $cg->{"func_param_skip_wrap"};
-        my int $pn_i = 0;
-        while ($pn_i < $pn_count) {
-            if ($param_skip->[$pn_i] == 0) {
-                emit_indent($cg);
-                emit($cg, "strada_cleanup_pop();\n");
-                emit_indent($cg);
-                my str $pname = $param_names->[$pn_i];
-                emit($cg, "strada_decref(" . $pname . ");\n");
-            } elsif ($param_skip->[$pn_i] == 2) {
-                emit_indent($cg);
-                my str $pname = $param_names->[$pn_i];
-                emit($cg, "strada_decref(" . $pname . ");\n");
-            }
-            $pn_i = $pn_i + 1;
-        }
-    }
+    # Also pop and decref function parameters in LIFO order
+    emit_param_cleanup_lifo($cg, 1, 0);
 }
 
 # Pop and release foreach lists of loops that started at depth >= min_depth

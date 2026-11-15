@@ -591,6 +591,7 @@ enum BI {
     DUMP = 757, RESERVE = 758, STACKTRACE = 759,
     SB_NEW = 760, SB_APPEND = 761, SB_TO_STRING = 762,
     SB_LENGTH = 763, SB_CLEAR = 764, SB_FREE = 765,
+    SYS_SOCKET_SERVER_HOST = 766,
     PLACEHOLDER_END = 999
 }
 
@@ -1184,6 +1185,7 @@ func init_builtins(scalar $interp) void {
     $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV; $b{"sys::socket_recv"} = BI::SYS_SOCKET_RECV;
     $b{"core::socket_send"} = BI::SYS_SOCKET_SEND; $b{"sys::socket_send"} = BI::SYS_SOCKET_SEND;
     $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG; $b{"sys::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG;
+    $b{"core::socket_server_host"} = BI::SYS_SOCKET_SERVER_HOST; $b{"sys::socket_server_host"} = BI::SYS_SOCKET_SERVER_HOST;
     $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING; $b{"sys::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING;
     $b{"core::spew_fd"} = BI::SYS_SPEW_FD; $b{"sys::spew_fd"} = BI::SYS_SPEW_FD;
     $b{"core::spew_fh"} = BI::SYS_SPEW_FH; $b{"sys::spew_fh"} = BI::SYS_SPEW_FH;
@@ -1775,7 +1777,7 @@ func interp_resolve_obj_pkg_in(scalar $interp, scalar $obj) str {
     my str $pkg = get_obj_class_in($interp, $obj);
     if (length($pkg) == 0) {
         my str $ref_type = ref($obj);
-        if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
+        if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "Closure" && $ref_type ne "CODE" && $ref_type ne "" && $ref_type ne "0") {
             $pkg = $ref_type;
         }
     }
@@ -3679,13 +3681,13 @@ func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, 
         if ($around_n > 0) {
             my hash %base_orig = ();
             $base_orig{"__orig_func__"} = $func_info;
-            my scalar $chain = \%base_orig;
+            my scalar $chain = bless(\%base_orig, "Closure");
             my int $ami = 0;
             while ($ami < $around_n - 1) {
                 my hash %wrap = ();
                 $wrap{"__around_func__"} = $around_mods[$ami];
                 $wrap{"__next_orig__"} = $chain;
-                $chain = \%wrap;
+                $chain = bless(\%wrap, "Closure");
                 $ami = $ami + 1;
             }
             my array @around_args = ();
@@ -4864,6 +4866,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($r eq "ARRAY") { return "array"; }
         if ($r eq "HASH" && exists($v, "__scalar_ref__")) { return "ref"; }
         if ($r eq "HASH") { return "hash"; }
+        if ($r eq "Closure" || $r eq "CODE") {
+            if (length(get_obj_class_in($interp, $v)) > 0) { return "ref"; }
+            return "code";
+        }
         if (length($r) > 0) { return "ref"; }
         return typeof($v);
     }
@@ -4988,11 +4994,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my scalar $v = $args->[0];
         my str $bcls = get_obj_class_in($interp, $v);
         if (length($bcls) > 0) { return $bcls; }
-        if (ref($v) eq "HASH") {
+        my str $rt = ref($v);
+        if ($rt eq "Closure") { return "CODE"; }
+        if ($rt eq "HASH") {
             if (exists($v, "__scalar_ref__")) { return "SCALAR"; }
             if (exists($v, "__class__")) { return $v->{"__class__"}; }
         }
-        return ref($v);
+        return $rt;
     }
     if ($bid == BI::INT_FN) {
         # Truncate to integer: use arithmetic to force int conversion
@@ -5115,7 +5123,8 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::exec($args->[0]);
     }
     if ($bid == BI::SYS_WAITPID) {
-        return core::waitpid($args->[0], $args->[1]);
+        my int $opts = ($argc >= 2 && defined($args->[1])) ? $args->[1] : 0;
+        return core::waitpid($args->[0], $opts);
     }
     if ($bid == BI::SYS_ALARM) {
         return core::alarm($args->[0]);
@@ -5264,6 +5273,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::SYS_SOCKET_RECV) { return core::socket_recv($args->[0], $args->[1]); }
     if ($bid == BI::SYS_SOCKET_SEND) { return core::socket_send($args->[0], $args->[1]); }
     if ($bid == BI::SYS_SOCKET_SERVER_BACKLOG) { return core::socket_server_backlog($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SERVER_HOST) {
+        my int $bl = ($argc >= 3 && defined($args->[2])) ? $args->[2] : 128;
+        return core::socket_server_host($args->[0], $args->[1], $bl);
+    }
     if ($bid == BI::SYS_SOCKET_SET_NONBLOCKING) { return core::socket_set_nonblocking($args->[0], $args->[1]); }
     if ($bid == BI::SYS_SPEW_FD) { core::spew_fd($args->[0], $args->[1]); return undef; }
     if ($bid == BI::SYS_SPEW_FH) { core::spew_fh($args->[0], $args->[1]); return undef; }
@@ -5442,7 +5455,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
             return $bcls;
         }
         my str $rt = ref($v);
-        if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
+        if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "Closure" && $rt ne "CODE" && $rt ne "" && $rt ne "0") {
             return $rt;
         }
         return undef;
@@ -6216,7 +6229,37 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         core::exit($args->[0]);
     }
     if ($bid == BI::SYS_SIGNAL) {
-        return undef;
+        if ($argc < 2) { return undef; }
+        my scalar $sig = $args->[0];
+        my scalar $handler = $args->[1];
+        if (!exists($interp, "__tw_sig_by_wrap")) {
+            my hash %wmap = ();
+            $interp->{"__tw_sig_by_wrap"} = \%wmap;
+        }
+        my scalar $native_handler = $handler;
+        if (defined($handler) && reftype($handler) eq "HASH" && (exists($handler, "params") || exists($handler, "__around_func__") || exists($handler, "__orig_func__"))) {
+            my scalar $winterp = $interp;
+            core::weaken($winterp);
+            my scalar $whandler = $handler;
+            my scalar $wrap = func (scalar $snum) void {
+                if (defined($winterp)) {
+                    call_user_func($winterp, $whandler, [$snum]);
+                }
+            };
+            my str $wkey = interp_blessed_ref_key($wrap);
+            $interp->{"__tw_sig_by_wrap"}->{$wkey} = $handler;
+            $native_handler = $wrap;
+        }
+        my scalar $prev = core::signal($sig, $native_handler);
+        if (defined($prev) && ref($prev) eq "CODE") {
+            my str $pkey = interp_blessed_ref_key($prev);
+            if (exists($interp->{"__tw_sig_by_wrap"}, $pkey)) {
+                my scalar $tw_prev = $interp->{"__tw_sig_by_wrap"}->{$pkey};
+                delete($interp->{"__tw_sig_by_wrap"}, $pkey);
+                return $tw_prev;
+            }
+        }
+        return $prev;
     }
 
     # ---- core:: context functions ----
@@ -7669,7 +7712,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
         }
 
         # Check for chained __around_func__ and __orig_func__ wrappers (from around modifier)
-        if (ref($closure) eq "HASH" && exists($closure, "__around_func__")) {
+        if (reftype($closure) eq "HASH" && exists($closure, "__around_func__")) {
             my array @chained_args = ();
             push(@chained_args, $closure->{"__next_orig__"});
             my int $cai = 0;
@@ -7681,12 +7724,12 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
             return call_user_func($interp, $closure->{"__around_func__"}, \@chained_args);
         }
 
-        if (ref($closure) eq "HASH" && exists($closure, "__orig_func__")) {
+        if (reftype($closure) eq "HASH" && exists($closure, "__orig_func__")) {
             $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $closure->{"__orig_func__"}, \@args);
         }
 
-        if (ref($closure) eq "HASH" && exists($closure, "params")) {
+        if (reftype($closure) eq "HASH" && exists($closure, "params")) {
             # It's a function info hash (from anonymous func)
             $interp->{"next_call_context"} = $eval_ctx;
             return call_user_func($interp, $closure, \@args);
@@ -7743,7 +7786,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
             if ($lp->{"is_variadic"} == 1 || $ls eq "...@") { $is_va = 1; }
         }
         $fi{"is_variadic"} = $is_va;
-        return \%fi;
+        return bless(\%fi, "Closure");
     }
 
     # --- Range (start..end) ---
@@ -8445,7 +8488,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type, in
         $fi{"param_count"} = $node->{"param_count"};
         $fi{"body"} = $node->{"body"};
         $fi{"closure_env"} = $env;
-        return \%fi;
+        return bless(\%fi, "Closure");
     }
 
     # --- Await (in interpreter, just evaluate the expression) ---
@@ -9644,7 +9687,15 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
         if (defined($func_info)) {
-            return $func_info;
+            my hash %cf = ();
+            my scalar $fks = keys($func_info);
+            my int $fk_i = 0;
+            while ($fk_i < size($fks)) {
+                my str $k = $fks->[$fk_i];
+                $cf{$k} = $func_info->{$k};
+                $fk_i = $fk_i + 1;
+            }
+            return bless(\%cf, "Closure");
         }
         die("Undefined function for reference: " . $fname);
     }

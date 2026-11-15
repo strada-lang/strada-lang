@@ -1,0 +1,84 @@
+package R14VmLkHasBase;
+has rw scalar $items = ["a"];
+has rw scalar $cfg (default => {"n" => 1});
+
+package R14VmLkHasSub;
+inherit R14VmLkHasBase;
+
+package R14VmLkAroundBase;
+func act(scalar $self) str { return "b"; }
+around "act" func(scalar $orig, scalar $self) str { return "[" . $orig->($self) . "]"; }
+
+package R14VmLkAroundSub;
+inherit R14VmLkAroundBase;
+
+package main;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 4) {
+        my array @pa = (1);
+        my scalar $pr = push(@pa, 2);
+
+        my int $a0 = core::access("Makefile", 0);
+        my int $a1 = core::access("/no_such_r14_lk_xyz", 0);
+        my int $wp = core::waitpid(-1, 1);
+
+        my int $hit = 0;
+        my scalar $prev = core::signal("USR1", func (int $s) void { $hit = $hit + 1; });
+        my int $k = 0;
+        while ($hit == 0 && $k < 200) {
+            if ($k == 3) { core::kill(core::getpid(), 10); }
+            $k = $k + 1;
+        }
+        core::signal("USR1", "DEFAULT");
+
+        my scalar $fn = func (int $x) int { return $x + 1; };
+        my scalar $bf = func (int $x) int { return $x * 2; };
+        bless($bf, "R14VmLkClos");
+        my str $rt = ref($fn) . typeof($fn) . ref($bf) . blessed($bf) . typeof($bf);
+        my int $call_sum = $fn->($i) + $bf->($i);
+
+        my scalar $ar = bless({}, "R14VmLkAroundSub");
+        my str $as = $ar->act();
+
+        my str $rm = replace("cat", "a", "[$&]");
+        my str $re = replace("ab", "", "X");
+        my array @sr = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+
+        my scalar $h1 = R14VmLkHasSub::new();
+        push($h1->items(), "z");
+        $h1->cfg()->{"n"} = 7;
+
+        my int $tp = 21450 + (core::getpid() % 500) + $i;
+        my scalar $srv = core::socket_server_host("127.0.0.1", $tp, 4);
+        if (defined($srv)) {
+            core::socket_set_nonblocking($srv, 1);
+            my scalar $cli = core::socket_client("127.0.0.1", $tp);
+            my scalar $rd1 = core::select_fds([$srv], 500);
+            my scalar $acc = core::socket_accept($srv);
+            if (defined($acc)) {
+                core::socket_send($cli, "ok");
+                my scalar $rd2 = core::select_fds([$acc], 500);
+                my str $got = core::socket_recv($acc, 32);
+                core::socket_close($acc);
+            }
+            core::socket_close($cli);
+            core::socket_close($srv);
+        }
+
+        my int $up = 22450 + (core::getpid() % 500) + $i;
+        my scalar $us = core::udp_server($up);
+        if (defined($us)) {
+            my scalar $uc = core::udp_socket();
+            core::udp_sendto($uc, "u\x00p", "127.0.0.1", $up);
+            my scalar $ug = core::udp_recvfrom($us, 32);
+            core::socket_close($uc);
+            core::socket_close($us);
+        }
+
+        $i = $i + 1;
+    }
+    say("LEAK_AUDIT_R14_VM_OK");
+    return 0;
+}

@@ -874,14 +874,15 @@ func lex_pp_skip_delim_body(str $src, int $len, int $pos, int $open_c, int $clos
     return $p;
 }
 
-func lex_pp_try_skip_quote_op(str $src, int $len, int $ws, int $sc, str $kw, int $can_regex, scalar $line_box) int {
+func lex_pp_try_skip_quote_op(str $src, int $len, int $ws, int $sc, str $kw, int $can_regex, int $can_subst, scalar $line_box) int {
     if ($can_regex == 0) { return -1; }
     my int $parts = 0;
     my int $has_flags = 0;
     if ($kw eq "s" || $kw eq "tr" || $kw eq "y") {
+        if ($can_subst == 0) { return -1; }
         $parts = 2;
         $has_flags = 1;
-    } elsif ($kw eq "m" || $kw eq "qr") {
+    } elsif ($kw eq "m") {
         $parts = 1;
         $has_flags = 1;
     } elsif ($kw eq "q" || $kw eq "qq" || $kw eq "qw") {
@@ -907,16 +908,24 @@ func lex_pp_try_skip_quote_op(str $src, int $len, int $ws, int $sc, str $kw, int
     my int $d = char_at($src, $j);
     my int $open_c = 0;
     my int $close_c = 0;
-    my int $paired = 0;
-    if ($d == '(') { $open_c = '('; $close_c = ')'; $paired = 1; }
-    elsif ($d == '[') { $open_c = '['; $close_c = ']'; $paired = 1; }
-    elsif ($d == '{') { $open_c = '{'; $close_c = '}'; $paired = 1; }
-    elsif ($d == '<') { $open_c = '<'; $close_c = '>'; $paired = 1; }
-    elsif ($had_ws == 0 && $d == '/') { $open_c = '/'; $close_c = '/'; }
-    elsif ($had_ws == 0 && ($kw eq "q" || $kw eq "qq" || $kw eq "qw" || $kw eq "qr")) {
+    if ($kw eq "s" || $kw eq "tr" || $kw eq "y" || $kw eq "m") {
+        # Real lexer only recognizes m/, s///, tr///, y/// with no whitespace before '/'.
+        if ($had_ws == 1 || $d != '/') { return -1; }
+        $open_c = '/';
+        $close_c = '/';
+    } elsif ($d == '(') {
+        $open_c = '('; $close_c = ')';
+    } elsif ($d == '[') {
+        $open_c = '['; $close_c = ']';
+    } elsif ($d == '{') {
+        $open_c = '{'; $close_c = '}';
+    } elsif ($had_ws == 0 && $d == '/') {
+        $open_c = '/'; $close_c = '/';
+    } elsif ($had_ws == 0) {
         my int $nxt = 0;
         if ($j + 1 < $len) { $nxt = char_at($src, $j + 1); }
-        if ($d == '!' && $nxt != '=' && $nxt != '~') { $open_c = '!'; $close_c = '!'; }
+        if ($d == '<' && $nxt != '=' && $nxt != '<') { $open_c = '<'; $close_c = '>'; }
+        elsif ($d == '!' && $nxt != '=' && $nxt != '~') { $open_c = '!'; $close_c = '!'; }
         elsif ($d == '|' && $nxt != '|') { $open_c = '|'; $close_c = '|'; }
         else { return -1; }
     } else {
@@ -927,23 +936,7 @@ func lex_pp_try_skip_quote_op(str $src, int $len, int $ws, int $sc, str $kw, int
     my int $cur = lex_pp_skip_delim_body($src, $len, $j + 1, $open_c, $close_c, \%ln_box);
     if ($cur < 0) { return -1; }
     if ($parts == 2) {
-        if ($paired == 1) {
-            while ($cur < $len && (char_at($src, $cur) == ' ' || char_at($src, $cur) == '\t')) {
-                $cur = $cur + 1;
-            }
-            if ($cur >= $len) { return -1; }
-            my int $d2 = char_at($src, $cur);
-            my int $o2 = $d2;
-            my int $c2 = $d2;
-            if ($d2 == '(') { $c2 = ')'; }
-            elsif ($d2 == '[') { $c2 = ']'; }
-            elsif ($d2 == '{') { $c2 = '}'; }
-            elsif ($d2 == '<') { $c2 = '>'; }
-            elsif ($d2 != '/' && $d2 != '!' && $d2 != '|') { return -1; }
-            $cur = lex_pp_skip_delim_body($src, $len, $cur + 1, $o2, $c2, \%ln_box);
-        } else {
-            $cur = lex_pp_skip_delim_body($src, $len, $cur, $open_c, $close_c, \%ln_box);
-        }
+        $cur = lex_pp_skip_delim_body($src, $len, $cur, $open_c, $close_c, \%ln_box);
         if ($cur < 0) { return -1; }
     }
     if ($has_flags == 1) {
@@ -1043,10 +1036,15 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
             # confuse outer #ifdef/#endif nesting.
             my int $sc = $q;
             my int $can_regex = 1;
+            my int $can_subst = 0;
             while ($sc < $len && char_at($src, $sc) != '\n') {
                 my int $cc = char_at($src, $sc);
                 if ($cc == ' ' || $cc == '\t' || $cc == '\r') {
                     $sc = $sc + 1;
+                } elsif (($cc == '=' || $cc == '!') && $sc + 1 < $len && char_at($src, $sc + 1) == '~') {
+                    $sc = $sc + 2;
+                    $can_regex = 1;
+                    $can_subst = 1;
                 } elsif ($cc == '#') {
                     # '#' Strada comment to end of line
                     while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
@@ -1058,6 +1056,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         # Binary '//' defined-or operator
                         $sc = $sc + 2;
                         $can_regex = 1;
+                        $can_subst = 0;
                     }
                 } elsif ($cc == '/' && $sc + 1 < $len && char_at($src, $sc + 1) == '*') {
                     # /* ... */ block comment
@@ -1094,6 +1093,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         $sc = $sc + 1;
                         $can_regex = 1;
                     }
+                    $can_subst = 0;
                 } elsif ($cc == '"' || $cc == '\'') {
                     # String literal ("..." or '...')
                     my int $qch = $cc;
@@ -1109,6 +1109,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         }
                     }
                     $can_regex = 0;
+                    $can_subst = 0;
                 } elsif ($cc == '<' && $sc + 1 < $len && char_at($src, $sc + 1) == '<' && $can_regex == 1) {
                     my int $hj = $sc + 2;
                     my int $hq = 0;
@@ -1244,6 +1245,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                     } else {
                         $sc = $sc + 2;
                         $can_regex = 1;
+                        $can_subst = 0;
                     }
                 } elsif (lex_pp_is_word_char($cc) == 1) {
                     my int $ws = $sc;
@@ -1366,15 +1368,16 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                             }
                         }
                         $can_regex = 0;
+                        $can_subst = 0;
                     } else {
                         my hash %qline = ();
                         $qline{"n"} = $line;
-                        my int $qend = lex_pp_try_skip_quote_op($src, $len, $ws, $sc, $kw, $can_regex, \%qline);
+                        my int $qend = lex_pp_try_skip_quote_op($src, $len, $ws, $sc, $kw, $can_regex, $can_subst, \%qline);
                         if ($qend >= 0) {
                             $line = $qline{"n"};
                             $sc = $qend;
                             $can_regex = 0;
-                        } elsif ($kw eq "split" || $kw eq "return" || $kw eq "if" || $kw eq "elsif" || $kw eq "unless" || $kw eq "while" || $kw eq "until" || $kw eq "for" || $kw eq "die" || $kw eq "warn" || $kw eq "say" || $kw eq "print" || $kw eq "throw" || $kw eq "and" || $kw eq "or" || $kw eq "not" || $kw eq "eq" || $kw eq "ne" || $kw eq "cmp" || $kw eq "m" || $kw eq "qr") {
+                        } elsif ($kw eq "split" || $kw eq "return" || $kw eq "if" || $kw eq "elsif" || $kw eq "unless" || $kw eq "while" || $kw eq "until" || $kw eq "for" || $kw eq "die" || $kw eq "warn" || $kw eq "say" || $kw eq "print" || $kw eq "throw" || $kw eq "and" || $kw eq "or" || $kw eq "not" || $kw eq "eq" || $kw eq "ne" || $kw eq "cmp") {
                             my int $allow_kw = 1;
                             if ($ws >= 1) {
                                 my int $kp1 = char_at($src, $ws - 1);
@@ -1388,6 +1391,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                         } else {
                             $can_regex = 0;
                         }
+                        $can_subst = 0;
                     }
                 } else {
                     $sc = $sc + 1;
@@ -1396,6 +1400,7 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                     } else {
                         $can_regex = 1;
                     }
+                    $can_subst = 0;
                 }
             }
             $pos = $sc;

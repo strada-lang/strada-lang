@@ -1535,7 +1535,7 @@ static void dbi_clear_bindings(DbiStatement *sth) {
 /* A parameter's bytes and length: strings are copied whole (they may hold
  * NUL bytes - images, any binary data); other values are stringified.
  * Returns a malloc'd, NUL-terminated buffer. */
-static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
+static char *dbi_value_bytes_utf8(StradaValue *val, unsigned long *len, int *out_is_utf8) {
     StradaValue *owned = NULL;
     StradaValue *src = val;
     if (!val || STRADA_IS_TAGGED_INT(val) || val->type != STRADA_STR
@@ -1546,13 +1546,18 @@ static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
     if (!src || STRADA_IS_TAGGED_INT(src)) {
         if (owned) strada_decref(owned);
         *len = 0;
+        if (out_is_utf8) *out_is_utf8 = 0;
         return NULL;
+    }
+    if (out_is_utf8) {
+        *out_is_utf8 = (src->type == STRADA_STR && STRADA_STR_IS_UTF8(src)) ? 1 : 0;
     }
     size_t n = STRADA_STR_BYTELEN(src);
     char *p = malloc(n + 1);
     if (!p) {
         if (owned) strada_decref(owned);
         *len = 0;
+        if (out_is_utf8) *out_is_utf8 = 0;
         return NULL;
     }
     if (n > 0 && src->value.pv) memcpy(p, src->value.pv, n);
@@ -1560,6 +1565,10 @@ static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
     *len = (unsigned long)n;
     if (owned) strada_decref(owned);
     return p;
+}
+
+static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
+    return dbi_value_bytes_utf8(val, len, NULL);
 }
 
 static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
@@ -2815,26 +2824,41 @@ func rollback(scalar $dbh) int {
 
 # Quote a string value for safe use in SQL
 func quote(scalar $dbh, scalar $value) str {
-    if (!defined($value)) {
-        return "NULL";
-    }
-
     my int $dbh_ptr = defined($dbh) ? $dbh->{"_ptr"} : 0;
     my str $result = "";
     my int $nul_err = 0;
     __C__ {
         DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
-        unsigned long val_len = 0;
-        char *val_str = dbi_value_bytes(value, &val_len);
-        char *quoted = dbi_quote_len(h, val_str, (size_t)val_len);
-        free(val_str);
-        if (!quoted) {
-            strada_decref(nul_err);
-            nul_err = strada_new_int(1);
-        } else {
+        StradaValue *fetched = NULL;
+        StradaValue *eff = value;
+        /* Unwrap tied scalars once before undef/byte inspection so FETCH is
+         * not invoked twice (previously defined($value) + dbi_value_bytes_utf8). */
+        if (value && !STRADA_IS_TAGGED_INT(value) && value->meta && value->meta->is_tied && value->meta->tied_obj
+            && value->type != STRADA_HASH && value->type != STRADA_ARRAY) {
+            fetched = strada_tied_scalar_fetch(value);
+            eff = fetched;
+        }
+        if (!eff || (!STRADA_IS_TAGGED_INT(eff) && eff->type == STRADA_UNDEF && !(eff->meta && eff->meta->is_tied))) {
+            if (fetched) strada_decref(fetched);
             strada_decref(result);
-            result = strada_new_str_like(quoted, value);
-            free(quoted);
+            result = strada_new_str("NULL");
+        } else {
+            if (fetched) strada_cleanup_push(fetched);
+            unsigned long val_len = 0;
+            int val_utf8 = 0;
+            char *val_str = dbi_value_bytes_utf8(eff, &val_len, &val_utf8);
+            if (fetched) strada_cleanup_pop_decref(fetched);
+            char *quoted = dbi_quote_len(h, val_str, (size_t)val_len);
+            free(val_str);
+            if (!quoted) {
+                strada_decref(nul_err);
+                nul_err = strada_new_int(1);
+            } else {
+                strada_decref(result);
+                result = strada_new_str(quoted);
+                if (val_utf8) STRADA_SET_UTF8_FLAG(result);
+                free(quoted);
+            }
         }
     }
     if ($nul_err == 1) {

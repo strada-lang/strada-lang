@@ -1,0 +1,130 @@
+package R14VmHasBase;
+has rw scalar $items = ["init"];
+has rw scalar $cfg (default => {"n" => 1});
+
+package R14VmHasSub;
+inherit R14VmHasBase;
+
+package R14VmAroundBase;
+func act(scalar $self) str { return "base"; }
+around "act" func(scalar $orig, scalar $self) str { return "<" . $orig->($self) . ">"; }
+
+package R14VmAroundSub;
+inherit R14VmAroundBase;
+
+package main;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # VM1: push returns undef
+    my array @pa = (1, 2);
+    my scalar $pr = push(@pa, 3);
+    check(!defined($pr) && join(",", @pa) eq "1,2,3", "VM1 push returns undef");
+    say("VM1=ok");
+
+    # VM2: core::access returns raw 0 / -1
+    my int $acc_ok = core::access("Makefile", 0);
+    my int $acc_bad = core::access("/no_such_r14_path_9876", 0);
+    check($acc_ok == 0 && $acc_bad == -1, "VM2 core::access 0/-1");
+    say("VM2=" . $acc_ok . ":" . $acc_bad);
+
+    # VM3: core::waitpid 1-arg optional options + 2-arg
+    my int $p1 = core::fork();
+    if ($p1 == 0) { core::exit(7); }
+    my int $st1 = core::waitpid($p1);
+    my int $p2 = core::fork();
+    if ($p2 == 0) { core::exit(9); }
+    my int $st2 = core::waitpid($p2, 0);
+    check(int($st1 / 256) == 7 && int($st2 / 256) == 9, "VM3 waitpid 1-arg and 2-arg");
+    say("VM3=" . int($st1 / 256) . ":" . int($st2 / 256));
+
+    # VM4: core::signal closure handler dispatch in loop + restore previous
+    my int $sig_hits = 0;
+    my scalar $prev1 = core::signal("USR1", func (int $sn) void {
+        if ($sn > 0) { $sig_hits = $sig_hits + 1; }
+    });
+    my int $iter = 0;
+    while ($sig_hits == 0 && $iter < 1000) {
+        if ($iter == 5) {
+            core::kill(core::getpid(), 10);
+        }
+        $iter = $iter + 1;
+    }
+    my scalar $prev2 = core::signal("USR1", "DEFAULT");
+    check(!defined($prev1) && $sig_hits == 1 && defined($prev2), "VM4 signal loop dispatch & restore");
+    say("VM4=undef:" . $sig_hits);
+
+    # VM5: socket_server_host + socket_set_nonblocking + select_fds + socket_send + udp_sendto binary NUL
+    my int $tport = 19450 + (core::getpid() % 500);
+    my scalar $srv = undef;
+    my int $pt = 0;
+    while ($pt < 20 && !defined($srv)) {
+        $srv = core::socket_server_host("127.0.0.1", $tport + $pt, 4);
+        if (!defined($srv)) { $pt = $pt + 1; }
+    }
+    check(defined($srv), "VM5 socket_server_host bound");
+    my int $bound_tport = $tport + $pt;
+    my int $nb_rc = core::socket_set_nonblocking($srv, 1);
+    my scalar $cli = core::socket_client("127.0.0.1", $bound_tport);
+    my scalar $ready1 = core::select_fds([$srv], 1000);
+    my scalar $acc = core::socket_accept($srv);
+    my int $snd_rc = core::socket_send($cli, "hello_tcp");
+    my scalar $ready2 = core::select_fds([$acc], 1000);
+    my str $tcp_got = core::socket_recv($acc, 64);
+    core::socket_close($acc);
+    core::socket_close($cli);
+    core::socket_close($srv);
+    check($nb_rc == 0 && size($ready1) == 1 && $snd_rc == 9 && size($ready2) == 1 && $tcp_got eq "hello_tcp",
+          "VM5 TCP socket + select_fds");
+
+    my int $uport = 20450 + (core::getpid() % 500);
+    my scalar $us = undef;
+    my int $pu = 0;
+    while ($pu < 20 && !defined($us)) {
+        $us = core::udp_server($uport + $pu);
+        if (!defined($us)) { $pu = $pu + 1; }
+    }
+    check(defined($us), "VM5 udp_server bound");
+    my int $bound_uport = $uport + $pu;
+    my scalar $uc = core::udp_socket();
+    my str $upay = "u\x00p";
+    my int $usnd = core::udp_sendto($uc, $upay, "127.0.0.1", $bound_uport);
+    my scalar $urecv = core::udp_recvfrom($us, 64);
+    core::socket_close($uc);
+    core::socket_close($us);
+    check($usnd == 3 && defined($urecv) && length($urecv->{"data"}) == 3 && $urecv->{"data"} eq $upay,
+          "VM5 UDP sendto binary NUL");
+    say("VM5=" . $nb_rc . ":" . $snd_rc . ":" . $tcp_got . ":" . $usnd . ":" . length($urecv->{"data"}));
+
+    # VM6: closures unblessed & blessed + around chain
+    my scalar $fn = func (int $x) int { return $x + 10; };
+    my str $fn_bl = defined(blessed($fn)) ? blessed($fn) : "undef";
+    my scalar $bf = func (int $x) int { return $x * 3; };
+    bless($bf, "R14VmClos");
+    my scalar $ar = bless({}, "R14VmAroundSub");
+    check(ref($fn) eq "CODE" && typeof($fn) eq "code" && $fn_bl eq "undef" && $fn->(5) == 15,
+          "VM6 unblessed closure");
+    check(ref($bf) eq "R14VmClos" && blessed($bf) eq "R14VmClos" && typeof($bf) eq "ref" && $bf->(4) == 12,
+          "VM6 blessed closure");
+    say("VM6=" . ref($fn) . ":" . typeof($fn) . ":" . $fn_bl . ":" . $fn->(5)
+        . "|" . ref($bf) . ":" . blessed($bf) . ":" . typeof($bf) . ":" . $bf->(4)
+        . "|" . $ar->act());
+
+    # VM7: replace empty/meta + 64-bit sort + has default clone
+    my str $rm = replace("cat", "a", "[$&]");
+    my str $re = replace("ab", "", "X");
+    my array @s = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+    my scalar $h1 = R14VmHasSub::new();
+    my scalar $h2 = R14VmHasSub::new();
+    push($h1->items(), "mut");
+    $h1->cfg()->{"n"} = 88;
+    say("VM7=" . $rm . "|" . $re . "|" . join(",", @s) . "|" . size($h1->items()) . "," . size($h2->items())
+        . "|" . $h1->cfg()->{"n"} . "," . $h2->cfg()->{"n"});
+
+    return 0;
+}

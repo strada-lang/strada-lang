@@ -2577,7 +2577,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
                 }
             }
-            vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE); /* return new size */
+            vm_chunk_emit(ctx->chunk, OP_POP);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
             break;
         }
 
@@ -3210,8 +3211,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "is_file") == 0) bid = BUILTIN_FILE_TEST_F;
             else if (strcmp(fn, "unlink") == 0) bid = BUILTIN_CORE_UNLINK;
             else if (strcmp(fn, "exit") == 0) bid = BUILTIN_CORE_EXIT;
-            else if (strcmp(fn, "sleep") == 0) bid = BUILTIN_CORE_SLEEP;
-            else if (strcmp(fn, "usleep") == 0) bid = BUILTIN_CORE_USLEEP;
+            /* sleep, usleep: handled by generic runtime bridge so signals dispatch
+             * and return values match compiled Strada */
             else if (strcmp(fn, "getpid") == 0) bid = BUILTIN_CORE_GETPID;
             else if (strcmp(fn, "getppid") == 0) bid = BUILTIN_CORE_GETPPID;
             else if (strcmp(fn, "chdir") == 0) bid = BUILTIN_CORE_CHDIR;
@@ -3240,8 +3241,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "fork") == 0) bid = BUILTIN_CORE_FORK;
             else if (strcmp(fn, "wait") == 0) bid = BUILTIN_CORE_WAIT;
             else if (strcmp(fn, "waitpid") == 0) bid = BUILTIN_CORE_WAITPID;
-            else if (strcmp(fn, "kill") == 0) bid = BUILTIN_CORE_KILL;
-            else if (strcmp(fn, "signal") == 0) bid = BUILTIN_CORE_SIGNAL;
+            /* kill, signal: handled by generic runtime bridge */
             else if (strcmp(fn, "alarm") == 0) bid = BUILTIN_CORE_ALARM;
             else if (strcmp(fn, "pipe") == 0) bid = BUILTIN_CORE_PIPE;
             else if (strcmp(fn, "dup2") == 0) bid = BUILTIN_CORE_DUP2;
@@ -3268,16 +3268,15 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "exec") == 0) bid = BUILTIN_CORE_EXEC;
             else if (strcmp(fn, "srand") == 0) bid = BUILTIN_CORE_SRAND;
             else if (strcmp(fn, "rand") == 0) bid = BUILTIN_CORE_RAND;
-            /* truncate: handled by the generic runtime bridge (raw syscall return,
-             * matching compiled semantics — the old BUILTIN_CORE_TRUNCATE used 1/0) */
-            else if (strcmp(fn, "nanosleep") == 0) bid = BUILTIN_CORE_NANOSLEEP;
+            /* truncate, nanosleep, access: handled by the generic runtime bridge
+             * (raw syscall return, signal dispatch, and compiled semantics parity) */
             else if (strcmp(fn, "gethostname") == 0) bid = BUILTIN_CORE_GETHOSTNAME;
-            else if (strcmp(fn, "access") == 0) bid = BUILTIN_CORE_ACCESS;
             else if (strcmp(fn, "glob") == 0) bid = BUILTIN_CORE_GLOB;
             /* Socket */
             else if (strcmp(fn, "socket_client") == 0) bid = BUILTIN_CORE_SOCKET_CLIENT;
             else if (strcmp(fn, "socket_server") == 0) bid = BUILTIN_CORE_SOCKET_SERVER;
             else if (strcmp(fn, "socket_server_backlog") == 0) bid = BUILTIN_CORE_SOCKET_SERVER_BACKLOG;
+            else if (strcmp(fn, "socket_server_host") == 0) bid = BUILTIN_CORE_SOCKET_SERVER_HOST;
             else if (strcmp(fn, "socket_accept") == 0) bid = BUILTIN_CORE_SOCKET_ACCEPT;
             else if (strcmp(fn, "socket_recv") == 0) bid = BUILTIN_CORE_SOCKET_RECV;
             else if (strcmp(fn, "socket_send") == 0) bid = BUILTIN_CORE_SOCKET_SEND;
@@ -3589,6 +3588,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "dumper") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DUMPER_STR); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "reserve") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_RESERVE); vm_chunk_emit(ctx->chunk, 2); break; }
         if (strcmp(name, "unlink") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_UNLINK); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "exit") == 0 && argc <= 1) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_EXIT); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "getpid") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_GETPID); vm_chunk_emit(ctx->chunk, 0); break; }
         if (strcmp(name, "write_fd") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_WRITE_FD); vm_chunk_emit(ctx->chunk, 2); break; }
         if (strcmp(name, "close_fd") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_CLOSE_FD); vm_chunk_emit(ctx->chunk, 1); break; }

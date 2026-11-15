@@ -1,0 +1,182 @@
+package R14Dtor;
+func new(str $name, scalar $log_ref) scalar {
+    return bless({"name" => $name, "log" => $log_ref}, "R14Dtor");
+}
+func DESTROY(scalar $self) void {
+    my scalar $log = $self->{"log"};
+    push(@{$log}, $self->{"name"});
+}
+
+package R14HasBase;
+has rw scalar $items = ["base"];
+has rw scalar $cfg (default => {"k" => 1, "arr" => [10, 20]});
+has rw str $tag = "t0";
+
+package R14HasLeft;
+inherit R14HasBase;
+has rw int $lv = 11;
+
+package R14HasRight;
+inherit R14HasBase;
+has rw int $rv = 22;
+
+package R14HasDiamond;
+inherit R14HasLeft, R14HasRight;
+has rw str $leaf = "leaf";
+
+package R14TieHash;
+func TIEHASH(str $cls) scalar {
+    return bless({"store" => {}, "gets" => 0}, $cls);
+}
+func FETCH(scalar $self, str $k) scalar {
+    $self->{"gets"} = $self->{"gets"} + 1;
+    return $self->{"store"}->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    $self->{"store"}->{$k} = $v;
+}
+func EXISTS(scalar $self, str $k) int {
+    return exists($self->{"store"}, $k);
+}
+
+package main;
+
+our array @g_r14_arr = (10, 20, 30);
+our hash %g_r14_hash = ("alpha" => "A", "beta" => "B");
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func lifo_ret_helper(scalar $p1, scalar $p2, scalar $log) int {
+    my scalar $a = R14Dtor::new("a", $log);
+    if (1) {
+        my scalar $b = R14Dtor::new("b", $log);
+        return 7;
+    }
+    return 0;
+}
+
+func lifo_goto_helper(scalar $log) void {
+    my scalar $outer = R14Dtor::new("g_outer", $log);
+    {
+        my scalar $inner = R14Dtor::new("g_inner", $log);
+        goto DONE_GOTO;
+    }
+DONE_GOTO:
+    my scalar $after = R14Dtor::new("g_after", $log);
+}
+
+func main() int {
+    # R14-C1: replace/replace_all literal & meta/empty guards
+    my str $r_meta = replace("cat", "a", "[$&]");
+    check($r_meta eq "c[a]t", "replace literal pat + meta repl: " . $r_meta);
+    my str $r_empty = replace("ab", "", "X");
+    check($r_empty eq "Xab", "replace empty pat: " . $r_empty);
+    my str $ra_empty = regex_replace_all("ab", "", "X");
+    check($ra_empty eq "XaXbX", "regex_replace_all empty pat: " . $ra_empty);
+    my str $ra_ctx = regex_replace_all("cat bat", "a", "[$&$$]");
+    check($ra_ctx eq "c[a$]t b[a$]t", "regex_replace_all literal pat + $&$$: " . $ra_ctx);
+    my str $r_nul = "p\x00q\x00r";
+    my str $ra_nul = replace_all($r_nul, "\x00", "|");
+    check($ra_nul eq "p|q|r", "replace_all embedded NUL");
+
+    # nested exception rethrow (throw $e)
+    my str $rethrow_seen = "";
+    try {
+        try {
+            die("r14_ex");
+        } catch ($inner_e) {
+            throw $inner_e;
+        }
+    } catch ($outer_e) {
+        $rethrow_seen = "" . $outer_e;
+    }
+    check($rethrow_seen =~ /r14_ex/, "nested exception rethrow: " . $rethrow_seen);
+
+    # R14-C2: sort comparator returning > 2^31 / 2^32 (int64_t __cmp_)
+    my array @nums = (3, 1, 5, 2, 4);
+    my array @asc = sort {
+        ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0);
+    } @nums;
+    check(join(",", @asc) eq "1,2,3,4,5", "sort 2^32 diff asc: " . join(",", @asc));
+
+    my array @desc = sort {
+        ($a < $b) ? 6442450945 : (($a > $b) ? -6442450945 : 0);
+    } @nums;
+    check(join(",", @desc) eq "5,4,3,2,1", "sort sign-flip int64 diff desc: " . join(",", @desc));
+
+    # R14-C3: has default AST cloning across instances & diamond inheritance
+    my scalar $d1 = R14HasDiamond::new();
+    my scalar $d2 = R14HasDiamond::new();
+    push($d1->items(), "mut1");
+    $d1->cfg()->{"k"} = 999;
+    push($d1->cfg()->{"arr"}, 30);
+    check(size($d1->items()) == 2 && size($d2->items()) == 1 && $d2->items()->[0] eq "base",
+          "has default array cloned per instance");
+    check($d1->cfg()->{"k"} == 999 && $d2->cfg()->{"k"} == 1
+          && size($d2->cfg()->{"arr"}) == 2,
+          "has default nested hash/array cloned across diamond inheritance");
+    check($d1->lv() == 11 && $d1->rv() == 22 && $d1->leaf() eq "leaf" && $d1->tag() eq "t0",
+          "diamond has scalar/int defaults intact");
+
+    # R14-C4: our containers & initialized arrays & tied hash autoviv
+    my array @loc_arr = (1, 2, 3);
+    push(@loc_arr, 4);
+    check(join(":", @g_r14_arr) eq "10:20:30" && $g_r14_hash{"beta"} eq "B" && join(":", @loc_arr) eq "1:2:3:4",
+          "our/local initialized containers");
+    my hash %th = ();
+    tie(%th, "R14TieHash");
+    $th{"nested"}->{"val"} = "viv_ok";
+    $th{"list"}->[0] = "arr_ok";
+    check($th{"nested"}->{"val"} eq "viv_ok" && $th{"list"}->[0] eq "arr_ok",
+          "tied hash autoviv hash & array");
+    untie(%th);
+
+    # R14-C5: lexer regex/quote disambiguation (/ division, < comparison, q<...>, m<...>, s///, qr<...>)
+    my int $s = 40;
+    my int $half = $s / 2;
+    my int $lt = 3 < 5;
+    my str $ql = q<x/y#z>;
+    my int $cmp_sp = $s < 100;
+    my str $mstr = "alpha/beta#1";
+    my int $m_ok = ($mstr =~ m/beta#1/);
+    $mstr =~ s/alpha/OMEGA/;
+    my str $qql = qq<val\t$half/1#tag>;
+    check($half == 20 && $lt == 1 && $ql eq "x/y#z" && $cmp_sp == 1 && $m_ok == 1
+          && $mstr eq "OMEGA/beta#1" && $qql eq "val\t$half/1#tag"
+          && ($mstr =~ /^OMEGA\/([a-z]+)#([0-9]+)$/),
+          "lexer quoting & operator disambiguation");
+
+    # R14-C6: LIFO local & parameter destruction order across return / try / goto
+    my array @log1 = ();
+    lifo_ret_helper(R14Dtor::new("p1", \@log1), R14Dtor::new("p2", \@log1), \@log1);
+    check(join(",", @log1) eq "b,a,p2,p1", "LIFO early return order got: " . join(",", @log1));
+
+    my array @log2 = ();
+    try {
+        my scalar $t1 = R14Dtor::new("t1", \@log2);
+        my scalar $t2 = R14Dtor::new("t2", \@log2);
+        die("unw");
+    } catch ($ex) {
+    }
+    check(join(",", @log2) eq "t2,t1", "LIFO try unwind order got: " . join(",", @log2));
+
+    my array @log3 = ();
+    lifo_goto_helper(\@log3);
+    check(join(",", @log3) eq "g_inner,g_after,g_outer", "LIFO goto block unwind order got: " . join(",", @log3));
+
+    # Closure typeof / ref / reftype / blessed
+    my scalar $uc = func (int $n) int { return $n + 3; };
+    check(ref($uc) eq "CODE" && typeof($uc) eq "code" && !defined(blessed($uc)) && $uc->(4) == 7,
+          "unblessed closure introspection");
+    my scalar $bc = func (int $n) int { return $n * 3; };
+    bless($bc, "R14ClosPkg");
+    check(ref($bc) eq "R14ClosPkg" && typeof($bc) eq "ref" && blessed($bc) eq "R14ClosPkg" && $bc->(5) == 15,
+          "blessed closure introspection");
+
+    say("AUDIT_R14_COMPILER_RUNTIME_OK");
+    return 0;
+}

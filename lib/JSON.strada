@@ -445,10 +445,11 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
 
     /* Scalar fallback: always encode as JSON string. */
     {
-        char *s = strada_to_str(v);
-        size_t n = s ? strlen(s) : 0;
-        jb_put_escaped(b, s ? s : "", n);
-        free(s);
+        const char *s = "";
+        size_t n = 0;
+        StradaValue *owned = json_str_bytes(v, &s, &n);
+        jb_put_escaped(b, s, n);
+        if (owned) strada_decref(owned);
     }
 }
 

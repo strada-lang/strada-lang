@@ -344,26 +344,26 @@ static void strada_md5_base64_encode_16(const uint8_t *input, char *output) {
     output[22] = '\0';
 }
 
-static const uint8_t *strada_md5_get_bytes(StradaValue *sv, size_t *out_len, char **out_owned) {
+static const uint8_t *strada_md5_get_bytes(StradaValue *sv, size_t *out_len, StradaValue **out_owned) {
     *out_owned = NULL;
     if (!sv) {
         *out_len = 0;
         return (const uint8_t *)"";
     }
     if (!STRADA_IS_TAGGED_INT(sv)) {
-        if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
+        if (sv->type == STRADA_STR && !(sv->meta && (sv->meta->blessed_package || sv->meta->is_tied))) {
             *out_len = STRADA_STR_BYTELEN(sv);
             return (const uint8_t *)(sv->value.pv ? sv->value.pv : "");
         }
-        if (sv->type == STRADA_UNDEF) {
+        if (sv->type == STRADA_UNDEF && !(sv->meta && sv->meta->is_tied)) {
             *out_len = 0;
             return (const uint8_t *)"";
         }
     }
-    char *s = strada_to_str(sv);
-    *out_owned = s;
-    *out_len = s ? strlen(s) : 0;
-    return (const uint8_t *)(s ? s : "");
+    StradaValue *ev = strada_to_str_sv(sv);
+    *out_owned = ev;
+    *out_len = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+    return (const uint8_t *)((ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "");
 }
 }
 
@@ -380,11 +380,11 @@ func md5(str $data) str {
     my str $result = "";
     __C__ {
         size_t len = 0;
-        char *owned = NULL;
+        StradaValue *owned = NULL;
         uint8_t digest[16];
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
         strada_md5_compute(input, len, digest);
-        free(owned);
+        if (owned) strada_decref(owned);
         strada_decref(result);
         result = strada_new_str_len((const char*)digest, 16);
     }
@@ -403,7 +403,7 @@ func md5_hex(str $data) str {
     my str $result = "";
     __C__ {
         size_t len = 0;
-        char *owned = NULL;
+        StradaValue *owned = NULL;
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
         uint8_t digest[16];
         char hex_result[33];
@@ -416,7 +416,7 @@ func md5_hex(str $data) str {
         }
         hex_result[32] = '\0';
 
-        free(owned);
+        if (owned) strada_decref(owned);
         strada_decref(result);
         result = strada_new_str(hex_result);
     }
@@ -436,7 +436,7 @@ func md5_base64(str $data) str {
     my str $result = "";
     __C__ {
         size_t len = 0;
-        char *owned = NULL;
+        StradaValue *owned = NULL;
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
         uint8_t digest[16];
         char b64_result[23];
@@ -444,7 +444,7 @@ func md5_base64(str $data) str {
         strada_md5_compute(input, len, digest);
         strada_md5_base64_encode_16(digest, b64_result);
 
-        free(owned);
+        if (owned) strada_decref(owned);
         strada_decref(result);
         result = strada_new_str(b64_result);
     }

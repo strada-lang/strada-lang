@@ -341,70 +341,129 @@ void strada_perl5_run(StradaValue *code_sv) {
     LEAVE;
 }
 
+static int perl5_prepare_call_args(StradaValue *sub_sv, StradaValue *args_sv, int allow_single,
+                                   char **out_sub_name, Perl5ConvArg **out_cargs, size_t *out_argc) {
+    *out_sub_name = NULL;
+    *out_cargs = NULL;
+    *out_argc = 0;
+
+    int cm = strada_cleanup_mark();
+    int lm = strada_local_depth_get();
+    char * volatile sub_name = NULL;
+    Perl5ConvArg * volatile cargs = NULL;
+    volatile size_t argc = 0;
+    volatile size_t converted = 0;
+    volatile int oom = 0;
+
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        if (sub_sv && !STRADA_IS_TAGGED_INT(sub_sv) && sub_sv->meta && sub_sv->meta->is_tied && sub_sv->meta->tied_obj) {
+            StradaValue *fetched_sub = strada_tied_scalar_fetch(sub_sv);
+            if (fetched_sub) strada_cleanup_push(fetched_sub);
+            sub_name = strada_to_str(fetched_sub);
+            if (fetched_sub) strada_cleanup_pop_decref(fetched_sub);
+        } else {
+            sub_name = strada_to_str(sub_sv);
+        }
+
+        StradaValue *resolved_args = args_sv;
+        for (int depth = 0; depth < 10 && resolved_args && !STRADA_IS_TAGGED_INT(resolved_args)
+                            && resolved_args->type == STRADA_REF; depth++) {
+            resolved_args = strada_is_slot_ref(resolved_args)
+                ? (resolved_args->value.ptr ? *(StradaValue **)resolved_args->value.ptr : NULL)
+                : resolved_args->value.rv;
+        }
+        if (resolved_args && !STRADA_IS_TAGGED_INT(resolved_args) && resolved_args->meta
+            && resolved_args->meta->is_tied && resolved_args->meta->tied_obj
+            && resolved_args->type != STRADA_ARRAY && resolved_args->type != STRADA_HASH) {
+            StradaValue *fetched_args = strada_tied_scalar_fetch(resolved_args);
+            if (fetched_args) strada_cleanup_push(fetched_args);
+            resolved_args = fetched_args;
+            for (int depth = 0; depth < 10 && resolved_args && !STRADA_IS_TAGGED_INT(resolved_args)
+                                && resolved_args->type == STRADA_REF; depth++) {
+                resolved_args = strada_is_slot_ref(resolved_args)
+                    ? (resolved_args->value.ptr ? *(StradaValue **)resolved_args->value.ptr : NULL)
+                    : resolved_args->value.rv;
+            }
+        }
+
+        int is_array = 0;
+        int is_tied_arr = 0;
+        if (resolved_args && !STRADA_IS_TAGGED_INT(resolved_args) && resolved_args->type == STRADA_ARRAY) {
+            is_array = 1;
+            if (resolved_args->meta && resolved_args->meta->is_tied) {
+                is_tied_arr = 1;
+                int64_t tlen = strada_tied_array_fetchsize(resolved_args);
+                argc = tlen > 0 ? (size_t)tlen : 0;
+            } else {
+                argc = strada_array_length(resolved_args->value.av);
+            }
+        } else if (allow_single && resolved_args) {
+            if (STRADA_IS_TAGGED_INT(resolved_args) || resolved_args->type != STRADA_UNDEF) {
+                argc = 1;
+            }
+        }
+
+        if (argc > 0) {
+            cargs = calloc(argc, sizeof(Perl5ConvArg));
+            if (!cargs) {
+                oom = 1;
+            } else if (is_array) {
+                if (is_tied_arr) {
+                    for (size_t i = 0; i < argc; i++) {
+                        StradaValue *el = strada_tied_array_fetch(resolved_args, (int64_t)i);
+                        if (el) strada_cleanup_push(el);
+                        perl5_conv_one_arg(el, &cargs[i]);
+                        if (el) strada_cleanup_pop_decref(el);
+                        converted = i + 1;
+                    }
+                } else {
+                    StradaArray *arr = resolved_args->value.av;
+                    for (size_t i = 0; i < argc; i++) {
+                        perl5_conv_one_arg(strada_array_get(arr, i), &cargs[i]);
+                        converted = i + 1;
+                    }
+                }
+            } else {
+                perl5_conv_one_arg(resolved_args, &cargs[0]);
+                converted = 1;
+            }
+        }
+        STRADA_TRY_POP();
+        strada_cleanup_drain_to(cm);
+    } else {
+        STRADA_TRY_POP();
+        strada_local_restore_to(lm);
+        strada_cleanup_drain_to(cm);
+        free(sub_name);
+        perl5_conv_args_free(cargs, converted);
+        strada_throw_value(strada_get_exception());
+        return -1;
+    }
+
+    if (oom) {
+        free(sub_name);
+        return 0;
+    }
+    *out_sub_name = sub_name;
+    *out_cargs = cargs;
+    *out_argc = argc;
+    return 1;
+}
+
 /* Call a Perl subroutine with arguments, return StradaValue preserving UTF-8 and NUL bytes */
 StradaValue* strada_perl5_call_sv(StradaValue *sub_sv, StradaValue *args_sv) {
     if (!my_perl) {
         return strada_new_str("Error: Perl not initialized");
     }
 
-    StradaValue *resolved_args = (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_REF)
-        ? (strada_is_slot_ref(args_sv)
-            ? (args_sv->value.ptr ? *(StradaValue **)args_sv->value.ptr : NULL)
-            : args_sv->value.rv)
-        : args_sv;
-
+    char *sub_name = NULL;
+    Perl5ConvArg *cargs = NULL;
     size_t argc = 0;
-    int is_array = 0;
-    if (resolved_args) {
-        if (STRADA_IS_TAGGED_INT(resolved_args)) {
-            argc = 1;
-        } else if (resolved_args->type == STRADA_ARRAY) {
-            is_array = 1;
-            argc = strada_array_length(resolved_args->value.av);
-        } else if (resolved_args->type != STRADA_UNDEF) {
-            argc = 1;
-        }
-    }
-
-    Perl5ConvArg *cargs = argc > 0 ? calloc(argc, sizeof(Perl5ConvArg)) : NULL;
-    if (argc > 0 && !cargs) {
+    int prep = perl5_prepare_call_args(sub_sv, args_sv, 1, &sub_name, &cargs, &argc);
+    if (prep == 0) {
         return strada_new_str("Error: Out of memory");
     }
-
-    StradaValue * volatile conv_args = resolved_args;
-    char * volatile sub_name = NULL;
-    volatile size_t converted = 0;
-    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-        StradaValue *fetched_sub = NULL;
-        if (sub_sv && !STRADA_IS_TAGGED_INT(sub_sv) && sub_sv->meta && sub_sv->meta->is_tied && sub_sv->meta->tied_obj) {
-            fetched_sub = strada_tied_scalar_fetch(sub_sv);
-            if (fetched_sub) strada_inflight_push(fetched_sub);
-            sub_name = strada_to_str(fetched_sub);
-            if (fetched_sub) {
-                strada_inflight_pop();
-                strada_decref(fetched_sub);
-            }
-        } else {
-            sub_name = strada_to_str(sub_sv);
-        }
-
-        if (is_array) {
-            StradaArray *arr = conv_args->value.av;
-            for (size_t i = 0; i < argc; i++) {
-                StradaValue *arg = strada_array_get(arr, i);
-                perl5_conv_one_arg(arg, &cargs[i]);
-                converted = i + 1;
-            }
-        } else if (argc == 1) {
-            perl5_conv_one_arg(conv_args, &cargs[0]);
-            converted = 1;
-        }
-        STRADA_TRY_POP();
-    } else {
-        STRADA_TRY_POP();
-        free(sub_name);
-        perl5_conv_args_free(cargs, converted);
-        strada_throw_value(strada_get_exception());
+    if (prep < 0) {
         return NULL;
     }
 
@@ -457,53 +516,14 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
         return strada_new_array();
     }
 
-    /* Push arguments from Strada array (guard slot refs & tagged-int odd pointers) */
-    StradaValue *resolved_args = (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_REF)
-        ? (strada_is_slot_ref(args_sv)
-            ? (args_sv->value.ptr ? *(StradaValue **)args_sv->value.ptr : NULL)
-            : args_sv->value.rv)
-        : args_sv;
-
+    char *sub_name = NULL;
+    Perl5ConvArg *cargs = NULL;
     size_t argc = 0;
-    if (resolved_args && !STRADA_IS_TAGGED_INT(resolved_args) && resolved_args->type == STRADA_ARRAY) {
-        argc = strada_array_length(resolved_args->value.av);
-    }
-
-    Perl5ConvArg *cargs = argc > 0 ? calloc(argc, sizeof(Perl5ConvArg)) : NULL;
-    if (argc > 0 && !cargs) {
+    int prep = perl5_prepare_call_args(sub_sv, args_sv, 0, &sub_name, &cargs, &argc);
+    if (prep == 0) {
         return strada_new_array();
     }
-
-    char * volatile sub_name = NULL;
-    volatile size_t converted = 0;
-    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-        StradaValue *fetched_sub = NULL;
-        if (sub_sv && !STRADA_IS_TAGGED_INT(sub_sv) && sub_sv->meta && sub_sv->meta->is_tied && sub_sv->meta->tied_obj) {
-            fetched_sub = strada_tied_scalar_fetch(sub_sv);
-            if (fetched_sub) strada_inflight_push(fetched_sub);
-            sub_name = strada_to_str(fetched_sub);
-            if (fetched_sub) {
-                strada_inflight_pop();
-                strada_decref(fetched_sub);
-            }
-        } else {
-            sub_name = strada_to_str(sub_sv);
-        }
-
-        if (argc > 0) {
-            StradaArray *arr = resolved_args->value.av;
-            for (size_t i = 0; i < argc; i++) {
-                StradaValue *arg = strada_array_get(arr, i);
-                perl5_conv_one_arg(arg, &cargs[i]);
-                converted = i + 1;
-            }
-        }
-        STRADA_TRY_POP();
-    } else {
-        STRADA_TRY_POP();
-        free(sub_name);
-        perl5_conv_args_free(cargs, converted);
-        strada_throw_value(strada_get_exception());
+    if (prep < 0) {
         return NULL;
     }
 

@@ -1123,8 +1123,8 @@ static void vm_method_cache_clear(VM *vm) {
 
 void vm_free(VM *vm) {
     if (!vm) return;
-    vm_suspend(vm);
     if (__sync_sub_and_fetch(&vm->refcount, 1) > 0) return;
+    vm_suspend(vm);
     VMObjHeader *obj = vm->gc_objects;
     while (obj) {
         VMObjHeader *next = obj->gc_next;
@@ -3235,6 +3235,27 @@ static int vm_c_call_downgrade(VM *vm, VMValue a0, int fail_ok, VMValue *out_val
 }
 
 __attribute__((noinline))
+static int vm_c_dispatch_signals(VM *vm, VMValue *out_exc) {
+    int cm = strada_cleanup_mark();
+    int lm = strada_local_depth_get();
+    vm->gc_pause++;
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        strada_dispatch_signals();
+        STRADA_TRY_POP();
+        vm->gc_pause--;
+        strada_cleanup_drain_to(cm);
+        return 0;
+    } else {
+        STRADA_TRY_POP();
+        strada_local_restore_to(lm);
+        strada_cleanup_drain_to(cm);
+        vm->gc_pause--;
+        *out_exc = vm_capture_c_exception();
+        return 1;
+    }
+}
+
+__attribute__((noinline))
 static int vm_c_call_generic(VM *vm, const VMGenericBuiltin *gb, StradaValue **sa, int argc, StradaValue **out_r, VMValue *out_exc) {
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
@@ -4280,6 +4301,14 @@ static int vm_pattern_is_literal(const char *pat, size_t plen) {
     return 1;
 }
 
+/* Check whether a replacement string has capture/escape metacharacters ($ or \). */
+static int vm_repl_is_literal(const char *repl, size_t rlen) {
+    for (size_t i = 0; i < rlen; i++) {
+        if (repl[i] == '$' || repl[i] == '\\') return 0;
+    }
+    return 1;
+}
+
 /* Binary-safe literal substring replacement for replace/replace_all/str_replace. */
 static VMValue vm_replace_literal(const char *s, size_t slen,
                                   const char *pat, size_t plen,
@@ -4977,11 +5006,21 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
         }
         uint8_t *target = chunk->code + off;
-        if (target <= ip && __builtin_expect(vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0, 0)) {
-            frame->ip = target;
-            vm->stack_top = sp;
-            vm_gc_collect(vm);
-            stack = vm->stack;
+        if (target <= ip) {
+            if (__builtin_expect(vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0, 0)) {
+                frame->ip = target;
+                vm->stack_top = sp;
+                vm_gc_collect(vm);
+                stack = vm->stack;
+            }
+            if (__builtin_expect(strada_has_pending_signals(), 0)) {
+                frame->ip = target;
+                vm->stack_top = sp;
+                int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                stack = vm->stack;
+                RELOAD();
+                if (__th) goto L_vm_throw_exc;
+            }
         }
         ip = target;
         DISPATCH();
@@ -4992,14 +5031,23 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue c = SP_POP();
         int _truthy = 0;
         VM_VALUE_IS_TRUTHY(c, _truthy);
+        vm_temp_free(&c);
         if (!_truthy) {
             if (__builtin_expect(off >= chunk->code_len, 0)) {
                 fprintf(stderr, "VM error: jump offset %u out of bounds (%zu)\n", (unsigned)off, chunk->code_len);
-                vm_temp_free(&c); vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
+                vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
-            ip = chunk->code + off;
+            uint8_t *target = chunk->code + off;
+            if (target <= ip && __builtin_expect(strada_has_pending_signals(), 0)) {
+                frame->ip = target;
+                vm->stack_top = sp;
+                int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                stack = vm->stack;
+                RELOAD();
+                if (__th) goto L_vm_throw_exc;
+            }
+            ip = target;
         }
-        vm_temp_free(&c);
         DISPATCH();
     }
 
@@ -5008,14 +5056,23 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue c = SP_POP();
         int _truthy = 0;
         VM_VALUE_IS_TRUTHY(c, _truthy);
+        vm_temp_free(&c);
         if (_truthy) {
             if (__builtin_expect(off >= chunk->code_len, 0)) {
                 fprintf(stderr, "VM error: jump offset %u out of bounds (%zu)\n", (unsigned)off, chunk->code_len);
-                vm_temp_free(&c); vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
+                vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
-            ip = chunk->code + off;
+            uint8_t *target = chunk->code + off;
+            if (target <= ip && __builtin_expect(strada_has_pending_signals(), 0)) {
+                frame->ip = target;
+                vm->stack_top = sp;
+                int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                stack = vm->stack;
+                RELOAD();
+                if (__th) goto L_vm_throw_exc;
+            }
+            ip = target;
         }
-        vm_temp_free(&c);
         DISPATCH();
     }
 
@@ -5958,7 +6015,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         RELOAD();
                         goto L_vm_throw_exc;
                     }
-                    int cmp_result = (int)vm_to_int(cres);
+                    int64_t cmp_result = vm_to_int(cres);
                     vm_temp_free(&cres);
 
                     if (cmp_result > 0) {
@@ -9223,7 +9280,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 const char *repl = vm_bytes_view(args[2], rbuf, sizeof(rbuf), &rlen);
                 int u8_s = vm_is_utf8(args[0]);
                 int u8_r = vm_is_utf8(args[2]);
-                if (vm_pattern_is_literal(pat, plen)) {
+                if (plen > 0 && vm_pattern_is_literal(pat, plen) && vm_repl_is_literal(repl, rlen)) {
                     SP_PUSH(vm_replace_literal(s, slen, pat, plen, repl, rlen, u8_s, u8_r, 0, 1));
                 } else {
                     char *result = NULL;
@@ -9925,20 +9982,35 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             break;
         }
         case BUILTIN_CORE_FORK: {
+            fflush(NULL);
             SP_PUSH(VM_MAKE_INT(fork()));
             break;
         }
         case BUILTIN_CORE_WAIT: {
             int status;
             pid_t pid = wait(&status);
+            if (__builtin_expect(strada_has_pending_signals(), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                stack = vm->stack; RELOAD();
+                if (__th) goto L_builtin_throw_exc;
+            }
             SP_PUSH(VM_MAKE_INT(pid));
             break;
         }
         case BUILTIN_CORE_WAITPID: {
-            if (argc >= 2) {
-                int status;
-                pid_t pid = waitpid((pid_t)vm_to_int(args[0]), &status, (int)vm_to_int(args[1]));
-                SP_PUSH(VM_MAKE_INT(pid));
+            if (argc >= 1) {
+                int status = 0;
+                int options = (argc >= 2) ? (int)vm_to_int(args[1]) : 0;
+                pid_t pid = waitpid((pid_t)vm_to_int(args[0]), &status, options);
+                if (__builtin_expect(strada_has_pending_signals(), 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_builtin_throw_exc;
+                }
+                int64_t res = (pid == -1) ? -1 : ((pid == 0) ? 0 : (int64_t)status);
+                SP_PUSH(VM_MAKE_INT(res));
             } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
@@ -10394,6 +10466,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             SP_PUSH(sv_to_vm(r)); strada_decref(r);
             break;
         }
+        case BUILTIN_CORE_SOCKET_SERVER_HOST: {
+            if (argc >= 2) {
+                char hbuf[256];
+                const char *host = vm_to_cstr(args[0], hbuf, 256);
+                int port = (int)vm_to_int(args[1]);
+                int backlog = (argc >= 3) ? (int)vm_to_int(args[2]) : 128;
+                StradaValue *r = strada_socket_server_host(host, port, backlog);
+                SP_PUSH(r ? sv_to_vm(r) : VM_UNDEF_VAL);
+                if (r) strada_decref(r);
+            } else SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
         case BUILTIN_CORE_SOCKET_ACCEPT: RT_CALL_1(strada_socket_accept); break;
         case BUILTIN_CORE_SOCKET_RECV: {
             StradaValue *sock = vm_to_sv(args[0]);
@@ -10404,8 +10488,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_SOCKET_SEND: {
             StradaValue *sock = vm_to_sv(args[0]);
             StradaValue *data = vm_to_sv(args[1]);
-            strada_socket_send_sv(sock, data);
-            SP_PUSH(VM_UNDEF_VAL);
+            int rc = strada_socket_send_sv(sock, data);
+            SP_PUSH(VM_MAKE_INT(rc));
             strada_decref(sock); strada_decref(data);
             break;
         }
@@ -10425,8 +10509,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         case BUILTIN_CORE_SOCKET_SET_NONBLOCKING: {
             StradaValue *sock = vm_to_sv(args[0]);
-            strada_socket_set_nonblocking(sock, (int)vm_to_int(args[1]));
-            SP_PUSH(VM_UNDEF_VAL);
+            int rc = strada_socket_set_nonblocking(sock, (int)vm_to_int(args[1]));
+            SP_PUSH(VM_MAKE_INT(rc));
             strada_decref(sock);
             break;
         }
@@ -10451,10 +10535,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_UDP_SENDTO: {
             StradaValue *sock = vm_to_sv(args[0]);
             char dbuf[4096], hbuf[256];
-            const char *data = vm_to_cstr(args[1], dbuf, 4096);
+            size_t dlen = 0;
+            const char *data = vm_bytes_view(args[1], dbuf, sizeof(dbuf), &dlen);
             const char *host = vm_to_cstr(args[2], hbuf, 256);
             int port = (int)vm_to_int(args[3]);
-            int r = strada_udp_sendto(sock, data, (int)strlen(data), host, port);
+            int r = strada_udp_sendto(sock, data, (int)dlen, host, port);
             SP_PUSH(VM_MAKE_INT(r)); strada_decref(sock);
             break;
         }
@@ -10996,8 +11081,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         case BUILTIN_CORE_WANTSCALAR: { SP_PUSH(VM_MAKE_INT(frame->call_context == 0 ? 1 : 0)); break; }
         case BUILTIN_CORE_WANTHASH: { SP_PUSH(VM_MAKE_INT(frame->call_context == 2 ? 1 : 0)); break; }
         case BUILTIN_CORE_SELECT_FDS: {
-            /* Simplified: just return undef for now */
-            SP_PUSH(VM_UNDEF_VAL);
+            if (argc >= 2) {
+                StradaValue *fds_sv = vm_to_sv(args[0]);
+                StradaValue *r = strada_select_fds(fds_sv, (int)vm_to_int(args[1]));
+                SP_PUSH(r ? sv_to_vm(r) : VM_UNDEF_VAL);
+                if (r) strada_decref(r);
+                strada_decref(fds_sv);
+            } else SP_PUSH(VM_UNDEF_VAL);
             break;
         }
         case BUILTIN_CORE_SET_BYTE: {

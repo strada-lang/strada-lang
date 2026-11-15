@@ -1,0 +1,99 @@
+use lib "lib";
+use JSON;
+use DBI;
+use Digest::MD5;
+use Digest::SHA;
+
+package R14BinOv;
+use overload '""' => "to_s";
+func new(str $v) scalar { return bless({"v" => $v}, "R14BinOv"); }
+func to_s(scalar $self) str { return $self->{"v"}; }
+
+package R14TieBin;
+func TIESCALAR(str $cls, str $v) scalar { return bless({"v" => $v, "calls" => 0}, $cls); }
+func FETCH(scalar $self) scalar { $self->{"calls"} = $self->{"calls"} + 1; return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R14CountTie;
+func TIESCALAR(str $cls, scalar $state, str $v) scalar {
+    return bless({"state" => $state, "v" => $v}, $cls);
+}
+func FETCH(scalar $self) scalar {
+    $self->{"state"}->{"fetches"} = $self->{"state"}->{"fetches"} + 1;
+    return $self->{"v"};
+}
+
+package main;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # R14-LIB1 / R14-LIB2: Digest::MD5 & Digest::SHA on binary NUL tied scalars (incl undef base) & blessed overloads
+    my str $bin = "a\x00b\x00c";
+    my scalar $ov = R14BinOv::new($bin);
+    my scalar $ts_str = "";
+    tie($ts_str, "R14TieBin", $bin);
+    my scalar $ts_undef = undef;
+    tie($ts_undef, "R14TieBin", $bin);
+
+    my str $ref_md5 = Digest::MD5::md5_hex($bin);
+    check(Digest::MD5::md5_hex($ov) eq $ref_md5, "MD5 hex blessed overload binary NUL");
+    check(Digest::MD5::md5_hex($ts_str) eq $ref_md5, "MD5 hex tied scalar binary NUL");
+    check(Digest::MD5::md5_hex($ts_undef) eq $ref_md5, "MD5 hex tied undef-base binary NUL");
+    check(Digest::MD5::md5($ov) eq Digest::MD5::md5($bin), "MD5 raw overload");
+    check(Digest::MD5::md5_base64($ts_undef) eq Digest::MD5::md5_base64($bin), "MD5 base64 tied");
+
+    my str $ref_sha256 = Digest::SHA::sha256_hex($bin);
+    check(Digest::SHA::sha256_hex($ov) eq $ref_sha256, "SHA256 hex blessed overload binary NUL");
+    check(Digest::SHA::sha256_hex($ts_str) eq $ref_sha256, "SHA256 hex tied scalar binary NUL");
+    check(Digest::SHA::sha256_hex($ts_undef) eq $ref_sha256, "SHA256 hex tied undef-base binary NUL");
+    check(Digest::SHA::sha1_hex($ts_undef) eq Digest::SHA::sha1_hex($bin), "SHA1 tied");
+    check(Digest::SHA::sha1($ov) eq Digest::SHA::sha1($bin), "SHA1 raw overload");
+    check(Digest::SHA::hmac_sha256_hex($ov, $ts_undef) eq Digest::SHA::hmac_sha256_hex($bin, $bin),
+          "HMAC-SHA256 overload key + tied data");
+
+    # R14-LIB5: JSON scalar fallback with tied scalar, blessed overload, UTF-8, and embedded NUL
+    my str $u8nul = "café\x00z";
+    my scalar $jov = R14BinOv::new($u8nul);
+    my scalar $jts = undef;
+    tie($jts, "R14TieBin", $u8nul);
+    my str $ov_cat = "" . $jov;
+    my str $ts_cat = "" . $jts;
+    my str $ov_suf = $jov . "!";
+    my str $ov_app = "!";
+    $ov_app .= $jov;
+    check(length($ov_cat) == length($u8nul) && $ov_cat eq $u8nul && utf8::is_utf8($ov_cat) == 1,
+          "overload stringify via concat preserves NUL + UTF-8");
+    check(length($ts_cat) == length($u8nul) && $ts_cat eq $u8nul && utf8::is_utf8($ts_cat) == 1,
+          "tied stringify via concat preserves NUL + UTF-8");
+    check($ov_suf eq ($u8nul . "!") && $ov_app eq ("!" . $u8nul) && utf8::is_utf8($ov_suf) == 1 && utf8::is_utf8($ov_app) == 1,
+          "overload suffix and .= concat preserve NUL + UTF-8");
+    my str $enc_ov = JSON::encode($jov);
+    my str $enc_ts = JSON::encode($jts);
+    my scalar $dec_ov = JSON::decode($enc_ov);
+    my scalar $dec_ts = JSON::decode($enc_ts);
+    check($enc_ov eq $enc_ts && ($enc_ov =~ /\\u0000/), "JSON top-level scalar encodes NUL & utf8: " . $enc_ov);
+    check($dec_ov eq $u8nul && $dec_ts eq $u8nul && length($dec_ov) == length($u8nul),
+          "JSON round-trips tied/overload top-level scalar with NUL + UTF-8");
+
+    # R14-LIB8: DBI::quote preserves UTF-8 on tied scalar and fetches once
+    my scalar $qstate = {"fetches" => 0};
+    my scalar $qts = undef;
+    tie($qts, "R14CountTie", $qstate, "café's");
+    my str $quoted = DBI::quote(undef, $qts);
+    check($quoted eq "'café''s'", "DBI::quote tied UTF-8 value: " . $quoted);
+    check(utf8::is_utf8($quoted) == 1, "DBI::quote preserves UTF-8 flag on tied scalar");
+    check($qstate->{"fetches"} == 1, "DBI::quote fetches tied scalar once, got " . $qstate->{"fetches"});
+
+    untie($ts_str);
+    untie($ts_undef);
+    untie($jts);
+    untie($qts);
+
+    say("AUDIT_R14_STDLIB_TOOLS_OK");
+    return 0;
+}

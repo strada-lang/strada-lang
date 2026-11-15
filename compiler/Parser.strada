@@ -7562,7 +7562,7 @@ func flush_has_constructor(scalar $program, str $pkg) void {
             my scalar $s_key = ast_new_str_literal($a_name);
             my scalar $s_val = ast_new_hash_access($self_hash2, $s_key);
 
-            my scalar $rhs = ast_new_binary_op("//", $s_val, $a_default);
+            my scalar $rhs = ast_new_binary_op("//", $s_val, ast_clone_node($a_default));
 
             my scalar $attr_assign = ast_new_assign("=", $self_acc, $rhs);
             my scalar $def_stmt = ast_new_expr_stmt($attr_assign);

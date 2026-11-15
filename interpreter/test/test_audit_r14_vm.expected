@@ -1,0 +1,7 @@
+VM1=ok
+VM2=0:-1
+VM3=7:9
+VM4=undef:1
+VM5=0:9:hello_tcp:3:3
+VM6=CODE:code:undef:15|R14VmClos:R14VmClos:ref:12|<base>
+VM7=c[a]t|Xab|1,2,3|2,1|88,1

@@ -1817,6 +1817,7 @@ StradaValue* strada_kill(StradaValue *pid, StradaValue *sig);
 StradaValue* strada_alarm(StradaValue *seconds);
 StradaValue* strada_signal(StradaValue *sig_name, StradaValue *handler);
 void strada_dispatch_signals(void);
+int strada_has_pending_signals(void);
 StradaValue* strada_stat(StradaValue *path);
 StradaValue* strada_lstat(StradaValue *path);
 StradaValue* strada_isatty(StradaValue *fd);
@@ -2619,17 +2620,10 @@ static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue
 }
 
 /* Concat key operations: build key from prefix + suffix in stack buffer (zero allocations) */
-/* Autovivifying fetch: if key doesn't exist, create empty hash and store it */
+/* Autovivifying fetch: delegate to strada_autoviv_hash so tied/locked hashes
+ * and container-type checks stay identical across every call path. */
 static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
-    StradaHash *hv = strada_deref_hash(sv);
-    if (!hv) return strada_undef_static();
-    StradaValue *result = strada_hash_get(hv, key);
-    if (!result || STRADA_IS_TAGGED_INT(result) || (result->type == STRADA_UNDEF)) {
-        result = strada_new_hash();
-        strada_hash_set_take(hv, key, result);
-    }
-    return result;
+    return strada_autoviv_hash(sv, key);
 }
 
 StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);

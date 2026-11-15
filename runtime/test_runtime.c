@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 
 static int g_rt1_boom_armed = 0;
 static StradaValue *g_rt1_resurrect_arr = NULL;
@@ -642,14 +643,14 @@ static void test_r11_runtime(void) {
     StradaValue *up_lbe = strada_new_str_len("\xff\xff\xff\xfe" "ABCDE", 9);
     StradaValue *ua3 = strada_unpack("l>/a*", up_lbe);
     assert(ua3 && ua3->type == STRADA_ARRAY && ua3->value.av->size == 1);
-    StradaValue *u3e = strada_array_get(ua3->value.av, 0);
+    StradaValue *u3e = strada_array_get_owned(ua3->value.av, 0);
     assert(u3e && u3e->type == STRADA_STR && u3e->value.pv[0] == '\0');
     strada_decref(u3e); strada_decref(ua3); strada_decref(up_lbe);
 
     StradaValue *up_n = strada_new_str_len("\x80\x00\x00\x01" "abc", 7);
     StradaValue *ua4 = strada_unpack("N/a*", up_n);
     assert(ua4 && ua4->type == STRADA_ARRAY && ua4->value.av->size == 1);
-    StradaValue *u4e = strada_array_get(ua4->value.av, 0);
+    StradaValue *u4e = strada_array_get_owned(ua4->value.av, 0);
     assert(u4e && u4e->type == STRADA_STR && strcmp(u4e->value.pv, "abc") == 0);
     strada_decref(u4e); strada_decref(ua4); strada_decref(up_n);
 
@@ -660,7 +661,7 @@ static void test_r11_runtime(void) {
     StradaValue *up_q = strada_new_str_len(qbuf, 13);
     StradaValue *ua5 = strada_unpack("Q/a*", up_q);
     assert(ua5 && ua5->type == STRADA_ARRAY && ua5->value.av->size == 1);
-    StradaValue *u5e = strada_array_get(ua5->value.av, 0);
+    StradaValue *u5e = strada_array_get_owned(ua5->value.av, 0);
     assert(u5e && u5e->type == STRADA_STR && strcmp(u5e->value.pv, "hello") == 0);
     strada_decref(u5e); strada_decref(ua5); strada_decref(up_q);
 
@@ -919,12 +920,12 @@ static void test_r12_runtime(void) {
         StradaValue *nested = strada_new_str_len("A\x01\x02" "B\x03\x04", 6);
         StradaValue *un = strada_unpack("(a(C)2)2", nested);
         assert(un && un->type == STRADA_ARRAY && un->value.av->size == 6);
-        StradaValue *un0 = strada_array_get(un->value.av, 0);
-        StradaValue *un1 = strada_array_get(un->value.av, 1);
-        StradaValue *un2 = strada_array_get(un->value.av, 2);
-        StradaValue *un3 = strada_array_get(un->value.av, 3);
-        StradaValue *un4 = strada_array_get(un->value.av, 4);
-        StradaValue *un5 = strada_array_get(un->value.av, 5);
+        StradaValue *un0 = strada_array_get_owned(un->value.av, 0);
+        StradaValue *un1 = strada_array_get_owned(un->value.av, 1);
+        StradaValue *un2 = strada_array_get_owned(un->value.av, 2);
+        StradaValue *un3 = strada_array_get_owned(un->value.av, 3);
+        StradaValue *un4 = strada_array_get_owned(un->value.av, 4);
+        StradaValue *un5 = strada_array_get_owned(un->value.av, 5);
         assert(strcmp(un0->value.pv, "A") == 0 && strada_to_int(un1) == 1 && strada_to_int(un2) == 2);
         assert(strcmp(un3->value.pv, "B") == 0 && strada_to_int(un4) == 3 && strada_to_int(un5) == 4);
         strada_decref(un0); strada_decref(un1); strada_decref(un2);
@@ -941,7 +942,7 @@ static void test_r12_runtime(void) {
         assert(pq && STRADA_STR_BYTELEN(pq) == 8 + 5);
         StradaValue *uq = strada_unpack("q/a*", pq);
         assert(uq && uq->value.av->size == 1);
-        StradaValue *uq0 = strada_array_get(uq->value.av, 0);
+        StradaValue *uq0 = strada_array_get_owned(uq->value.av, 0);
         assert(strcmp(uq0->value.pv, "hello") == 0);
         strada_decref(uq0); strada_decref(uq); strada_decref(pq);
 
@@ -949,7 +950,7 @@ static void test_r12_runtime(void) {
         assert(pi && STRADA_STR_BYTELEN(pi) == sizeof(int) + 5);
         StradaValue *ui = strada_unpack("i/a*", pi);
         assert(ui && ui->value.av->size == 1);
-        StradaValue *ui0 = strada_array_get(ui->value.av, 0);
+        StradaValue *ui0 = strada_array_get_owned(ui->value.av, 0);
         assert(strcmp(ui0->value.pv, "hello") == 0);
         strada_decref(ui0); strada_decref(ui); strada_decref(pi);
         strada_decref(pargs);
@@ -1189,6 +1190,269 @@ static void test_r13_runtime(void) {
     printf("R13 runtime tests OK\n");
 }
 
+/* --- R14 runtime test helpers --- */
+extern StradaValue *perla_irs;
+
+static StradaValue* r14_th_tiehash(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return strada_bless(strada_new_hash(), "R14TiedHash");
+}
+static StradaValue* r14_th_fetch(StradaValue *self, StradaValue *args) {
+    StradaValue *k = strada_array_get_owned(args->value.av, 0);
+    char *ks = strada_to_str(k);
+    StradaValue *v = strada_hash_get(self->value.hv, ks);
+    free(ks);
+    strada_decref(k);
+    if (!v) return strada_new_undef();
+    strada_incref(v);
+    return v;
+}
+static StradaValue* r14_th_store(StradaValue *self, StradaValue *args) {
+    StradaValue *k = strada_array_get_owned(args->value.av, 0);
+    StradaValue *v = strada_array_get_owned(args->value.av, 1);
+    char *ks = strada_to_str(k);
+    strada_hash_set(self->value.hv, ks, v);
+    free(ks);
+    strada_decref(k);
+    strada_decref(v);
+    return strada_new_undef();
+}
+static StradaValue* r14_ta_tiearray(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return strada_bless(strada_new_hash(), "R14TiedArr");
+}
+static StradaValue* r14_ta_fetch(StradaValue *self, StradaValue *args) {
+    StradaValue *idx_sv = strada_array_get_owned(args->value.av, 0);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)strada_to_int(idx_sv));
+    strada_decref(idx_sv);
+    StradaValue *v = strada_hash_get(self->value.hv, buf);
+    if (!v) return strada_new_undef();
+    strada_incref(v);
+    return v;
+}
+static StradaValue* r14_ta_store(StradaValue *self, StradaValue *args) {
+    StradaValue *idx_sv = strada_array_get_owned(args->value.av, 0);
+    StradaValue *v = strada_array_get_owned(args->value.av, 1);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)strada_to_int(idx_sv));
+    strada_decref(idx_sv);
+    strada_hash_set(self->value.hv, buf, v);
+    strada_decref(v);
+    return strada_new_undef();
+}
+
+void test_r14_runtime() {
+    printf("Testing R14 runtime fixes...\n");
+
+    /* R14-RT1: strada_regex_replace_sv literal fast path guards empty pattern & $/\ metachars */
+    {
+        StradaValue *s = strada_new_str("cat");
+        StradaValue *p_a = strada_new_str("a");
+        StradaValue *r_meta = strada_new_str("[$&]");
+        StradaValue *res1 = strada_regex_replace_sv(s, p_a, r_meta, "", 0);
+#ifdef HAVE_PCRE2
+        assert(res1 && res1->type == STRADA_STR && strcmp(res1->value.pv, "c[a]t") == 0);
+#else
+        assert(res1 && res1->type == STRADA_STR && strcmp(res1->value.pv, "c[$&]t") == 0);
+#endif
+        strada_decref(res1);
+
+        StradaValue *r_ctx = strada_new_str("[$0$$]");
+        StradaValue *res2 = strada_regex_replace_sv(s, p_a, r_ctx, "", 0);
+#ifdef HAVE_PCRE2
+        assert(res2 && res2->type == STRADA_STR && strcmp(res2->value.pv, "c[a$]t") == 0);
+#else
+        assert(res2 && res2->type == STRADA_STR && strcmp(res2->value.pv, "c[$0$$]t") == 0);
+#endif
+        strada_decref(res2);
+
+        StradaValue *p_empty = strada_new_str("");
+        StradaValue *r_x = strada_new_str("X");
+        StradaValue *res3 = strada_regex_replace_sv(s, p_empty, r_x, "", 0);
+        assert(res3 && res3->type == STRADA_STR && strcmp(res3->value.pv, "Xcat") == 0);
+        strada_decref(res3);
+
+        StradaValue *sbin = strada_new_str_len("a\0b", 3);
+        StradaValue *r_e = strada_new_str("");
+        StradaValue *res4 = strada_regex_replace_sv(sbin, p_empty, r_e, "", 1);
+#ifdef HAVE_PCRE2
+        assert(res4 && res4->type == STRADA_STR && STRADA_STR_BYTELEN(res4) == 3);
+        assert(memcmp(res4->value.pv, "a\0b", 3) == 0);
+#else
+        assert(res4 && res4->type == STRADA_STR && strcmp(res4->value.pv, "a") == 0);
+#endif
+        strada_decref(res4);
+
+        strada_decref(sbin);
+        strada_decref(r_e);
+        strada_decref(r_x);
+        strada_decref(p_empty);
+        strada_decref(r_ctx);
+        strada_decref(r_meta);
+        strada_decref(p_a);
+        strada_decref(s);
+    }
+
+    /* R14-RT2: strada_autoviv_* & strada_hv_autoviv on tied hashes and tied arrays */
+    {
+        strada_method_register("R14TiedHash", "TIEHASH", r14_th_tiehash);
+        strada_method_register("R14TiedHash", "FETCH", r14_th_fetch);
+        strada_method_register("R14TiedHash", "STORE", r14_th_store);
+        strada_method_register("R14TiedArr", "TIEARRAY", r14_ta_tiearray);
+        strada_method_register("R14TiedArr", "FETCH", r14_ta_fetch);
+        strada_method_register("R14TiedArr", "STORE", r14_ta_store);
+
+        StradaValue *th = strada_new_hash();
+        StradaValue *th_ref = strada_new_ref(th, '%');
+        strada_decref(strada_tie_hash(th_ref, "R14TiedHash", 0));
+
+        StradaValue *vh1 = strada_autoviv_hash(th, "h1");
+        StradaValue *v_ok1 = strada_new_str("ok1");
+        strada_hv_store(vh1, "k1", v_ok1);
+        strada_decref(v_ok1);
+        StradaValue *vh1_again = strada_hv_autoviv(th, "h1");
+        StradaValue *k1_got = strada_hv_fetch_owned(vh1_again, "k1");
+        assert(k1_got && k1_got->type == STRADA_STR && strcmp(k1_got->value.pv, "ok1") == 0);
+        strada_decref(k1_got);
+
+        StradaValue *va1 = strada_autoviv_array(th, "a1");
+        StradaValue *v_ok2 = strada_new_str("ok2");
+        strada_av_push_sv(va1, v_ok2);
+        strada_decref(v_ok2);
+        StradaValue *va1_got = strada_tied_hash_fetch(th, "a1");
+        StradaValue *elem0 = strada_array_get_owned(strada_deref_array(va1_got), 0);
+        assert(elem0 && elem0->type == STRADA_STR && strcmp(elem0->value.pv, "ok2") == 0);
+        strada_decref(elem0);
+        strada_decref(va1_got);
+
+        StradaValue *ta = strada_new_array();
+        StradaValue *ta_ref = strada_new_ref(ta, '@');
+        strada_decref(strada_tie_array(ta_ref, "R14TiedArr", 0));
+
+        StradaValue *eh = strada_autoviv_elem_hash(ta, 2);
+        StradaValue *v_ev = strada_new_str("ev");
+        strada_hv_store(eh, "ek", v_ev);
+        strada_decref(v_ev);
+        StradaValue *eh_got = strada_tied_array_fetch(ta, 2);
+        StradaValue *ek_got = strada_hv_fetch_owned(eh_got, "ek");
+        assert(ek_got && ek_got->type == STRADA_STR && strcmp(ek_got->value.pv, "ev") == 0);
+        strada_decref(ek_got);
+        strada_decref(eh_got);
+
+        StradaValue *ea = strada_autoviv_elem_array(ta, 3);
+        StradaValue *v_av = strada_new_str("av3");
+        strada_av_push_sv(ea, v_av);
+        strada_decref(v_av);
+        StradaValue *ea_got = strada_tied_array_fetch(ta, 3);
+        StradaValue *av0 = strada_array_get_owned(strada_deref_array(ea_got), 0);
+        assert(av0 && av0->type == STRADA_STR && strcmp(av0->value.pv, "av3") == 0);
+        strada_decref(av0);
+        strada_decref(ea_got);
+
+        strada_decref(ta_ref);
+        strada_decref(ta);
+        strada_decref(th_ref);
+        strada_decref(th);
+    }
+
+    /* R14-RT3: strada_read_line_max & strada_read_all_lines respect multi-char & undef $/ */
+    {
+        StradaValue *saved_irs = perla_irs;
+        StradaValue *irs_mc = strada_new_str("::");
+        perla_irs = irs_mc;
+
+        StradaValue *fh1 = strada_open_str("alpha::beta::gamma", "r");
+        StradaValue *l1 = strada_read_line_max(fh1, STRADA_MAKE_TAGGED_INT(0));
+        StradaValue *l2 = strada_read_line_max(fh1, STRADA_MAKE_TAGGED_INT(0));
+        StradaValue *l3 = strada_read_line_max(fh1, STRADA_MAKE_TAGGED_INT(0));
+        StradaValue *l4 = strada_read_line_max(fh1, STRADA_MAKE_TAGGED_INT(0));
+        assert(l1 && l1->type == STRADA_STR && strcmp(l1->value.pv, "alpha::") == 0);
+        assert(l2 && l2->type == STRADA_STR && strcmp(l2->value.pv, "beta::") == 0);
+        assert(l3 && l3->type == STRADA_STR && strcmp(l3->value.pv, "gamma") == 0);
+        assert(l4 && l4->type == STRADA_UNDEF);
+        strada_decref(l1); strada_decref(l2); strada_decref(l3); strada_decref(l4);
+        strada_decref(strada_close(fh1));
+        strada_decref(fh1);
+
+        StradaValue *fh2 = strada_open_str("alpha::beta::gamma", "r");
+        StradaValue *all1 = strada_read_all_lines(fh2);
+        assert(all1 && all1->type == STRADA_ARRAY && all1->value.av->size == 3);
+        StradaValue *a0 = strada_array_get_owned(all1->value.av, 0);
+        StradaValue *a2 = strada_array_get_owned(all1->value.av, 2);
+        assert(strcmp(a0->value.pv, "alpha::") == 0);
+        assert(strcmp(a2->value.pv, "gamma") == 0);
+        strada_decref(a0); strada_decref(a2); strada_decref(all1);
+        strada_decref(strada_close(fh2));
+        strada_decref(fh2);
+
+        StradaValue *irs_undef = strada_new_undef();
+        perla_irs = irs_undef;
+        StradaValue *in_sv = strada_new_str_len("x\0y\nz", 5);
+        StradaValue *mode_r = strada_new_str("r");
+        StradaValue *fh3 = strada_open_str_sv(in_sv, mode_r);
+        StradaValue *sl1 = strada_read_line_max(fh3, STRADA_MAKE_TAGGED_INT(0));
+        assert(sl1 && sl1->type == STRADA_STR && STRADA_STR_BYTELEN(sl1) == 5 && memcmp(sl1->value.pv, "x\0y\nz", 5) == 0);
+        strada_decref(sl1);
+        strada_decref(strada_close(fh3));
+        strada_decref(fh3);
+
+        StradaValue *fh4 = strada_open_str_sv(in_sv, mode_r);
+        StradaValue *all2 = strada_read_all_lines(fh4);
+        assert(all2 && all2->type == STRADA_ARRAY && all2->value.av->size == 1);
+        StradaValue *sl2 = strada_array_get_owned(all2->value.av, 0);
+        assert(sl2 && sl2->type == STRADA_STR && STRADA_STR_BYTELEN(sl2) == 5 && memcmp(sl2->value.pv, "x\0y\nz", 5) == 0);
+        strada_decref(sl2); strada_decref(all2);
+        strada_decref(strada_close(fh4));
+        strada_decref(fh4);
+
+        perla_irs = saved_irs;
+        strada_decref(in_sv);
+        strada_decref(mode_r);
+        strada_decref(irs_undef);
+        strada_decref(irs_mc);
+    }
+
+    /* R14-RT4: strada_slurp_fd across >4096 bytes & embedded NULs */
+    {
+        unsigned char expected[10000];
+        memset(expected, 'Z', sizeof(expected));
+        expected[0] = '\0';
+        expected[17] = '\0';
+        expected[4095] = '\0';
+        expected[4096] = '\0';
+        expected[8192] = '\0';
+        expected[9999] = '\0';
+
+        int fds[2];
+        assert(pipe(fds) == 0);
+        pid_t pid = fork();
+        assert(pid >= 0);
+        if (pid == 0) {
+            close(fds[0]);
+            size_t off = 0;
+            while (off < sizeof(expected)) {
+                ssize_t w = write(fds[1], expected + off, sizeof(expected) - off);
+                if (w <= 0) _exit(1);
+                off += (size_t)w;
+            }
+            close(fds[1]);
+            _exit(0);
+        }
+        close(fds[1]);
+        StradaValue *slurped = strada_slurp_fd(STRADA_MAKE_TAGGED_INT(fds[0]));
+        close(fds[0]);
+        int st = 0;
+        assert(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        assert(slurped && slurped->type == STRADA_STR);
+        assert(STRADA_STR_BYTELEN(slurped) == sizeof(expected));
+        assert(memcmp(slurped->value.pv, expected, sizeof(expected)) == 0);
+        strada_decref(slurped);
+    }
+
+    printf("R14 runtime tests OK\n");
+}
+
 int main() {
     printf("=== Strada Runtime Test ===\n\n");
     
@@ -1275,6 +1539,7 @@ int main() {
     test_r11_runtime();
     test_r12_runtime();
     test_r13_runtime();
+    test_r14_runtime();
     
     printf("=== All tests completed ===\n");
     

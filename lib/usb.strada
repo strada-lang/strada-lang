@@ -292,6 +292,30 @@ static int usb_ensure_init(void) {
     }
     return ret;
 }
+
+static const char *usb_extract_bytes(StradaValue *data, int *out_len, StradaValue **out_owned) {
+    *out_owned = NULL;
+    if (!data) {
+        *out_len = 0;
+        return "";
+    }
+    if (!STRADA_IS_TAGGED_INT(data)) {
+        if (data->type == STRADA_STR && !(data->meta && (data->meta->blessed_package || data->meta->is_tied))) {
+            size_t n = STRADA_STR_BYTELEN(data);
+            *out_len = (n > (size_t)INT_MAX) ? INT_MAX : (int)n;
+            return data->value.pv ? data->value.pv : "";
+        }
+        if (data->type == STRADA_UNDEF && !(data->meta && data->meta->is_tied)) {
+            *out_len = 0;
+            return "";
+        }
+    }
+    StradaValue *ev = strada_to_str_sv(data);
+    *out_owned = ev;
+    size_t n = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+    *out_len = (n > (size_t)INT_MAX) ? INT_MAX : (int)n;
+    return (ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "";
+}
 }
 
 # ===== Initialization =====
@@ -560,17 +584,9 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        char *owned = NULL;
-        const char *d = "";
+        StradaValue *owned = NULL;
         int length = 0;
-        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
-            d = data->value.pv ? data->value.pv : "";
-            length = (int)STRADA_STR_BYTELEN(data);
-        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
-            owned = strada_to_str(data);
-            d = owned ? owned : "";
-            length = (int)strlen(d);
-        }
+        const char *d = usb_extract_bytes(data, &length, &owned);
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -585,7 +601,7 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
                 result = strada_new_int(transferred);
             }
         }
-        free(owned);
+        if (owned) strada_decref(owned);
     }
     return $result;
 }
@@ -633,17 +649,9 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        char *owned = NULL;
-        const char *d = "";
+        StradaValue *owned = NULL;
         int length = 0;
-        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
-            d = data->value.pv ? data->value.pv : "";
-            length = (int)STRADA_STR_BYTELEN(data);
-        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
-            owned = strada_to_str(data);
-            d = owned ? owned : "";
-            length = (int)strlen(d);
-        }
+        const char *d = usb_extract_bytes(data, &length, &owned);
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -658,7 +666,7 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
                 result = strada_new_int(transferred);
             }
         }
-        free(owned);
+        if (owned) strada_decref(owned);
     }
     return $result;
 }
@@ -708,17 +716,9 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
         uint8_t req = (uint8_t)strada_to_int(request);
         uint16_t val = (uint16_t)strada_to_int(value);
         uint16_t index = (uint16_t)strada_to_int(idx);
-        char *owned = NULL;
-        const char *d = "";
+        StradaValue *owned = NULL;
         int length = 0;
-        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
-            d = data->value.pv ? data->value.pv : "";
-            length = (int)STRADA_STR_BYTELEN(data);
-        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
-            owned = strada_to_str(data);
-            d = owned ? owned : "";
-            length = (int)strlen(d);
-        }
+        const char *d = usb_extract_bytes(data, &length, &owned);
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -728,7 +728,7 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
             int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);
             result = strada_new_int(ret);
         }
-        free(owned);
+        if (owned) strada_decref(owned);
     }
     return $result;
 }

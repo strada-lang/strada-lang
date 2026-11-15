@@ -1,0 +1,82 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # 1. Tree-walk Eval: R14 fixes (push return, sort int64, replace meta/empty, closures, waitpid 1-arg)
+    my scalar $tw = Strada::Interpreter::eval('
+        my array @a = (1);
+        my scalar $pr = push(@a, 2);
+        my array @s = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+        my str $rm = replace("cat", "a", "[$&]");
+        my str $re = replace("ab", "", "X");
+        my scalar $fn = func (int $x) int { return $x + 5; };
+        my scalar $bfn = func (int $x) int { return $x * 4; };
+        bless($bfn, "EvR14Clos");
+        my int $acc_ok = (core::access("Makefile", 0) == 0 && core::access("/no_such_r14_file_xyz", 0) == -1) ? 1 : 0;
+        my str $r_push = defined($pr) ? "BAD" : "undef";
+        my str $r_bl1 = defined(blessed($fn)) ? "BAD" : "undef";
+        $r_push
+            . "|" . join(",", @s)
+            . "|" . $rm . "|" . $re
+            . "|" . ref($fn) . "," . typeof($fn) . "," . $r_bl1 . "," . $fn->(3)
+            . "|" . ref($bfn) . "," . typeof($bfn) . "," . blessed($bfn) . "," . $bfn->(3)
+            . "|" . $acc_ok;
+    ');
+    check($tw eq "undef|1,2,3|c[a]t|Xab|CODE,code,undef,8|EvR14Clos,ref,EvR14Clos,12|1",
+          "tree-walk eval r14: " . $tw);
+    Strada::Interpreter::reset();
+
+    # 2. HAVE_VM eval_string_vm: R14 fixes (push undef, sort 64-bit, replace meta/empty, signal loop dispatch, closures)
+    my scalar $vm = Strada::Interpreter::eval_string_vm('
+        my array @a = (1);
+        my scalar $pr = push(@a, 2);
+        my array @s = sort { ($a < $b) ? 6442450945 : (($a > $b) ? -6442450945 : 0); } (2, 3, 1);
+        my str $rm = replace("cat", "a", "[$&]");
+        my str $re = replace("ab", "", "X");
+        my int $sig_hit = 0;
+        my scalar $prev = core::signal("USR1", func (int $sn) void { $sig_hit = $sig_hit + 1; });
+        my int $k = 0;
+        while ($sig_hit == 0 && $k < 1000) {
+            if ($k == 5) { core::kill(core::getpid(), 10); }
+            $k = $k + 1;
+        }
+        my scalar $prev2 = core::signal("USR1", "DEFAULT");
+        my int $acc_ok = (core::access("Makefile", 0) == 0 && core::access("/no_such_r14_file_xyz", 0) == -1) ? 1 : 0;
+        my str $vp = defined($pr) ? "BAD" : "undef";
+        my str $ps1 = defined($prev) ? "BAD" : "undef";
+        my str $ps2 = defined($prev2) ? "ok" : "BAD";
+        $vp . "|" . join(",", @s) . "|" . $rm . "|" . $re . "|" . $sig_hit . "|" . $ps1 . "," . $ps2 . "|" . $acc_ok;
+    ');
+    check($vm eq "undef|3,2,1|c[a]t|Xab|1|undef,ok|1", "eval_string_vm r14: " . $vm);
+    Strada::Interpreter::reset();
+
+    # 3. Strada::JIT: R14 compiled-compatible behavior inside JIT eval
+    Strada::JIT::init();
+    my scalar $jres = Strada::JIT::eval('
+        package JR14Has;
+        has rw scalar $items = ["x"];
+        has rw scalar $cfg (default => {"n" => 1});
+        package JR14Sub;
+        inherit JR14Has;
+        package main;
+        my scalar $o1 = JR14Sub::new();
+        my scalar $o2 = JR14Sub::new();
+        push($o1->items(), "y");
+        $o1->cfg()->{"n"} = 9;
+        my array @s = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+        join(",", @s) . "|" . size($o1->items()) . "," . size($o2->items()) . "|" . $o1->cfg()->{"n"} . "," . $o2->cfg()->{"n"}
+            . "|" . replace("cat", "a", "[$&]");
+    ');
+    Strada::JIT::reset();
+    check($jres eq "1,2,3|2,1|9,1|c[a]t", "JIT r14 got: " . $jres);
+
+    say("AUDIT_R14_EVAL_JIT_OK");
+    return 0;
+}

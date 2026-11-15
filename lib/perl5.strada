@@ -424,15 +424,17 @@ func call(str $sub_name, str $arg) str {
                 arg_s = strada_new_str_len(pv, clen);
                 if (fetched) strada_decref(fetched);
             } else {
-                strada_decref(arg_utf8);
-                arg_utf8 = strada_new_int(0);
                 if (fetched) strada_cleanup_push(fetched);
-                char *cs = strada_to_str(use_arg);
-                size_t clen = cs ? strlen(cs) : 0;
+                StradaValue *sv_s = strada_to_str_sv(use_arg);
                 if (fetched) strada_cleanup_pop_decref(fetched);
+                int u8 = (sv_s && !STRADA_IS_TAGGED_INT(sv_s) && STRADA_STR_IS_UTF8(sv_s)) ? 1 : 0;
+                size_t clen = (sv_s && !STRADA_IS_TAGGED_INT(sv_s)) ? STRADA_STR_BYTELEN(sv_s) : 0;
+                const char *pv = (sv_s && !STRADA_IS_TAGGED_INT(sv_s) && sv_s->value.pv) ? sv_s->value.pv : "";
+                strada_decref(arg_utf8);
+                arg_utf8 = strada_new_int(u8);
                 strada_decref(arg_s);
-                arg_s = strada_new_str_len(cs ? cs : "", clen);
-                free(cs);
+                arg_s = strada_new_str_len(pv, clen);
+                if (sv_s) strada_decref(sv_s);
             }
         }
     }

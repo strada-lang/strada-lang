@@ -1373,3 +1373,32 @@ func ast_data_type_name(int $type) str {
     if ($type == TYPE_DYNAMIC()) { return "dynamic"; }
     return "unknown";
 }
+
+# Deep-clone an AST node tree (hashes/arrays only; scalar/int/str values copied).
+func ast_clone_node(scalar $v) scalar {
+    if (!defined($v)) { return $v; }
+    my str $rt = reftype($v);
+    if ($rt eq "HASH") {
+        my hash %copy = ();
+        my scalar $ks = keys(%{$v});
+        my int $i = 0;
+        my int $n = size($ks);
+        while ($i < $n) {
+            my str $k = $ks->[$i];
+            $copy{$k} = ast_clone_node($v->{$k});
+            $i = $i + 1;
+        }
+        return \%copy;
+    }
+    if ($rt eq "ARRAY") {
+        my array @copy = ();
+        my int $i = 0;
+        my int $n = size($v);
+        while ($i < $n) {
+            push(@copy, ast_clone_node($v->[$i]));
+            $i = $i + 1;
+        }
+        return \@copy;
+    }
+    return $v;
+}

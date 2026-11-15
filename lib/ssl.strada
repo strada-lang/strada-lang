@@ -297,26 +297,26 @@ static int ssl_bind_host_and_verify(SSL *ssl, const char *host_str, int do_verif
     return ok;
 }
 
-static const char *ssl_extract_bytes(StradaValue *sv, size_t *out_len, char **out_owned) {
+static const char *ssl_extract_bytes(StradaValue *sv, size_t *out_len, StradaValue **out_owned) {
     *out_owned = NULL;
     if (!sv) {
         *out_len = 0;
         return "";
     }
     if (!STRADA_IS_TAGGED_INT(sv)) {
-        if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
+        if (sv->type == STRADA_STR && !(sv->meta && (sv->meta->blessed_package || sv->meta->is_tied))) {
             *out_len = STRADA_STR_BYTELEN(sv);
             return sv->value.pv ? sv->value.pv : "";
         }
-        if (sv->type == STRADA_UNDEF) {
+        if (sv->type == STRADA_UNDEF && !(sv->meta && sv->meta->is_tied)) {
             *out_len = 0;
             return "";
         }
     }
-    char *s = strada_to_str(sv);
-    *out_owned = s;
-    *out_len = s ? strlen(s) : 0;
-    return s ? s : "";
+    StradaValue *ev = strada_to_str_sv(sv);
+    *out_owned = ev;
+    *out_len = (ev && !STRADA_IS_TAGGED_INT(ev)) ? STRADA_STR_BYTELEN(ev) : 0;
+    return (ev && !STRADA_IS_TAGGED_INT(ev) && ev->value.pv) ? ev->value.pv : "";
 }
 
 /* How long a blocking-style read/write waits for a non-blocking fd to
@@ -756,10 +756,10 @@ func write(int $conn, str $data) int {
             result = strada_new_int(-1);
         } else {
             size_t len = 0;
-            char *owned = NULL;
+            StradaValue *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
             int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
-            free(owned);
+            if (owned) strada_decref(owned);
             strada_decref(result);
             result = strada_new_int(written);
         }
@@ -800,10 +800,10 @@ func write_binary(int $conn, str $data) int {
             result = strada_new_int(-1);
         } else {
             size_t len = 0;
-            char *owned = NULL;
+            StradaValue *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
             int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
-            free(owned);
+            if (owned) strada_decref(owned);
             strada_decref(result);
             result = strada_new_int(written);
         }
@@ -1187,16 +1187,16 @@ func try_write(int $conn, str $data) int {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         if (c && c->ssl) {
             size_t len = 0;
-            char *owned = NULL;
+            StradaValue *owned = NULL;
             const char *bytes = ssl_extract_bytes(data, &len, &owned);
             if (len == 0) {
-                free(owned);
+                if (owned) strada_decref(owned);
                 strada_decref(result);
                 result = strada_new_int(0);
             } else {
                 size_t chunk = len > (size_t)INT_MAX ? (size_t)INT_MAX : len;
                 int n = SSL_write(c->ssl, bytes, (int)chunk);
-                free(owned);
+                if (owned) strada_decref(owned);
                 if (n > 0) {
                     strada_decref(result);
                     result = strada_new_int(n);

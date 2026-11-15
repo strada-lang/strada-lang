@@ -165,6 +165,7 @@ func autoviv_link_type(scalar $node) int {
 
 func autoviv_chain_needs_cleanup(scalar $cg, scalar $node) int {
     if ($cg->{"cleanup_enabled"} != 1 || autoviv_link_type($node) == 0) { return 0; }
+    if (($cg->{"uses_tie"} + 0) == 1) { return 1; }
     my scalar $cur = $node;
     while (autoviv_link_type($cur) == 1) {
         my int $ct = $cur->{"type"};
@@ -1931,6 +1932,9 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             if ($val_type2 == NODE_CALL()) { $cg->{"call_context"} = 0; }
                         } else {
                             gen_expression($cg, $val);
+                            if (needs_temp_cleanup($cg, $val) == 0) {
+                                emit($cg, "; strada_incref(__new_a)");
+                            }
                         }
                         emit($cg, "; StradaValue *__old_a = ");
                         gen_expression($cg, $target);
@@ -7783,7 +7787,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"current_sort_a"} = $saved_sort_a;
         $cg->{"current_sort_b"} = $saved_sort_b;
 
-        emit($cg, "; int __cmp_" . $sort_id . " = strada_to_int(__cmp_sv_" . $sort_id . "); ");
+        emit($cg, "; int64_t __cmp_" . $sort_id . " = strada_to_int(__cmp_sv_" . $sort_id . "); ");
         if ($cmp_owned == 1) {
             emit($cg, "strada_decref(__cmp_sv_" . $sort_id . "); ");
         }

@@ -1,0 +1,54 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 4) {
+        my scalar $tw = Strada::Interpreter::eval('
+            my array @a = (1);
+            my scalar $pr = push(@a, 2);
+            my str $rm = replace("cat", "a", "[$&]");
+            my str $re = replace("ab", "", "X");
+            my array @s = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+            my scalar $fn = func (int $x) int { return $x + 1; };
+            my scalar $bf = func (int $x) int { return $x * 2; };
+            bless($bf, "EvR14LkClos");
+            ref($fn) . typeof($fn) . ref($bf) . typeof($bf) . $fn->(1) . $bf->(2) . $rm . $re . join(",", @s);
+        ');
+        Strada::Interpreter::reset();
+
+        my scalar $vm = Strada::Interpreter::eval_string_vm('
+            my array @a = (1);
+            my scalar $pr = push(@a, 2);
+            my str $rm = replace("cat", "a", "[$&]");
+            my array @s = sort { ($a < $b) ? 6442450945 : (($a > $b) ? -6442450945 : 0); } (2, 3, 1);
+            my int $hit = 0;
+            my scalar $prev = core::signal("USR1", func (int $s) void { $hit = $hit + 1; });
+            my int $k = 0;
+            while ($hit == 0 && $k < 200) {
+                if ($k == 3) { core::kill(core::getpid(), 10); }
+                $k = $k + 1;
+            }
+            core::signal("USR1", "DEFAULT");
+            $rm . "|" . join(",", @s) . "|" . $hit;
+        ');
+        Strada::Interpreter::reset();
+
+        Strada::JIT::init();
+        my scalar $jr = Strada::JIT::eval('
+            package JR14Lk;
+            has rw scalar $items = ["a"];
+            package main;
+            my scalar $o1 = JR14Lk::new();
+            my scalar $o2 = JR14Lk::new();
+            push($o1->items(), "b");
+            size($o1->items()) . "," . size($o2->items()) . "|" . replace("cat", "a", "[$&]");
+        ');
+        Strada::JIT::reset();
+
+        $i = $i + 1;
+    }
+    say("AUDIT_R14_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

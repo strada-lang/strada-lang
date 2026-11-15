@@ -1,0 +1,103 @@
+use lib "lib";
+use JSON;
+use DBI;
+use Digest::MD5;
+use Digest::SHA;
+
+package R14LkDtor;
+func new(str $name, scalar $log_ref) scalar {
+    return bless({"name" => $name, "log" => $log_ref}, "R14LkDtor");
+}
+func DESTROY(scalar $self) void {
+    push(@{$self->{"log"}}, $self->{"name"});
+}
+
+package R14LkHasBase;
+has rw scalar $items = ["init"];
+has rw scalar $cfg (default => {"k" => 1, "arr" => [1, 2]});
+
+package R14LkHasSub;
+inherit R14LkHasBase;
+
+package R14LkOv;
+use overload '""' => "to_s";
+func new(str $v) scalar { return bless({"v" => $v}, "R14LkOv"); }
+func to_s(scalar $self) str { return $self->{"v"}; }
+
+package R14LkTieBin;
+func TIESCALAR(str $cls, str $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R14LkTieHash;
+func TIEHASH(str $cls) scalar { return bless({"d" => {}}, $cls); }
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+
+package main;
+
+func lk_ret_helper(scalar $p1, scalar $p2, scalar $log) int {
+    my scalar $a = R14LkDtor::new("a", $log);
+    if (1) {
+        my scalar $b = R14LkDtor::new("b", $log);
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 6) {
+        my str $rm = replace("cat", "a", "[$&]");
+        my str $re = replace("ab", "", "X");
+        my str $rae = replace_all("ab", "", "X");
+
+        my array @s = sort { ($a > $b) ? 4294967296 : (($a < $b) ? -4294967296 : 0); } (3, 1, 2);
+
+        my scalar $h1 = R14LkHasSub::new();
+        my scalar $h2 = R14LkHasSub::new();
+        push($h1->items(), "x");
+        $h1->cfg()->{"k"} = 9;
+
+        my hash %th = ();
+        tie(%th, "R14LkTieHash");
+        $th{"sub"}->{"x"} = "v_" . $i;
+        $th{"arr"}->[0] = "a_" . $i;
+        untie(%th);
+
+        my array @dlog = ();
+        lk_ret_helper(R14LkDtor::new("p1", \@dlog), R14LkDtor::new("p2", \@dlog), \@dlog);
+
+        my str $bin = "x\x00y_" . $i;
+        my scalar $ov = R14LkOv::new($bin);
+        my scalar $ts = undef;
+        tie($ts, "R14LkTieBin", $bin);
+        my str $m1 = Digest::MD5::md5_hex($ov);
+        my str $m2 = Digest::MD5::md5_hex($ts);
+        my str $sh1 = Digest::SHA::sha256_hex($ov);
+        my str $sh2 = Digest::SHA::hmac_sha256_hex($ov, $ts);
+
+        my scalar $jov = R14LkOv::new("café\x00z");
+        my scalar $jts = undef;
+        tie($jts, "R14LkTieBin", "café\x00z");
+        my str $je1 = JSON::encode($jov);
+        my str $je2 = JSON::encode($jts);
+        my scalar $jd1 = JSON::decode($je1);
+
+        my scalar $qts = undef;
+        tie($qts, "R14LkTieBin", "café's");
+        my str $dq = DBI::quote(undef, $qts);
+
+        my scalar $uc = func (int $x) int { return $x + 1; };
+        my scalar $bc = func (int $x) int { return $x * 2; };
+        bless($bc, "R14LkClos");
+        my str $ct = typeof($uc) . typeof($bc) . ref($bc);
+
+        untie($ts);
+        untie($jts);
+        untie($qts);
+        $i = $i + 1;
+    }
+    say("AUDIT_R14_LEAKS_OK");
+    return 0;
+}
