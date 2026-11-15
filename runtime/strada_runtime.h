@@ -1036,6 +1036,7 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args);  /* Pack values in
  * place (zero-fills new bytes). */
 int64_t strada_vec_get(StradaValue *sv, int64_t offset, int bits);
 void strada_vec_set(StradaValue *sv, int64_t offset, int bits, int64_t value);
+void strada_vec_set_slot(StradaValue **slot, int64_t offset, int bits, int64_t value);
 StradaValue* strada_unpack(const char *fmt, StradaValue *data);  /* Unpack binary string to array */
 StradaValue* strada_base64_encode(StradaValue *sv);  /* Encode string to base64 */
 StradaValue* strada_base64_decode(StradaValue *sv);  /* Decode base64 to string */

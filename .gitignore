@@ -111,8 +111,6 @@ perl/Strada/Makefile
 perl/Strada/MANIFEST.bak
 perl/Strada/*.tar.gz
 # Generated C for tools + built tool binaries not already listed
-tools/strada2perl.c
-tools/strada2perl
 tools/strada-jit.c
 # Scratch test dir
 tools/tt/

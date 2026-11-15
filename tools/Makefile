@@ -8,7 +8,7 @@
 STRADA = ../strada
 
 # All tools to build
-TOOLS = strada-soinfo strada-md2html strada-md2man stradadoc strada2perl
+TOOLS = strada-soinfo strada-md2html strada-md2man stradadoc
 
 .PHONY: all clean $(TOOLS)
 
@@ -29,10 +29,6 @@ strada-md2man: strada-md2man.strada
 stradadoc: stradadoc.strada
 	$(STRADA) stradadoc.strada
 	@echo "Built: stradadoc"
-
-strada2perl: strada2perl.strada
-	$(STRADA) strada2perl.strada
-	@echo "Built: strada2perl"
 
 clean:
 	rm -f $(TOOLS) $(addsuffix .o,$(TOOLS)) $(addsuffix .c,$(TOOLS))

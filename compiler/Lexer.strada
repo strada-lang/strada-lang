@@ -1503,6 +1503,32 @@ func lex_oct_digits_to_hex(str $oct) str {
     return lex_bin_digits_to_hex(sb_to_string($bsb));
 }
 
+func lex_finalize_num_token(scalar $lexer, str $raw, int $is_float, int $token_line) scalar {
+    my hash %token = ();
+    if ($is_float) {
+        $token{"type"} = "NUM_LITERAL";
+        $token{"value"} = $raw;
+        return \%token;
+    }
+    $token{"type"} = "INT_LITERAL";
+    if (length($raw) > 1 && substr($raw, 0, 1) eq "0") {
+        my str $oct = substr($raw, 1, length($raw) - 1);
+        my int $oi = 0;
+        my int $olen = length($oct);
+        while ($oi < $olen) {
+            my str $oc = substr($oct, $oi, 1);
+            if ($oc lt "0" || $oc gt "7") {
+                lex_error($lexer, "Invalid octal digit '" . $oc . "' in octal literal", $token_line, $lexer->{"tok_col"});
+            }
+            $oi = $oi + 1;
+        }
+        $token{"value"} = lex_oct_digits_to_hex($oct);
+        return \%token;
+    }
+    $token{"value"} = $raw;
+    return \%token;
+}
+
 func lex_read_number(scalar $lexer) scalar {
     my scalar $sb = sb_new();
     my int $is_float = 0;
@@ -1548,17 +1574,17 @@ func lex_read_number(scalar $lexer) scalar {
             if ($is_bin == 1) {
                 $token{"type"} = "INT_LITERAL";
                 $token{"value"} = lex_bin_digits_to_hex(sb_to_string($sb));
+                return \%token;
             } elsif ($is_oct == 1) {
                 $token{"type"} = "INT_LITERAL";
                 $token{"value"} = lex_oct_digits_to_hex(sb_to_string($sb));
-            } elsif ($is_float) {
-                $token{"type"} = "NUM_LITERAL";
-                $token{"value"} = sb_to_string($sb);
-            } else {
+                return \%token;
+            } elsif ($is_hex == 1) {
                 $token{"type"} = "INT_LITERAL";
                 $token{"value"} = sb_to_string($sb);
+                return \%token;
             }
-            return \%token;
+            return lex_finalize_num_token($lexer, sb_to_string($sb), $is_float, $token_line);
         }
         my int $code = lex_current_code($lexer);
 
@@ -1623,24 +1649,15 @@ func lex_read_number(scalar $lexer) scalar {
                 if ($nd >= '0' && $nd <= '9') {
                     lex_advance($lexer);
                 } else {
-                    my hash %token = ();
-                    if ($is_float) {
-                        $token{"type"} = "NUM_LITERAL";
-                    } else {
-                        $token{"type"} = "INT_LITERAL";
-                    }
-                    $token{"value"} = sb_to_string($sb);
-                    return \%token;
+                    return lex_finalize_num_token($lexer, sb_to_string($sb), $is_float, $token_line);
                 }
             } elsif ($code == '.' && $is_float == 0) {
                 # Check for range operator before consuming dot
                 my int $next_code = lex_peek_code($lexer, 1);
                 if ($next_code == '.') {
-                    my hash %token = ();
-                    $token{"type"} = "INT_LITERAL";
-                    $token{"value"} = sb_to_string($sb);
-                    $token{"line"} = $token_line;
-                    return \%token;
+                    my scalar $rtok = lex_finalize_num_token($lexer, sb_to_string($sb), 0, $token_line);
+                    $rtok->{"line"} = $token_line;
+                    return $rtok;
                 }
                 $is_float = 1;
                 sb_append($sb, chr($code));
@@ -1681,23 +1698,9 @@ func lex_read_number(scalar $lexer) scalar {
                     $etok{"value"} = sb_to_string($sb);
                     return \%etok;
                 }
-                my hash %token = ();
-                if ($is_float) {
-                    $token{"type"} = "NUM_LITERAL";
-                } else {
-                    $token{"type"} = "INT_LITERAL";
-                }
-                $token{"value"} = sb_to_string($sb);
-                return \%token;
+                return lex_finalize_num_token($lexer, sb_to_string($sb), $is_float, $token_line);
             } else {
-                my hash %token = ();
-                if ($is_float) {
-                    $token{"type"} = "NUM_LITERAL";
-                } else {
-                    $token{"type"} = "INT_LITERAL";
-                }
-                $token{"value"} = sb_to_string($sb);
-                return \%token;
+                return lex_finalize_num_token($lexer, sb_to_string($sb), $is_float, $token_line);
             }
         }
     }
@@ -2261,32 +2264,19 @@ func lex_peek_char(scalar $lexer, int $offset) str {
     return substr_bytes($lexer->{"source"}, $pos, 1);
 }
 
-func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
-    lex_advance($lexer);  # Skip opening /
+func lex_read_regex_pattern(scalar $lexer, int $token_line, str $unterm_msg) str {
     my scalar $sb = sb_new();
     my str $source = $lexer->{"source"};
+    my int $src_len = $lexer->{"length"};
+    my int $in_cc = 0;
+    my int $cc_start = -1;
 
     while (!lex_at_end($lexer)) {
+        my int $pos = $lexer->{"pos"};
         my int $code = lex_current_code($lexer);
-        if ($code == '/') {
+        if ($code == '/' && $in_cc == 0) {
             lex_advance($lexer);
-            # Read optional flags
-            my scalar $flags_sb = sb_new();
-            while (!lex_at_end($lexer)) {
-                my int $f = lex_current_code($lexer);
-                if ($f == 'g' || $f == 'i' || $f == 'm' || $f == 's' || $f == 'x') {
-                    sb_append($flags_sb, chr($f));
-                    lex_advance($lexer);
-                } else {
-                    last;
-                }
-            }
-            my hash %token = ();
-            $token{"type"} = "REGEX_LITERAL";
-            $token{"pattern"} = sb_to_string($sb);
-            $token{"flags"} = sb_to_string($flags_sb);
-            $token{"line"} = $token_line;
-            return \%token;
+            return sb_to_string($sb);
         }
         if ($code == '\\') {
             lex_advance($lexer);
@@ -2295,7 +2285,6 @@ func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
             }
             my int $escaped = lex_current_code($lexer);
             if ($escaped == '/') {
-                # Escaped slash - just add the slash
                 sb_append($sb, "/");
             } else {
                 # Keep backslash for regex escapes (including \n, \t, \r so /x ignores literal whitespace only)
@@ -2303,12 +2292,81 @@ func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
                 sb_append($sb, substr_bytes($source, $lexer->{"pos"}, 1));
             }
             lex_advance($lexer);
-        } else {
-            sb_append($sb, substr_bytes($source, $lexer->{"pos"}, 1));
+            next;
+        }
+        if ($in_cc == 1) {
+            if ($code == '[' && $pos + 2 < $src_len) {
+                my int $pkind = char_at($source, $pos + 1);
+                if ($pkind == ':' || $pkind == '.' || $pkind == '=') {
+                    # Bounded scan for matching POSIX bracket end (:], .], =]) before /, ], \n, or \.
+                    my int $scan = $pos + 2;
+                    my int $posix_end = -1;
+                    while ($scan + 1 < $src_len) {
+                        my int $sc = char_at($source, $scan);
+                        if ($sc == '/' || $sc == '\n' || $sc == ']' || $sc == '\\') {
+                            last;
+                        }
+                        if ($sc == $pkind && char_at($source, $scan + 1) == ']') {
+                            $posix_end = $scan + 2;
+                            last;
+                        }
+                        $scan = $scan + 1;
+                    }
+                    if ($posix_end > 0) {
+                        while ($lexer->{"pos"} < $posix_end) {
+                            sb_append($sb, substr_bytes($source, $lexer->{"pos"}, 1));
+                            lex_advance($lexer);
+                        }
+                        next;
+                    }
+                }
+            }
+            if ($code == ']') {
+                my int $is_leading_lit = 0;
+                if ($pos == $cc_start) {
+                    $is_leading_lit = 1;
+                } elsif ($pos == $cc_start + 1 && $cc_start >= 0 && char_at($source, $cc_start) == '^') {
+                    $is_leading_lit = 1;
+                }
+                if ($is_leading_lit == 0) {
+                    $in_cc = 0;
+                }
+            }
+            sb_append($sb, substr_bytes($source, $pos, 1));
             lex_advance($lexer);
+            next;
+        }
+        if ($code == '[') {
+            $in_cc = 1;
+            $cc_start = $pos + 1;
+        }
+        sb_append($sb, substr_bytes($source, $pos, 1));
+        lex_advance($lexer);
+    }
+    lex_error($lexer, $unterm_msg, $token_line, $lexer->{"tok_col"});
+    return "";
+}
+
+func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
+    lex_advance($lexer);  # Skip opening /
+    my str $pat = lex_read_regex_pattern($lexer, $token_line, "Unterminated regex literal");
+    # Read optional flags
+    my scalar $flags_sb = sb_new();
+    while (!lex_at_end($lexer)) {
+        my int $f = lex_current_code($lexer);
+        if ($f == 'g' || $f == 'i' || $f == 'm' || $f == 's' || $f == 'x') {
+            sb_append($flags_sb, chr($f));
+            lex_advance($lexer);
+        } else {
+            last;
         }
     }
-    lex_error($lexer, "Unterminated regex literal", $token_line, $lexer->{"tok_col"});
+    my hash %token = ();
+    $token{"type"} = "REGEX_LITERAL";
+    $token{"pattern"} = $pat;
+    $token{"flags"} = sb_to_string($flags_sb);
+    $token{"line"} = $token_line;
+    return \%token;
 }
 
 func lex_unescape_subst_repl(str $raw) str {
@@ -2344,38 +2402,7 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
     my str $source = $lexer->{"source"};
 
     # Read pattern
-    my scalar $pattern_sb = sb_new();
-    my int $found_pat_end = 0;
-    while (!lex_at_end($lexer)) {
-        my int $code = lex_current_code($lexer);
-        if ($code == '/') {
-            lex_advance($lexer);
-            $found_pat_end = 1;
-            last;
-        }
-        if ($code == '\\') {
-            lex_advance($lexer);
-            if (lex_at_end($lexer)) {
-                last;
-            }
-            my int $escaped = lex_current_code($lexer);
-            if ($escaped == '/') {
-                sb_append($pattern_sb, "/");
-            } else {
-                # Keep backslash for regex escapes (including \n, \t, \r so /x ignores literal whitespace only)
-                sb_append($pattern_sb, "\\");
-                sb_append($pattern_sb, substr_bytes($source, $lexer->{"pos"}, 1));
-            }
-            lex_advance($lexer);
-        } else {
-            sb_append($pattern_sb, substr_bytes($source, $lexer->{"pos"}, 1));
-            lex_advance($lexer);
-        }
-    }
-
-    if ($found_pat_end == 0) {
-        lex_error($lexer, "Unterminated substitution literal", $token_line, $lexer->{"tok_col"});
-    }
+    my str $pat_str = lex_read_regex_pattern($lexer, $token_line, "Unterminated substitution literal");
 
     # Read raw replacement (unescaping only \/ delimiter; other escapes are
     # interpreted after flags are known so /e code keeps its string escapes!)
@@ -2431,7 +2458,7 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
 
     my hash %token = ();
     $token{"type"} = "SUBST_LITERAL";
-    $token{"pattern"} = sb_to_string($pattern_sb);
+    $token{"pattern"} = $pat_str;
     $token{"replacement"} = $repl_str;
     $token{"flags"} = $flags_str;
     $token{"line"} = $token_line;

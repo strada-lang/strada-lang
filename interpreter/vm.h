@@ -549,6 +549,20 @@ enum {
     BUILTIN_UTF8_DECODE_WB,
     BUILTIN_UTF8_DOWNGRADE_WB,
     BUILTIN_UTF8_UPGRADE_WB,
+    BUILTIN_REGEX_BYTE_SLICE,
+    BUILTIN_SUBSTR_BYTES,
+    BUILTIN_BYTE_AT,
+    BUILTIN_CLONE,
+    BUILTIN_VEC_GET,
+    BUILTIN_VEC_SET,
+    BUILTIN_DEREF_SET,
+    BUILTIN_DEREF_ARRAY,
+    BUILTIN_DEREF_HASH,
+    BUILTIN_DUMP,
+    BUILTIN_RESERVE,
+    BUILTIN_CORE_WRITE_FD,
+    BUILTIN_CORE_CLOSE_FD,
+    BUILTIN_STACKTRACE,
 };
 
 /* Heap object type tag */
@@ -566,6 +580,7 @@ enum VMObjType {
     VM_OBJ_TIED_SCALAR = 20, /* TIESCALAR wrapper holding tied object */
     VM_OBJ_INT64 = 22,    /* boxed 64-bit integer outside 63-bit tagged range */
     VM_OBJ_WEAKREF = 24,  /* weak reference wrapper; target cleared on GC when unmarked */
+    VM_OBJ_UINT64 = 26,   /* boxed unsigned 64-bit integer (> INT64_MAX) */
 };
 typedef struct VMObjHeader {
     enum VMObjType obj_type;
@@ -637,6 +652,11 @@ typedef struct {
     int64_t val;
 } VMInt64;
 static inline VMInt64 *VM_AS_INT64(VMValue v) { return (VMInt64*)VM_TO_PTR(v); }
+typedef struct {
+    VMObjHeader hdr;
+    uint64_t val;
+} VMUInt64;
+static inline VMUInt64 *VM_AS_UINT64(VMValue v) { return (VMUInt64*)VM_TO_PTR(v); }
 static inline int VM_IS_ANY_INT(VMValue v) {
     return VM_IS_INT(v) || (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_INT64);
 }

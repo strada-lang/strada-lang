@@ -762,13 +762,14 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
     }
     const char *s;
     size_t n;
-    char _tb[256];
+    char *owned = NULL;
     if (!STRADA_IS_TAGGED_INT(json_sv) && json_sv->type == STRADA_STR) {
         s = json_sv->value.pv ? json_sv->value.pv : "";
         n = STRADA_STR_BYTELEN(json_sv);
     } else {
-        s = strada_to_str_buf(json_sv, _tb, sizeof(_tb));
-        n = s ? strlen(s) : 0;
+        owned = strada_to_str(json_sv);
+        s = owned ? owned : "";
+        n = strlen(s);
     }
     JsonP p = { s, 0, n, 0 };
     StradaValue *v = jp_value(&p, 0);
@@ -781,6 +782,7 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
     } else {
         jp_set_err("Invalid JSON value", p.pos);
     }
+    free(owned);
     if (p.err) {
         if (v) strada_decref(v);
         return strada_new_undef();
@@ -857,8 +859,9 @@ func last_error() str {
 func encode(scalar $value) str {
     my str $out = "";
     __C__ {
+        StradaValue *__tmp = strada_json_encode_c(value, 0);
         strada_decref(out);
-        out = strada_json_encode_c(value, 0);
+        out = __tmp;
     }
     return $out;
 }
@@ -873,8 +876,9 @@ func encode_opts(scalar $value, scalar $options) str {
     }
     my str $out = "";
     __C__ {
+        StradaValue *__tmp = strada_json_encode_c(value, (int)strada_to_int(canonical));
         strada_decref(out);
-        out = strada_json_encode_c(value, (int)strada_to_int(canonical));
+        out = __tmp;
     }
     return $out;
 }

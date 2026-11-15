@@ -475,18 +475,55 @@ func find_mapping_colon(str $s) int {
     return -1;
 }
 
+private func scan_quoted_end(str $s, str $quote) int {
+    my int $len = length($s);
+    my int $i = 1;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($quote eq "'") {
+            if ($ch eq "'") {
+                if ($i + 1 < $len && substr($s, $i + 1, 1) eq "'") {
+                    $i = $i + 2;
+                    next;
+                }
+                return $i;
+            }
+        } else {
+            if ($ch eq "\\") {
+                if ($i + 1 >= $len) {
+                    return -1;
+                }
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "\"") {
+                return $i;
+            }
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
 # Unquote a YAML key if wrapped in single or double quotes
 func unquote_key(str $k) str {
     my str $t = YAML::trim($k);
     my int $len = length($t);
-    if ($len >= 2) {
+    if ($len >= 1) {
         my str $f = substr($t, 0, 1);
-        my str $l = substr($t, $len - 1, 1);
-        if ($f eq "'" && $l eq "'") {
-            return replace_all(substr($t, 1, $len - 2), "''", "'");
-        }
-        if ($f eq "\"" && $l eq "\"") {
-            return YAML::process_escapes(substr($t, 1, $len - 2));
+        if ($f eq "'" || $f eq "\"") {
+            my int $end_pos = YAML::scan_quoted_end($t, $f);
+            if ($end_pos < 0) {
+                throw "YAML parse error: unterminated quoted key";
+            }
+            if ($end_pos != $len - 1) {
+                throw "YAML parse error: unexpected trailing content in quoted key";
+            }
+            my str $inner = substr($t, 1, $end_pos - 1);
+            if ($f eq "'") {
+                return replace_all($inner, "''", "'");
+            }
+            return YAML::process_escapes($inner);
         }
     }
     return $t;
@@ -504,18 +541,19 @@ func parse_value(str $s) scalar {
     # Check for quoted string
     my str $first = substr($trimmed, 0, 1);
     if ($first eq "'" || $first eq "\"") {
-        if ($len >= 2) {
-            my str $last_ch = substr($trimmed, $len - 1, 1);
-            if ($last_ch eq $first) {
-                my str $content = substr($trimmed, 1, $len - 2);
-                # Process escape sequences for double-quoted strings
-                if ($first eq "\"") {
-                    return YAML::process_escapes($content);
-                }
-                return replace_all($content, "''", "'");
-            }
+        my int $end_pos = YAML::scan_quoted_end($trimmed, $first);
+        if ($end_pos < 0) {
+            throw "YAML parse error: unterminated quoted string";
         }
-        throw "YAML parse error: unterminated quoted string";
+        if ($end_pos != $len - 1) {
+            throw "YAML parse error: unexpected trailing content after quoted string";
+        }
+        my str $content = substr($trimmed, 1, $end_pos - 1);
+        # Process escape sequences for double-quoted strings
+        if ($first eq "\"") {
+            return YAML::process_escapes($content);
+        }
+        return replace_all($content, "''", "'");
     }
 
     # Check for inline hash { ... }

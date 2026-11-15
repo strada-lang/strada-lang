@@ -1,0 +1,131 @@
+#!/usr/bin/env strada
+# Cycle 9 Audit regression tests: R9-LIB1..R9-LIB2, R9-LIB4, R9-LIB6..R9-LIB11
+
+use lib "lib";
+use JSON;
+use compress;
+use Forma;
+use Math::BigFloat;
+use YAML;
+use Template;
+use DateTime;
+use Syslog;
+use Digest::SHA;
+
+our int $g_fail = 0;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+package R9OverJson;
+func new(str $payload) scalar {
+    my hash %s = ("p" => $payload);
+    return bless(\%s, "R9OverJson");
+}
+func to_str(scalar $self, scalar $o, int $r) str {
+    return $self->{"p"};
+}
+use overload '""' => "to_str";
+
+package main;
+
+func r9_helper_greet(scalar $args, scalar $vars) str {
+    return "hi_" . $args->[0];
+}
+
+func main() int {
+    # R9-LIB1 & R9-LIB4: JSON >300B overloaded SV decode + compress round-trip
+    my str $long_val = "x" x 320;
+    my str $jstr = "{\"k\":\"" . $long_val . "\",\"n\":42}";
+    my scalar $jobj = R9OverJson::new($jstr);
+    my scalar $decoded = JSON::decode($jobj);
+    check(ref($decoded) eq "HASH" && $decoded->{"k"} eq $long_val && $decoded->{"n"} == 42,
+          "R9-LIB4 JSON::decode >300B overloaded stringification");
+    my str $enc = JSON::encode($decoded);
+    check(index($enc, $long_val) >= 0, "R9-LIB1 JSON::encode round-trip");
+
+    my str $orig_gz = ("compression_payload_" x 20);
+    my str $gz = compress::gzip($orig_gz);
+    my str $gunz = compress::gunzip($gz);
+    check($gunz eq $orig_gz, "R9-LIB1 compress::gzip/gunzip round-trip");
+
+    # R9-LIB2: Forma pipe stages & pre-escaping rules
+    Forma::register_helper("greet", \&r9_helper_greet);
+    my str $f1 = Forma::render_string("{{ greet \"world\" | upper }}", {});
+    check($f1 eq "HI_WORLD", "R9-LIB2 Forma helper + pipe: got=" . $f1);
+
+    my hash %fctx = ("html" => "<b>ok</b>", "x" => "<v>");
+    my str $f2 = Forma::render_string_safe("{{ html | upper }}", \%fctx);
+    check($f2 eq "&lt;B&gt;OK&lt;/B&gt;", "R9-LIB2 Forma auto-escape after upper: got=" . $f2);
+
+    my str $f3 = Forma::render_string_safe("{{ html | upper | raw }}", \%fctx);
+    check($f3 eq "<B>OK</B>", "R9-LIB2 Forma raw skips auto-escape: got=" . $f3);
+
+    my str $f4 = Forma::render_string("{{ dump x | upper }}", \%fctx);
+    check(index($f4, "&LT;V&GT;") >= 0 || index($f4, "&lt;V&gt;") >= 0 || index($f4, "<") < 0,
+          "R9-LIB2 Forma dump+pipe is escaped: got=" . $f4);
+
+    my str $f5 = Forma::render_string_safe("{{ x | escape | trim }}", {"x" => "  <b>  "});
+    check($f5 eq "&lt;b&gt;", "R9-LIB2 Forma escape+trim preserves escape: got=" . $f5);
+
+    my str $f6 = Forma::render_string_safe("{{ x | escape | url_decode }}", {"x" => "%3Cb%3E"});
+    check($f6 eq "&lt;b&gt;", "R9-LIB2 Forma escape+url_decode re-escapes: got=" . $f6);
+
+    # R9-LIB6: BigFloat::round negative scale
+    my scalar $bf1 = BigFloat::new("1234.56");
+    my scalar $r1 = $bf1->round(-2);
+    my scalar $bf0 = BigFloat::new("0");
+    my scalar $r0 = $bf0->round(-3);
+    check($r1->to_str() eq "1200" && $r0->to_str() eq "0",
+          "R9-LIB6 BigFloat negative round: " . $r1->to_str() . "|" . $r0->to_str());
+
+    # R9-LIB7: YAML quoted strings/keys + unclosed/trailing rejection
+    my str $yml = "\"k\\\"1\": \"a\\\"b\\\\c\"\n's''k': 'it''s' # ok comment\n";
+    my scalar $ydoc = YAML::Load($yml);
+    check($ydoc->{"k\"1"} eq "a\"b\\c" && $ydoc->{"s'k"} eq "it's",
+          "R9-LIB7 YAML escaped quotes & keys");
+
+    my int $y_err1 = 0;
+    try { YAML::Load("bad: \"unterminated\n"); } catch ($e) { $y_err1 = 1; }
+    my int $y_err2 = 0;
+    try { YAML::Load("bad: \"ok\" trailing\n"); } catch ($e) { $y_err2 = 1; }
+    check($y_err1 == 1 && $y_err2 == 1, "R9-LIB7 YAML rejects unclosed quotes & trailing garbage");
+
+    # R9-LIB8: Template end_tag inside string literal + unterminated string exception
+    my scalar $tt = Template::new({});
+    my str $t1 = $tt->process_string("[% \"a%]b\" %]", {});
+    check($t1 eq "a%]b", "R9-LIB8 Template directive ignores %] inside string: got=" . $t1);
+
+    my int $t_err = 0;
+    try {
+        $tt->process_string("[% \"unclosed %]", {});
+    } catch ($e) {
+        $t_err = 1;
+    }
+    check($t_err == 1, "R9-LIB8 Template throws on unterminated string literal");
+
+    # R9-LIB9: Digest::SHA with overloaded arg
+    my scalar $sha_obj = R9OverJson::new("abc");
+    my str $dg = Digest::SHA::sha256_hex($sha_obj);
+    check($dg eq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "R9-LIB9 Digest::SHA overloaded arg: got=" . $dg);
+
+    # R9-LIB10: DateTime UTC is_today / is_tomorrow / is_yesterday
+    my scalar $utc_now = DateTime::now_utc();
+    check(DateTime::is_today($utc_now) == 1 && DateTime::is_tomorrow($utc_now) == 0 && DateTime::is_yesterday($utc_now) == 0,
+          "R9-LIB10 DateTime UTC day predicates");
+
+    # R9-LIB11: Syslog mask/upto bounds
+    check(Syslog::mask(-1) == 0 && Syslog::mask(31) == 0 && Syslog::upto(-1) == 0 && Syslog::upto(35) == 0,
+          "R9-LIB11 Syslog mask/upto OOB returns 0");
+
+    if ($g_fail == 0) {
+        say("R9_STDLIB_OK");
+        return 0;
+    }
+    return 1;
+}

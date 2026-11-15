@@ -141,7 +141,7 @@ strada/
 ├── interpreter/         # Bytecode VM interpreter (strada-interp)
 ├── examples/            # Example programs
 ├── lib/                 # Standard library modules
-├── tools/               # Dev tools (strada-driver, stradadoc, strada2perl, ...)
+├── tools/               # Dev tools (strada-driver, stradadoc, strada-jit, ...)
 ├── docs/                # Documentation
 ├── t/                   # Test suite
 ├── benchmarks/          # Benchmark programs

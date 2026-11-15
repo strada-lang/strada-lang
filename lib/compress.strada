@@ -321,8 +321,9 @@ static StradaValue* compress_inflate_stream(const char *input, size_t input_len,
 func gzip(str $data) str {
     my str $result = "";
     __C__ {
+        StradaValue *__tmp = compress_deflate_common(data, 15 + 16);
         strada_decref(result);
-        result = compress_deflate_common(data, 15 + 16);
+        result = __tmp;
     }
     return $result;
 }
@@ -331,8 +332,9 @@ func gzip(str $data) str {
 func deflate(str $data) str {
     my str $result = "";
     __C__ {
+        StradaValue *__tmp = compress_deflate_common(data, -15);
         strada_decref(result);
-        result = compress_deflate_common(data, -15);
+        result = __tmp;
     }
     return $result;
 }

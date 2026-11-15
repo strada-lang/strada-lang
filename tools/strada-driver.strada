@@ -630,7 +630,7 @@ func handle_doc() void {
 our int $CC_IS_CLANG_CACHE = -1;
 func cc_is_clang() int {
     if ($CC_IS_CLANG_CACHE >= 0) { return $CC_IS_CLANG_CACHE; }
-    my str $v = core::qx(sq($CC[0]) . " --version 2>&1");
+    my str $v = core::qx(join(" ", map { sq($_) } @CC) . " --version 2>&1");
     if (index($v, "clang") >= 0) { $CC_IS_CLANG_CACHE = 1; } else { $CC_IS_CLANG_CACHE = 0; }
     return $CC_IS_CLANG_CACHE;
 }

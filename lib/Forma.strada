@@ -976,6 +976,27 @@ func render_string(str $template, scalar $vars) str {
                         next;
                     }
 
+                    # Check for {{dump varname}} or pipe syntax BEFORE specific helpers
+                    # so {{helper ... | filter}} works uniformly.
+                    my array @pipe_parts = Forma::split_pipe_stages($content);
+                    if (scalar(@pipe_parts) > 1) {
+                        my str $stage0 = trim($pipe_parts[0]);
+                        my str $value = (length($stage0) > 0) ? Forma::render_string("{{ " . $stage0 . " }}", $vars) : "";
+                        my int $pipe_escaped = Forma::stage0_is_escaped($stage0);
+                        my int $pi = 1;
+                        while ($pi < scalar(@pipe_parts)) {
+                            my str $stage = trim($pipe_parts[$pi]);
+                            if (length($stage) > 0) {
+                                $value = Forma::apply_filter_value($value, $stage, $vars, $pipe_escaped);
+                                $pipe_escaped = Forma::pipe_stage_next_escaped($pipe_escaped, $stage);
+                            }
+                            $pi = $pi + 1;
+                        }
+                        $result = $result . $value;
+                        $i = $end + 2;
+                        next;
+                    }
+
                     # Check for {{dump varname}}
                     if (length($content) > 5 && substr($content, 0, 5) eq "dump ") {
                         my str $var_name = substr($content, 5, length($content) - 5);
@@ -1300,31 +1321,6 @@ func render_string(str $template, scalar $vars) str {
                         next;
                     }
 
-                    # Check for pipe syntax: {{varname | f1 | f2}}
-                    my array @pipe_parts = Forma::split_pipe_stages($content);
-                    if (scalar(@pipe_parts) > 1) {
-                        my str $var_name = trim($pipe_parts[0]);
-                        my str $value = Forma::resolve_var($var_name, $vars);
-                        my int $pipe_escaped = 0;
-                        my int $pi = 1;
-                        while ($pi < scalar(@pipe_parts)) {
-                            my str $stage = trim($pipe_parts[$pi]);
-                            if (length($stage) > 0) {
-                                $value = Forma::apply_filter_value($value, $stage, $vars, $pipe_escaped);
-                                my str $slc = lc($stage);
-                                my int $ssp = index($slc, " ");
-                                my str $sn = ($ssp > 0) ? substr($slc, 0, $ssp) : $slc;
-                                if ($sn eq "escape" || $sn eq "h" || $sn eq "nl2br" || $sn eq "raw") {
-                                    $pipe_escaped = 1;
-                                }
-                            }
-                            $pi = $pi + 1;
-                        }
-                        $result = $result . $value;
-                        $i = $end + 2;
-                        next;
-                    }
-
                     # Regular variable
                     my str $value = Forma::resolve_var($content, $vars);
                     $result = $result . $value;
@@ -1438,29 +1434,53 @@ private func split_pipe_stages(str $content) array {
     return @parts;
 }
 
+# True if a stage-0 tag expression (without pipes) already emits escaped HTML.
+private func stage0_is_escaped(str $stage0) int {
+    my str $slc = lc(trim($stage0));
+    if ($slc eq "dump" || (length($slc) >= 5 && substr($slc, 0, 5) eq "dump ")) {
+        return 1;
+    }
+    return 0;
+}
+
+# Update HTML-escaped status across one pipe filter stage.
+# Escaping/HTML-producing filters mark escaped; pure formatting/case/trim
+# filters preserve prior escaped status; decoding/fallback/custom filters reset.
+private func pipe_stage_next_escaped(int $cur_escaped, str $stage) int {
+    my str $slc = lc(trim($stage));
+    if (length($slc) == 0) { return $cur_escaped; }
+    my int $sp = index($slc, " ");
+    my str $sn = ($sp > 0) ? substr($slc, 0, $sp) : $slc;
+    if ($sn eq "escape" || $sn eq "h" || $sn eq "nl2br" || $sn eq "raw") {
+        return 1;
+    }
+    if ($sn eq "trim" || $sn eq "upper" || $sn eq "lower" || $sn eq "capitalize" ||
+        $sn eq "truncate" || $sn eq "commas" || $sn eq "money" || $sn eq "length" ||
+        $sn eq "url_encode") {
+        return $cur_escaped;
+    }
+    return 0;
+}
+
 # True if a leaf {{...}} tag already emits HTML or intentionally unescaped HTML
 private func is_pre_escaped_tag(str $tag_str) int {
     my int $tlen = length($tag_str);
     if ($tlen < 4) { return 0; }
     my str $inner = trim(substr($tag_str, 2, $tlen - 4));
-    my str $ilc = lc($inner);
-    if ($ilc eq "dump" || (length($ilc) >= 5 && substr($ilc, 0, 5) eq "dump ")) {
-        return 1;
-    }
     my array @stages = Forma::split_pipe_stages($inner);
-    if (scalar(@stages) > 1) {
-        my int $si = 1;
-        while ($si < scalar(@stages)) {
-            my str $stage = lc(trim($stages[$si]));
-            my int $sp = index($stage, " ");
-            my str $flt = ($sp > 0) ? substr($stage, 0, $sp) : $stage;
-            if ($flt eq "escape" || $flt eq "h" || $flt eq "nl2br" || $flt eq "raw") {
-                return 1;
-            }
-            $si = $si + 1;
-        }
+    if (scalar(@stages) <= 1) {
+        return Forma::stage0_is_escaped($inner);
     }
-    return 0;
+    my int $escaped = Forma::stage0_is_escaped($stages[0]);
+    my int $si = 1;
+    while ($si < scalar(@stages)) {
+        my str $st = trim($stages[$si]);
+        if (length($st) > 0) {
+            $escaped = Forma::pipe_stage_next_escaped($escaped, $st);
+        }
+        $si = $si + 1;
+    }
+    return $escaped;
 }
 
 # Parse a template string into a cached-able node list. Mirrors render_string's

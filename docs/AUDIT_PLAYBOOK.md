@@ -19,6 +19,7 @@ Each audit cycle follows six ordered phases until a full 4-shard audit finds **z
 
 ### Excluded Directories / Tools
 - **`xs2strada` (`tools/xs2strada*`)**: Excluded completely from audits, builds, tests, and commits unless explicitly requested.
+- **`tools/strada2perl` / `tools/perl2strada`**: Removed from the repository; do not re-add or audit them.
 - **`bootstrap/` (`bootstrap/*`)**: Excluded from routine audit cycles. Only modify `bootstrap/` when compiling `compiler/Combined.strada` (`make test-selfhost` Stage 1) exposes a concrete blocker (such as a crash, OOM, or syntax/codegen limitation needed to compile the Strada compiler).
 
 ### Active 4-Shard Audit Partition
@@ -37,7 +38,7 @@ Each audit cycle follows six ordered phases until a full 4-shard audit finds **z
    - Focus: 3-way semantic parity (Compiled C vs `--vm` vs `--tree-walk`), mark-sweep GC & weakref correctness, exception propagation, tied containers & operator overloads, `next`/`last`/`redo`/`return` boundaries, `-e` / REPL / `eval_string`, `Strada::JIT` parsing & execution.
 
 4. **Shard 4 — Standard Library, C Extensions & Active Tools**
-   - `lib/**/*.strada` (excluding `lib/Strada/Interpreter.strada` and `lib/Strada/JIT.strada` covered by Shard 3), C helper sources under `lib/` (e.g. `lib/usb/`), and active tools under `tools/` (e.g. `tools/strada2perl.strada`, `tools/p5_to_strada.strada`, `tools/stradapkg.strada`, `tools/strada-pro`), excluding `xs2strada`.
+   - `lib/**/*.strada` (excluding `lib/Strada/Interpreter.strada` and `lib/Strada/JIT.strada` covered by Shard 3), C helper sources under `lib/` (e.g. `lib/usb/`, `lib/perl5/`), and active tools under `tools/` (e.g. `tools/strada-driver.strada`, `tools/stradadoc.strada`, `tools/strada-soinfo.strada`, `tools/strada-md2man.strada`, `tools/strada-md2html.strada`, `tools/strada-jit.strada`, `tools/strada-proftext.strada`, `tools/strada-profhtml.strada`, `tools/perla-cpan.strada`), excluding `xs2strada`.
    - Focus: `Forma`, `Template`, `DBI`, `JSON`, `HTTP`, `Regex`, `NFA`, cryptography/encoding, memory safety/leaks in `__C__` blocks, boundary checks, protocol/RFC compliance.
 
 ---
@@ -62,7 +63,8 @@ make tools
 
 ### Pre-Commit Clean Non-`DEV` Full Build
 ```bash
-make clean && make && make libs && make interpreter && make -C interpreter vm && make tools && make -C bootstrap clean all && make -C lib/usb clean all && ./strada -O0 -L lib tools/strada2perl.strada -o tools/strada2perl
+gcc -DSTRADA_NO_TLS -fsyntax-only -Iruntime runtime/strada_runtime.c
+make clean && make -C interpreter clean && make && make test-selfhost && make libs && make interpreter && make -C interpreter vm && make tools && make -C lib/usb clean all && make -C lib/perl5 clean all
 ```
 
 ### Mandatory Full Test & Valgrind 0-Leak Verification
@@ -72,8 +74,9 @@ make test-selfhost
 make test && rm -f runtime/test_runtime
 ./t/run_tests.sh
 ./interpreter/test/run_tests.sh
-./interpreter/test/run_tests.sh --vm
+INTERP="$PWD/interpreter/strada-interp --vm" ./interpreter/test/run_tests.sh
 ./t/leak_tests/run_leak_tests.sh
-./interpreter/test/leak_tests/run_leak_tests.sh
-./interpreter/test/leak_tests/run_leak_tests.sh --tree-walk
+INTERP_FLAGS="--vm" ./interpreter/test/leak_tests/run_leak_tests.sh
+INTERP_FLAGS="--tree-walk" ./interpreter/test/leak_tests/run_leak_tests.sh
+./strada --tcc -r examples/test_simple.strada
 ```

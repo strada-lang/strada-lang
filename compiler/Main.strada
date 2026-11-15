@@ -586,8 +586,21 @@ func main() int {
     # Start from 0 — @ARGV excludes program name (Perl-style)
     # For bootstrap compatibility, also skip if ARGV[0] looks like program name
     my int $i = 0;
-    if ($arg_count > 0 && index($ARGV[0], "stradac") >= 0) {
-        $i = 1;
+    if ($arg_count > 0) {
+        my str $av0 = $ARGV[0];
+        my str $base0 = $av0;
+        my int $sl = index($base0, "/");
+        while ($sl >= 0) {
+            if ($sl + 1 < length($base0)) {
+                $base0 = substr($base0, $sl + 1, length($base0) - $sl - 1);
+            } else {
+                $base0 = "";
+            }
+            $sl = index($base0, "/");
+        }
+        if ($base0 eq "stradac" || $base0 eq "stradac_stage1" || $base0 eq "stradac_stage2") {
+            $i = 1;
+        }
     }
 
     while ($i < $arg_count) {

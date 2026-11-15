@@ -586,6 +586,8 @@ func connect_insecure(str $host, int $port) int {
 
 # Create an SSL server socket
 func server(int $port, str $cert_file, str $key_file) int {
+    my str $cert_s = "" . $cert_file;
+    my str $key_s = "" . $key_file;
     my int $result = 0;
     __C__ {
         if (!ssl_initialized) {
@@ -597,8 +599,8 @@ func server(int $port, str $cert_file, str $key_file) int {
         }
 
         int port_val = (int)strada_to_int(port);
-        char *cert_str = strada_to_str(cert_file);
-        char *key_str = strada_to_str(key_file);
+        char *cert_str = strada_to_str(cert_s);
+        char *key_str = strada_to_str(key_s);
 
         SSLConnection *conn = malloc(sizeof(SSLConnection));
         if (conn) {
@@ -1016,26 +1018,29 @@ func http_get(str $host, int $port, str $path) str {
 # giving name-blind verification. Use $verify = 0 to deliberately skip checks.
 func attach_fd(int $fd, int $verify, str $host) int {
     init();
+    my str $host_s = "" . $host;
     my int $result = 0;
     __C__ {
         int raw_fd = (int)strada_to_int(fd);
         int do_verify = (int)strada_to_int(verify);
-        SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-        if (ctx) {
-            if (do_verify) {
-                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-                SSL_CTX_set_default_verify_paths(ctx);
-            }
-            SSL *ssl = SSL_new(ctx);
-            if (ssl) {
-                char *hname = strada_to_str(host);
-                if (ssl_has_crlf(hname) || (do_verify && (!hname || !hname[0]))) {
-                    /* Reject CRLF in host/SNI, or verification requested without
-                     * hostname to bind. */
+        char *hname = strada_to_str(host_s);
+        if (ssl_has_crlf(hname) || (do_verify && (!hname || !hname[0]))) {
+            /* Reject CRLF in host/SNI, or verification requested without
+             * hostname to bind, before allocating SSL_CTX/SSL. */
+            free(hname);
+        } else {
+            SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+            if (!ctx) {
+                free(hname);
+            } else {
+                if (do_verify) {
+                    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+                    SSL_CTX_set_default_verify_paths(ctx);
+                }
+                SSL *ssl = SSL_new(ctx);
+                if (!ssl) {
                     free(hname);
-                    SSL_free(ssl);
                     SSL_CTX_free(ctx);
-                    /* result stays 0 */
                 } else {
                     int bound = ssl_bind_host_and_verify(ssl, hname, do_verify);
                     free(hname);
@@ -1062,8 +1067,6 @@ func attach_fd(int $fd, int $verify, str $host) int {
                         }
                     }
                 }
-            } else {
-                SSL_CTX_free(ctx);
             }
         }
     }

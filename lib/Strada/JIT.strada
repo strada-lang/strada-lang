@@ -239,6 +239,39 @@ my hash %g_constant_idx = ();
 my hash %g_oop_packages = ();
 my hash %g_ever_oop_packages = ();
 my int $g_did_oop_reset = 0;
+my int $g_strip_unclosed = 0;
+
+private func jit_escape_c_keyword(str $name) str {
+    if ($name eq "for" || $name eq "while" || $name eq "if" || $name eq "else" ||
+        $name eq "switch" || $name eq "case" || $name eq "default" || $name eq "break" ||
+        $name eq "continue" || $name eq "return" || $name eq "goto" || $name eq "do" ||
+        $name eq "int" || $name eq "char" || $name eq "float" || $name eq "double" ||
+        $name eq "void" || $name eq "long" || $name eq "short" || $name eq "unsigned" ||
+        $name eq "signed" || $name eq "const" || $name eq "static" || $name eq "extern" ||
+        $name eq "register" || $name eq "volatile" || $name eq "auto" ||
+        $name eq "struct" || $name eq "union" || $name eq "enum" || $name eq "typedef" ||
+        $name eq "sizeof" || $name eq "inline" || $name eq "restrict" ||
+        $name eq "alignas" || $name eq "alignof" || $name eq "constexpr" || $name eq "nullptr" ||
+        $name eq "static_assert" || $name eq "thread_local" || $name eq "typeof_unqual" ||
+        $name eq "STDIN" || $name eq "STDOUT" || $name eq "STDERR" ||
+        $name eq "bool" || $name eq "true" || $name eq "false" || $name eq "errno" ||
+        $name eq "NULL" || $name eq "EOF" || $name eq "asm" || $name eq "typeof" ||
+        $name eq "pow" || $name eq "sin" || $name eq "cos" || $name eq "tan" ||
+        $name eq "sqrt" || $name eq "log" || $name eq "exp" || $name eq "floor" ||
+        $name eq "ceil" || $name eq "fabs" || $name eq "fmod" ||
+        $name eq "free" || $name eq "malloc" || $name eq "calloc" || $name eq "realloc" ||
+        $name eq "memcpy" || $name eq "memset" || $name eq "strlen" || $name eq "strcmp" ||
+        $name eq "stdin" || $name eq "stdout" || $name eq "stderr") {
+        return "v_" . $name;
+    }
+    if ($name eq "_Bool" || $name eq "_Complex" || $name eq "_Imaginary" ||
+        $name eq "_Alignas" || $name eq "_Alignof" || $name eq "_Atomic" ||
+        $name eq "_Generic" || $name eq "_Noreturn" || $name eq "_Static_assert" ||
+        $name eq "_Thread_local") {
+        return "v" . $name;
+    }
+    return $name;
+}
 
 # Detect stradac path
 private func detect_stradac() str {
@@ -431,7 +464,7 @@ private func register_function(str $func_def) int {
 
 # Advance past a /regex/ or comment in JIT extract_function_def
 private func jit_can_regex_after(str $c) int {
-    if ($c eq ")" || $c eq "]" || $c eq "\"" || $c eq "'" || $c eq "_") { return 0; }
+    if ($c eq ")" || $c eq "]" || $c eq "}" || $c eq "\"" || $c eq "'" || $c eq "_") { return 0; }
     if (($c ge "0" && $c le "9") || ($c ge "A" && $c le "Z") || ($c ge "a" && $c le "z")) { return 0; }
     return 1;
 }
@@ -452,8 +485,11 @@ private func jit_kw_allows_regex(str $w) int {
     return 0;
 }
 
-private func jit_skip_delimited_section(str $s, int $pos, int $len) int {
-    if ($pos >= $len) { return $len; }
+private func jit_skip_delimited_section(str $s, int $pos, int $len, int $allow_cc) int {
+    if ($pos >= $len) {
+        $g_strip_unclosed = 1;
+        return $len;
+    }
     my str $open = substr($s, $pos, 1);
     my str $close = $open;
     my int $paired = 0;
@@ -462,10 +498,29 @@ private func jit_skip_delimited_section(str $s, int $pos, int $len) int {
     elsif ($open eq "[") { $close = "]"; $paired = 1; }
     elsif ($open eq "<") { $close = ">"; $paired = 1; }
     my int $depth = 1;
+    my int $in_class = 0;
+    my int $cc_start = 0;
     my int $j = $pos + 1;
     while ($j < $len) {
         my str $ch = substr($s, $j, 1);
         if ($ch eq "\\" && $j + 1 < $len) { $j = $j + 2; next; }
+        if ($allow_cc == 1 && $in_class == 1) {
+            if ($ch eq "[" && $j + 1 < $len && substr($s, $j + 1, 1) eq ":") {
+                my int $pend = index($s, ":]", $j + 2);
+                if ($pend >= 0) { $j = $pend + 2; next; }
+            }
+            if ($ch eq "]" && $j > $cc_start && !($j == $cc_start + 1 && substr($s, $cc_start, 1) eq "^")) {
+                $in_class = 0;
+            }
+            $j = $j + 1;
+            next;
+        }
+        if ($allow_cc == 1 && $ch eq "[") {
+            $in_class = 1;
+            $cc_start = $j + 1;
+            $j = $j + 1;
+            next;
+        }
         if ($paired == 1) {
             if ($ch eq $open) { $depth = $depth + 1; }
             elsif ($ch eq $close) {
@@ -477,6 +532,7 @@ private func jit_skip_delimited_section(str $s, int $pos, int $len) int {
         }
         $j = $j + 1;
     }
+    $g_strip_unclosed = 1;
     return $len;
 }
 
@@ -493,9 +549,13 @@ private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
     }
     my int $op_len = 0;
     my int $two_part = 0;
+    my int $allow_cc1 = 0;
     if ($pos + 2 < $len) {
         my str $p2 = substr($s, $pos, 2);
-        if ($p2 eq "qr" || $p2 eq "qq" || $p2 eq "qw" || $p2 eq "qx") {
+        if ($p2 eq "qr") {
+            $op_len = 2;
+            $allow_cc1 = 1;
+        } elsif ($p2 eq "qq" || $p2 eq "qw" || $p2 eq "qx") {
             $op_len = 2;
         } elsif ($p2 eq "tr") {
             $op_len = 2;
@@ -504,10 +564,17 @@ private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
     }
     if ($op_len == 0 && $pos < $len) {
         my str $p1 = substr($s, $pos, 1);
-        if ($p1 eq "s" || $p1 eq "y") {
+        if ($p1 eq "s") {
             $op_len = 1;
             $two_part = 1;
-        } elsif ($p1 eq "m" || $p1 eq "q") {
+            $allow_cc1 = 1;
+        } elsif ($p1 eq "y") {
+            $op_len = 1;
+            $two_part = 1;
+        } elsif ($p1 eq "m") {
+            $op_len = 1;
+            $allow_cc1 = 1;
+        } elsif ($p1 eq "q") {
             $op_len = 1;
         } else {
             return -1;
@@ -515,6 +582,10 @@ private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
     }
     my int $dpos = $pos + $op_len;
     if ($dpos >= $len) { return -1; }
+    if ($dpos + 1 < $len) {
+        my str $op2 = substr($s, $dpos, 2);
+        if ($op2 eq "::" || $op2 eq "->") { return -1; }
+    }
     my str $dc0 = substr($s, $dpos, 1);
     if (jit_is_ident_ch($dc0) == 1) { return -1; }
     my int $had_ws = 0;
@@ -539,7 +610,7 @@ private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
         return -1;
     }
     my int $is_paired = ($delim eq "{" || $delim eq "(" || $delim eq "[" || $delim eq "<") ? 1 : 0;
-    my int $end1 = jit_skip_delimited_section($s, $dpos, $len);
+    my int $end1 = jit_skip_delimited_section($s, $dpos, $len, $allow_cc1);
     my int $fin = $end1;
     if ($two_part == 1) {
         if ($is_paired == 1) {
@@ -553,11 +624,16 @@ private func jit_try_skip_quote_op(str $s, int $pos, int $len) int {
                 }
             }
             if ($p2pos < $len) {
-                $fin = jit_skip_delimited_section($s, $p2pos, $len);
+                $fin = jit_skip_delimited_section($s, $p2pos, $len, 0);
+            } else {
+                $g_strip_unclosed = 1;
+                $fin = $len;
             }
         } else {
-            if ($end1 > $dpos + 1) {
-                $fin = jit_skip_delimited_section($s, $end1 - 1, $len);
+            if ($end1 > $dpos + 1 && $end1 - 1 < $len && substr($s, $end1 - 1, 1) eq $delim) {
+                $fin = jit_skip_delimited_section($s, $end1 - 1, $len, 0);
+            } else {
+                $g_strip_unclosed = 1;
             }
         }
     }
@@ -582,22 +658,40 @@ private func jit_skip_slash_token(str $input, int $pos, int $len, int $can_regex
         return $len;
     }
     if ($can_regex == 1) {
-        if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "/") {
-            my int $j = $pos + 2;
-            while ($j < $len && substr($input, $j, 1) ne "\n") {
-                $j = $j + 1;
-            }
-            return $j;
-        }
         my int $j = $pos + 1;
         my int $in_cc = 0;
+        my int $cc_start = 0;
         while ($j < $len) {
             my str $rc = substr($input, $j, 1);
             if ($rc eq "\n") { last; }
             if ($rc eq "\\" && $j + 1 < $len) { $j = $j + 2; next; }
-            if ($rc eq "[" && $in_cc == 0) { $in_cc = 1; }
-            elsif ($rc eq "]" && $in_cc == 1) { $in_cc = 0; }
-            elsif ($rc eq "/" && $in_cc == 0) { return $j + 1; }
+            if ($in_cc == 1) {
+                if ($rc eq "[" && $j + 1 < $len && substr($input, $j + 1, 1) eq ":") {
+                    my int $pend = index($input, ":]", $j + 2);
+                    my int $nl = index($input, "\n", $j);
+                    if ($pend >= 0 && ($nl < 0 || $nl > $pend)) { $j = $pend + 2; next; }
+                }
+                if ($rc eq "]" && $j > $cc_start && !($j == $cc_start + 1 && substr($input, $cc_start, 1) eq "^")) {
+                    $in_cc = 0;
+                }
+                $j = $j + 1;
+                next;
+            }
+            if ($rc eq "[") {
+                $in_cc = 1;
+                $cc_start = $j + 1;
+            } elsif ($rc eq "/") {
+                my int $end_p = $j + 1;
+                while ($end_p < $len) {
+                    my str $fc = substr($input, $end_p, 1);
+                    if (($fc ge "a" && $fc le "z") || ($fc ge "A" && $fc le "Z")) {
+                        $end_p = $end_p + 1;
+                    } else {
+                        last;
+                    }
+                }
+                return $end_p;
+            }
             $j = $j + 1;
         }
     }
@@ -722,7 +816,7 @@ private func extract_function_def(str $input) array {
             $can_regex = 1;
         } elsif ($c eq "}") {
             $depth = $depth - 1;
-            $can_regex = 1;
+            $can_regex = 0;
             if ($depth == 0) {
                 $end_pos = $i;
                 last;
@@ -872,6 +966,7 @@ private func jit_scan_delim_body(str $s, int $pos, str $open_d, str $close_d, in
     my int $paired = ($open_d ne $close_d) ? 1 : 0;
     my int $nest = 1;
     my int $in_class = 0;
+    my int $cc_start = 0;
     while ($i < $len) {
         my str $c = substr($s, $i, 1);
         if ($c eq "\\" && $i + 1 < $len) {
@@ -882,12 +977,25 @@ private func jit_scan_delim_body(str $s, int $pos, str $open_d, str $close_d, in
             return -1;
         }
         if ($allow_char_class == 1 && $in_class == 1) {
-            if ($c eq "]") { $in_class = 0; }
+            if ($c eq "[" && $i + 1 < $len && substr($s, $i + 1, 1) eq ":") {
+                my int $pend = index($s, ":]", $i + 2);
+                if ($pend >= 0) {
+                    my int $nl = ($allow_newline == 0) ? index($s, "\n", $i) : -1;
+                    if ($nl < 0 || $nl > $pend) {
+                        $i = $pend + 2;
+                        next;
+                    }
+                }
+            }
+            if ($c eq "]" && $i > $cc_start && !($i == $cc_start + 1 && substr($s, $cc_start, 1) eq "^")) {
+                $in_class = 0;
+            }
             $i = $i + 1;
             next;
         }
         if ($allow_char_class == 1 && $c eq "[") {
             $in_class = 1;
+            $cc_start = $i + 1;
             $i = $i + 1;
             next;
         }
@@ -920,56 +1028,15 @@ private func skip_regex_literal(str $s, int $pos, str $prev_non_ws, str $prev_wo
         return $end_p;
     }
 
-    my int $is_prev_ident = ($pos > 0) ? jit_is_ident_char(substr($s, $pos - 1, 1)) : 0;
-    if ($is_prev_ident == 1 || $prev_non_ws eq "\$" || $prev_non_ws eq "@" || $prev_non_ws eq "%") {
+    if ($prev_word eq "func") {
         return -1;
     }
-
-    my int $op_len = 0;
-    my int $bodies = 0;
-    if ($c eq "m" && $pos + 1 < $len) {
-        $op_len = 1;
-        $bodies = 1;
-    } elsif ($c eq "s" && $pos + 1 < $len) {
-        $op_len = 1;
-        $bodies = 2;
-    } elsif ($c eq "t" && $pos + 2 < $len && substr($s, $pos + 1, 1) eq "r") {
-        $op_len = 2;
-        $bodies = 2;
-    } else {
-        return -1;
-    }
-
-    my str $open_d = substr($s, $pos + $op_len, 1);
-    if (index("/{([|!#", $open_d) < 0) {
-        return -1;
-    }
-    my str $close_d = jit_matching_delim($open_d);
-    my int $allow_nl = ($open_d eq "/" ? 0 : 1);
-    my int $after1 = jit_scan_delim_body($s, $pos + $op_len + 1, $open_d, $close_d, 1, $allow_nl);
-    if ($after1 < 0) { return -1; }
-    my int $end_p = $after1;
-    if ($bodies == 2) {
-        if ($open_d ne $close_d) {
-            my int $k = $after1;
-            while ($k < $len && (substr($s, $k, 1) eq " " || substr($s, $k, 1) eq "\t" || substr($s, $k, 1) eq "\n")) {
-                $k = $k + 1;
-            }
-            if ($k >= $len || substr($s, $k, 1) ne $open_d) { return -1; }
-            $end_p = jit_scan_delim_body($s, $k + 1, $open_d, $close_d, 0, $allow_nl);
-        } else {
-            $end_p = jit_scan_delim_body($s, $after1, $open_d, $close_d, 0, $allow_nl);
-        }
-        if ($end_p < 0) { return -1; }
-    }
-    while ($end_p < $len && substr($s, $end_p, 1) =~ /[a-zA-Z]/) {
-        $end_p = $end_p + 1;
-    }
-    return $end_p;
+    return jit_try_skip_quote_op($s, $pos, $len);
 }
 
 # Replace string literals, regex literals, and # comments with spaces so scans never false-positive
 private func strip_strings_and_comments(str $input) str {
+    $g_strip_unclosed = 0;
     my str $out = "";
     my int $len = length($input);
     my int $i = 0;
@@ -978,11 +1045,31 @@ private func strip_strings_and_comments(str $input) str {
     my str $prev_non_ws = "";
     my str $cur_word = "";
     my str $last_word = "";
+    my array @heredoc_tags = ();
     while ($i < $len) {
         my str $c = substr($input, $i, 1);
         if ($in_cmt == 1) {
-            if ($c eq "\n") { $in_cmt = 0; $out = $out . "\n"; }
-            else { $out = $out . " "; }
+            if ($c eq "\n") {
+                $in_cmt = 0;
+                if (size(@heredoc_tags) == 0) {
+                    $out = $out . "\n";
+                    $i = $i + 1;
+                    next;
+                }
+            } else {
+                $out = $out . " ";
+                $i = $i + 1;
+                next;
+            }
+        }
+        if ($in_cmt == 2) {
+            if ($c eq "*" && $i + 1 < $len && substr($input, $i + 1, 1) eq "/") {
+                $in_cmt = 0;
+                $out = $out . "  ";
+                $i = $i + 2;
+                next;
+            }
+            $out = $out . (($c eq "\n") ? "\n" : " ");
             $i = $i + 1;
             next;
         }
@@ -1010,9 +1097,105 @@ private func strip_strings_and_comments(str $input) str {
             $i = $i + 1;
             next;
         }
+        if ($c eq "\n" && size(@heredoc_tags) > 0) {
+            $out = $out . "\n";
+            $i = $i + 1;
+            while (size(@heredoc_tags) > 0) {
+                my str $htag = shift(@heredoc_tags);
+                while (1) {
+                    if ($i >= $len) {
+                        $g_strip_unclosed = 1;
+                        last;
+                    }
+                    my int $nl = index($input, "\n", $i);
+                    if ($nl < 0) {
+                        my str $hline = substr($input, $i, $len - $i);
+                        if (length($hline) > 0 && substr($hline, length($hline) - 1, 1) eq "\r") {
+                            $hline = substr($hline, 0, length($hline) - 1);
+                        }
+                        $out = $out . (" " x ($len - $i));
+                        $i = $len;
+                        if ($hline ne $htag || size(@heredoc_tags) > 0) {
+                            $g_strip_unclosed = 1;
+                        }
+                        last;
+                    }
+                    my str $hline = substr($input, $i, $nl - $i);
+                    if (length($hline) > 0 && substr($hline, length($hline) - 1, 1) eq "\r") {
+                        $hline = substr($hline, 0, length($hline) - 1);
+                    }
+                    $out = $out . (" " x ($nl - $i)) . "\n";
+                    $i = $nl + 1;
+                    if ($hline eq $htag) {
+                        last;
+                    }
+                }
+                if ($g_strip_unclosed == 1) {
+                    last;
+                }
+            }
+            next;
+        }
         if ($c eq "\"") { $in_str = 1; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
         if ($c eq "'") { $in_str = 2; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
+        if ($c eq "#") {
+            $in_cmt = 1;
+            if ($cur_word ne "") { $last_word = $cur_word; $cur_word = ""; }
+            $out = $out . " ";
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "/" && $i + 1 < $len && substr($input, $i + 1, 1) eq "*") {
+            $in_cmt = 2;
+            if ($cur_word ne "") { $last_word = $cur_word; $cur_word = ""; }
+            $out = $out . "  ";
+            $i = $i + 2;
+            next;
+        }
+        if ($c eq "<" && $i + 1 < $len && substr($input, $i + 1, 1) eq "<" &&
+            jit_is_regex_prefix($prev_non_ws, ($cur_word ne "" ? $cur_word : $last_word)) == 1) {
+            my int $hp = $i + 2;
+            my int $hend = -1;
+            my str $htag = "";
+            if ($hp < $len) {
+                my str $hc0 = substr($input, $hp, 1);
+                if (jit_is_ident_char($hc0) == 1 && !($hc0 ge "0" && $hc0 le "9")) {
+                    my int $he = $hp + 1;
+                    while ($he < $len && jit_is_ident_char(substr($input, $he, 1)) == 1) {
+                        $he = $he + 1;
+                    }
+                    $htag = substr($input, $hp, $he - $hp);
+                    $hend = $he;
+                } else {
+                    my int $qp = $hp;
+                    while ($qp < $len && (substr($input, $qp, 1) eq " " || substr($input, $qp, 1) eq "\t")) {
+                        $qp = $qp + 1;
+                    }
+                    if ($qp < $len) {
+                        my str $qc = substr($input, $qp, 1);
+                        if ($qc eq "'" || $qc eq "\"") {
+                            my int $qe = $qp + 1;
+                            while ($qe < $len && substr($input, $qe, 1) ne $qc && substr($input, $qe, 1) ne "\n") {
+                                $qe = $qe + 1;
+                            }
+                            if ($qe < $len && substr($input, $qe, 1) eq $qc && $qe > $qp + 1) {
+                                $htag = substr($input, $qp + 1, $qe - ($qp + 1));
+                                $hend = $qe + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if ($hend > $i) {
+                push(@heredoc_tags, $htag);
+                $out = $out . (" " x ($hend - $i));
+                $prev_non_ws = "\"";
+                $cur_word = "";
+                $last_word = "";
+                $i = $hend;
+                next;
+            }
+        }
 
         my int $rx_end = skip_regex_literal($input, $i, $prev_non_ws, ($cur_word ne "" ? $cur_word : $last_word));
         if ($rx_end > $i) {
@@ -1049,6 +1232,9 @@ private func strip_strings_and_comments(str $input) str {
         }
         $out = $out . $c;
         $i = $i + 1;
+    }
+    if ($in_str != 0 || $in_cmt == 2 || size(@heredoc_tags) > 0) {
+        $g_strip_unclosed = 1;
     }
     return $out;
 }
@@ -1720,12 +1906,11 @@ private func generate_source(str $input) str {
         }
 
         if ($redecl == 0) {
-            $restore_code = $restore_code . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
-            $restore_code = $restore_code . "        if (STRADA_IS_TAGGED_INT(__saved_" . $vname . ") || __saved_" . $vname . "->type != STRADA_UNDEF) {\n";
-            $restore_code = $restore_code . "            strada_decref(" . $vname . ");\n";
-            $restore_code = $restore_code . "            " . $vname . " = __saved_" . $vname . ";\n";
-            $restore_code = $restore_code . "        } else {\n";
-            $restore_code = $restore_code . "            strada_decref(__saved_" . $vname . ");\n";
+            my str $cname = jit_escape_c_keyword($vname);
+            $restore_code = $restore_code . "        if (strada_global_exists(strada_new_str(\"repl::" . $vname . "\"))) {\n";
+            $restore_code = $restore_code . "            StradaValue *__saved_" . $cname . " = strada_global_get_cstr(\"repl::" . $vname . "\");\n";
+            $restore_code = $restore_code . "            strada_decref(" . $cname . ");\n";
+            $restore_code = $restore_code . "            " . $cname . " = __saved_" . $cname . ";\n";
             $restore_code = $restore_code . "        }\n";
         }
     }
@@ -1893,8 +2078,10 @@ private func generate_source(str $input) str {
             while ($si < $tracked_count) {
                 my str $svn = $tracked_names[$si];
                 $persist_caps = $persist_caps
-                    . "                strada_incref(*__repl_caps[" . $si . "]);\n"
-                    . "                strada_global_set(strada_new_str(\"repl::" . $svn . "\"), *__repl_caps[" . $si . "]);\n";
+                    . "                if (*__repl_caps[" . $si . "]) {\n"
+                    . "                    strada_incref(*__repl_caps[" . $si . "]);\n"
+                    . "                    strada_global_set_cstr(\"repl::" . $svn . "\", *__repl_caps[" . $si . "]);\n"
+                    . "                }\n";
                 $si = $si + 1;
             }
             $persist_caps = $persist_caps
@@ -1973,8 +2160,9 @@ private func generate_source(str $input) str {
         # Save all tracked variables back to global registry (inline __C__ path)
         my str $save_c = "";
         foreach my str $vname (keys(%g_var_types)) {
-            $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
-            $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
+            my str $cv = jit_escape_c_keyword($vname);
+            $save_c = $save_c . "        strada_incref(" . $cv . ");\n";
+            $save_c = $save_c . "        strada_global_set_cstr(\"repl::" . $vname . "\", " . $cv . ");\n";
         }
         if ($save_c ne "") {
             $src = $src . "\n    __C__ {\n";
@@ -2881,6 +3069,9 @@ func check_package_decl(str $input) int {
 # Check if braces/parens/brackets are balanced
 func is_balanced(str $input) int {
     my str $cleaned = strip_strings_and_comments($input);
+    if ($g_strip_unclosed == 1) {
+        return 0;
+    }
     my int $braces = 0;
     my int $parens = 0;
     my int $brackets = 0;
@@ -2900,9 +3091,15 @@ func is_balanced(str $input) int {
         $i = $i + 1;
     }
 
+    if ($braces < 0 || $parens < 0 || $brackets < 0) {
+        return 1;
+    }
+
     if ($braces == 0 && $parens == 0) {
-        if (index($input, "{") < 0) {
-            if ($input =~ /^func\s+/ || $input =~ /^fn\s+/ || $input =~ /^async\s+/ || $input =~ /^private\s+/) {
+        if (index($cleaned, "{") < 0) {
+            my str $tclean = $cleaned;
+            $tclean =~ s/^\s+//;
+            if ($tclean =~ /^func\s+/ || $tclean =~ /^fn\s+/ || $tclean =~ /^async\s+/ || $tclean =~ /^private\s+/) {
                 return 0;
             }
         }

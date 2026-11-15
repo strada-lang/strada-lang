@@ -1,0 +1,110 @@
+#!/usr/bin/env strada
+# Cycle 9 VM & Tree-Walk Valgrind leak regression suite: R9-VM1..R9-VM5, R9-TW1
+
+enum R9LVColor {
+    R9LV_A = 3,
+    R9LV_B = 4
+};
+
+our str $g_r9lv_buf = "";
+
+package R9LVPkg;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v, "pad" => ("p" x 32));
+    return bless(\%s, "R9LVPkg");
+}
+func tag(int $x) str {
+    return __PACKAGE__ . ":" . ($x + 1);
+}
+
+package main;
+
+func r9lv_fn(int $x) int {
+    return $x * 2;
+}
+
+async func r9lv_async(int $x) int {
+    return $x + 10;
+}
+
+func main() int {
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        # R9-VM1
+        my int $x = 10 + $i;
+        my scalar $sr = \$x;
+        my scalar $d1 = deref($sr);
+        deref_set($sr, $d1 + 5);
+        if (reftype($sr) ne "SCALAR" || $$sr != 15 + $i) { die("vm1 fail"); }
+
+        # R9-VM2
+        my str $u = "café_" . $i;
+        $u =~ s/(é)/"[" . $1 . "]"/eg;
+        my str $zw = "aé";
+        $zw =~ s/(?=é)/"-"/eg;
+        my str $bin = "a" . chr(0) . "b";
+        if (!($bin =~ /b/) || length($zw) == 0) { die("vm2 fail"); }
+
+        # R9-VM3
+        my str $s2 = substr_bytes("café", 3);
+        my str $s3 = substr_bytes("café", 0, 3);
+        my int $ba = byte_at("café", 2);
+        my int $bi = byte_index("café", "f");
+        if (core::byte_length($s2) != 2 || core::byte_length($s3) != 3 || $ba != 102 || $bi != 2) { die("vm3 bytes fail"); }
+
+        my scalar $o1 = R9LVPkg::new($i);
+        my scalar $o2 = clone($o1);
+        $o2->{"v"} = 99;
+        my hash %cyc = ("n" => $i);
+        $cyc{"self"} = \%cyc;
+        my scalar $cyc2 = clone(\%cyc);
+        $cyc2->{"self"} = undef;
+        $cyc{"self"} = undef;
+
+        my str $lbuf = "";
+        core::vec_set($lbuf, 0, 8, 65 + $i);
+        $g_r9lv_buf = "";
+        sys::vec_set($g_r9lv_buf, 0, 8, 97 + $i);
+        if (core::vec_get($lbuf, 0, 8) != 65 + $i || sys::vec_get($g_r9lv_buf, 0, 8) != 97 + $i) { die("vm3 vec fail"); }
+
+        my str $sr1 = str_replace("aa bb aa", "aa", "cc");
+        my str $sr2 = str_replace_first("aa bb aa", "aa", "cc");
+        my str $rr1 = regex_replace("x1 y2", "[0-9]+", "Z");
+        my str $rr2 = regex_replace_all("x1 y2", "[0-9]+", "Z");
+        my scalar $da = deref_array([1, 2]);
+        my scalar $dh = deref_hash({"a" => 3});
+        my array @ra = ();
+        reserve(\@ra, 8);
+        push(@ra, $i);
+        if (length($sr1) == 0 || length($sr2) == 0 || length($rr1) == 0 || length($rr2) == 0 || size($da) != 2 || $dh->{"a"} != 3 || math::abs("-42.5") < 42.0) { die("vm3 builtins fail"); }
+
+        # R9-VM4
+        my int $ev = R9LVColor::R9LV_A + R9LVColor::R9LV_B;
+        my scalar $fr1 = \&r9lv_fn;
+        my scalar $fr2 = \&R9LVPkg::tag;
+        my int $aw = await r9lv_async($i);
+        if ($ev != 7 || $fr1->(3) != 6 || index($fr2->(1), "R9LVPkg:") != 0 || $aw != 10 + $i || __LINE__ <= 0) { die("vm4 fail"); }
+
+        # R9-VM5
+        my str $nk1 = "k" . chr(0) . "1_" . $i;
+        my str $nk2 = "k" . chr(0) . "2_" . $i;
+        my hash %nh = ();
+        $nh{$nk1} = "v1_" . $i;
+        $nh{$nk2} = "v2_" . $i;
+        $nh{$nk1} = "V1_" . $i;
+        my scalar $ks = keys(%nh);
+        if (!exists($nh{$nk1}) || size($ks) != 2) { die("vm5 fail"); }
+        my array @kv = each(%nh);
+        while (size(@kv) > 0) {
+            if (length($kv[0]) < 3) { die("vm5 each fail"); }
+            @kv = each(%nh);
+        }
+        delete($nh{$nk1});
+        if (exists($nh{$nk1}) || $nh{$nk2} ne "v2_" . $i) { die("vm5 del fail"); }
+
+        # R9-TW1
+        if (hex(" 0x1_f ") != 31 || oct(" 0b101_0 ") != 10 || oct(" 0o7_1 ") != 57) { die("tw1 fail"); }
+    }
+
+    say("R9_VM_LEAKS_OK");
+    return 0;
+}

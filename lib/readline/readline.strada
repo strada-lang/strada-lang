@@ -218,8 +218,11 @@ func history_get(int $index) str {
     my str $result = "";
     my int $found = 0;
     __C__ {
-        int idx = (int)strada_to_int(index);
-        HIST_ENTRY *entry = history_get(idx + history_base);
+        int64_t idx64 = strada_to_int(index);
+        HIST_ENTRY *entry = NULL;
+        if (idx64 >= 0 && idx64 < (int64_t)history_length) {
+            entry = history_get((int)idx64 + history_base);
+        }
         if (entry && entry->line) {
             strada_decref(result);
             result = strada_new_str(entry->line);
@@ -285,10 +288,12 @@ func append_history(int $count, str $filename) int {
 
 # Set readline variable (e.g., "editing-mode" to "vi" or "emacs")
 func set_variable(str $name, str $value) int {
+    my str $name_s = "" . $name;
+    my str $value_s = "" . $value;
     my int $result = 0;
     __C__ {
-        char *n = strada_to_str(name);
-        char *v = strada_to_str(value);
+        char *n = strada_to_str(name_s);
+        char *v = strada_to_str(value_s);
         int ret = rl_variable_bind(n, v);
         free(n);
         free(v);

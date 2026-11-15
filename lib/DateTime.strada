@@ -1025,7 +1025,7 @@ func month_name_short(scalar $dt) str {
 # Check if a date is today
 func is_today(scalar $dt) int {
     if (!defined($dt)) { return 0; }
-    my scalar $today = DateTime::now();
+    my scalar $today = DateTime::_is_utc($dt) ? DateTime::now_utc() : DateTime::now();
     return $dt->{"year"} == $today->{"year"} &&
            $dt->{"month"} == $today->{"month"} &&
            $dt->{"day"} == $today->{"day"};
@@ -1034,7 +1034,8 @@ func is_today(scalar $dt) int {
 # Check if a date is tomorrow
 func is_tomorrow(scalar $dt) int {
     if (!defined($dt)) { return 0; }
-    my scalar $tomorrow = DateTime::add_days(DateTime::now(), 1);
+    my scalar $now = DateTime::_is_utc($dt) ? DateTime::now_utc() : DateTime::now();
+    my scalar $tomorrow = DateTime::add_days($now, 1);
     return $dt->{"year"} == $tomorrow->{"year"} &&
            $dt->{"month"} == $tomorrow->{"month"} &&
            $dt->{"day"} == $tomorrow->{"day"};
@@ -1043,7 +1044,8 @@ func is_tomorrow(scalar $dt) int {
 # Check if a date is yesterday
 func is_yesterday(scalar $dt) int {
     if (!defined($dt)) { return 0; }
-    my scalar $yesterday = DateTime::subtract_days(DateTime::now(), 1);
+    my scalar $now = DateTime::_is_utc($dt) ? DateTime::now_utc() : DateTime::now();
+    my scalar $yesterday = DateTime::subtract_days($now, 1);
     return $dt->{"year"} == $yesterday->{"year"} &&
            $dt->{"month"} == $yesterday->{"month"} &&
            $dt->{"day"} == $yesterday->{"day"};

@@ -521,10 +521,6 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 - **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
 - **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
 
-## Conversion Tools
-
-- **strada2perl** — Converts Strada to Perl 5. `./strada2perl input.strada output.pl`
-
 Build tools with: `make tools` or `./strada tools/<tool>.strada`
 
 ## Perla (Perl 5 Compiler)

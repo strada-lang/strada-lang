@@ -347,21 +347,97 @@ func run(str $code) void {
 
 # Call a Perl subroutine with a single string argument, return scalar result
 func call(str $sub_name, str $arg) str {
+    my str $sub_s = "" . $sub_name;
+    my str $arg_s = "";
+    my int $has_arg = 0;
+    my int $arg_undef = 0;
+    my int $arg_utf8 = 0;
+    my int $arg_is_int = 0;
+    my int $arg_is_num = 0;
+    my int $arg_iv = 0;
+    my num $arg_nv = 0.0;
+    __C__ {
+        if (!STRADA_IS_TAGGED_INT(arg) && (!arg || (arg->type == STRADA_UNDEF && !(arg->meta && arg->meta->is_tied && arg->meta->tied_obj)))) {
+            /* Explicit undef omits the argument for call_noargs compatibility */
+            strada_decref(has_arg);
+            has_arg = strada_new_int(0);
+        } else {
+            StradaValue *use_arg = arg;
+            StradaValue *fetched = NULL;
+            if (!STRADA_IS_TAGGED_INT(arg) && arg->meta && arg->meta->is_tied && arg->meta->tied_obj) {
+                fetched = strada_tied_scalar_fetch(arg);
+                use_arg = fetched;
+            }
+            strada_decref(has_arg);
+            has_arg = strada_new_int(1);
+            if (!use_arg || (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_UNDEF)) {
+                strada_decref(arg_undef);
+                arg_undef = strada_new_int(1);
+                if (fetched) strada_decref(fetched);
+            } else if (STRADA_IS_TAGGED_INT(use_arg)) {
+                strada_decref(arg_is_int);
+                arg_is_int = strada_new_int(1);
+                strada_decref(arg_iv);
+                arg_iv = strada_new_int(STRADA_TAGGED_INT_VAL(use_arg));
+                if (fetched) strada_decref(fetched);
+            } else if (use_arg->type == STRADA_INT) {
+                strada_decref(arg_is_int);
+                arg_is_int = strada_new_int(1);
+                strada_decref(arg_iv);
+                arg_iv = strada_new_int(use_arg->value.iv);
+                if (fetched) strada_decref(fetched);
+            } else if (use_arg->type == STRADA_NUM) {
+                strada_decref(arg_is_num);
+                arg_is_num = strada_new_int(1);
+                strada_decref(arg_nv);
+                arg_nv = strada_new_num(use_arg->value.nv);
+                if (fetched) strada_decref(fetched);
+            } else {
+                int u8 = (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_STR && STRADA_STR_IS_UTF8(use_arg)) ? 1 : 0;
+                strada_decref(arg_utf8);
+                arg_utf8 = strada_new_int(u8);
+                if (fetched) strada_inflight_push(fetched);
+                char *cs = strada_to_str(use_arg);
+                size_t clen = (!STRADA_IS_TAGGED_INT(use_arg) && use_arg->type == STRADA_STR)
+                    ? STRADA_STR_BYTELEN(use_arg)
+                    : (cs ? strlen(cs) : 0);
+                if (fetched) {
+                    strada_inflight_pop();
+                    strada_decref(fetched);
+                }
+                strada_decref(arg_s);
+                arg_s = strada_new_str_len(cs ? cs : "", clen);
+                free(cs);
+            }
+        }
+    }
     my str $result = "";
     __C__ {
         if (!my_perl) {
             strada_decref(result);
             result = strada_new_str("Error: Perl not initialized");
         } else {
-            char *sub_str = strada_to_str(sub_name);
+            char *sub_str = strada_to_str(sub_s);
 
             dSP;
             ENTER;
             SAVETMPS;
             PUSHMARK(SP);
 
-            if (arg && (STRADA_IS_TAGGED_INT(arg) || arg->type != STRADA_UNDEF)) {
-                XPUSHs(sv_2mortal(perl5_sv_from_strada(arg)));
+            if (strada_to_int(has_arg)) {
+                if (strada_to_int(arg_undef)) {
+                    XPUSHs(&PL_sv_undef);
+                } else if (strada_to_int(arg_is_int)) {
+                    XPUSHs(sv_2mortal(newSViv((IV)strada_to_int(arg_iv))));
+                } else if (strada_to_int(arg_is_num)) {
+                    XPUSHs(sv_2mortal(newSVnv((NV)strada_to_num(arg_nv))));
+                } else {
+                    size_t alen = (!STRADA_IS_TAGGED_INT(arg_s) && arg_s && arg_s->type == STRADA_STR) ? STRADA_STR_BYTELEN(arg_s) : 0;
+                    const char *apv = (!STRADA_IS_TAGGED_INT(arg_s) && arg_s && arg_s->type == STRADA_STR && arg_s->value.pv) ? arg_s->value.pv : "";
+                    SV *psv = sv_2mortal(newSVpvn(apv, (STRLEN)alen));
+                    if (strada_to_int(arg_utf8)) SvUTF8_on(psv);
+                    XPUSHs(psv);
+                }
             }
 
             PUTBACK;

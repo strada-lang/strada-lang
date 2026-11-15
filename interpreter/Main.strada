@@ -482,6 +482,9 @@ func load_file(scalar $interp, str $filename) void {
     parser_set_filename($parser, $filename);
     my array @empty = ();
     my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+    if (defined($program)) {
+        $program->{"source_file"} = $filename;
+    }
 
     # Register functions (skip main)
     my scalar $funcs = $program->{"functions"};
@@ -735,6 +738,9 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     parser_set_filename($parser, $filename);
     my array @empty = ();
     my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+    if (defined($program)) {
+        $program->{"source_file"} = $filename;
+    }
 
     # Load program into interpreter while still in project root so relative import_lib .so paths load
     try {
@@ -799,6 +805,9 @@ func run_file_vm(str $filename, scalar $argv) int {
     parser_set_filename($parser, $filename);
     my array @empty = ();
     my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+    if (defined($program)) {
+        $program->{"source_file"} = $filename;
+    }
 
     # Compile to bytecode (and dlopen relative import_libs) before restoring cwd
     my int $result = 0;
@@ -969,37 +978,11 @@ func run_eval_program_tw(scalar $interp, str $code, scalar $argv) int {
     return $exit_code;
 }
 
-# Execute a code string (wraps in main() if no func/package declarations)
+# Execute a code string (tree-walk -e mode runs with full program semantics)
 func run_eval(scalar $interp, str $code, scalar $argv) int {
     my str $trimmed = str_trim($code);
     if (length($trimmed) == 0) { return 0; }
-    my str $tcheck = $trimmed;
-    my str $lch = substr($tcheck, length($tcheck) - 1, 1);
-    if ($lch ne ";" && $lch ne "}") {
-        $tcheck = $tcheck . ";";
-    }
-    my scalar $uchk = Strada::Interpreter::split_eval_units($tcheck, "main");
-    if (length($uchk->{"top"}) > 0 || index($trimmed, "func main") >= 0 || index($trimmed, "fn main") >= 0 ||
-        index($trimmed, "func run") >= 0 || index($trimmed, "fn run") >= 0) {
-        return run_eval_program_tw($interp, $code, $argv);
-    }
-    my scalar $result = undef;
-    try {
-        $result = repl_eval($interp, $code);
-        if (defined($result)) {
-            display_result($result);
-        }
-    } catch ($e) {
-        if (Strada::Interpreter::is_signal($e, "return")) {
-            if (defined($e->{"value"})) {
-                return $e->{"value"};
-            }
-        } else {
-            say("Error: " . $e);
-            return 1;
-        }
-    }
-    return 0;
+    return run_eval_program_tw($interp, $code, $argv);
 }
 
 # Execute a code string using the bytecode VM backend (-e)
@@ -1080,6 +1063,7 @@ func main() int {
     # Parse options
     my str $script = "";
     my str $eval_code = "";
+    my int $has_eval = 0;
     my array @script_args = ();
     my int $use_vm = 1;
     my int $i = 0;
@@ -1096,6 +1080,7 @@ func main() int {
         } elsif ($parsing_opts == 1 && ($arg eq "--tree-walk" || $arg eq "--tw")) {
             $use_vm = 0;
         } elsif ($parsing_opts == 1 && $arg eq "-e") {
+            $has_eval = 1;
             $i = $i + 1;
             if ($i >= $argc) {
                 say("Error: -e requires a code argument");
@@ -1123,7 +1108,7 @@ func main() int {
             say("Use --help for usage information");
             return 1;
         } else {
-            if (length($script) == 0) {
+            if (length($script) == 0 && $has_eval == 0) {
                 $script = $arg;
             } else {
                 push(@script_args, $arg);

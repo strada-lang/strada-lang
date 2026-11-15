@@ -28,6 +28,7 @@ func scan_string(str $src, int $i, str $q) scalar {
     my int $n = length($src);
     my str $out = "";
     my int $j = $i + 1;
+    my int $closed = 0;
     while ($j < $n) {
         my str $c = substr($src, $j, 1);
         if ($c eq "\\" && $j + 1 < $n) {
@@ -51,9 +52,12 @@ func scan_string(str $src, int $i, str $q) scalar {
             $j = $j + 2;
             next;
         }
-        if ($c eq $q) { $j = $j + 1; last; }
+        if ($c eq $q) { $j = $j + 1; $closed = 1; last; }
         $out = $out . $c;
         $j = $j + 1;
+    }
+    if ($closed == 0) {
+        throw(Template::Exception::make("parse", "unterminated string literal"));
     }
     my hash %r = (); $r{"val"} = $out; $r{"next"} = $j; $r{"q"} = $q;
     return \%r;

@@ -225,6 +225,9 @@ func c_int64_lit(str $val) str {
     if ($val eq "9223372036854775808") {
         return "((int64_t)9223372036854775808ULL)";
     }
+    if ($val eq "-9223372036854775808") {
+        return "INT64_MIN";
+    }
     if (length($val) >= 2 && (substr($val, 0, 2) eq "0x" || substr($val, 0, 2) eq "0X")) {
         return "((int64_t)" . $val . "ULL)";
     }
@@ -377,6 +380,12 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"foreach_counter"} = 0; # Counter for unique foreach variable names
     $cg{"redo_counter"} = 0;    # Counter for unique redo labels
     $cg{"current_redo_label"} = ""; # Current innermost redo label for unlabeled redo
+    my array @empty_ltm = ();
+    my hash %empty_label_tm = ();
+    $cg{"fn_has_tmps_mark"} = 0;
+    $cg{"loop_tmps_marks"} = \@empty_ltm;
+    $cg{"label_tmps_marks"} = \%empty_label_tm;
+    $cg{"destruct_id"} = 0;
     $cg{"call_context"} = 0;   # Call context for dynamic functions (0=scalar, 1=array, 2=hash)
     $cg{"autoviv"} = 0;        # Autovivification flag for nested hash assignment targets
     $cg{"in_map_block"} = 0;  # Track if inside map block (for $_)
@@ -2031,6 +2040,8 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "~");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "bool");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "!");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "abs");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "0+");
             # Stringify ("") overload - key in hash is two double-quote chars
             gen_overload_reg_stringify($sb, $pkg, $pkg_ol);
         }
@@ -3182,6 +3193,65 @@ func ast_any_try(scalar $n) int {
     return 0;
 }
 
+func ast_has_expr_stmt_block(scalar $n) int {
+    if (!$n) { return 0; }
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $i = 0;
+        my int $nn = size($n);
+        while ($i < $nn) {
+            if (ast_has_expr_stmt_block($n->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    my scalar $tp = $n->{"type"};
+    if (defined($tp)) {
+        my int $ti = $tp + 0;
+        if ($ti == NODE_ANON_FUNC()) { return 0; }
+        if ($ti == NODE_DO_EXPR() || $ti == NODE_MAP() || $ti == NODE_GREP()) { return 1; }
+    }
+    my array @ks = keys(%{$n});
+    my int $k = 0;
+    my int $nk = size(@ks);
+    while ($k < $nk) {
+        my str $key = $ks[$k];
+        my scalar $v = $n->{$key};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (ast_has_expr_stmt_block($v) == 1) { return 1; }
+        }
+        $k = $k + 1;
+    }
+    return 0;
+}
+
+func loop_tmps_current(scalar $cg) str {
+    my scalar $stk = $cg->{"loop_tmps_marks"};
+    if ($stk && size($stk) > 0) {
+        return $stk->[size($stk) - 1]->{"var"};
+    }
+    return "__fn_tmps_mark";
+}
+
+func loop_tmps_mark_for_depth(scalar $cg, int $target_depth) str {
+    my scalar $stk = $cg->{"loop_tmps_marks"};
+    my str $res = "__fn_tmps_mark";
+    if ($stk) {
+        my int $i = 0;
+        my int $n = size($stk);
+        while ($i < $n) {
+            my scalar $ent = $stk->[$i];
+            if (($ent->{"depth"} + 0) <= $target_depth) {
+                $res = $ent->{"var"};
+            }
+            $i = $i + 1;
+        }
+    }
+    return $res;
+}
+
 # Scan raw C code for identifier tokens [A-Za-z_][A-Za-z0-9_]* so closure boxing
 # only unboxes variables actually referenced by inline __C__ blocks.
 func ast_scan_c_code_idents(str $code, scalar $out_idents) void {
@@ -3189,6 +3259,42 @@ func ast_scan_c_code_idents(str $code, scalar $out_idents) void {
     my int $i = 0;
     while ($i < $len) {
         my int $ch = char_at($code, $i);
+        if ($ch == '/' && $i + 1 < $len) {
+            my int $nch = char_at($code, $i + 1);
+            if ($nch == '/') {
+                $i = $i + 2;
+                while ($i < $len && char_at($code, $i) != 10) {
+                    $i = $i + 1;
+                }
+                next;
+            } elsif ($nch == '*') {
+                $i = $i + 2;
+                while ($i < $len) {
+                    if (char_at($code, $i) == '*' && $i + 1 < $len && char_at($code, $i + 1) == '/') {
+                        $i = $i + 2;
+                        last;
+                    }
+                    $i = $i + 1;
+                }
+                next;
+            }
+        }
+        if ($ch == '"' || $ch == 39) {
+            my int $q = $ch;
+            $i = $i + 1;
+            while ($i < $len) {
+                my int $sc = char_at($code, $i);
+                if ($sc == 92) {
+                    $i = $i + 2;
+                    next;
+                }
+                $i = $i + 1;
+                if ($sc == $q) {
+                    last;
+                }
+            }
+            next;
+        }
         if (($ch >= 'A' && $ch <= 'Z') || ($ch >= 'a' && $ch <= 'z') || $ch == '_') {
             my int $start = $i;
             $i = $i + 1;
@@ -3221,6 +3327,7 @@ func ast_collect_c_block_idents(scalar $n, scalar $out_idents) void {
     }
     if ($rt ne "HASH") { return; }
     my int $type = $n->{"type"} + 0;
+    if ($type == NODE_ANON_FUNC()) { return; }
     if ($type == NODE_C_BLOCK()) {
         my str $code = $n->{"code"} . "";
         ast_scan_c_code_idents($code, $out_idents);
@@ -4183,10 +4290,12 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
             substr($val, 0, 2) eq "0o" || substr($val, 0, 2) eq "0O" ||
             substr($val, 0, 2) eq "0b" || substr($val, 0, 2) eq "0B") {
             # Cast hex/octal/binary to double
-            emit($cg, "(double)(" . $val . ")");
+            emit($cg, "((double)(" . c_int64_lit($val) . "))");
         } elsif ($first eq "0" && length($val) > 1 && $second ne ".") {
             # Leading zero means octal in C - must cast to preserve value
-            emit($cg, "(double)(" . $val . ")");
+            emit($cg, "((double)(" . c_int64_lit($val) . "))");
+        } elsif ($val eq "-9223372036854775808" || $val eq "9223372036854775808" || length($val) >= 10) {
+            emit($cg, "((double)(" . c_int64_lit($val) . "))");
         } else {
             emit($cg, $val . ".0");
         }
@@ -5141,7 +5250,7 @@ func gen_raw_int_cond(scalar $cg, scalar $expr, str $cur_pkg) void {
 func gen_raw_int_expr(scalar $cg, scalar $expr, str $cur_pkg) void {
     my int $t = $expr->{"type"} + 0;
     if ($t == NODE_INT_LITERAL()) {
-        emit($cg, "(int64_t)" . $expr->{"value"});
+        emit($cg, "(int64_t)(" . c_int64_lit($expr->{"value"}) . ")");
         return;
     }
     if ($t == NODE_VARIABLE()) {
@@ -5362,7 +5471,7 @@ func emit_extern_str_operand(scalar $cg, scalar $expr) void {
 
     # Integer literals - convert to string
     if ($type == NODE_INT_LITERAL()) {
-        emit($cg, "strada_int_to_cstr(" . $expr->{"value"} . ")");
+        emit($cg, "strada_int_to_cstr(" . c_int64_lit($expr->{"value"}) . ")");
         return;
     }
 
@@ -6384,6 +6493,9 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
     # the same recursion used in return_needs_incref's bless branch.
     if ($type == NODE_CALL() && $expr->{"name"} eq "bless") {
         my scalar $bargs = $expr->{"args"};
+        if ($bargs && $expr->{"arg_count"} >= 2 && $bargs->[1]->{"type"} != NODE_STR_LITERAL()) {
+            return 1;
+        }
         if ($bargs && $expr->{"arg_count"} > 0) {
             return needs_temp_cleanup($cg, $bargs->[0]);
         }
@@ -6727,6 +6839,9 @@ func return_needs_incref(scalar $cg, scalar $expr) int {
         # bless() returns its first argument, so check if THAT needs incref
         if ($name eq "bless") {
             my scalar $args = $expr->{"args"};
+            if ($args && $expr->{"arg_count"} >= 2 && $args->[1]->{"type"} != NODE_STR_LITERAL()) {
+                return 0;
+            }
             if ($args && $expr->{"arg_count"} > 0) {
                 return return_needs_incref($cg, $args->[0]);
             }
@@ -6969,7 +7084,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
 
     my str $hca_opch = "";
-    if ($is_void == 1) {
+    if ($is_void == 1 && arg_is_trivially_pure($cg, $rhs) == 1) {
         if ($op eq "+=") { $hca_opch = "'+'"; }
         elsif ($op eq "-=") { $hca_opch = "'-'"; }
         elsif ($op eq "*=") { $hca_opch = "'*'"; }
@@ -7236,7 +7351,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
     my int $aca_push = cleanup_push_useful($cg);
 
     my str $aca_opch = "";
-    if ($is_void == 1 && $cg->{"uses_tie"} == 0) {
+    if ($is_void == 1 && $cg->{"uses_tie"} == 0 && arg_is_trivially_pure($cg, $rhs) == 1) {
         if ($op eq "+=") { $aca_opch = "'+'"; }
         elsif ($op eq "-=") { $aca_opch = "'-'"; }
         elsif ($op eq "*=") { $aca_opch = "'*'"; }
@@ -7250,7 +7365,9 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
         gen_assign_container_marked($cg, $arr_expr, 2, $aca_av_cl);
         emit($cg, "; ");
         if ($aca_push == 1 && $arr_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_arr); "); }
-        emit($cg, "StradaValue *__aca_rhs = ");
+        emit($cg, "int64_t __aca_idx = ");
+        emit_int_operand($cg, $idx_expr);
+        emit($cg, "; StradaValue *__aca_rhs = ");
         gen_expression($cg, $rhs);
         emit($cg, "; ");
         if ($aca_push == 1 && $rhs_cleanup == 1) { emit($cg, "strada_cleanup_push(__aca_rhs); "); }
@@ -7267,9 +7384,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op,
             if ($aca_av_cl == 1) { emit($cg, "strada_cleanup_drain_to(__aca_av_mk); "); }
             emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
         }
-        emit($cg, "strada_array_compound(__aca_arr, ");
-        emit_int_operand($cg, $idx_expr);
-        emit($cg, ", __aca_rhs, " . $aca_opch . "); ");
+        emit($cg, "strada_array_compound(__aca_arr, __aca_idx, __aca_rhs, " . $aca_opch . "); ");
         if ($rhs_cleanup == 1) {
             if ($aca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__aca_rhs); ");

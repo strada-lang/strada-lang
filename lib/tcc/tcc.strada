@@ -385,10 +385,12 @@ func add_lib(int $state, str $name) int {
 
 # Define a preprocessor symbol
 func define(int $state, str $name, str $value) void {
+    my str $name_s = "" . $name;
+    my str $value_s = "" . $value;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        char *n = strada_to_str(name);
-        char *v = strada_to_str(value);
+        char *n = strada_to_str(name_s);
+        char *v = strada_to_str(value_s);
         if (s && n) {
             tcc_define_symbol(s, n, v && v[0] ? v : NULL);
         }

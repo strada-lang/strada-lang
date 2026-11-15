@@ -1,0 +1,62 @@
+#!/usr/bin/env strada
+# Cycle 9 Eval + JIT Valgrind leak regression suite: R9-EVAL1, R9-JIT1, R9-JIT2
+
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        my scalar $ev1 = Strada::Interpreter::eval_string('
+            /* ; { } */
+            our int $r9l_bumps = 0;
+            func r9l_ev_bump() int {
+                $r9l_bumps = $r9l_bumps + 1;
+                return 55;
+            }
+            our int $r9l_g = r9l_ev_bump();
+            my str $s = "a/b";
+            $s =~ s/[/]/_/g;
+            $s . ":" . $r9l_g . ":" . $r9l_bumps;
+        ');
+        if (("" . $ev1) ne "a_b:55:1") { die("tw eval fail"); }
+
+        my scalar $vm1 = Strada::Interpreter::eval_string_vm('
+            /* comment ; { } */
+            my str $s = "x/y";
+            $s =~ s/[/]/:/g;
+            $s;
+        ');
+        if (("" . $vm1) ne "x:y") { die("vm eval fail"); }
+        Strada::Interpreter::reset();
+    }
+
+    Strada::JIT::init();
+    Strada::JIT::eval('func r9l_jit_fn(scalar $h, scalar $x) int {
+        /* block ; { } comment */
+        if ($h->{"k"} / 2 > 0) {
+            my str $q = q{ok};
+            my int $dv = $x // 5;
+            if ($q eq "ok") { return ($h->{"k"} / 2) + $dv; }
+        }
+        return 0;
+    }');
+    Strada::JIT::eval('my int $errno = 9; my scalar $default = "init";');
+    for (my int $j = 0; $j < 3; $j = $j + 1) {
+        my scalar $r1 = Strada::JIT::eval('
+            my hash %h = ("k" => 8);
+            return r9l_jit_fn(\%h, undef) + $errno;
+        ');
+        if (($r1 + 0) != 18) { die("jit fn fail"); }
+        if (Strada::JIT::is_balanced("my str \$h = <<EOF;\n{\nEOF\n") != 1) { die("heredoc balanced fail"); }
+        if (Strada::JIT::is_balanced("/* unclosed") != 0) { die("unclosed comment fail"); }
+        Strada::JIT::eval('$default = undef;');
+        my scalar $r2 = Strada::JIT::eval('return defined($default) ? 1 : 0;');
+        if (($r2 + 0) != 0) { die("undef restore fail"); }
+        Strada::JIT::eval('$default = "init";');
+    }
+    Strada::JIT::reset();
+
+    say("R9_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

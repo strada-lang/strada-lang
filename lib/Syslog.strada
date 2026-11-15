@@ -197,8 +197,8 @@ func setmask(int $mask) int {
 func mask(int $priority) int {
     my int $result = 0;
     __C__ {
-        int p = (int)strada_to_int(priority);
-        int m = LOG_MASK(p);
+        int64_t p = strada_to_int(priority);
+        int64_t m = (p >= 0 && p <= 30) ? (int64_t)(1U << (unsigned int)p) : 0;
         strada_decref(result);
         result = strada_new_int(m);
     }
@@ -209,8 +209,8 @@ func mask(int $priority) int {
 func upto(int $priority) int {
     my int $result = 0;
     __C__ {
-        int p = (int)strada_to_int(priority);
-        int m = LOG_UPTO(p);
+        int64_t p = strada_to_int(priority);
+        int64_t m = (p >= 0 && p <= 30) ? (int64_t)((1U << ((unsigned int)p + 1U)) - 1U) : 0;
         strada_decref(result);
         result = strada_new_int(m);
     }

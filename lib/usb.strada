@@ -560,9 +560,17 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
-        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
-        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
+        char *owned = NULL;
+        const char *d = "";
+        int length = 0;
+        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
+            d = data->value.pv ? data->value.pv : "";
+            length = (int)STRADA_STR_BYTELEN(data);
+        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
+            owned = strada_to_str(data);
+            d = owned ? owned : "";
+            length = (int)strlen(d);
+        }
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -577,6 +585,7 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
                 result = strada_new_int(transferred);
             }
         }
+        free(owned);
     }
     return $result;
 }
@@ -624,9 +633,17 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
-        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
-        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
+        char *owned = NULL;
+        const char *d = "";
+        int length = 0;
+        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
+            d = data->value.pv ? data->value.pv : "";
+            length = (int)STRADA_STR_BYTELEN(data);
+        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
+            owned = strada_to_str(data);
+            d = owned ? owned : "";
+            length = (int)strlen(d);
+        }
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -641,6 +658,7 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
                 result = strada_new_int(transferred);
             }
         }
+        free(owned);
     }
     return $result;
 }
@@ -690,9 +708,17 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
         uint8_t req = (uint8_t)strada_to_int(request);
         uint16_t val = (uint16_t)strada_to_int(value);
         uint16_t index = (uint16_t)strada_to_int(idx);
-        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
-        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
-        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
+        char *owned = NULL;
+        const char *d = "";
+        int length = 0;
+        if (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) {
+            d = data->value.pv ? data->value.pv : "";
+            length = (int)STRADA_STR_BYTELEN(data);
+        } else if (data && (STRADA_IS_TAGGED_INT(data) || data->type != STRADA_UNDEF)) {
+            owned = strada_to_str(data);
+            d = owned ? owned : "";
+            length = (int)strlen(d);
+        }
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
         strada_decref(result);
@@ -702,6 +728,7 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
             int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);
             result = strada_new_int(ret);
         }
+        free(owned);
     }
     return $result;
 }
@@ -804,7 +831,7 @@ func get_string_descriptor(int $handle, int $idx) str {
         int index = (int)strada_to_int(idx);
 
         strada_decref(result);
-        if (h && index > 0) {
+        if (h && index > 0 && index <= 255) {
             unsigned char buffer[256];
             int ret = libusb_get_string_descriptor_ascii(h, index, buffer, sizeof(buffer));
             if (ret >= 0) {

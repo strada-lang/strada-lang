@@ -1,0 +1,270 @@
+#!/usr/bin/env strada
+# Cycle 9 Valgrind leak regression suite: R9-RT1..R9-RT6, R9-C1..C10, R9-LIB1..9
+
+use lib "lib";
+use JSON;
+use compress;
+use Forma;
+use YAML;
+use Template;
+use Digest::SHA;
+
+our str $r9l_vec_g = "";
+our scalar $r9l_obj = undef;
+our str $r9l_mname = "";
+our scalar $r9l_fn = undef;
+our str $r9l_s = "";
+our scalar $r9l_bref = undef;
+our int $r9l_d = 0;
+
+func r9l_inc_d() void { $r9l_d = $r9l_d + 1; }
+
+package R9LTieScalar;
+func TIESCALAR(str $cls, str $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R9LOverStr;
+func new(str $p, int $fail) scalar {
+    my hash %s = ("p" => $p, "fail" => $fail, "pad" => ("z" x 48));
+    return bless(\%s, "R9LOverStr");
+}
+func to_str(scalar $self, scalar $o, int $r) str {
+    if ($self->{"fail"} == 1) { die("r9l_over_boom"); }
+    return $self->{"p"};
+}
+func DESTROY(scalar $self) void { main::r9l_inc_d(); }
+use overload '""' => "to_str";
+
+package R9LAbsThrow;
+func new() scalar {
+    my hash %s = ("pad" => ("q" x 48));
+    return bless(\%s, "R9LAbsThrow");
+}
+func abs_op(scalar $self, scalar $o, int $r) int {
+    die("r9l_abs_boom");
+}
+use overload "abs" => "abs_op";
+
+package R9LPkg;
+func new(str $t) scalar {
+    my hash %s = ("t" => $t, "buf" => ("b" x 48));
+    return bless(\%s, "R9LPkg");
+}
+func act(scalar $self, str $a, str $b) str {
+    return $self->{"t"} . ":" . $a . ":" . $b;
+}
+
+package R9LChild;
+extends R9LPkg;
+func new(str $t) scalar {
+    my hash %s = ("t" => $t, "buf" => ("c" x 48));
+    return bless(\%s, "R9LChild");
+}
+func act(scalar $self, str $a, str $b) str {
+    return SUPER::act($self, $a, $b);
+}
+
+package R9LSlot;
+func noop(scalar $self) int { return 1; }
+
+package main;
+
+func r9l_mut_obj() str {
+    $r9l_obj = R9LChild::new("REPLACED");
+    $r9l_mname = "other";
+    return "B_" . ("b" x 12);
+}
+
+func r9l_throw_arg() str {
+    die("r9l_arg_boom");
+}
+
+func r9l_mut_fn() str {
+    $r9l_fn = undef;
+    return "Y_" . ("y" x 12);
+}
+
+func r9l_mut_s() str {
+    $r9l_s = "OTHER_" . ("o" x 20);
+    return "_TAIL";
+}
+
+func r9l_pkg_mut() str {
+    $r9l_bref = undef;
+    return "R9LPkg";
+}
+
+func r9l_pkg_throw() str {
+    $r9l_bref = undef;
+    die("r9l_bless_boom");
+}
+
+func r9l_loop_work(int $iter) int {
+    my int $acc = 0;
+    my int $i = 0;
+    while ($i < 4) {
+        $i = $i + 1;
+        my array @m = map {
+            if ($_ == 2) { next; }
+            "v_" . $_ . "_" . $iter;
+        } (1, 2, 3);
+        my array @g = grep { length($_) > 0; } @m;
+        my int $d = do {
+            if ($i == 2) { next; }
+            if ($i == 4) { return $acc + size(@g); }
+            10;
+        };
+        $acc = $acc + $d;
+    }
+    return $acc;
+}
+
+async func r9l_async_work(int $n) int {
+    my int $i = 0;
+    my int $s = 0;
+    while ($i < 3) {
+        $i = $i + 1;
+        my array @m = map { "x" . $_; } (1, 2);
+        my int $v = do {
+            if ($i == 2) { next; }
+            if ($i == 3) { return $s + size(@m); }
+            $n;
+        };
+        $s = $s + $v;
+    }
+    return $s;
+}
+
+func main() int {
+    for (my int $iter = 0; $iter < 4; $iter = $iter + 1) {
+        # R9-RT1: Shared handles
+        my str $p = "/tmp/r9l_fh_" . sys::getpid() . "_" . $iter . ".txt";
+        spew($p, "line_" . $iter . "\n");
+        my scalar $fh1 = sys::open($p, "r");
+        my scalar $fh2 = clone($fh1);
+        sys::close($fh1);
+        my str $ln = sys::readline($fh2);
+        sys::close($fh2);
+        sys::unlink($p);
+        if (index($ln, "line_") != 0) { die("fh fail"); }
+
+        my scalar $dh1 = core::opendir(".");
+        my scalar $dh2 = clone($dh1);
+        core::closedir($dh1);
+        my str $de = core::readdir_next($dh2);
+        core::closedir($dh2);
+        if (length($de) == 0) { die("dh fail"); }
+
+        my scalar $m1 = thread::mutex_new();
+        my scalar $m2 = clone($m1);
+        thread::mutex_destroy($m1);
+        thread::mutex_lock($m2);
+        thread::mutex_unlock($m2);
+        thread::mutex_destroy($m2);
+
+        my scalar $c1 = thread::cond_new();
+        my scalar $c2 = clone($c1);
+        thread::cond_destroy($c1);
+        thread::cond_signal($c2);
+        thread::cond_destroy($c2);
+
+        # R9-RT2 + R9-RT4 + R9-RT6
+        my str $lv = "";
+        sys::vec_set($lv, 0, 8, 65 + $iter);
+        $r9l_vec_g = "";
+        core::vec_set($r9l_vec_g, 0, 8, 97 + $iter);
+        my str $tv = "";
+        tie($tv, "R9LTieScalar", "");
+        sys::vec_set($tv, 0, 8, 48 + $iter);
+        untie($tv);
+
+        my int $sx = $iter + 1;
+        my scalar $sr = \$sx;
+        bless($sr, "R9LSlot");
+        core::weaken($sr);
+
+        my num $ad = math::abs(" -12.5 ");
+        my str $amin = "" . math::abs(-9223372036854775807 - 1);
+        if ($ad < 12.0 || $amin ne "9223372036854775808") { die("abs fail"); }
+        try {
+            my int $unused = math::abs(R9LAbsThrow::new());
+        } catch ($e) {}
+
+        # R9-C1: Method / dyn / closure with mutating + throwing args
+        $r9l_obj = R9LChild::new("O" . $iter);
+        $r9l_mname = "act";
+        my str $m1r = $r9l_obj->act("A_" . $iter, r9l_mut_obj());
+        $r9l_mname = "act";
+        my str $m2r = $r9l_obj->$r9l_mname("A_" . $iter, r9l_mut_obj());
+        try {
+            $r9l_obj->act("A_" . $iter, r9l_throw_arg());
+        } catch ($e) {}
+        $r9l_obj = undef;
+
+        $r9l_fn = func(str $x, str $y) str { return $x . ":" . $y; };
+        my str $cr = $r9l_fn->("X_" . $iter, r9l_mut_fn());
+        $r9l_fn = func(str $x, str $y) str { return $x . ":" . $y; };
+        try {
+            $r9l_fn->("X_" . $iter, r9l_throw_arg());
+        } catch ($e) {}
+        $r9l_fn = undef;
+        if (length($m1r) == 0 || length($m2r) == 0 || length($cr) == 0) { die("call fail"); }
+
+        # R9-C2 + R9-C5 + R9-C10
+        my int $lw = r9l_loop_work($iter);
+        my int $aw = await r9l_async_work(5);
+        if ($lw != 22 || $aw != 7) { die("loop/async fail"); }
+
+        $r9l_s = "HEAD_" . $iter;
+        $r9l_s = $r9l_s . r9l_mut_s();
+        $r9l_s = "HEAD_" . $iter;
+        $r9l_s .= r9l_mut_s();
+        my str $ss = "abcdef";
+        substr($ss, 1, 2) .= "_" . $iter;
+
+        my hash %bh = ("t" => "B" . $iter);
+        $r9l_bref = \%bh;
+        my scalar $bl = bless($r9l_bref, r9l_pkg_mut());
+        if (ref($bl) ne "R9LPkg") { die("bless fail"); }
+        my hash %bh2 = ("t" => "B2");
+        $r9l_bref = \%bh2;
+        try {
+            my scalar $bl2 = bless($r9l_bref, r9l_pkg_throw());
+        } catch ($e) {}
+        $r9l_bref = undef;
+
+        # R9-LIB1, R9-LIB2, R9-LIB4, R9-LIB7, R9-LIB8, R9-LIB9
+        my str $big = "{\"k\":\"" . ("q" x 310) . "\",\"i\":" . $iter . "}";
+        my scalar $jo = R9LOverStr::new($big, 0);
+        my scalar $dec = JSON::decode($jo);
+        my str $enc = JSON::encode($dec);
+        my str $gz = compress::gzip($enc);
+        my str $gunz = compress::gunzip($gz);
+        if ($gunz ne $enc) { die("json/gz fail"); }
+
+        my hash %fctx = ("html" => "<b>" . $iter . "</b>");
+        my str $fo1 = Forma::render_string("{{ html | upper }}|{{ html | upper | raw }}", \%fctx);
+        if (length($fo1) == 0) { die("forma fail"); }
+
+        my scalar $yd = YAML::Load("\"a\\n" . $iter . "\": \"v\\\"1\"\n");
+        try { YAML::Load("bad: \"unclosed\n"); } catch ($e) {}
+        my scalar $tt = Template::new({});
+        my str $to = $tt->process_string("[% \"a%]b\" %]", {});
+        if ($to ne "a%]b") { die("tt fail"); }
+        try { $tt->process_string("[% \"unclosed %]", {}); } catch ($e) {}
+
+        my scalar $sho = R9LOverStr::new("abc" . $iter, 0);
+        my str $sh = Digest::SHA::sha256_hex($sho);
+        if (length($sh) != 64 || !defined($yd)) { die("sha/yaml fail"); }
+        try {
+            my str $bad = Digest::SHA::sha256_hex(R9LOverStr::new("bad", 1));
+        } catch ($e) {}
+    }
+
+    say("R9_LEAKS_OK");
+    return 0;
+}

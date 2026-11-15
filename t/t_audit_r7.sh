@@ -257,32 +257,3 @@ EOF
 else
     test_skip "Bug #48 lib/usb/strada_usb.c string descriptor bounds guard" "HAVE_LIBUSB != 1"
 fi
-
-# 12. Bug #49 tools/strada2perl qualifies ::func() after operators on same line
-cat > "$aud_dir/s2p_r7.strada" <<'EOF'
-func main() int {
-    my int $x = ::foo(1) + ::bar(2);
-    my str $y = $a . ::baz();
-    return 0;
-}
-EOF
-s2p_bin="$PROJECT_DIR/tools/strada2perl"
-if [ ! -x "$s2p_bin" ]; then
-    s2p_bin="$aud_dir/strada2perl"
-    (cd "$PROJECT_DIR" && "$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" tools/strada2perl.strada -o "$s2p_bin" >"$aud_dir/s2p_build.log" 2>&1) || true
-fi
-s2p_ok=1
-s2p_diag=""
-if [ -x "$s2p_bin" ] && "$s2p_bin" "$aud_dir/s2p_r7.strada" "$aud_dir/s2p.pl" >"$aud_dir/s2p.log" 2>&1; then
-    s2p_txt=$(cat "$aud_dir/s2p.pl" 2>/dev/null || true)
-    if echo "$s2p_txt" | grep -q 'my \$x = foo(1) + bar(2);' \
-        && echo "$s2p_txt" | grep -q 'my \$y = \$a \. baz();' \
-        && ! echo "$s2p_txt" | grep -qE '::(foo|bar|baz)\('; then
-        s2p_ok=0
-    else
-        s2p_diag="unexpected output: $s2p_txt"
-    fi
-else
-    s2p_diag="strada2perl failed: $(cat "$aud_dir/s2p.log" 2>/dev/null)"
-fi
-aud_r7_record "$s2p_ok" "Bug #49 tools/strada2perl qualifies ::func() after operators" "$s2p_diag"

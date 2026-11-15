@@ -2336,11 +2336,14 @@ static int dbi_rows(DbiStatement *sth) {
 # Connect to a database
 # Returns a database handle (hash reference with _ptr) or undef on failure
 func connect(str $dsn, str $username, str $password) scalar {
+    my str $dsn_s = "" . $dsn;
+    my str $user_s = "" . $username;
+    my str $pass_s = "" . $password;
     my int $dbh_ptr = 0;
     __C__ {
-        char *dsn_str = strada_to_str(dsn);
-        char *user_str = strada_to_str(username);
-        char *pass_str = strada_to_str(password);
+        char *dsn_str = strada_to_str(dsn_s);
+        char *user_str = strada_to_str(user_s);
+        char *pass_str = strada_to_str(pass_s);
         DbiHandle *dbh = dbi_connect_raw(dsn_str, user_str, pass_str, 1, 1);
         strada_decref(dbh_ptr);  /* Free old value before reassign */
         dbh_ptr = strada_new_int((int64_t)(intptr_t)dbh);
@@ -2355,13 +2358,16 @@ func connect(str $dsn, str $username, str $password) scalar {
 
     my hash %handle = ();
     $handle{"_ptr"} = $dbh_ptr;
-    $handle{"dsn"} = $dsn;
+    $handle{"dsn"} = $dsn_s;
     $handle{"connected"} = 1;
     return bless(\%handle, "DBI::db");
 }
 
 # Connect with attributes
 func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar {
+    my str $dsn_s = "" . $dsn;
+    my str $user_s = "" . $username;
+    my str $pass_s = "" . $password;
     my int $auto_commit = 1;
     my int $print_error = 1;
     my int $raise_error = 0;
@@ -2381,9 +2387,9 @@ func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar
     my int $dbh_ptr = 0;
     my str $err_msg = "";
     __C__ {
-        char *dsn_str = strada_to_str(dsn);
-        char *user_str = strada_to_str(username);
-        char *pass_str = strada_to_str(password);
+        char *dsn_str = strada_to_str(dsn_s);
+        char *user_str = strada_to_str(user_s);
+        char *pass_str = strada_to_str(pass_s);
         int ac = (int)strada_to_int(auto_commit);
         int pe = (int)strada_to_int(print_error);
         int re = (int)strada_to_int(raise_error);

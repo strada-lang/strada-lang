@@ -1,0 +1,386 @@
+#!/usr/bin/env strada
+# Cycle 9 Audit regression tests: R9-RT1..R9-RT4, R9-RT6, R9-C1..C2, R9-C4..C5, R9-C8..C10
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+our int $g_fail = 0;
+our str $r9_vec_g = "";
+our scalar $r9_c1_obj = undef;
+our str $r9_c1_mname = "";
+our scalar $r9_c1_fn = undef;
+our str $r9_c5_s = "";
+our array @r9_c5_arr = ();
+our array @r9_log = ();
+our scalar $r9_bless_ref = undef;
+
+func check(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+package R9TieScalar;
+func TIESCALAR(str $cls, str $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R9TieArr;
+func TIEARRAY(str $cls) scalar {
+    my hash %s = ("a" => [10, 20, 30]);
+    return bless(\%s, $cls);
+}
+func FETCHSIZE(scalar $self) int { return size(@{$self->{"a"}}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"a"}->[$i] = $v; }
+
+package R9AbsObj;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R9AbsObj");
+}
+func abs_op(scalar $self, scalar $o, int $r) int {
+    return $self->{"v"} + 1000;
+}
+use overload "abs" => "abs_op";
+
+package R9SlotPkg;
+func noop(scalar $self) int { return 1; }
+
+package R9Base;
+func new(str $tag) scalar {
+    my hash %s = ("tag" => $tag);
+    return bless(\%s, "R9Base");
+}
+func tag_op(scalar $self, str $a, str $b) str {
+    return $self->{"tag"} . ":" . $a . ":" . $b;
+}
+
+package R9Child;
+extends R9Base;
+func new(str $tag) scalar {
+    my hash %s = ("tag" => $tag);
+    return bless(\%s, "R9Child");
+}
+func tag_op(scalar $self, str $a, str $b) str {
+    return "child(" . SUPER::tag_op($self, $a, $b) . ")";
+}
+
+package main;
+
+func c1_mut_obj() str {
+    $r9_c1_obj = R9Child::new("NEW");
+    $r9_c1_mname = "wrong";
+    push(@r9_log, "argB");
+    return "B";
+}
+
+func c1_first_arg() str {
+    push(@r9_log, "argA");
+    return "A";
+}
+
+func c1_throw_arg() str {
+    push(@r9_log, "throw_arg");
+    die("r9_c1_boom");
+}
+
+func c1_cl_arg1() str {
+    push(@r9_log, "cl1");
+    return "X";
+}
+
+func c1_cl_arg2() str {
+    $r9_c1_fn = undef;
+    push(@r9_log, "cl2");
+    return "Y";
+}
+
+func c5_mut_s() str {
+    $r9_c5_s = "CHANGED";
+    return "YZ";
+}
+
+func c5_idx_mut() int {
+    push(@r9_log, "idx");
+    $r9_c5_arr[0] = 500;
+    return 0;
+}
+
+func c5_rhs_mut() int {
+    push(@r9_log, "rhs");
+    $r9_c5_arr[0] = 7;
+    return 5;
+}
+
+func c2_helper() int {
+    my int $acc = 0;
+    my int $i = 0;
+    while ($i < 6) {
+        $i = $i + 1;
+        my array @tmp = map {
+            if ($_ == 2) { next; }
+            $_ * 10;
+        } (1, 2, 3);
+        # Just ensure do{} inside loop works with next/last/redo/goto/return
+        my int $d = do {
+            if ($i == 2) { next; }
+            if ($i == 5) { return $acc + 1000; }
+            $i * 3;
+        };
+        $acc = $acc + $d;
+    }
+    return $acc;
+}
+
+func c2_labeled_goto() int {
+    my int $sum = 0;
+    my int $round = 0;
+    OUTER: while ($round < 4) {
+        $round = $round + 1;
+        my array @vals = grep {
+            my int $x = do { $_ + 0; };
+            if ($round == 3 && $x == 2) { last OUTER; }
+            $x > 0;
+        } (1, 2, 3);
+        $sum = $sum + size(@vals);
+        if ($round == 2) {
+            my int $g = do { goto SKIP_PART; 99; };
+            $sum = $sum + $g;
+            SKIP_PART:
+        }
+    }
+    return $sum;
+}
+
+func c2_redo_early() int {
+    my int $k = 0;
+    my int $hits = 0;
+    while ($k < 3) {
+        $hits = $hits + 1;
+        my int $x = do {
+            if ($k == 0) {
+                $k = 1;
+                redo;
+            }
+            $k;
+        };
+        $k = $x + 1;
+    }
+    return $hits;
+}
+
+async func c2_async_fn() int {
+    my int $i = 0;
+    my int $tot = 0;
+    while ($i < 4) {
+        $i = $i + 1;
+        my array @m = map { $_ + 1; } (1, 2);
+        my int $v = do {
+            if ($i == 2) { next; }
+            if ($i == 4) { return $tot + size(@m); }
+            10;
+        };
+        $tot = $tot + $v;
+    }
+    return $tot;
+}
+
+func c10_sub_off() int { push(@r9_log, "s_off"); return 1; }
+func c10_sub_len() int { push(@r9_log, "s_len"); return 2; }
+func c10_sub_rep() str { push(@r9_log, "s_rep"); return "XX"; }
+
+func c10_pkg_mut() str {
+    $r9_bless_ref = undef;
+    return "R9Child";
+}
+
+func c10_pkg_throw() str {
+    $r9_bless_ref = undef;
+    die("r9_bless_throw");
+}
+
+func main() int {
+    # R9-RT1: Shared handle retain/release
+    my str $fh_path = "/tmp/r9_rt1_" . sys::getpid() . ".txt";
+    spew($fh_path, "hello_rt1\n");
+    my scalar $fh1 = sys::open($fh_path, "r");
+    my scalar $fh2 = clone($fh1);
+    sys::close($fh1);
+    my str $line1 = sys::readline($fh2);
+    sys::close($fh2);
+    sys::unlink($fh_path);
+    check(index($line1, "hello_rt1") == 0, "R9-RT1 cloned fh readable after original closed: " . $line1);
+
+    my scalar $dh1 = core::opendir(".");
+    my scalar $dh2 = clone($dh1);
+    core::closedir($dh1);
+    my str $dent = core::readdir_next($dh2);
+    core::closedir($dh2);
+    check(length($dent) > 0, "R9-RT1 cloned dir handle readable after original closed");
+
+    my scalar $mtx1 = thread::mutex_new();
+    my scalar $mtx2 = clone($mtx1);
+    thread::mutex_destroy($mtx1);
+    thread::mutex_lock($mtx2);
+    thread::mutex_unlock($mtx2);
+    thread::mutex_destroy($mtx2);
+
+    my scalar $cv1 = thread::cond_new();
+    my scalar $cv2 = clone($cv1);
+    thread::cond_destroy($cv1);
+    thread::cond_signal($cv2);
+    thread::cond_destroy($cv2);
+    check(1, "R9-RT1 cloned mutex/cond survived original destroy");
+
+    # R9-RT2: sys::vec_set / core::vec_get across lexical, our, tied
+    my str $lv = "";
+    sys::vec_set($lv, 0, 1, 1);
+    sys::vec_set($lv, 1, 2, 3);
+    sys::vec_set($lv, 1, 4, 10);
+    sys::vec_set($lv, 1, 8, 171);
+    sys::vec_set($lv, 1, 16, 48879);
+    sys::vec_set($lv, 1, 32, 305419896);
+    check(sys::vec_get($lv, 0, 1) == 1 && sys::vec_get($lv, 1, 2) == 3 &&
+          sys::vec_get($lv, 1, 4) == 10 && sys::vec_get($lv, 1, 8) == 171 &&
+          sys::vec_get($lv, 1, 16) == 48879 && sys::vec_get($lv, 1, 32) == 305419896,
+          "R9-RT2 lexical vec_set/vec_get widths 1,2,4,8,16,32");
+
+    $r9_vec_g = "";
+    sys::vec_set($r9_vec_g, 0, 8, 97);
+    check(core::vec_get($r9_vec_g, 0, 8) == 97 && $r9_vec_g eq "a", "R9-RT2 our vec_set");
+
+    my str $tv = "";
+    tie($tv, "R9TieScalar", "");
+    core::vec_set($tv, 0, 8, 66);
+    check(core::vec_get($tv, 0, 8) == 66 && $tv eq "B", "R9-RT2 tied scalar vec_set");
+    untie($tv);
+
+    # R9-RT3: core::hex (oct tested on interp/VM in t_audit_r9.sh)
+    check(core::hex(" 0x1_a! ") == 26 && core::hex("0XFF") == 255, "R9-RT3 core::hex");
+
+    # R9-RT4: weaken blessed slot ref
+    my int $sx = 7;
+    my scalar $sr = \$sx;
+    bless($sr, "R9SlotPkg");
+    core::weaken($sr);
+    check(ref($sr) eq "R9SlotPkg" && $$sr == 7, "R9-RT4 weaken blessed slot ref");
+
+    # R9-RT6: math::abs()
+    my num $ad = math::abs(" -42.5 ");
+    my str $amin_s = "" . math::abs(-9223372036854775807 - 1);
+    my str $tab = "";
+    tie($tab, "R9TieScalar", "-19");
+    my scalar $aobj = R9AbsObj::new(23);
+    check(math::abs(-5) == 5 && math::abs("-42") == 42 && $ad > 42.4 && $ad < 42.6 &&
+          $amin_s eq "9223372036854775808" && math::abs($tab) == 19 && math::abs($aobj) == 1023,
+          "R9-RT6 abs numeric string/INT64_MIN/tied/overload: min=" . $amin_s);
+    untie($tab);
+
+    # R9-C1: Method/Dyn/Super/Closure LTR & borrowed preservation on mut/throw
+    @r9_log = ();
+    $r9_c1_obj = R9Base::new("OLD");
+    my str $mres = $r9_c1_obj->tag_op(c1_first_arg(), c1_mut_obj());
+    check($mres eq "OLD:A:B" && join(",", @r9_log) eq "argA,argB", "R9-C1 method LTR+recv: " . $mres);
+
+    @r9_log = ();
+    $r9_c1_obj = R9Child::new("OLD2");
+    $r9_c1_mname = "tag_op";
+    my str $dmres = $r9_c1_obj->$r9_c1_mname(c1_first_arg(), c1_mut_obj());
+    check($dmres eq "child(OLD2:A:B)" && join(",", @r9_log) eq "argA,argB", "R9-C1 dyn method LTR+recv+mname: " . $dmres);
+
+    my int $c1_threw = 0;
+    try {
+        $r9_c1_obj->tag_op(c1_first_arg(), c1_throw_arg());
+    } catch ($e) {
+        $c1_threw = 1;
+    }
+    check($c1_threw == 1, "R9-C1 method arg throw caught cleanly");
+
+    @r9_log = ();
+    $r9_c1_fn = func(str $x, str $y) str { return $x . "+" . $y; };
+    my str $cres = $r9_c1_fn->(c1_cl_arg1(), c1_cl_arg2());
+    check($cres eq "X+Y" && join(",", @r9_log) eq "cl1,cl2", "R9-C1 closure LTR+callee: " . $cres);
+
+    # R9-C2: loop tmps mark with do/map/grep + next/last/redo/goto/return/async
+    # c2_helper: i=1 -> d=3 (acc=3); i=2 -> next; i=3 -> d=9 (acc=12); i=4 -> d=12 (acc=24); i=5 -> returns 1024
+    check(c2_helper() == 1024, "R9-C2 do/map + next/return");
+    # c2_labeled_goto: round=1 (+3), round=2 (+3), round=3 (last OUTER) => 6
+    check(c2_labeled_goto() == 6, "R9-C2 grep/do + labeled last + goto");
+    # c2_redo_early: hit1 (k=0->1, redo), hit2 (k=1->2), hit3 (k=2->3), exits => 3
+    check(c2_redo_early() == 3, "R9-C2 do + redo");
+    # c2_async_fn: i=1 (+10), i=2 (next), i=3 (+10), i=4 (returns 20+2=22)
+    my int $ares = await c2_async_fn();
+    check($ares == 22, "R9-C2 async func do/map + next/return: " . $ares);
+
+    # R9-C4: my ($a, $b) = ($b, $a) outer scope init
+    my int $pa = 10;
+    my int $pb = 20;
+    {
+        my ($pa, $pb) = ($pb, $pa);
+        check($pa == 20 && $pb == 10, "R9-C4 destructuring swap");
+    }
+    check($pa == 10 && $pb == 20, "R9-C4 outer variables untouched");
+
+    # R9-C5: self-append, .=, substr <op>=, array compound
+    $r9_c5_s = "ab";
+    $r9_c5_s = $r9_c5_s . c5_mut_s();
+    check($r9_c5_s eq "abYZ", "R9-C5 self-append aliases: " . $r9_c5_s);
+
+    $r9_c5_s = "ab";
+    $r9_c5_s .= c5_mut_s();
+    check($r9_c5_s eq "abYZ", "R9-C5 .= aliases: " . $r9_c5_s);
+
+    my str $ss1 = "hello";
+    substr($ss1, 1, 3) .= "XYZ";
+    my str $ss2 = "v=10end";
+    substr($ss2, 2, 2) += 5;
+    check($ss1 eq "hellXYZo" && $ss2 eq "v=15end", "R9-C5 substr compound: " . $ss1 . "|" . $ss2);
+
+    @r9_log = ();
+    @r9_c5_arr = (100);
+    $r9_c5_arr[c5_idx_mut()] += c5_rhs_mut();
+    check(join(",", @r9_log) eq "idx,rhs", "R9-C5 array compound LTR idx->rhs");
+
+    my array @ta = ();
+    tie(@ta, "R9TieArr");
+    $ta[1] += 5;
+    check($ta[1] == 25, "R9-C5 tied array += : " . $ta[1]);
+    untie(@ta);
+
+    # R9-C8..C10: octal literal, INT64_MIN, 4-arg substr LTR, bless non-literal
+    my int $octv = 0755;
+    my str $i64s = "" . (-9223372036854775807 - 1);
+    check($octv == 493 && $i64s eq "-9223372036854775808", "R9-C8/C9 octal/INT64_MIN");
+
+    @r9_log = ();
+    my str $sub4 = "abcdef";
+    substr($sub4, c10_sub_off(), c10_sub_len(), c10_sub_rep());
+    check($sub4 eq "aXXdef" && join(",", @r9_log) eq "s_off,s_len,s_rep", "R9-C10 4-arg substr LTR");
+
+    my hash %bh = ("tag" => "B");
+    $r9_bless_ref = \%bh;
+    my scalar $bl = bless($r9_bless_ref, c10_pkg_mut());
+    check(ref($bl) eq "R9Child" && !defined($r9_bless_ref), "R9-C10 non-literal bless retains arg0");
+
+    my hash %bh2 = ("tag" => "B2");
+    $r9_bless_ref = \%bh2;
+    my int $bl_threw = 0;
+    try {
+        my scalar $bl2 = bless($r9_bless_ref, c10_pkg_throw());
+    } catch ($e) {
+        $bl_threw = 1;
+    }
+    check($bl_threw == 1, "R9-C10 non-literal bless throw caught cleanly");
+
+    if ($g_fail == 0) {
+        say("R9_RUNTIME_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

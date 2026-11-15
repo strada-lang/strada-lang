@@ -394,12 +394,14 @@ func sha256_hex(str $data) str {
 
 # HMAC-SHA256 (RFC 2104) of binary-safe key and data, raw 32 bytes.
 func hmac_sha256(str $key, str $data) str {
+    my str $key_s = "" . $key;
+    my str $data_s = "" . $data;
     my str $result = "";
     __C__ {
         size_t klen = 0, dlen = 0;
         char *kowned = NULL, *downed = NULL;
-        const uint8_t *k = sha_get_bytes_impl(key, &klen, &kowned);
-        const uint8_t *d = sha_get_bytes_impl(data, &dlen, &downed);
+        const uint8_t *k = sha_get_bytes_impl(key_s, &klen, &kowned);
+        const uint8_t *d = sha_get_bytes_impl(data_s, &dlen, &downed);
         uint8_t kb[64];
         uint8_t pad[64];
         uint8_t inner[32];

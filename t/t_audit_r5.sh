@@ -153,31 +153,6 @@ else
     aud_r5_record 1 "tools/strada-md2man escapes quotes and backslashes in --name macro arg" "rc=$mdm_rc out=$mdm_out"
 fi
 
-cat > "$aud_dir/s2p_sample.strada" <<'EOF'
-func greet(str $who) str {
-    return "hi_" . $who;
-}
-func main() int {
-    my int $a = ord("A");
-    if ($a == 65) {
-        say(greet("S2P_OK"));
-    }
-    return 0;
-}
-EOF
-s2p_rc=1
-if (cd "$PROJECT_DIR" && "$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$PROJECT_DIR/tools/strada2perl.strada" -o "$aud_dir/strada2perl" >"$aud_dir/s2p.log" 2>&1) \
-    && "$aud_dir/strada2perl" "$aud_dir/s2p_sample.strada" "$aud_dir/s2p_sample.pl" >>"$aud_dir/s2p.log" 2>&1; then
-    s2p_out=$(perl "$aud_dir/s2p_sample.pl" 2>&1) && s2p_rc=0 || s2p_rc=$?
-else
-    s2p_out=$(tail -n 15 "$aud_dir/s2p.log" 2>/dev/null || true)
-fi
-if [ "$s2p_rc" -eq 0 ] && echo "$s2p_out" | grep -q "hi_S2P_OK"; then
-    aud_r5_record 0 "tools/strada2perl generates runnable Perl 5 output" ""
-else
-    aud_r5_record 1 "tools/strada2perl generates runnable Perl 5 output" "rc=$s2p_rc out=$s2p_out"
-fi
-
 doc_out=$(cd "$PROJECT_DIR" && "$PROJECT_DIR/tools/stradadoc" --no-pager "[unclosed" 2>&1)
 doc_rc=$?
 if [ "$doc_rc" -ne 0 ] && echo "$doc_out" | grep -q "No documentation found"; then

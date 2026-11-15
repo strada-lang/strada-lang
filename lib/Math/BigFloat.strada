@@ -799,6 +799,13 @@ func round(scalar $self, int $places) scalar {
         new_scale = strada_new_int(e_val);
     }
 
+    if ($new_scale < 0) {
+        if ($norm_m ne "0") {
+            $norm_m = $norm_m . ("0" x (0 - $new_scale));
+        }
+        $new_scale = 0;
+    }
+
     my hash %r = ();
     $r{"s"} = $self->{"s"};
     $r{"m"} = $norm_m;

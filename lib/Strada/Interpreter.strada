@@ -583,6 +583,14 @@ enum BI {
     SYS_BYTE_INDEX = 741,
     SYS_GC_COLLECT = 742,
     SYS_ARENA_BEGIN = 743, SYS_ARENA_END = 744,
+    SUBSTR_BYTES = 745, BYTE_AT = 746, CLONE = 747,
+    SYS_VEC_GET = 748, SYS_VEC_SET = 749,
+    STR_REPLACE = 750, STR_REPLACE_FIRST = 751,
+    REGEX_REPLACE = 752, REGEX_REPLACE_ALL = 753,
+    DEREF_SET = 754, DEREF_ARRAY = 755, DEREF_HASH = 756,
+    DUMP = 757, RESERVE = 758, STACKTRACE = 759,
+    SB_NEW = 760, SB_APPEND = 761, SB_TO_STRING = 762,
+    SB_LENGTH = 763, SB_CLEAR = 764, SB_FREE = 765,
     PLACEHOLDER_END = 999
 }
 
@@ -855,12 +863,30 @@ func init_builtins(scalar $interp) void {
     $b{"slurp"} = BI::SLURP; $b{"spew"} = BI::SPEW;
     $b{"abs"} = BI::ABS; $b{"hex"} = BI::HEX; $b{"oct"} = BI::OCT;
     $b{"dumper_str"} = BI::DUMPER_STR; $b{"strada_new_undef"} = BI::STRADA_NEW_UNDEF;
+    $b{"dump"} = BI::DUMP; $b{"reserve"} = BI::RESERVE;
+    $b{"substr_bytes"} = BI::SUBSTR_BYTES; $b{"core::substr_bytes"} = BI::SUBSTR_BYTES; $b{"sys::substr_bytes"} = BI::SUBSTR_BYTES;
+    $b{"byte_at"} = BI::BYTE_AT; $b{"core::byte_at"} = BI::BYTE_AT; $b{"sys::byte_at"} = BI::BYTE_AT;
+    $b{"byte_index"} = BI::SYS_BYTE_INDEX;
+    $b{"clone"} = BI::CLONE; $b{"core::clone"} = BI::CLONE; $b{"sys::clone"} = BI::CLONE;
+    $b{"vec_get"} = BI::SYS_VEC_GET; $b{"core::vec_get"} = BI::SYS_VEC_GET; $b{"sys::vec_get"} = BI::SYS_VEC_GET;
+    $b{"vec_set"} = BI::SYS_VEC_SET; $b{"core::vec_set"} = BI::SYS_VEC_SET; $b{"sys::vec_set"} = BI::SYS_VEC_SET;
+    $b{"str_replace"} = BI::STR_REPLACE; $b{"str_replace_first"} = BI::STR_REPLACE_FIRST;
+    $b{"regex_replace"} = BI::REGEX_REPLACE; $b{"regex_replace_all"} = BI::REGEX_REPLACE_ALL;
+    $b{"unlink"} = BI::SYS_UNLINK; $b{"getpid"} = BI::SYS_GETPID;
+    $b{"write_fd"} = BI::SYS_WRITE_FD; $b{"close_fd"} = BI::SYS_CLOSE_FD;
+    $b{"stacktrace"} = BI::STACKTRACE; $b{"core::stacktrace"} = BI::STACKTRACE; $b{"sys::stacktrace"} = BI::STACKTRACE;
+    $b{"stacktrace_str"} = BI::SYS_STACK_TRACE; $b{"core::stacktrace_str"} = BI::SYS_STACK_TRACE; $b{"sys::stacktrace_str"} = BI::SYS_STACK_TRACE;
+    $b{"caller"} = BI::SYS_CALLER_INFO;
+    $b{"sb_new"} = BI::SB_NEW; $b{"sb_append"} = BI::SB_APPEND;
+    $b{"sb_to_string"} = BI::SB_TO_STRING; $b{"sb_length"} = BI::SB_LENGTH;
+    $b{"sb_clear"} = BI::SB_CLEAR; $b{"sb_free"} = BI::SB_FREE;
     # Ref/memory functions
     $b{"refto"} = BI::REFTO; $b{"refcount"} = BI::REFCOUNT;
     $b{"core::refcount"} = BI::REFCOUNT; $b{"sys::refcount"} = BI::REFCOUNT;
     $b{"core::gc_collect"} = BI::SYS_GC_COLLECT; $b{"sys::gc_collect"} = BI::SYS_GC_COLLECT;
     $b{"is_refto"} = BI::IS_REFTO; $b{"reftype"} = BI::REFTYPE;
     $b{"blessed"} = BI::BLESSED; $b{"deref"} = BI::DEREF;
+    $b{"deref_set"} = BI::DEREF_SET; $b{"deref_array"} = BI::DEREF_ARRAY; $b{"deref_hash"} = BI::DEREF_HASH;
     $b{"derefto"} = BI::DEREFTO; $b{"is_ref"} = BI::IS_REF;
     # OOP helpers
     $b{"set_package"} = BI::SET_PACKAGE; $b{"inherit"} = BI::INHERIT_FN;
@@ -2874,7 +2900,7 @@ func interp_regex_find_all(str $s, str $pat, str $flags, int $global) scalar {
 
 func interp_set_captures(scalar $m) void {
     __C__ {
-        StradaValue *mav = (m && !STRADA_IS_TAGGED_INT(m) && m->type == STRADA_REF) ? m->value.rv : m;
+        StradaValue *mav = (m && !STRADA_IS_TAGGED_INT(m) && m->type == STRADA_REF && !strada_is_slot_ref(m)) ? m->value.rv : m;
         strada_set_captures_sv(mav);
     }
 }
@@ -2883,8 +2909,8 @@ func interp_regex_build_result(str $s, scalar $matches, scalar $repls) str {
     my str $res = "";
     __C__ {
         const char *src = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR && s->value.pv) ? s->value.pv : "";
-        StradaValue *mav = (matches && !STRADA_IS_TAGGED_INT(matches) && matches->type == STRADA_REF) ? matches->value.rv : matches;
-        StradaValue *rav = (repls && !STRADA_IS_TAGGED_INT(repls) && repls->type == STRADA_REF) ? repls->value.rv : repls;
+        StradaValue *mav = (matches && !STRADA_IS_TAGGED_INT(matches) && matches->type == STRADA_REF && !strada_is_slot_ref(matches)) ? matches->value.rv : matches;
+        StradaValue *rav = (repls && !STRADA_IS_TAGGED_INT(repls) && repls->type == STRADA_REF && !strada_is_slot_ref(repls)) ? repls->value.rv : repls;
         strada_regex_set_subject_for_sv(s);
         StradaValue *built = strada_regex_build_result(src, mav, rav);
         strada_regex_clear_subject_len();
@@ -2976,6 +3002,9 @@ func eval_lvalue_read(scalar $interp, scalar $prep, scalar $env) scalar {
         if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) {
             return interp_deref_scalar_ref($interp, $rv);
         }
+        if (reftype($rv) eq "SCALAR") {
+            return deref($rv);
+        }
         return $rv;
     }
     return eval_node($interp, $prep->{"node"}, $env);
@@ -3018,6 +3047,10 @@ func eval_lvalue_write(scalar $interp, scalar $prep, scalar $value, scalar $env)
         my scalar $rv = $prep->{"ref"};
         if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) {
             interp_set_scalar_ref($interp, $rv, $value);
+            return;
+        }
+        if (reftype($rv) eq "SCALAR") {
+            deref_set($rv, $value);
             return;
         }
         my scalar $rnode = $prep->{"node"}->{"ref"};
@@ -4029,6 +4062,125 @@ func interp_sprintf_arr(scalar $interp, scalar $args, int $argc) str {
     return $res;
 }
 
+func interp_clone_val(scalar $v, scalar $seen) scalar {
+    if (!defined($v)) { return undef; }
+    my int $kind = 0;
+    my str $addr = "";
+    my str $bpkg = "";
+    __C__ {
+        if (v && !STRADA_IS_TAGGED_INT(v)) {
+            char kbuf[48];
+            if (v->type == STRADA_ARRAY) {
+                kind = STRADA_MAKE_TAGGED_INT(1);
+                snprintf(kbuf, sizeof(kbuf), "%p", (void *)v);
+                strada_decref(addr);
+                addr = strada_new_str(kbuf);
+            } else if (v->type == STRADA_HASH) {
+                kind = STRADA_MAKE_TAGGED_INT(2);
+                snprintf(kbuf, sizeof(kbuf), "%p", (void *)v);
+                strada_decref(addr);
+                addr = strada_new_str(kbuf);
+            } else if (v->type == STRADA_REF) {
+                kind = strada_is_slot_ref(v) ? STRADA_MAKE_TAGGED_INT(4) : STRADA_MAKE_TAGGED_INT(3);
+                snprintf(kbuf, sizeof(kbuf), "%p", (void *)v);
+                strada_decref(addr);
+                addr = strada_new_str(kbuf);
+            }
+            const char *bp = strada_blessed_name_cstr(v);
+            if (bp && bp[0]) {
+                strada_decref(bpkg);
+                bpkg = strada_new_str(bp);
+            }
+        }
+    }
+    if ($kind == 0) {
+        return $v;
+    }
+    if (length($addr) > 0 && exists($seen, $addr)) {
+        return $seen->{$addr};
+    }
+    if ($kind == 1) {
+        my scalar $copy = [];
+        if (length($bpkg) > 0) {
+            $copy = bless($copy, $bpkg);
+        }
+        $seen->{$addr} = $copy;
+        my int $n = size($v);
+        my int $i = 0;
+        while ($i < $n) {
+            push($copy, interp_clone_val($v->[$i], $seen));
+            $i = $i + 1;
+        }
+        return $copy;
+    }
+    if ($kind == 2) {
+        my scalar $copy = {};
+        if (length($bpkg) > 0) {
+            $copy = bless($copy, $bpkg);
+        }
+        $seen->{$addr} = $copy;
+        my int $is_sref = exists($v, "__scalar_ref__") ? 1 : 0;
+        my scalar $ks = keys($v);
+        my int $n = size($ks);
+        my int $i = 0;
+        while ($i < $n) {
+            my str $k = $ks->[$i];
+            if ($is_sref == 1 && $k eq "env") {
+                $copy->{$k} = $v->{$k};
+            } else {
+                $copy->{$k} = interp_clone_val($v->{$k}, $seen);
+            }
+            $i = $i + 1;
+        }
+        return $copy;
+    }
+    if ($kind == 3) {
+        my scalar $rcopy = undef;
+        my scalar $tgt = undef;
+        __C__ {
+            StradaValue *ph = strada_new_undef();
+            StradaValue *nr = strada_new_ref_take(ph, '$');
+            strada_decref(rcopy);
+            rcopy = nr;
+            if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_REF && v->value.rv) {
+                strada_decref(tgt);
+                tgt = v->value.rv;
+                strada_incref(tgt);
+            }
+        }
+        if (length($bpkg) > 0) {
+            $rcopy = bless($rcopy, $bpkg);
+        }
+        $seen->{$addr} = $rcopy;
+        my scalar $inner = interp_clone_val($tgt, $seen);
+        __C__ {
+            if (rcopy && !STRADA_IS_TAGGED_INT(rcopy) && rcopy->type == STRADA_REF) {
+                StradaValue *old_rv = rcopy->value.rv;
+                if (inner && STRADA_IS_TAGGED_INT(inner)) {
+                    StradaValue *tmp = strada_new_ref(inner, '$');
+                    rcopy->value.rv = tmp->value.rv;
+                    if (rcopy->value.rv) strada_incref(rcopy->value.rv);
+                    strada_decref(tmp);
+                } else {
+                    if (inner) strada_incref(inner);
+                    rcopy->value.rv = inner;
+                }
+                if (old_rv) strada_decref(old_rv);
+            }
+        }
+        return $rcopy;
+    }
+    my scalar $dummy = undef;
+    my scalar $rcopy = \$dummy;
+    if (length($bpkg) > 0) {
+        $rcopy = bless($rcopy, $bpkg);
+    }
+    $seen->{$addr} = $rcopy;
+    my scalar $inner = interp_clone_val(deref($v), $seen);
+    deref_set($rcopy, $inner);
+    return $rcopy;
+}
+
 func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     my int $argc = size($args);
     my int $bid = $interp->{"builtin_ids"}->{$name};
@@ -4603,58 +4755,62 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::HEX) {
+        if ($argc < 1 || !defined($args->[0])) { return 0; }
         my str $s = "" . $args->[0];
-        $s =~ s/^0[xX]//;
-        my int $result = 0;
-        my int $hi = 0;
-        while ($hi < length($s)) {
-            my int $c = char_at($s, $hi);
-            $result = $result * 16;
-            if ($c >= 48 && $c <= 57) { $result = $result + ($c - 48); }
-            elsif ($c >= 97 && $c <= 102) { $result = $result + ($c - 87); }
-            elsif ($c >= 65 && $c <= 70) { $result = $result + ($c - 55); }
-            $hi = $hi + 1;
+        my int $res = 0;
+        __C__ {
+            const char *p = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR && s->value.pv) ? s->value.pv : "";
+            size_t len = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR) ? STRADA_STR_BYTELEN(s) : 0;
+            size_t i = 0;
+            while (i < len && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n' || p[i] == '\r' || p[i] == '\f' || p[i] == '\v')) i++;
+            if (i + 1 < len && p[i] == '0' && (p[i + 1] == 'x' || p[i + 1] == 'X')) i += 2;
+            uint64_t acc = 0;
+            while (i < len) {
+                unsigned char c = (unsigned char)p[i++];
+                if (c == '_') continue;
+                unsigned int d;
+                if (c >= '0' && c <= '9') d = (unsigned int)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = (unsigned int)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') d = (unsigned int)(c - 'A' + 10);
+                else break;
+                acc = (acc << 4) | d;
+            }
+            strada_decref(res);
+            res = strada_new_int((int64_t)acc);
         }
-        return $result;
+        return $res;
     }
     if ($bid == BI::OCT) {
+        if ($argc < 1 || !defined($args->[0])) { return 0; }
         my str $s = "" . $args->[0];
-        if (index($s, "0x") == 0 || index($s, "0X") == 0) {
-            # Hex
-            $s = substr($s, 2, length($s) - 2);
-            my int $result = 0;
-            my int $oi = 0;
-            while ($oi < length($s)) {
-                my int $c = char_at($s, $oi);
-                $result = $result * 16;
-                if ($c >= 48 && $c <= 57) { $result = $result + ($c - 48); }
-                elsif ($c >= 97 && $c <= 102) { $result = $result + ($c - 87); }
-                elsif ($c >= 65 && $c <= 70) { $result = $result + ($c - 55); }
-                $oi = $oi + 1;
+        my int $res = 0;
+        __C__ {
+            const char *p = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR && s->value.pv) ? s->value.pv : "";
+            size_t len = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR) ? STRADA_STR_BYTELEN(s) : 0;
+            size_t i = 0;
+            int base = 8;
+            while (i < len && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n' || p[i] == '\r' || p[i] == '\f' || p[i] == '\v')) i++;
+            if (i + 1 < len && p[i] == '0') {
+                char c = p[i + 1];
+                if (c == 'x' || c == 'X') { base = 16; i += 2; }
+                else if (c == 'b' || c == 'B') { base = 2; i += 2; }
+                else if (c == 'o' || c == 'O') { base = 8; i += 2; }
             }
-            return $result;
-        }
-        if (index($s, "0b") == 0 || index($s, "0B") == 0) {
-            # Binary
-            $s = substr($s, 2, length($s) - 2);
-            my int $result = 0;
-            my int $oi = 0;
-            while ($oi < length($s)) {
-                $result = $result * 2 + (char_at($s, $oi) - 48);
-                $oi = $oi + 1;
+            uint64_t acc = 0;
+            while (i < len) {
+                unsigned char c = (unsigned char)p[i++];
+                if (c == '_') continue;
+                unsigned int d = 99;
+                if (c >= '0' && c <= '9') d = (unsigned int)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = (unsigned int)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') d = (unsigned int)(c - 'A' + 10);
+                if (d >= (unsigned int)base) break;
+                acc = acc * (uint64_t)base + d;
             }
-            return $result;
+            strada_decref(res);
+            res = strada_new_int((int64_t)acc);
         }
-        # Octal
-        $s =~ s/^0+//;
-        if (length($s) == 0) { return 0; }
-        my int $result = 0;
-        my int $oi = 0;
-        while ($oi < length($s)) {
-            $result = $result * 8 + (char_at($s, $oi) - 48);
-            $oi = $oi + 1;
-        }
-        return $result;
+        return $res;
     }
     if ($bid == BI::SYS_CHDIR) {
         my str $dir = "" . $args->[0];
@@ -4685,7 +4841,11 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return core::alarm($args->[0]);
     }
     # --- All remaining core::/core:: builtins (auto-generated call-through) ---
-    if ($bid == BI::SYS_BYTE_SUBSTR) { return core::byte_substr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_BYTE_SUBSTR) {
+        if ($argc < 2) { die("byte_substr requires at least 2 arguments"); }
+        if ($argc == 2) { return core::byte_substr($args->[0], $args->[1], core::byte_length($args->[0])); }
+        return core::byte_substr($args->[0], $args->[1], $args->[2]);
+    }
     if ($bid == BI::SYS_BYTE_INDEX) {
         if (size($args) >= 3) {
             return core::byte_index($args->[0], $args->[1], $args->[2]);
@@ -4856,9 +5016,20 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::ABS) {
+        if ($argc < 1) { return 0; }
         my scalar $v = $args->[0];
-        if ($v < 0) { return 0 - $v; }
-        return $v;
+        if ($interp->{"has_overloads"} == 1 && ref($v) eq "HASH" && exists($v, "__class__")) {
+            my scalar $ovl = check_overload($interp, $v, "abs");
+            if (defined($ovl)) {
+                return call_user_func($interp, $ovl, [$v, undef, 0]);
+            }
+        }
+        my scalar $res = 0;
+        __C__ {
+            strada_decref(res);
+            res = strada_abs(v);
+        }
+        return $res;
     }
     if ($bid == BI::NSORT) {
         my scalar $arr = $args->[0];
@@ -4975,11 +5146,13 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::DEREF) {
         my scalar $rv = $args->[0];
         if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return interp_deref_scalar_ref($interp, $rv); }
+        if (reftype($rv) eq "SCALAR") { return deref($rv); }
         return $rv;
     }
     if ($bid == BI::DEREFTO) {
         my scalar $rv = $args->[0];
         if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return interp_deref_scalar_ref($interp, $rv); }
+        if (reftype($rv) eq "SCALAR") { return deref($rv); }
         return $rv;
     }
     if ($bid == BI::BLESSED) {
@@ -5238,8 +5411,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- core:: filesystem ----
     if ($bid == BI::SYS_UNLINK) {
-        core::unlink($args->[0]);
-        return undef;
+        return core::unlink($args->[0]);
     }
     if ($bid == BI::SYS_RENAME) {
         core::rename($args->[0], $args->[1]);
@@ -5317,10 +5489,23 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return 0;
     }
     if ($bid == BI::SYS_CALLER_INFO) {
-        # In interpreter, return basic info (limited stack introspection)
+        my int $lvl = ($argc >= 1) ? (0 + $args->[0]) : 0;
+        my scalar $cs = $interp->{"call_stack"};
+        my int $cn = size($cs);
+        my int $idx = $cn - 2 - $lvl;
+        if ($lvl < 0 || $idx < -1 || $idx >= $cn) {
+            return undef;
+        }
         my hash %info = ();
-        $info{"function"} = "(interpreter)";
-        $info{"file"} = "(eval)";
+        if ($idx == -1) {
+            if ($cn == 0 || $cs->[0] eq "main") {
+                return undef;
+            }
+            $info{"function"} = "(eval)";
+        } else {
+            $info{"function"} = $cs->[$idx];
+        }
+        $info{"file"} = defined($interp->{"filename"}) ? $interp->{"filename"} : "(eval)";
         $info{"line"} = 0;
         return \%info;
     }
@@ -5749,7 +5934,22 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     if ($bid == BI::MATH_SIN) { return math::sin($args->[0]); }
     if ($bid == BI::MATH_COS) { return math::cos($args->[0]); }
     if ($bid == BI::MATH_POW) { return math::pow($args->[0], $args->[1]); }
-    if ($bid == BI::MATH_ABS) { my scalar $v = $args->[0]; if ($v < 0) { return 0 - $v; } return $v; }
+    if ($bid == BI::MATH_ABS) {
+        if ($argc < 1) { return 0; }
+        my scalar $v = $args->[0];
+        if ($interp->{"has_overloads"} == 1 && ref($v) eq "HASH" && exists($v, "__class__")) {
+            my scalar $ovl = check_overload($interp, $v, "abs");
+            if (defined($ovl)) {
+                return call_user_func($interp, $ovl, [$v, undef, 0]);
+            }
+        }
+        my scalar $res = 0;
+        __C__ {
+            strada_decref(res);
+            res = strada_abs(v);
+        }
+        return $res;
+    }
     if ($bid == BI::MATH_FLOOR) { return math::floor($args->[0]); }
     if ($bid == BI::MATH_CEIL) { return math::ceil($args->[0]); }
     if ($bid == BI::MATH_LOG) { return math::log($args->[0]); }
@@ -6294,6 +6494,345 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         $self{"m"} = $norm_m;
         $self{"e"} = $norm_e;
         return bless(\%self, "BigFloat");
+    }
+
+    if ($bid == BI::SUBSTR_BYTES) {
+        if ($argc < 2) { return ""; }
+        my scalar $sb_s = $args->[0];
+        my scalar $sb_off = $args->[1];
+        my scalar $sb_len = ($argc >= 3) ? $args->[2] : -1;
+        my str $sb_res = "";
+        __C__ {
+            strada_decref(sb_res);
+            sb_res = strada_substr_bytes(sb_s, strada_to_int(sb_off), strada_to_int(sb_len));
+        }
+        return $sb_res;
+    }
+    if ($bid == BI::BYTE_AT) {
+        if ($argc < 2) { return 0; }
+        my scalar $ba_s = $args->[0];
+        my scalar $ba_i = $args->[1];
+        my int $ba_res = 0;
+        __C__ {
+            strada_decref(ba_res);
+            ba_res = strada_byte_at(ba_s, ba_i);
+        }
+        return $ba_res;
+    }
+    if ($bid == BI::CLONE) {
+        if ($argc < 1) { return undef; }
+        my hash %seen = ();
+        return interp_clone_val($args->[0], \%seen);
+    }
+    if ($bid == BI::SYS_VEC_GET) {
+        if ($argc < 3) { return 0; }
+        my scalar $vg_s = $args->[0];
+        my scalar $vg_off = $args->[1];
+        my scalar $vg_bits = $args->[2];
+        my int $vg_res = 0;
+        __C__ {
+            strada_decref(vg_res);
+            vg_res = strada_new_int(strada_vec_get(vg_s, strada_to_int(vg_off), (int)strada_to_int(vg_bits)));
+        }
+        return $vg_res;
+    }
+    if ($bid == BI::SYS_VEC_SET) {
+        if ($argc >= 4) {
+            my scalar $vs_s = $args->[0];
+            my scalar $vs_off = $args->[1];
+            my scalar $vs_bits = $args->[2];
+            my scalar $vs_val = $args->[3];
+            __C__ {
+                strada_vec_set_slot(&vs_s, strada_to_int(vs_off), (int)strada_to_int(vs_bits), strada_to_int(vs_val));
+            }
+        }
+        return undef;
+    }
+    if ($bid == BI::STR_REPLACE || $bid == BI::STR_REPLACE_FIRST) {
+        if ($argc < 3) { return ($argc >= 1) ? $args->[0] : ""; }
+        my scalar $sr_s = $args->[0];
+        my scalar $sr_f = $args->[1];
+        my scalar $sr_r = $args->[2];
+        my int $sr_first = ($bid == BI::STR_REPLACE_FIRST) ? 1 : 0;
+        my str $sr_out = "";
+        __C__ {
+            char *s_own = NULL, *f_own = NULL, *r_own = NULL;
+            const char *s = ""; const char *f = ""; const char *r = "";
+            size_t slen = 0, flen = 0, rlen = 0;
+            if (sr_s && !STRADA_IS_TAGGED_INT(sr_s) && sr_s->type == STRADA_STR && !(sr_s->meta && (sr_s->meta->is_tied || sr_s->meta->blessed_package))) {
+                s = sr_s->value.pv ? sr_s->value.pv : "";
+                slen = STRADA_STR_BYTELEN(sr_s);
+            } else {
+                s_own = strada_to_str(sr_s);
+                s = s_own ? s_own : "";
+                slen = strlen(s);
+            }
+            if (sr_f && !STRADA_IS_TAGGED_INT(sr_f) && sr_f->type == STRADA_STR && !(sr_f->meta && (sr_f->meta->is_tied || sr_f->meta->blessed_package))) {
+                f = sr_f->value.pv ? sr_f->value.pv : "";
+                flen = STRADA_STR_BYTELEN(sr_f);
+            } else {
+                f_own = strada_to_str(sr_f);
+                f = f_own ? f_own : "";
+                flen = strlen(f);
+            }
+            if (sr_r && !STRADA_IS_TAGGED_INT(sr_r) && sr_r->type == STRADA_STR && !(sr_r->meta && (sr_r->meta->is_tied || sr_r->meta->blessed_package))) {
+                r = sr_r->value.pv ? sr_r->value.pv : "";
+                rlen = STRADA_STR_BYTELEN(sr_r);
+            } else {
+                r_own = strada_to_str(sr_r);
+                r = r_own ? r_own : "";
+                rlen = strlen(r);
+            }
+            int u8 = (!STRADA_IS_TAGGED_INT(sr_s) && sr_s && sr_s->type == STRADA_STR && STRADA_STR_IS_UTF8(sr_s)) ? 1 : 0;
+            int r_u8 = (!STRADA_IS_TAGGED_INT(sr_r) && sr_r && sr_r->type == STRADA_STR && STRADA_STR_IS_UTF8(sr_r)) ? 1 : 0;
+            StradaValue *nv = NULL;
+            if (flen == 0) {
+                nv = u8 ? strada_new_str_len_utf8(s, slen) : strada_new_str_len(s, slen);
+            } else if (strada_to_int(sr_first)) {
+                size_t pos = 0;
+                int found = 0;
+                for (size_t i = 0; i + flen <= slen; i++) {
+                    if (memcmp(s + i, f, flen) == 0) { pos = i; found = 1; break; }
+                }
+                if (!found) {
+                    nv = u8 ? strada_new_str_len_utf8(s, slen) : strada_new_str_len(s, slen);
+                } else {
+                    size_t olen = slen - flen + rlen;
+                    char *buf = malloc(olen + 1);
+                    if (buf) {
+                        if (pos > 0) memcpy(buf, s, pos);
+                        if (rlen > 0) memcpy(buf + pos, r, rlen);
+                        if (slen - pos - flen > 0) memcpy(buf + pos + rlen, s + pos + flen, slen - pos - flen);
+                        buf[olen] = '\0';
+                        nv = (u8 || r_u8) ? strada_new_str_len_utf8(buf, olen) : strada_new_str_len(buf, olen);
+                        free(buf);
+                    }
+                }
+            } else {
+                size_t cap = slen * 2 + rlen + 64;
+                char *buf = malloc(cap);
+                if (buf) {
+                    size_t oi = 0;
+                    for (size_t i = 0; i < slen; ) {
+                        if (i + flen <= slen && memcmp(s + i, f, flen) == 0) {
+                            while (oi + rlen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                            if (rlen > 0) memcpy(buf + oi, r, rlen);
+                            oi += rlen;
+                            i += flen;
+                        } else {
+                            while (oi + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                            buf[oi++] = s[i++];
+                        }
+                    }
+                    buf[oi] = '\0';
+                    nv = (u8 || r_u8) ? strada_new_str_len_utf8(buf, oi) : strada_new_str_len(buf, oi);
+                    free(buf);
+                }
+            }
+            free(r_own); free(f_own); free(s_own);
+            strada_decref(sr_out);
+            sr_out = nv ? nv : strada_new_str("");
+        }
+        return $sr_out;
+    }
+    if ($bid == BI::REGEX_REPLACE || $bid == BI::REGEX_REPLACE_ALL) {
+        if ($argc < 3) { return ($argc >= 1) ? $args->[0] : ""; }
+        my scalar $rr_s = $args->[0];
+        my scalar $rr_p = $args->[1];
+        my scalar $rr_r = $args->[2];
+        my scalar $rr_f = ($argc >= 4) ? $args->[3] : "";
+        my int $rr_all = ($bid == BI::REGEX_REPLACE_ALL) ? 1 : 0;
+        my str $rr_out = "";
+        __C__ {
+            char *s_own = NULL, *p_own = NULL, *r_own = NULL, *f_own = NULL;
+            const char *s = ""; const char *p = ""; const char *r = ""; const char *f = "";
+            size_t slen = 0;
+            if (rr_s && !STRADA_IS_TAGGED_INT(rr_s) && rr_s->type == STRADA_STR && !(rr_s->meta && (rr_s->meta->is_tied || rr_s->meta->blessed_package))) {
+                s = rr_s->value.pv ? rr_s->value.pv : "";
+                slen = STRADA_STR_BYTELEN(rr_s);
+            } else {
+                s_own = strada_to_str(rr_s);
+                s = s_own ? s_own : "";
+                slen = strlen(s);
+            }
+            p_own = strada_to_str(rr_p); p = p_own ? p_own : "";
+            r_own = strada_to_str(rr_r); r = r_own ? r_own : "";
+            f_own = strada_to_str(rr_f); f = f_own ? f_own : "";
+            int u8 = (!STRADA_IS_TAGGED_INT(rr_s) && rr_s && rr_s->type == STRADA_STR && STRADA_STR_IS_UTF8(rr_s)) ? 1 : 0;
+            int r_u8 = (!STRADA_IS_TAGGED_INT(rr_r) && rr_r && rr_r->type == STRADA_STR && STRADA_STR_IS_UTF8(rr_r)) ? 1 : 0;
+            char *res = NULL;
+            size_t out_len = 0;
+            (void)strada_regex_replace_capture_len(s, slen, u8, p, r, f, (int)strada_to_int(rr_all), &res, &out_len);
+            StradaValue *nv = (u8 || r_u8)
+                ? strada_new_str_len_utf8(res ? res : s, res ? out_len : slen)
+                : strada_new_str_len(res ? res : s, res ? out_len : slen);
+            free(res);
+            free(f_own); free(r_own); free(p_own); free(s_own);
+            strada_decref(rr_out);
+            rr_out = nv ? nv : strada_new_str("");
+        }
+        return $rr_out;
+    }
+    if ($bid == BI::DEREF_SET) {
+        if ($argc < 2) { return undef; }
+        my scalar $dr_v = $args->[0];
+        my scalar $dr_nv = $args->[1];
+        if (ref($dr_v) eq "HASH" && exists($dr_v, "__scalar_ref__")) {
+            interp_set_scalar_ref($interp, $dr_v, $dr_nv);
+            return $dr_nv;
+        }
+        if (ref($dr_v) eq "HASH" && exists($dr_v, "__tied_scalar__")) {
+            interp_tied_scalar_store($interp, $dr_v->{"tie_obj"}, $dr_nv);
+            return $dr_nv;
+        }
+        if (reftype($dr_v) eq "SCALAR") {
+            return deref_set($dr_v, $dr_nv);
+        }
+        return $dr_nv;
+    }
+    if ($bid == BI::DEREF_ARRAY || $bid == BI::DEREF_HASH) {
+        my int $want_hash = ($bid == BI::DEREF_HASH) ? 1 : 0;
+        my scalar $cur = ($argc >= 1) ? $args->[0] : undef;
+        my int $depth = 0;
+        while ($depth < 1024 && defined($cur)) {
+            if (ref($cur) eq "HASH" && exists($cur, "__scalar_ref__")) {
+                $cur = interp_deref_scalar_ref($interp, $cur);
+                $depth = $depth + 1;
+                next;
+            }
+            if (reftype($cur) eq "SCALAR") {
+                $cur = deref($cur);
+                $depth = $depth + 1;
+                next;
+            }
+            last;
+        }
+        if ($depth >= 1024) { die("Circular reference in deref"); }
+        my int $ck = 0;
+        __C__ {
+            StradaValue *unw = cur;
+            while (unw && !STRADA_IS_TAGGED_INT(unw) && unw->type == STRADA_REF && !strada_is_slot_ref(unw)) {
+                unw = unw->value.rv;
+            }
+            if (unw && !STRADA_IS_TAGGED_INT(unw)) {
+                if (unw->type == STRADA_ARRAY) {
+                    strada_decref(ck);
+                    ck = strada_new_int(1);
+                    if (unw != cur && !(cur->type == STRADA_REF && cur->value.rv == unw)) {
+                        StradaValue *nr = strada_new_ref(unw, '@');
+                        strada_decref(cur);
+                        cur = nr;
+                    }
+                } else if (unw->type == STRADA_HASH) {
+                    strada_decref(ck);
+                    ck = strada_new_int(2);
+                    if (unw != cur && !(cur->type == STRADA_REF && cur->value.rv == unw)) {
+                        StradaValue *nr = strada_new_ref(unw, '%');
+                        strada_decref(cur);
+                        cur = nr;
+                    }
+                }
+            }
+        }
+        if ($want_hash == 1) {
+            if ($ck == 2) { return $cur; }
+            my hash %eh = ();
+            return \%eh;
+        }
+        if ($ck == 1) { return $cur; }
+        my array @ea = ();
+        return \@ea;
+    }
+    if ($bid == BI::DUMP) {
+        if ($argc >= 1) {
+            my scalar $d_sv = $args->[0];
+            my int $d_ind = ($argc >= 2) ? (0 + $args->[1]) : 0;
+            __C__ { strada_dump(d_sv, (int)strada_to_int(d_ind)); }
+        }
+        return undef;
+    }
+    if ($bid == BI::RESERVE || $bid == BI::SYS_ARRAY_RESERVE) {
+        if ($argc >= 2) {
+            my scalar $rs_v = $args->[0];
+            my scalar $rs_cap = $args->[1];
+            my int $rdepth = 0;
+            while ($rdepth < 64 && defined($rs_v)) {
+                if (ref($rs_v) eq "HASH" && exists($rs_v, "__scalar_ref__")) {
+                    $rs_v = interp_deref_scalar_ref($interp, $rs_v);
+                    $rdepth = $rdepth + 1;
+                    next;
+                }
+                if (reftype($rs_v) eq "SCALAR") {
+                    $rs_v = deref($rs_v);
+                    $rdepth = $rdepth + 1;
+                    next;
+                }
+                last;
+            }
+            __C__ { if (rs_v) strada_reserve_sv(rs_v, strada_to_int(rs_cap)); }
+        }
+        return undef;
+    }
+    if ($bid == BI::STACKTRACE) {
+        my scalar $cs = $interp->{"call_stack"};
+        my int $cn = size($cs);
+        my str $st_msg = "Stack trace:\n";
+        my int $ci = $cn - 1;
+        while ($ci >= 0) {
+            $st_msg = $st_msg . "  " . $cs->[$ci] . "\n";
+            $ci = $ci - 1;
+        }
+        __C__ {
+            char *ms = strada_to_str(st_msg);
+            if (ms) { fputs(ms, stderr); free(ms); }
+        }
+        return undef;
+    }
+    if ($bid == BI::SB_NEW) {
+        my scalar $sb_res = undef;
+        if ($argc >= 1) {
+            my scalar $sb_cap = $args->[0];
+            __C__ { strada_decref(sb_res); sb_res = strada_sb_new_cap(sb_cap); }
+        } else {
+            __C__ { strada_decref(sb_res); sb_res = strada_sb_new(); }
+        }
+        return $sb_res;
+    }
+    if ($bid == BI::SB_APPEND) {
+        if ($argc >= 2) {
+            my scalar $sb_obj = $args->[0];
+            my scalar $sb_val = $args->[1];
+            __C__ { strada_sb_append(sb_obj, sb_val); }
+        }
+        return undef;
+    }
+    if ($bid == BI::SB_TO_STRING) {
+        if ($argc < 1) { return ""; }
+        my scalar $sb_obj = $args->[0];
+        my str $sb_str = "";
+        __C__ { strada_decref(sb_str); sb_str = strada_sb_to_string(sb_obj); }
+        return $sb_str;
+    }
+    if ($bid == BI::SB_LENGTH) {
+        if ($argc < 1) { return 0; }
+        my scalar $sb_obj = $args->[0];
+        my int $sb_len = 0;
+        __C__ { strada_decref(sb_len); sb_len = strada_sb_length(sb_obj); }
+        return $sb_len;
+    }
+    if ($bid == BI::SB_CLEAR) {
+        if ($argc >= 1) {
+            my scalar $sb_obj = $args->[0];
+            __C__ { strada_sb_clear(sb_obj); }
+        }
+        return undef;
+    }
+    if ($bid == BI::SB_FREE) {
+        if ($argc >= 1) {
+            my scalar $sb_obj = $args->[0];
+            __C__ { strada_sb_free(sb_obj); }
+        }
+        return undef;
     }
 
     # If we got here with a core::/core::/math::/utf8:: prefix, it's genuinely undefined
@@ -8168,6 +8707,32 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             }
         }
 
+        # Special handling for vec_set / core::vec_set / sys::vec_set writeback on lvalues
+        if (($name eq "vec_set" || $name eq "core::vec_set" || $name eq "sys::vec_set") && $argc == 4) {
+            my scalar $v_arg = $raw_args->[0];
+            if (defined($v_arg)) {
+                my int $vt = $v_arg->{"type"};
+                if ($vt == NI::VARIABLE || $vt == NI::SUBSCRIPT || $vt == NI::HASH_ACCESS ||
+                    $vt == NI::DEREF_ARRAY || $vt == NI::DEREF_HASH || $vt == NI::DEREF_SCALAR) {
+                    my scalar $v_prep = eval_lvalue_prepare($interp, $v_arg, $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    my scalar $v_upd = eval_lvalue_read($interp, $v_prep, $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    my scalar $v_off = eval_node($interp, $raw_args->[1], $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    my scalar $v_bits = eval_node($interp, $raw_args->[2], $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    my scalar $v_val = eval_node($interp, $raw_args->[3], $env);
+                    if ($interp->{"signal"} != SIG::NONE) { return undef; }
+                    __C__ {
+                        strada_vec_set_slot(&v_upd, strada_to_int(v_off), (int)strada_to_int(v_bits), strada_to_int(v_val));
+                    }
+                    eval_lvalue_write($interp, $v_prep, $v_upd, $env);
+                    return undef;
+                }
+            }
+        }
+
         # Special handling for core::weaken / sys::weaken / core::isweak / sys::isweak
         if (($name eq "core::weaken" || $name eq "sys::weaken" ||
              $name eq "core::isweak" || $name eq "sys::isweak") && $argc == 1) {
@@ -8547,6 +9112,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         if (ref($ref_val) eq "HASH" && exists($ref_val, "__scalar_ref__")) {
             return interp_deref_scalar_ref($interp, $ref_val);
         }
+        if (reftype($ref_val) eq "SCALAR") {
+            return deref($ref_val);
+        }
         return $ref_val;
     }
 
@@ -8631,7 +9199,29 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     # --- Function Reference (\&func) ---
     if ($type == NI::FUNC_REF) {
         my str $fname = $node->{"name"};
-        my scalar $func_info = interp_get_func($interp, $fname);
+        my scalar $func_info = undef;
+        if (index($fname, "::") < 0) {
+            my str $cur_pkg = interp_env_pkg($interp, $env);
+            if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
+                $func_info = interp_get_func($interp, $cur_pkg . "::" . $fname);
+            }
+        }
+        if (!defined($func_info)) {
+            $func_info = interp_get_func($interp, $fname);
+        }
+        if (!defined($func_info) && index($fname, "::") < 0) {
+            my str $suffix = "_" . $fname;
+            my scalar $fkeys = keys($interp->{"functions"});
+            my int $fki = 0;
+            while ($fki < size($fkeys)) {
+                my str $fk = $fkeys->[$fki];
+                if (length($fk) > length($suffix) && substr($fk, length($fk) - length($suffix), length($suffix)) eq $suffix) {
+                    $func_info = $interp->{"functions"}->{$fk};
+                    last;
+                }
+                $fki = $fki + 1;
+            }
+        }
         if (defined($func_info)) {
             return $func_info;
         }
@@ -8786,7 +9376,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
     # --- __PACKAGE__ ---
     if ($type == NI::DUNDER_PACKAGE) {
-        return $interp->{"package"};
+        if (exists($node, "package") && defined($node->{"package"}) && length($node->{"package"}) > 0) {
+            return $node->{"package"};
+        }
+        return interp_env_pkg($interp, $env);
     }
 
     # --- __FILE__ ---
@@ -8865,6 +9458,14 @@ func eval_skip_ws_cmt(str $code, int $pos, int $len) int {
             }
             next;
         }
+        if ($c eq "/" && $i + 1 < $len && substr($code, $i + 1, 1) eq "*") {
+            $i = $i + 2;
+            while ($i + 1 < $len && (substr($code, $i, 1) ne "*" || substr($code, $i + 1, 1) ne "/")) {
+                $i = $i + 1;
+            }
+            if ($i + 1 < $len) { $i = $i + 2; } else { $i = $len; }
+            next;
+        }
         last;
     }
     return $i;
@@ -8878,13 +9479,36 @@ func eval_read_word(str $code, int $pos, int $len) str {
     return substr($code, $pos, $j - $pos);
 }
 
-func eval_scan_regex_body(str $code, int $pos, int $len) int {
+func eval_scan_regex_body(str $code, int $pos, int $len, int $allow_cc) int {
     my int $i = $pos;
+    my int $in_cc = 0;
+    my int $cc_start = 0;
     while ($i < $len) {
         my str $c = substr($code, $i, 1);
         if ($c eq "\\" && $i + 1 < $len) {
+            $cc_start = 0;
             $i = $i + 2;
             next;
+        }
+        if ($allow_cc == 1) {
+            if ($in_cc == 1) {
+                if ($c eq "^" && $cc_start == 1) {
+                    $i = $i + 1;
+                    next;
+                }
+                if ($c eq "]" && $cc_start == 0) {
+                    $in_cc = 0;
+                }
+                $cc_start = 0;
+                $i = $i + 1;
+                next;
+            }
+            if ($c eq "[") {
+                $in_cc = 1;
+                $cc_start = 1;
+                $i = $i + 1;
+                next;
+            }
         }
         if ($c eq "/") {
             return $i + 1;
@@ -8909,6 +9533,14 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
             while ($i < $len && substr($code, $i, 1) ne "\n") {
                 $i = $i + 1;
             }
+            next;
+        }
+        if ($c eq "/" && $i + 1 < $len && substr($code, $i + 1, 1) eq "*") {
+            $i = $i + 2;
+            while ($i + 1 < $len && (substr($code, $i, 1) ne "*" || substr($code, $i + 1, 1) ne "/")) {
+                $i = $i + 1;
+            }
+            if ($i + 1 < $len) { $i = $i + 2; } else { $i = $len; }
             next;
         }
         if ($c eq "\"" || $c eq "'") {
@@ -8937,10 +9569,11 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
             if ($w eq "s" || $w eq "tr" || $w eq "y" || $w eq "m") {
                 my int $after_w = $i + length($w);
                 if ($after_w < $len && substr($code, $after_w, 1) eq "/") {
-                    my int $end1 = eval_scan_regex_body($code, $after_w + 1, $len);
+                    my int $use_cc = ($w eq "s" || $w eq "m") ? 1 : 0;
+                    my int $end1 = eval_scan_regex_body($code, $after_w + 1, $len, $use_cc);
                     if ($end1 >= 0) {
                         if ($w ne "m") {
-                            my int $end2 = eval_scan_regex_body($code, $end1, $len);
+                            my int $end2 = eval_scan_regex_body($code, $end1, $len, 0);
                             if ($end2 >= 0) { $end1 = $end2; }
                         }
                         while ($end1 < $len && (substr($code, $end1, 1) =~ /[a-zA-Z]/)) {
@@ -8968,7 +9601,7 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
                 $is_rx = 1;
             }
             if ($is_rx == 1) {
-                my int $endr = eval_scan_regex_body($code, $i + 1, $len);
+                my int $endr = eval_scan_regex_body($code, $i + 1, $len, 1);
                 if ($endr >= 0) {
                     while ($endr < $len && (substr($code, $endr, 1) =~ /[a-zA-Z]/)) {
                         $endr = $endr + 1;
@@ -9016,6 +9649,57 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
         $i = $i + 1;
     }
     return $len;
+}
+
+func eval_strip_our_init(str $chunk) str {
+    my int $len = length($chunk);
+    my int $i = 0;
+    my int $depth = 0;
+    while ($i < $len) {
+        my str $c = substr($chunk, $i, 1);
+        if ($c eq "\"" || $c eq "'") {
+            my str $q = $c;
+            $i = $i + 1;
+            while ($i < $len) {
+                my str $sc = substr($chunk, $i, 1);
+                if ($sc eq "\\" && $i + 1 < $len) {
+                    $i = $i + 2;
+                    next;
+                }
+                if ($sc eq $q) {
+                    $i = $i + 1;
+                    last;
+                }
+                $i = $i + 1;
+            }
+            next;
+        }
+        if ($c eq "#") {
+            while ($i < $len && substr($chunk, $i, 1) ne "\n") {
+                $i = $i + 1;
+            }
+            next;
+        }
+        if ($c eq "/" && $i + 1 < $len && substr($chunk, $i + 1, 1) eq "*") {
+            $i = $i + 2;
+            while ($i + 1 < $len && (substr($chunk, $i, 1) ne "*" || substr($chunk, $i + 1, 1) ne "/")) {
+                $i = $i + 1;
+            }
+            if ($i + 1 < $len) { $i = $i + 2; } else { $i = $len; }
+            next;
+        }
+        if ($c eq "(" || $c eq "[" || $c eq "{") {
+            $depth = $depth + 1;
+        } elsif ($c eq ")" || $c eq "]" || $c eq "}") {
+            if ($depth > 0) { $depth = $depth - 1; }
+        } elsif ($c eq "=" && $depth == 0) {
+            my str $prefix = substr($chunk, 0, $i);
+            $prefix =~ s/\s+$//;
+            return $prefix . ";";
+        }
+        $i = $i + 1;
+    }
+    return $chunk;
 }
 
 func split_eval_units(str $code, str $start_pkg) scalar {
@@ -9088,7 +9772,11 @@ func split_eval_units(str $code, str $start_pkg) scalar {
                 $chunk = $chunk . ";";
             }
             $top = $top . $chunk . "\n";
-            $top_persist = $top_persist . $chunk . "\n";
+            if ($kw eq "our") {
+                $top_persist = $top_persist . eval_strip_our_init($chunk) . "\n";
+            } else {
+                $top_persist = $top_persist . $chunk . "\n";
+            }
             if ($kw eq "package") {
                 my int $ps = eval_skip_ws_cmt($code, $pos + 7, $end);
                 my int $pe = $ps;

@@ -2483,6 +2483,13 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
 
+        # Analyze initializer before registering new declaration bindings so
+        # `my ($a, $b) = ($b, $a);` resolves RHS against outer scope cleanly.
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+
         # Register all variables if this is a declaration; otherwise validate existing targets
         if ($is_decl == 1) {
             my int $i = 0;
@@ -2528,12 +2535,6 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 }
                 $i = $i + 1;
             }
-        }
-
-        # Analyze initializer
-        my scalar $init_expr = $stmt->{"init"};
-        if (is_valid_node($init_expr) == 1) {
-            analyze_expression($ctx, $init_expr);
         }
         return;
     }

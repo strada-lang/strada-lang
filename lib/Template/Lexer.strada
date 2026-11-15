@@ -95,8 +95,53 @@ func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $po
         if (length($pending_text) > 0) { push(@chunks, text_chunk($pending_text)); }
         $pending_text = "";
 
-        # find the end tag
-        my int $te = index_from($template, $end_tag, $after);
+        # find the end tag (skip quoted string literals in non-comment directives)
+        my int $chk = $after;
+        while ($chk < $n) {
+            my str $wc = substr($template, $chk, 1);
+            if ($wc eq " " || $wc eq "\t" || $wc eq "\r" || $wc eq "\n") {
+                $chk = $chk + 1;
+            } else {
+                last;
+            }
+        }
+        my int $is_cmt = ($chk < $n && substr($template, $chk, 1) eq "#") ? 1 : 0;
+        my int $te = -1;
+        if ($is_cmt == 1) {
+            $te = index_from($template, $end_tag, $after);
+        } else {
+            my int $si = $after;
+            while ($si <= $n - $elen) {
+                my str $sc = substr($template, $si, 1);
+                if ($sc eq "'" || $sc eq "\"") {
+                    my int $qi = $si + 1;
+                    my int $closed = 0;
+                    while ($qi < $n) {
+                        my str $qc = substr($template, $qi, 1);
+                        if ($qc eq "\\" && $qi + 1 < $n) {
+                            $qi = $qi + 2;
+                            next;
+                        }
+                        if ($qc eq $sc) {
+                            $qi = $qi + 1;
+                            $closed = 1;
+                            last;
+                        }
+                        $qi = $qi + 1;
+                    }
+                    $si = $qi;
+                    if ($closed == 0) {
+                        throw(Template::Exception::make("parse", "unterminated string literal"));
+                    }
+                    next;
+                }
+                if (substr($template, $si, $elen) eq $end_tag) {
+                    $te = $si;
+                    last;
+                }
+                $si = $si + 1;
+            }
+        }
         if ($te < 0) {
             # unterminated tag: treat the rest as literal text
             $pending_text = substr($template, $ts, $n - $ts);

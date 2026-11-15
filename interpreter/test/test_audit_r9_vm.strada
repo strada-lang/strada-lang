@@ -1,0 +1,149 @@
+# Cycle 9 compiled / tree-walk / bytecode --vm parity suite (R9-VM1..5, R9-TW1)
+
+enum R9VMColor {
+    R9_RED = 10,
+    R9_GREEN = 20
+};
+
+our str $g_r9_vbuf = "";
+our int $g_r9_side = 0;
+
+package R9VMPkg;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R9VMPkg");
+}
+func hi(int $n) str {
+    return "pkg:" . __PACKAGE__ . ":" . ($n + 1);
+}
+func make_pkg_getter() scalar {
+    return func() str {
+        return "cl:" . __PACKAGE__;
+    };
+}
+
+package R9VMSubMod;
+func only_submod_suffix(int $x) int {
+    return $x * 3;
+}
+
+package R9VMTie;
+func TIESCALAR(str $cls, str $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, $cls);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R9VMAbsObj;
+func new(int $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "R9VMAbsObj");
+}
+func abs_op(scalar $self, scalar $o, int $r) int {
+    return $self->{"v"} + 1000;
+}
+use overload "abs" => "abs_op";
+
+package main;
+
+func vm_local_fn(int $x) int {
+    return $x + 5;
+}
+
+async func r9_async_triple(int $x) int {
+    return $x * 3;
+}
+
+func main() int {
+    # R9-VM1: slot scalar ref & STRADA_REF interop
+    my int $vx = 42;
+    my scalar $vsr = \$vx;
+    say("VM1A:" . reftype($vsr) . ":" . $$vsr . ":" . deref($vsr));
+    deref_set($vsr, 99);
+    say("VM1B:" . $vx . ":" . $$vsr);
+
+    # R9-VM2: UTF-8 s///e, zero-width s///eg, NUL-byte regex match
+    my str $u1 = "café";
+    $u1 =~ s/(é)/"[" . $1 . "]"/eg;
+    my str $zw1 = "ab";
+    $zw1 =~ s/(?=b)/"_"/eg;
+    my str $zw2 = "aé";
+    $zw2 =~ s/(?=é)/"-"/eg;
+    my str $bin = "a" . chr(0) . "b";
+    my int $bm = ($bin =~ /b/) ? 1 : 0;
+    say("VM2:" . $u1 . "|" . $zw1 . "|" . $zw2 . "|" . $bm);
+
+    # R9-VM3: missing builtins & abs parity
+    my str $bstr = "café";
+    my str $sb2 = substr_bytes($bstr, 3);
+    my str $sb3 = substr_bytes($bstr, 0, 3);
+    my int $bat = byte_at($bstr, 2);
+    my int $bidx = byte_index($bstr, "f");
+    say("VM3A:" . core::byte_length($sb2) . ":" . core::byte_length($sb3) . ":" . $bat . ":" . $bidx);
+
+    my scalar $o1 = R9VMPkg::new(7);
+    my scalar $o2 = clone($o1);
+    $o2->{"v"} = 88;
+    my hash %cyc = ("n" => 5);
+    $cyc{"self"} = \%cyc;
+    my scalar $cyc2 = clone(\%cyc);
+    $cyc2->{"n"} = 9;
+    say("VM3B:" . blessed($o2) . ":" . $o1->{"v"} . ":" . $o2->{"v"} . ":" . $cyc{"n"} . ":" . $cyc2->{"self"}->{"n"});
+
+    my str $lbuf = "";
+    core::vec_set($lbuf, 0, 8, 65);
+    $g_r9_vbuf = "";
+    sys::vec_set($g_r9_vbuf, 0, 8, 90);
+    say("VM3C:" . core::vec_get($lbuf, 0, 8) . ":" . $lbuf . ":" . sys::vec_get($g_r9_vbuf, 0, 8) . ":" . $g_r9_vbuf);
+
+    my str $sr1 = str_replace("foo bar foo", "foo", "baz");
+    my str $sr2 = str_replace_first("foo bar foo", "foo", "baz");
+    my str $rr1 = regex_replace("a1 b2", "[0-9]+", "X");
+    my str $rr2 = regex_replace_all("a1 b2", "[0-9]+", "X");
+    my scalar $aref = [11, 22];
+    my scalar $da = deref_array($aref);
+    my scalar $href = {"k" => 77};
+    my scalar $dh = deref_hash($href);
+    my array @res_a = ();
+    reserve(\@res_a, 16);
+    push(@res_a, 5);
+    my num $ad = math::abs(" -42.5 ");
+    my str $amin = "" . math::abs(-9223372036854775807 - 1);
+    my str $vtab = "";
+    tie($vtab, "R9VMTie", "-19");
+    my scalar $vaobj = R9VMAbsObj::new(23);
+    my int $atab = math::abs($vtab);
+    my int $aobj = math::abs($vaobj);
+    untie($vtab);
+    say("VM3D:" . $sr1 . "|" . $sr2 . "|" . $rr1 . "|" . $rr2 . "|" . size($da) . ":" . $da->[1] . ":" . $dh->{"k"} . ":" . $res_a[0] . "|" . sprintf("%.1f", $ad) . "|" . $amin . "|" . $atab . "|" . $aobj);
+
+    # R9-VM4: enum, \&func, __PACKAGE__/__LINE__, async/await
+    my int $ev = R9VMColor::R9_RED + R9VMColor::R9_GREEN;
+    my scalar $fr1 = \&vm_local_fn;
+    my scalar $fr2 = \&R9VMPkg::hi;
+    my scalar $fr3 = \&R9VMSubMod::only_submod_suffix;
+    my scalar $pg = R9VMPkg::make_pkg_getter();
+    my int $line_ok = (__LINE__ > 0) ? 1 : 0;
+    my int $aw = await r9_async_triple(14);
+    say("VM4:" . $ev . "|" . $fr1->(4) . "|" . $fr2->(9) . "|" . $fr3->(4) . "|" . __PACKAGE__ . "|" . $pg->() . "|" . $line_ok . "|" . $aw);
+
+    # R9-VM5: NUL-containing hash keys
+    my str $nk1 = "k" . chr(0) . "1";
+    my str $nk2 = "k" . chr(0) . "2";
+    my hash %nh = ();
+    $nh{$nk1} = "one";
+    $nh{$nk2} = "two";
+    $nh{$nk1} = "ONE";
+    my int $ex_before = exists($nh{$nk1}) ? 1 : 0;
+    my int $nkeys_b = size(keys(%nh));
+    delete($nh{$nk1});
+    my int $ex_after = exists($nh{$nk1}) ? 1 : 0;
+    my str $rem_val = $nh{$nk2};
+    say("VM5:" . $ex_before . ":" . $nkeys_b . ":" . $ex_after . ":" . size(keys(%nh)) . ":" . $rem_val);
+
+    # R9-TW1: core::hex parity (bare hex/oct tested in t_audit_r9.sh)
+    say("TW1:" . core::hex(" 0x1_f ") . ":" . core::hex("0XFF"));
+
+    return 0;
+}

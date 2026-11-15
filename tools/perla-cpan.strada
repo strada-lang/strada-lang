@@ -283,6 +283,9 @@ func _install_module(str $module, str $lib_dir, int $verbose, int $depth) int {
     if ($is_xs == 1) {
         say("  XS module detected — compiling against perla_perl.h");
         my int $ok = _install_xs_module($extract_dir, $lib_dir, $verbose);
+        if ($ok == 1) {
+            _install_deps($module, $lib_dir, $verbose, $depth + 1);
+        }
         core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
         return $ok;
     }

@@ -312,6 +312,20 @@ func gen_return_value(scalar $cg, scalar $value) int {
     return 0;
 }
 
+func emit_var_decl_slot_prologue(scalar $cg, str $c_name) int {
+    emit_sv_ptr_decl($cg, $c_name);
+    emit($cg, " = NULL;\n");
+    my int $pushed = 0;
+    if (cleanup_push_useful($cg) == 1) {
+        emit_indent($cg);
+        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+        $pushed = 1;
+    }
+    emit_indent($cg);
+    emit($cg, $c_name);
+    return $pushed;
+}
+
 func gen_statement(scalar $cg, scalar $stmt) void {
     # Emit #line directive for source-level debugging
     emit_line_for_stmt($cg, $stmt);
@@ -376,7 +390,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
         }
         my int $box_scalar = 0;
-        my int $boxed_pushed_early = 0;
         my str $target_lval = $c_name;
         if ($sigil ne "%" && $sigil ne "@" && $var_type != TYPE_HASH() && $var_type != TYPE_ARRAY()) {
             if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($var_st_name) == 0) {
@@ -384,9 +397,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 $target_lval = "(*__cell_" . $c_name . ")";
             }
         }
+        # Track the slot (and whether its cleanup push was elided) BEFORE
+        # evaluating $init so any throw/return/goto/loop-control inside the
+        # initializer sees the exact runtime cleanup stack state.
+        my str $decl_track = $c_name;
+        if ($box_scalar == 1) {
+            $decl_track = "@cell:" . $c_name;
+        }
+        scope_track_var($cg, $decl_track);
+        if (cleanup_push_useful($cg) == 0) {
+            scope_mark_no_push($cg, $decl_track);
+        }
 
         if ($sigil eq "%" || $var_type == TYPE_HASH()) {
-            emit_sv_ptr_decl($cg, $c_name);
+            emit_var_decl_slot_prologue($cg, $c_name);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 my scalar $init = $stmt->{"init"};
@@ -445,7 +469,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, ")");
             }
         } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
-            emit_sv_ptr_decl($cg, $c_name);
+            emit_var_decl_slot_prologue($cg, $c_name);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 # Handle empty () which parser returns as anon_hash
@@ -548,11 +572,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 }
                 if (cleanup_push_useful($cg) == 1) {
                     emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . "); ");
-                    $boxed_pushed_early = 1;
                 }
                 emit($cg, "(*__cell_" . $c_name . ")");
             } else {
-                emit_sv_ptr_decl($cg, $c_name);
+                emit_var_decl_slot_prologue($cg, $c_name);
             }
             my str $saved_decl_boxed = "" . $cg->{"declaring_boxed_var"};
             if ($box_scalar == 1) {
@@ -659,13 +682,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"struct_vars"}->{$c_name} = $var_st_name;
         $cg->{"active_boxed_vars"}->{$c_name} = $box_scalar;
         $cg->{"func_locals_seen"}->{$c_name} = 1;
-        # Track variable for scope cleanup
-        # Use escaped name for C code generation
-        if ($box_scalar == 1) {
-            scope_track_var($cg, "@cell:" . $c_name);
-        } else {
-            scope_track_var($cg, $c_name);
-        }
 
         # Track known blessed type for devirtualization
         # When $p = Point::new(...) or $p = Counter::new_counter(), we know the class
@@ -693,36 +709,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
         }
 
-        # Push every owned local to the cleanup stack at declaration.
-        # The matching strada_cleanup_pop is emitted by
-        # emit_scope_decref at scope_pop. Without this, a function
-        # that does `my $x = ...; another_func(); ...` leaked $x
-        # whenever another_func() threw — longjmp skipped our
-        # scope_pop. The catch's strada_cleanup_drain_to walks the
-        # cleanup stack down to the try-entry mark and decref's
-        # everything above it, including our pushed locals.
-        #
-        # In `main()` outside any try block, no catch frame can ever drain
-        # the entry (no caller has a try around us; no local try is
-        # active), so the push is pure overhead. Skip it and record the
-        # var in scope_no_push_vars so emit_scope_decref doesn't emit a
-        # mismatched cleanup_pop.
-        if ($boxed_pushed_early == 0) {
-            if (cleanup_push_useful($cg) == 1) {
-                emit_indent($cg);
-                if ($box_scalar == 1) {
-                    emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . ");\n");
-                } else {
-                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-                }
-            } else {
-                if ($box_scalar == 1) {
-                    scope_mark_no_push($cg, "@cell:" . $c_name);
-                } else {
-                    scope_mark_no_push($cg, $c_name);
-                }
-            }
-        }
+        # Scope registration, cleanup push, and scope_mark_no_push (when elided
+        # inside main() with no active try) all ran in the pre-initializer
+        # prologue above so throw/return/goto/loop-control inside $init see
+        # the exact runtime cleanup stack state.
         return;
     }
 
@@ -733,23 +723,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"active_boxed_vars"}->{$c_name} = 0;
         $cg->{"func_locals_seen"}->{$c_name} = 1;
 
-        # Track variable for cleanup
+        # Track variable and push-elision state before evaluating $init
         scope_track_var($cg, $c_name);
 
         emit_indent($cg);
-        emit_sv_ptr_decl($cg, $c_name);
+        my int $cd_pushed = emit_var_decl_slot_prologue($cg, $c_name);
+        if ($cd_pushed == 0) {
+            scope_mark_no_push($cg, $c_name);
+        }
         emit($cg, " = ");
         gen_expression($cg, $init);
         emit($cg, ";\n");
-
-        # Same indirect-throw protection as NODE_VAR_DECL — same elision
-        # criterion (main()-with-no-try has nothing to drain).
-        if (cleanup_push_useful($cg) == 1) {
-            emit_indent($cg);
-            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-        } else {
-            scope_mark_no_push($cg, $c_name);
-        }
         return;
     }
 
@@ -978,8 +962,23 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $var_count = $stmt->{"var_count"};
         my scalar $init = $stmt->{"init"};
         my int $is_decl = $stmt->{"is_decl"};
+        my int $ds_id = ($cg->{"destruct_id"} + 0) + 1;
+        $cg->{"destruct_id"} = $ds_id;
+        my str $ds_src = "__destruct_src_" . $ds_id;
+        my int $ds_push = cleanup_push_useful($cg);
 
-        # If declaration, first declare all variables at outer scope
+        # Evaluate RHS initializer BEFORE declaring $is_decl == 1 LHS variables
+        # so `my ($a, $b) = ($b, $a)` reads the outer variables first.
+        emit_indent($cg);
+        emit($cg, "StradaValue *" . $ds_src . " = ");
+        gen_expression($cg, $init);
+        emit($cg, ";\n");
+        if (needs_temp_cleanup($cg, $init) == 0) {
+            emit_indent($cg);
+            emit($cg, "strada_incref(" . $ds_src . ");\n");
+        }
+
+        # If declaration, now declare all variables at outer scope (boxing captured scalars if needed)
         if ($is_decl == 1) {
             my int $i = 0;
             while ($i < $var_count) {
@@ -1007,23 +1006,47 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 } else {
                     $cg->{"num_vars"}->{$name} = "";
                 }
-                $cg->{"active_boxed_vars"}->{$name} = 0;
                 $cg->{"func_locals_seen"}->{$name} = 1;
-                emit_indent($cg);
-                emit_sv_ptr_decl($cg, $name);
-                if ($vsigil eq "%") {
-                    emit($cg, " = strada_new_hash();\n");
-                } elsif ($vsigil eq "@") {
-                    emit($cg, " = strada_new_array();\n");
-                } else {
-                    emit($cg, " = strada_new_undef();\n");
+                my int $ds_box = 0;
+                if ($vsigil ne "@" && $vsigil ne "%" && ($cg->{"cand_boxed_vars"}->{$name} + 0) == 1) {
+                    $ds_box = 1;
                 }
-                scope_track_var($cg, $name);
-                if (cleanup_push_useful($cg) == 1) {
+                if ($ds_box == 1) {
+                    $cg->{"active_boxed_vars"}->{$name} = 1;
                     emit_indent($cg);
-                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $name . ");\n");
+                    if ($cg->{"func_has_try"} == 1) {
+                        emit($cg, "StradaValue ** volatile __cell_" . $name . " = strada_cell_alloc();\n");
+                    } else {
+                        emit($cg, "StradaValue **__cell_" . $name . " = strada_cell_alloc();\n");
+                    }
+                    emit_indent($cg);
+                    emit($cg, "(*__cell_" . $name . ") = strada_new_undef();\n");
+                    my str $ds_track = "@cell:" . $name;
+                    scope_track_var($cg, $ds_track);
+                    if ($ds_push == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_push_cell(__cell_" . $name . ");\n");
+                    } else {
+                        scope_mark_no_push($cg, $ds_track);
+                    }
                 } else {
-                    scope_mark_no_push($cg, $name);
+                    $cg->{"active_boxed_vars"}->{$name} = 0;
+                    emit_indent($cg);
+                    emit_sv_ptr_decl($cg, $name);
+                    if ($vsigil eq "%") {
+                        emit($cg, " = strada_new_hash();\n");
+                    } elsif ($vsigil eq "@") {
+                        emit($cg, " = strada_new_array();\n");
+                    } else {
+                        emit($cg, " = strada_new_undef();\n");
+                    }
+                    scope_track_var($cg, $name);
+                    if ($ds_push == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $name . ");\n");
+                    } else {
+                        scope_mark_no_push($cg, $name);
+                    }
                 }
                 $i = $i + 1;
             }
@@ -1032,15 +1055,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit_indent($cg);
         emit($cg, "{\n");
         indent($cg);
-
-        emit_indent($cg);
-        emit($cg, "StradaValue *__destruct_src = ");
-        gen_expression($cg, $init);
-        emit($cg, ";\n");
-
-        if (needs_temp_cleanup($cg, $init) == 0) {
+        if ($ds_push == 1 && $cg->{"cleanup_enabled"} == 1) {
             emit_indent($cg);
-            emit($cg, "strada_incref(__destruct_src);\n");
+            emit($cg, "strada_cleanup_push(" . $ds_src . ");\n");
         }
 
         # Assign each variable
@@ -1057,7 +1074,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, $name . " = strada_new_hash();\n");
                 emit_indent($cg);
-                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(" . $ds_src . ");\n");
                 emit_indent($cg);
                 emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
                 emit_indent($cg);
@@ -1083,26 +1100,23 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, $name . " = strada_new_array();\n");
                 emit_indent($cg);
-                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(" . $ds_src . ");\n");
                 emit_indent($cg);
                 emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
                 emit_indent($cg);
                 emit($cg, "  for (int __ds_j = " . $i . "; __ds_j < __ds_len; __ds_j++)\n");
                 emit_indent($cg);
-                emit($cg, "    strada_array_push_take(strada_deref_array(" . $name . "), strada_array_get_safe(__destruct_src, __ds_j));\n");
+                emit($cg, "    strada_array_push_take(strada_deref_array(" . $name . "), strada_array_get_safe(" . $ds_src . ", __ds_j));\n");
                 emit_indent($cg);
                 emit($cg, "}\n");
             } else {
-                # Plain list assignment `($a, $b) = LIST;` (is_decl == 0) names
-                # variables that already exist, so they may be `our` globals
-                # (no C variable at all) or, inside a closure, captures.
+                # Scalar slot: could be `our` global (is_decl == 0), closure capture/boxed cell, or local SV
                 my str $ds_our_key = "";
-                my str $ds_ref = $name;
                 if ($is_decl == 0) {
                     my scalar $ds_our = $cg->{"our_vars"};
                     $ds_our_key = "" . $ds_our->{$name};
-                    $ds_ref = scalar_var_c_ref($cg, $var->{"name"}, $name);
                 }
+                my str $ds_ref = scalar_var_c_ref($cg, $var->{"name"}, $name);
                 my int $ds_is_int = 0;
                 my int $ds_is_num = 0;
                 if ($is_decl == 1) {
@@ -1112,7 +1126,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     if (length("" . $cg->{"int_vars"}->{$name}) > 0) { $ds_is_int = 1; }
                     elsif (length("" . $cg->{"num_vars"}->{$name}) > 0) { $ds_is_num = 1; }
                 }
-                my str $ds_el_expr = "strada_array_get_safe(__destruct_src, " . $i . ")";
+                my str $ds_el_expr = "strada_array_get_safe(" . $ds_src . ", " . $i . ")";
                 if ($ds_is_int == 1) {
                     $ds_el_expr = "({ StradaValue *__ds_el = " . $ds_el_expr . "; StradaValue *__ds_ci = strada_new_int(strada_to_int(__ds_el)); strada_decref(__ds_el); __ds_ci; })";
                 } elsif ($ds_is_num == 1) {
@@ -1138,7 +1152,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Release source
         emit_indent($cg);
-        emit($cg, "strada_decref(__destruct_src);\n");
+        if ($ds_push == 1 && $cg->{"cleanup_enabled"} == 1) {
+            emit($cg, "strada_cleanup_pop_decref(" . $ds_src . ");\n");
+        } else {
+            emit($cg, "strada_decref(" . $ds_src . ");\n");
+        }
 
         dedent($cg);
         emit_indent($cg);
@@ -1270,6 +1288,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if (length($label) > 0) {
             $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
         }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            my int $wt_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $wt_id + 1;
+            my str $w_tmark = "__loop_tm_" . $wt_id;
+            my hash %wt_ent = ();
+            $wt_ent{"depth"} = $cg->{"scope_depth"};
+            $wt_ent{"var"} = $w_tmark;
+            push($cg->{"loop_tmps_marks"}, \%wt_ent);
+            if (length($label) > 0) {
+                $cg->{"label_tmps_marks"}->{$label} = $w_tmark;
+            }
+            emit_indent($cg);
+            emit($cg, "size_t " . $w_tmark . " = strada_tmps_mark(); (void)" . $w_tmark . ";\n");
+        }
 
         emit_indent($cg);
         emit($cg, $redo_label . ": __attribute__((unused));\n");
@@ -1319,6 +1351,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             local_mark_pop($cg);
             emit_indent($cg);
             emit($cg, "strada_local_restore_to(__local_iter_mark_" . $while_local_id . ");\n");
+        }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            pop($cg->{"loop_tmps_marks"});
         }
 
         scope_pop($cg);
@@ -1384,6 +1419,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if (length($label) > 0) {
             $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
         }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            my int $wt_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $wt_id + 1;
+            my str $w_tmark = "__loop_tm_" . $wt_id;
+            my hash %wt_ent = ();
+            $wt_ent{"depth"} = $cg->{"scope_depth"};
+            $wt_ent{"var"} = $w_tmark;
+            push($cg->{"loop_tmps_marks"}, \%wt_ent);
+            if (length($label) > 0) {
+                $cg->{"label_tmps_marks"}->{$label} = $w_tmark;
+            }
+            emit_indent($cg);
+            emit($cg, "size_t " . $w_tmark . " = strada_tmps_mark(); (void)" . $w_tmark . ";\n");
+        }
 
         emit_indent($cg);
         emit($cg, $redo_label . ": __attribute__((unused));\n");
@@ -1436,6 +1485,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             local_mark_pop($cg);
             emit_indent($cg);
             emit($cg, "strada_local_restore_to(__local_iter_mark_" . $dw_local_id . ");\n");
+        }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
         dedent($cg);
@@ -1557,6 +1609,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if (length($label) > 0) {
             $cg->{"label_next_depths"}->{$label} = $cg->{"scope_depth"};
         }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            my int $wt_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $wt_id + 1;
+            my str $w_tmark = "__loop_tm_" . $wt_id;
+            my hash %wt_ent = ();
+            $wt_ent{"depth"} = $cg->{"scope_depth"};
+            $wt_ent{"var"} = $w_tmark;
+            push($cg->{"loop_tmps_marks"}, \%wt_ent);
+            if (length($label) > 0) {
+                $cg->{"label_tmps_marks"}->{$label} = $w_tmark;
+            }
+            emit_indent($cg);
+            emit($cg, "size_t " . $w_tmark . " = strada_tmps_mark(); (void)" . $w_tmark . ";\n");
+        }
 
         emit_indent($cg);
         emit($cg, $redo_label . ": __attribute__((unused));\n");
@@ -1593,6 +1659,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             local_mark_pop($cg);
             emit_indent($cg);
             emit($cg, "strada_local_restore_to(__local_iter_mark_" . $for_local_id . ");\n");
+        }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            pop($cg->{"loop_tmps_marks"});
         }
         scope_pop($cg);
         dedent($cg);
@@ -1734,6 +1803,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "for (int64_t __fr_i_" . $foreach_id . " = __fr_start_" . $foreach_id . "; __fr_i_" . $foreach_id . " <= __fr_end_" . $foreach_id . "; __fr_i_" . $foreach_id . "++) {\n");
             indent($cg);
             scope_push($cg);
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                my int $frt_id = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $frt_id + 1;
+                my str $fr_tmark = "__loop_tm_" . $frt_id;
+                my hash %frt_ent = ();
+                $frt_ent{"depth"} = $cg->{"scope_depth"};
+                $frt_ent{"var"} = $fr_tmark;
+                push($cg->{"loop_tmps_marks"}, \%frt_ent);
+                if (length($label) > 0) {
+                    $cg->{"label_tmps_marks"}->{$label} = $fr_tmark;
+                }
+                emit_indent($cg);
+                emit($cg, "size_t " . $fr_tmark . " = strada_tmps_mark(); (void)" . $fr_tmark . ";\n");
+            }
 
             emit_indent($cg);
             my int $fr_always_tagged = 0;
@@ -1825,6 +1908,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($cg->{"cleanup_enabled"} == 0 && $var_decl && $fr_box == 0 && $fr_always_tagged == 0) {
                 emit_indent($cg);
                 emit($cg, "strada_decref(" . $var_name . ");\n");
+            }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                pop($cg->{"loop_tmps_marks"});
             }
             scope_pop($cg);
             dedent($cg);
@@ -1945,6 +2031,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         indent($cg);
         scope_push($cg);
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            my int $fet_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $fet_id + 1;
+            my str $fe_tmark = "__loop_tm_" . $fet_id;
+            my hash %fet_ent = ();
+            $fet_ent{"depth"} = $cg->{"scope_depth"};
+            $fet_ent{"var"} = $fe_tmark;
+            push($cg->{"loop_tmps_marks"}, \%fet_ent);
+            if (length($label) > 0) {
+                $cg->{"label_tmps_marks"}->{$label} = $fe_tmark;
+            }
+            emit_indent($cg);
+            emit($cg, "size_t " . $fe_tmark . " = strada_tmps_mark(); (void)" . $fe_tmark . ";\n");
+        }
 
         emit_indent($cg);
         if ($var_decl) {
@@ -2110,6 +2210,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit_indent($cg);
             emit($cg, "strada_local_restore_to(__local_iter_mark_" . $fe_local_id . ");\n");
         }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            pop($cg->{"loop_tmps_marks"});
+        }
         scope_pop($cg);
         dedent($cg);
         emit_indent($cg);
@@ -2186,6 +2289,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit_indent($cg);
                         emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
                     }
+                    if ($cg->{"fn_has_tmps_mark"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+                    }
                     emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return " . $stmt->{"value"}->{"value"} . ";\n");
@@ -2208,6 +2315,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit_indent($cg);
                         emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
                     }
+                    if ($cg->{"fn_has_tmps_mark"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+                    }
                     emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return __main_ret; }\n");
@@ -2221,6 +2332,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if ($cg->{"has_local"} == 1) {
                     emit_indent($cg);
                     emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+                }
+                if ($cg->{"fn_has_tmps_mark"} == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
                 }
                 emit_stack_pop($cg);
                 emit_indent($cg);
@@ -2246,6 +2361,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit_indent($cg);
                     emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
                 }
+                if ($cg->{"fn_has_tmps_mark"} == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+                }
                 emit_stack_pop($cg);
                 emit_indent($cg);
                 emit($cg, "return __retval; }\n");
@@ -2263,6 +2382,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if ($fp == 1 && $in_main == 0 && length($func_name) > 0) {
                     emit_indent($cg);
                     emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+                }
+                if ($cg->{"fn_has_tmps_mark"} == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
                 }
                 emit_stack_pop($cg);
                 emit_indent($cg);
@@ -2329,6 +2452,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
             }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+            }
             emit_stack_pop($cg);
             emit_indent($cg);
             emit($cg, "return " . $ret_var . "; }\n");
@@ -2347,6 +2474,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($fp == 1 && length($func_name) > 0) {
                 emit_indent($cg);
                 emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+            }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
             }
             emit_stack_pop($cg);
             emit_indent($cg);
@@ -2442,6 +2573,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $target_lmark . ");\n");
             }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                my scalar $ltms = $cg->{"label_tmps_marks"};
+                my str $ltmark = "__fn_tmps_mark";
+                if ($ltms && exists($ltms->{$label}) && length("" . $ltms->{$label}) > 0) {
+                    $ltmark = $ltms->{$label};
+                }
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . $ltmark . ");\n");
+            }
             emit_indent($cg);
             emit($cg, "goto " . $label . "_break;\n");
         } else {
@@ -2452,6 +2592,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if (length($ul_lmark) > 0) {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $ul_lmark . ");\n");
+            }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . loop_tmps_current($cg) . ");\n");
             }
             emit_indent($cg);
             emit($cg, "break;\n");
@@ -2473,6 +2617,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $target_lmark . ");\n");
             }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                my scalar $ltms = $cg->{"label_tmps_marks"};
+                my str $ltmark = "__fn_tmps_mark";
+                if ($ltms && exists($ltms->{$label}) && length("" . $ltms->{$label}) > 0) {
+                    $ltmark = $ltms->{$label};
+                }
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . $ltmark . ");\n");
+            }
             emit_indent($cg);
             emit($cg, "goto " . $label . "_continue;\n");
         } else {
@@ -2483,6 +2636,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if (length($un_lmark) > 0) {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $un_lmark . ");\n");
+            }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . loop_tmps_current($cg) . ");\n");
             }
             emit_indent($cg);
             emit($cg, "continue;\n");
@@ -2504,6 +2661,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $target_lmark . ");\n");
             }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                my scalar $ltms = $cg->{"label_tmps_marks"};
+                my str $ltmark = "__fn_tmps_mark";
+                if ($ltms && exists($ltms->{$label}) && length("" . $ltms->{$label}) > 0) {
+                    $ltmark = $ltms->{$label};
+                }
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . $ltmark . ");\n");
+            }
             emit_indent($cg);
             emit($cg, "goto " . $label . "_redo;\n");
         } else {
@@ -2514,6 +2680,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if (length($ur_lmark) > 0) {
                 emit_indent($cg);
                 emit($cg, "strada_local_restore_to(" . $ur_lmark . ");\n");
+            }
+            if ($cg->{"fn_has_tmps_mark"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_tmps_free(" . loop_tmps_current($cg) . ");\n");
             }
             my str $redo_lbl = $cg->{"current_redo_label"};
             emit_indent($cg);
@@ -2984,6 +3154,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my scalar $label_depths = $cg->{"label_depths"};
         $label_depths->{$lbl} = $cg->{"scope_depth"};
         $cg->{"label_try_depths"}->{$lbl} = $cg->{"try_depth"};
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            $cg->{"label_tmps_marks"}->{$lbl} = loop_tmps_current($cg);
+        }
         $cg->{"known_types"} = {};
         emit($cg, $lbl . ":;\n");
         return;
@@ -3028,6 +3201,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     $lmi = $lmi - 1;
                 }
             }
+        }
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            my scalar $ltms = $cg->{"label_tmps_marks"};
+            my str $gmark = "__fn_tmps_mark";
+            if ($ltms && exists($ltms->{$target})) {
+                $gmark = $ltms->{$target};
+            } elsif ($has_target == 1) {
+                $gmark = loop_tmps_mark_for_depth($cg, $target_depth);
+            }
+            emit_indent($cg);
+            emit($cg, "strada_tmps_free(" . $gmark . ");\n");
         }
         emit_indent($cg);
         emit($cg, "goto " . $target . ";\n");
@@ -3579,6 +3763,12 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "int __local_saved_depth = strada_local_depth_get();\n");
             $cg->{"has_local"} = 1;
         }
+        $cg->{"fn_has_tmps_mark"} = ast_has_expr_stmt_block($body);
+        $cg->{"loop_tmps_marks"} = [];
+        $cg->{"label_tmps_marks"} = {};
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            emit($cg, "    size_t __fn_tmps_mark = strada_tmps_mark();\n    (void)__fn_tmps_mark;\n");
+        }
         my scalar $stmts = $body->{"statements"};
         prescan_goto_labels($cg, $stmts, 1, 0);
         my int $i = 0;
@@ -3587,12 +3777,16 @@ func gen_function(scalar $cg, scalar $fn) void {
             $i = $i + 1;
         }
         scope_pop($cg);
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            emit($cg, "    strada_tmps_free(__fn_tmps_mark);\n");
+        }
         if ($cg->{"func_tracks_depth"} == 1) {
             emit($cg, "    strada_stack_pop_il();\n");
         }
         emit($cg, "}\n\n");
         $cg->{"in_main"} = 0;
         $cg->{"func_tracks_depth"} = 0;
+        $cg->{"fn_has_tmps_mark"} = 0;
     } else {
         # Private functions get static prefix (file-scope only).
         # When this TU also defines `main`, the export_info table is
@@ -3876,6 +4070,12 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "int __local_saved_depth = strada_local_depth_get();\n");
             $cg->{"has_local"} = 1;
         }
+        $cg->{"fn_has_tmps_mark"} = ast_has_expr_stmt_block($fn->{"body"});
+        $cg->{"loop_tmps_marks"} = [];
+        $cg->{"label_tmps_marks"} = {};
+        if ($cg->{"fn_has_tmps_mark"} == 1) {
+            emit($cg, "size_t __fn_tmps_mark = strada_tmps_mark();\n(void)__fn_tmps_mark;\n");
+        }
         my scalar $stmts = $body->{"statements"};
         prescan_goto_labels($cg, $stmts, 1, 0);
         my int $b_sc = $body->{"statement_count"} + 0;
@@ -3929,6 +4129,9 @@ func gen_function(scalar $cg, scalar $fn) void {
             if ($cg->{"has_local"} == 1) {
                 emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
             }
+            if ($ret_type_id == TYPE_VOID() && $cg->{"fn_has_tmps_mark"} == 1) {
+                emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+            }
             if ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 1) {
                 emit($cg, "strada_stack_pop_il();\n");
             } elsif ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 2) {
@@ -3949,6 +4152,9 @@ func gen_function(scalar $cg, scalar $fn) void {
                         $pn_i2 = $pn_i2 + 1;
                     }
                 }
+                if ($cg->{"fn_has_tmps_mark"} == 1) {
+                    emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+                }
                 if ($cg->{"func_tracks_depth"} == 1) {
                     emit($cg, "strada_stack_pop_il();\n");
                 } elsif ($cg->{"func_tracks_depth"} == 2) {
@@ -3965,6 +4171,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"c_ret_is_sv"} = 0;
         $cg->{"current_fn_package"} = "";
         $cg->{"func_tracks_depth"} = 0;
+        $cg->{"fn_has_tmps_mark"} = 0;
 
         # Clear func_params
         $cg->{"func_params"} = {};
@@ -4076,6 +4283,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     my str $saved_cur_redo_lbl = "" . $cg->{"current_redo_label"};
     my int $saved_async_tracks_depth = $cg->{"func_tracks_depth"} + 0;
     my scalar $saved_async_struct_vars = $cg->{"struct_vars"};
+    my int $saved_async_fn_has_tmps_mark = $cg->{"fn_has_tmps_mark"} + 0;
+    my scalar $saved_async_loop_tmps_marks = $cg->{"loop_tmps_marks"};
+    my scalar $saved_async_label_tmps_marks = $cg->{"label_tmps_marks"};
     foreach_cleanup_reset($cg);
 
     my array @new_scope_vars = ();
@@ -4126,10 +4336,19 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"goto_label_try_depths"} = {};
     $cg->{"local_marks"} = [];
     $cg->{"c_ret_is_sv"} = 1;
+    $cg->{"fn_has_tmps_mark"} = ast_has_expr_stmt_block($async_body);
+    $cg->{"loop_tmps_marks"} = [];
+    $cg->{"label_tmps_marks"} = {};
 
     # Generate body
     indent($cg);
     scope_push($cg);
+    if ($cg->{"fn_has_tmps_mark"} == 1) {
+        emit_indent($cg);
+        emit($cg, "size_t __fn_tmps_mark = strada_tmps_mark();\n");
+        emit_indent($cg);
+        emit($cg, "(void)__fn_tmps_mark;\n");
+    }
     prescan_goto_labels($cg, $async_body->{"statements"}, 1, 0);
     if (func_body_has_local($async_body) == 1) {
         emit_indent($cg);
@@ -4196,6 +4415,10 @@ func gen_async_function(scalar $cg, scalar $fn) void {
         emit_indent($cg);
         emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
     }
+    if ($cg->{"fn_has_tmps_mark"} == 1) {
+        emit_indent($cg);
+        emit($cg, "strada_tmps_free(__fn_tmps_mark);\n");
+    }
     dedent($cg);
 
     # Restore per-function state
@@ -4245,6 +4468,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"goto_label_try_depths"} = $saved_async_goto_try_depths;
     $cg->{"local_marks"} = $saved_async_local_marks;
     $cg->{"c_ret_is_sv"} = $saved_async_c_ret_is_sv;
+    $cg->{"fn_has_tmps_mark"} = $saved_async_fn_has_tmps_mark;
+    $cg->{"loop_tmps_marks"} = $saved_async_loop_tmps_marks;
+    $cg->{"label_tmps_marks"} = $saved_async_label_tmps_marks;
 
     emit($cg, "    return strada_undef_static();\n");
     emit($cg, "}\n\n");
