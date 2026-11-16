@@ -2832,8 +2832,9 @@ func parse_assignment(scalar $parser) scalar {
         return ast_new_assign($op, $left, $right);
     }
 
-    # %=, **=, //=, x= — desugar to `target = target OP rhs` ONLY when target
-    # is a plain variable (zero side effects on read; //= short-circuits via //).
+    # %=, **=, //=, x= — desugar %= and **= to `target = target OP rhs` when
+    # target is a plain variable (zero side effects on read; //= keeps compound
+    # op so tied scalars avoid unnecessary STORE when already defined).
     # Non-variable targets ($a[i++], $h{next_k()}, $$r, etc.) keep their compound
     # op so codegen evaluates the container and index/key ONCE!
     if ($type eq "MOD_ASSIGN" || $type eq "POWER_ASSIGN" || $type eq "DOR_ASSIGN") {
@@ -2842,7 +2843,7 @@ func parse_assignment(scalar $parser) scalar {
         if ($type eq "DOR_ASSIGN") { $bop = "//"; }
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
-        if ($left->{"type"} == NODE_VARIABLE()) {
+        if ($left->{"type"} == NODE_VARIABLE() && $type ne "DOR_ASSIGN") {
             my scalar $lcopy = ast_new_variable($left->{"name"}, $left->{"sigil"});
             $lcopy->{"line"} = $left->{"line"};
             $lcopy->{"column"} = $left->{"column"};

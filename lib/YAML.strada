@@ -1230,8 +1230,12 @@ private func _read_block_scalar_raw(scalar $state, int $base_indent) hash {
             next;
         }
 
-        # Check if we've exited the block (including empty block before next key at <= base_indent)
+        # Check if we've exited the block (including empty block before next key at <= base_indent
+        # or document start/end markers at column 0)
         if ($indent <= $base_indent) {
+            last;
+        }
+        if ($indent == 0 && (YAML::is_doc_end($line) == 1 || YAML::is_doc_start($line) == 1)) {
             last;
         }
 
@@ -1244,6 +1248,12 @@ private func _read_block_scalar_raw(scalar $state, int $base_indent) hash {
                 $lb = $lb + 1;
             }
         } else {
+            if ($indent < $block_indent) {
+                if (substr(YAML::trim($line), 0, 1) eq "#") {
+                    last;
+                }
+                throw "YAML parse error: block scalar line indented less than block indent";
+            }
             my int $tb = 0;
             while ($tb <= $trailing_blanks) {
                 $result = $result . "\n";

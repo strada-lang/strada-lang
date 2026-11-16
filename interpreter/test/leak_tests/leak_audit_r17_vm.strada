@@ -1,0 +1,121 @@
+# Cycle 17 Bytecode VM Valgrind Leak Test (B3, B4, B5, B7, B9, B10, B11, B12, B13)
+
+package R17VmLkTie;
+func TIESCALAR(str $cls, scalar $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"v"} = $v; }
+
+package R17VmLkTH;
+func TIEHASH(str $cls) scalar {
+    my hash %d = ();
+    my str $k1 = "café";
+    my str $k2 = "a" . chr(0) . "b";
+    $d{$k1} = 1;
+    $d{$k2} = 2;
+    return bless({"d" => \%d, "ks" => [$k1, $k2]}, $cls);
+}
+func FETCH(scalar $s, str $k) scalar { return $s->{"d"}->{$k}; }
+func EXISTS(scalar $s, str $k) int { return exists($s->{"d"}->{$k}) ? 1 : 0; }
+func FIRSTKEY(scalar $s) scalar { return $s->{"ks"}->[0]; }
+func NEXTKEY(scalar $s, str $p) scalar {
+    if ($p eq $s->{"ks"}->[0]) { return $s->{"ks"}->[1]; }
+    return undef;
+}
+
+package main;
+
+func vm_zf() int { return 11; }
+
+func main() int {
+    # B3: map / grep redo
+    my int $mc = 0;
+    my array @mr = map {
+        my str $t = $_ . "!";
+        $mc = $mc + 1;
+        if ($mc == 2) { redo; }
+        $t;
+    } (1 .. 3);
+    my int $gc = 0;
+    my array @gr = grep {
+        my str $t = lc($_) . ".";
+        $gc = $gc + 1;
+        if ($gc == 1) { redo; }
+        $t eq "b.";
+    } (lc("A"), lc("B"));
+    if (join(",", @mr) ne "1!,2!,3!" || join(",", @gr) ne "b") { return 1; }
+
+    # B4 & B7: tied ||, //, //=, destructure
+    my scalar $ts = "";
+    tie($ts, "R17VmLkTie", "abc");
+    my scalar $v1 = ($ts || "x");
+    my scalar $v2 = ($ts // "x");
+    $ts //= "skip";
+    my scalar $t2 = "";
+    my scalar $o2 = tie($t2, "R17VmLkTie", undef);
+    my scalar $v3 = ($t2 //= "set");
+    ($ts, $t2) = ("P", "Q");
+    if ($v1 ne "abc" || $v2 ne "abc" || $v3 ne "set" || $o2->{"v"} ne "Q") { return 2; }
+    untie($ts);
+    untie($t2);
+
+    # B5: @array / %hash closure boxing
+    my array @la = ("x");
+    my hash %lh = ("a" => 1);
+    my scalar $f = func () int {
+        @la = ("y", "z");
+        %lh = ("b" => 2);
+        return size(@la) + $lh{"b"};
+    };
+    if ($f->() != 4) { return 3; }
+
+    # B9 & B10: worker VMs with weakrefs & concurrent GC
+    my array @gw = (undef, undef, undef);
+    my array @ws = ();
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        my int $idx = $i;
+        push(@ws, thread::create(func () scalar {
+            my scalar $c1 = {}; my scalar $c2 = {};
+            $c1->{"c"} = $c2; $c2->{"c"} = $c1;
+            my scalar $wt = {"a" => $idx};
+            $gw[$idx] = $wt;
+            core::weaken($gw[$idx]);
+            my scalar $live = {"b" => 2}; my scalar $wl = $live; core::weaken($wl);
+            return [$live, $wl];
+        }));
+    }
+    core::gc_collect();
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        my scalar $r = thread::join($ws[$i]);
+        if (!defined($r->[1])) { return 4; }
+        $r->[0] = undef;
+    }
+    core::gc_collect();
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        if (defined($gw[$i])) { return 4; }
+    }
+
+    # B11 & B12: forward goto cleanup & 0-param clamp
+    if (1) {
+        my str $gtmp = "local_" . "str";
+        goto VM_LK_FWD;
+    }
+VM_LK_FWD:
+    my scalar $zcl = func () int { return 5; };
+    if (vm_zf(1, 2, 3) != 11 || $zcl->(4, 5) != 5) { return 5; }
+
+    # B13: tied hash UTF-8 & NUL keys
+    my hash %th = ();
+    tie(%th, "R17VmLkTH");
+    my array @ks = keys(%th);
+    my int $bsum = bytes($ks[0]) + bytes($ks[1]);
+    while (1) {
+        my array @kv = each(%th);
+        if (size(@kv) == 0) { last; }
+        $bsum = $bsum + bytes($kv[0]);
+    }
+    untie(%th);
+    if ($bsum != 16) { return 6; }
+
+    say("LEAK_AUDIT_R17_VM_OK");
+    return 0;
+}

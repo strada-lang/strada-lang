@@ -1,0 +1,62 @@
+# Cycle 17 Valgrind Leak Test (Eval Worker VMs, Goto, 0-param, TiedHash, Heredocs, JIT)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    # B9, B10, B11, B12, B13, B15 in Eval
+    my scalar $ok = Strada::Interpreter::eval(
+        "package R17LkTieH;\n" .
+        "func TIEHASH(str \$c) scalar { my hash %h = (\"café\" => \"v1\"); my array @k = (\"café\"); return bless({\"d\" => \\%h, \"k\" => \\@k}, \$c); }\n" .
+        "func FETCH(scalar \$s, str \$k) scalar { return \$s->{\"d\"}->{\$k}; }\n" .
+        "func EXISTS(scalar \$s, str \$k) int { return exists(\$s->{\"d\"}->{\$k}) ? 1 : 0; }\n" .
+        "func FIRSTKEY(scalar \$s) scalar { return \$s->{\"k\"}->[0]; }\n" .
+        "func NEXTKEY(scalar \$s, str \$p) scalar { return undef; }\n" .
+        "package main;\n" .
+        "my array @ths = ();\n" .
+        "for (my int \$i = 0; \$i < 3; \$i = \$i + 1) {\n" .
+        "    push(@ths, thread::create(func () scalar {\n" .
+        "        my scalar \$a = {}; my scalar \$b = {}; \$a->{\"b\"} = \$b; \$b->{\"a\"} = \$a;\n" .
+        "        my scalar \$w = {\"x\" => 1}; core::weaken(\$w);\n" .
+        "        my scalar \$live = {\"y\" => 2}; my scalar \$wl = \$live; core::weaken(\$wl);\n" .
+        "        core::gc_collect();\n" .
+        "        return [\$live, \$wl];\n" .
+        "    }));\n" .
+        "}\n" .
+        "core::gc_collect();\n" .
+        "for (my int \$i = 0; \$i < 3; \$i = \$i + 1) {\n" .
+        "    my scalar \$r = thread::join(\$ths[\$i]);\n" .
+        "    \$r->[0] = undef;\n" .
+        "}\n" .
+        "core::gc_collect();\n" .
+        "func zf() int { return 7; }\n" .
+        "if (1) { my str \$tmp = \"leakcheck\" . \"_\"; goto DONE_G; }\n" .
+        "DONE_G:\n" .
+        "my int \$z = zf(1, 2);\n" .
+        "my hash %th = (); tie(%th, \"R17LkTieH\");\n" .
+        "my array @ks = keys(%th);\n" .
+        "my str \$ek = \"\";\n" .
+        "while (1) { my array \@kv = each(%th); if (size(\@kv) == 0) { last; } \$ek = \$ek . bytes(\$kv[0]); }\n" .
+        "untie(%th);\n" .
+        "my str \$re_ok = (\"a;b\" =~ /['\";]/) ? \"1\" : \"0\";\n" .
+        "my str \$hd = <<'R17_EV_LK';\nhello;world\nR17_EV_LK\n" .
+        "(\$z == 7 && bytes(\$ks[0]) == 5 && \$ek eq \"5\" && \$re_ok eq \"1\" && \$hd eq \"hello;world\") ? 1 : 0;"
+    );
+    if ($ok != 1) { return 1; }
+
+    # B16: Strada::JIT my ($a, $b) & heredoc
+    Strada::JIT::init();
+    Strada::JIT::eval('my ($ja, $jb) = (5, 8);');
+    my scalar $jres = Strada::JIT::eval(
+        "my str \$h = <<'R17_J_LK';\nline;\nR17_J_LK\n" .
+        "(\$ja + \$jb) . \":\" . \$h"
+    );
+    if ($jres ne "13:line;") { return 2; }
+    Strada::JIT::reset();
+
+    Strada::Interpreter::reset();
+    say("LEAK_AUDIT_R17_EVAL_OK");
+    return 0;
+}

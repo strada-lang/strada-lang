@@ -12470,6 +12470,20 @@ StradaValue* strada_release(StradaValue *ref) {
                 *slot = strada_new_undef();
                 if (old) strada_decref(old);
             }
+        } else if (SV_IS_WEAK(ref)) {
+            /* Weak ref does not own its referent: unregister without decref
+             * and clear is_weak so ref owns the replacement undef cleanly. */
+            if (ref->value.rv) {
+                strada_weak_registry_unregister(ref);
+            }
+            if (ref->meta) ref->meta->is_weak = 0;
+            ref->flags &= (uint16_t)~STRADA_SVf_CELL_REF;
+            ref->value.rv = strada_new_undef();
+        } else if (ref->flags & STRADA_SVf_CELL_REF) {
+            StradaValue **slot = (StradaValue**)ref->value.ptr;
+            ref->flags &= (uint16_t)~STRADA_SVf_CELL_REF;
+            ref->value.rv = strada_new_undef();
+            if (slot) strada_cell_release(slot);
         } else if (ref->value.rv) {
             StradaValue *old = ref->value.rv;
             ref->value.rv = strada_new_undef();

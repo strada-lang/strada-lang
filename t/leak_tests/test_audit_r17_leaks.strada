@@ -1,0 +1,124 @@
+# Cycle 17 Valgrind Leak Test (Compiled Compiler, Runtime, YAML, JSON::PS)
+use lib "lib";
+use YAML;
+use JSON::PS;
+
+package R17LkTie;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init}, $cls);
+}
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $val) void { $s->{"v"} = $val; }
+
+package main;
+
+struct R17LkCS {
+    str s;
+    int i;
+    num n;
+}
+
+func box_arr_hash(array @pa, hash %ph) str {
+    my scalar $c = func () str {
+        @pa = ("A", "B");
+        %ph = ("k" => "v");
+        return join(",", @pa) . ":" . $ph{"k"};
+    };
+    return $c->();
+}
+
+func main() int {
+    # B1: release on live and dead weakrefs
+    my scalar $obj = {"x" => "alive"};
+    my scalar $w1 = $obj;
+    my scalar $w2 = $obj;
+    core::weaken($w1);
+    core::weaken($w2);
+    core::release(\$w1);
+    $obj = undef;
+    core::release(\$w2);
+
+    # B3: map & grep redo with owned elems & inner locals
+    my int $mc = 0;
+    my array @mr = map {
+        my str $tmp = "[" . $_ . "]";
+        $mc = $mc + 1;
+        if ($mc == 2) { redo; }
+        $tmp;
+    } (1 .. 3);
+    my int $gc = 0;
+    my array @gr = grep {
+        my str $tmp = lc($_) . "!";
+        $gc = $gc + 1;
+        if ($gc == 1) { redo; }
+        $tmp eq "b!";
+    } (lc("A"), lc("B"));
+    if (join(",", @mr) ne "[1],[2],[3]" || join(",", @gr) ne "b") { return 1; }
+
+    # B4: ||, //, //= on tied scalars
+    my scalar $ts = "";
+    tie($ts, "R17LkTie", "hello");
+    my scalar $a1 = ($ts || "fb");
+    my scalar $a2 = ($ts // "fb");
+    $ts //= "skip";
+    my scalar $t_u = "";
+    tie($t_u, "R17LkTie", undef);
+    my scalar $a3 = ($t_u //= "set");
+    if ($a1 ne "hello" || $a2 ne "hello" || $a3 ne "set") { return 2; }
+    untie($ts);
+    untie($t_u);
+
+    # B5: @array / %hash closure boxing (local, param, destructure, async)
+    my array @la = ("1", "2");
+    my hash %lh = ("a" => "1");
+    my scalar $lf = func () void {
+        @la = ("x", "y");
+        %lh = ("b" => "2");
+    };
+    @la = ("0");
+    $lf->();
+    if (box_arr_hash(["z"], {"z" => 0}) ne "A,B:v") { return 3; }
+    my ($hd, @rest) = ("H", "r1", "r2");
+    my scalar $rf = func () int { @rest = ("r3"); return size(@rest); };
+    if ($rf->() != 1 || $lh{"b"} ne "2" || $hd ne "H") { return 4; }
+
+    # B6: native struct compound ops
+    my R17LkCS $cs;
+    $cs->s = "hi";
+    $cs->s x= 3;
+    $cs->s &&= "yo";
+    $cs->s ||= "no";
+    $cs->n = 14.5;
+    $cs->n %= 5;
+    $cs->n &&= 3.5;
+    $cs->i = 0;
+    $cs->i ||= 7;
+    $cs->i &&= 9;
+    if ($cs->s ne "yo" || math::abs($cs->n - 3.5) > 1e-9 || $cs->i != 9) { return 5; }
+
+    # B7: non-decl destructure on tied scalars
+    my scalar $d1 = "";
+    my scalar $d2 = "";
+    my scalar $o1 = tie($d1, "R17LkTie", "0");
+    my scalar $o2 = tie($d2, "R17LkTie", "0");
+    ($d1, $d2) = ("X", "Y");
+    if ($o1->{"v"} ne "X" || $o2->{"v"} ne "Y") { return 6; }
+    untie($d1);
+    untie($d2);
+
+    # B19 & B20: YAML block scalar & JSON::PS tied bool
+    my scalar $y = YAML::Load("k: |\n  one\n  two\n# done\n");
+    try {
+        YAML::Load("doc:\n  msg: |\n    indented\n   under\n");
+    } catch ($e) {
+    }
+    my scalar $tb = "";
+    tie($tb, "R17LkTie", JSON::PS::true());
+    my str $j = JSON::PS::encode({"b" => $tb});
+    untie($tb);
+    if ($y->{"k"} ne "one\ntwo\n" || index($j, "\"b\":true") < 0) { return 7; }
+
+    core::gc_collect();
+    say("LEAK_AUDIT_R17_OK");
+    return 0;
+}

@@ -1,0 +1,315 @@
+# Cycle 17 Compiler & Runtime Regression Suite
+
+package R17TieScalar;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init, "fetches" => 0, "stores" => 0}, $cls);
+}
+func FETCH(scalar $s) scalar {
+    $s->{"fetches"} = $s->{"fetches"} + 1;
+    return $s->{"v"};
+}
+func STORE(scalar $s, scalar $val) void {
+    $s->{"stores"} = $s->{"stores"} + 1;
+    $s->{"v"} = $val;
+}
+
+package main;
+
+struct R17CS {
+    str label;
+    int iv;
+    num nv;
+}
+
+our scalar $g_r17_our_t = "";
+our int $g_r17_se = 0;
+
+func bump_se_int(int $v) int {
+    $g_r17_se = $g_r17_se + 1;
+    return $v;
+}
+
+func bump_se_num(num $v) num {
+    $g_r17_se = $g_r17_se + 1;
+    return $v;
+}
+
+func bump_se_str(str $v) str {
+    $g_r17_se = $g_r17_se + 1;
+    return $v;
+}
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func test_b1_release_weakref() void {
+    my scalar $target = {"k" => "alive"};
+    my scalar $w1 = $target;
+    my scalar $w2 = $target;
+    core::weaken($w1);
+    core::weaken($w2);
+    check(core::isweak($w1) == 1 && core::isweak($w2) == 1, "B1 both weakrefs live");
+    core::release(\$w1);
+    check(!defined($w1) && core::isweak($w1) == 0, "B1 release clears released weakref");
+    check(core::isweak($w2) == 1 && $w2->{"k"} eq "alive", "B1 sibling weakref stays valid");
+
+    $target = undef;
+    check(!defined($w2) && core::isweak($w2) == 1, "B1 target destroyed clears w2");
+    core::release($w2);
+    check(core::isweak($w2) == 0 && !defined(${$w2}), "B1 direct core::release on dead weakref clears isweak & target");
+    core::release(\$w2);
+    check(!defined($w2) && core::isweak($w2) == 0, "B1 slot core::release on weakref clears slot");
+
+    # Direct core::release($weak_ref) on live non-slot weakref without decref'ing referent
+    my scalar $live_t = {"m" => 77};
+    my scalar $w_direct = $live_t;
+    core::weaken($w_direct);
+    core::release($w_direct);
+    check(core::isweak($w_direct) == 0 && !defined(${$w_direct}), "B1 direct core::release on live weakref clears it");
+    check($live_t->{"m"} == 77, "B1 direct core::release does not decref referent");
+}
+
+func test_b3_map_grep_redo() void {
+    my int $mcount = 0;
+    my array @mr = map {
+        my str $tmp = $_ . "!";
+        $mcount = $mcount + 1;
+        if ($mcount == 2) {
+            redo;
+        }
+        $tmp . ":" . $mcount;
+    } (1 .. 3);
+    check(join(",", @mr) eq "1!:1,2!:3,3!:4", "B3 map redo keeps elem alive & cleans inner locals");
+
+    my int $gcount = 0;
+    my array @gr = grep {
+        my str $tmp = "x" . $_;
+        $gcount = $gcount + 1;
+        if ($gcount == 1) {
+            redo;
+        }
+        $_ ne "ay";
+    } (map { $_ . "y"; } ("a", "b"));
+    # Ensure owned string elements survive redo in grep too
+    my int $g2 = 0;
+    my array @gr2 = grep {
+        my str $pad = "[" . $_ . "]";
+        $g2 = $g2 + 1;
+        if ($g2 == 1) {
+            redo;
+        }
+        $pad eq "[bb]";
+    } (lc("AA"), lc("BB"));
+    check(join(",", @gr) eq "by" && join(",", @gr2) eq "bb" && $gcount == 3 && $g2 == 3,
+          "B3 grep redo keeps owned elem alive & cleans inner locals");
+}
+
+func test_b4_tied_or_dor() void {
+    my scalar $t = "";
+    my scalar $o = tie($t, "R17TieScalar", "alpha");
+
+    my int $f0 = $o->{"fetches"};
+    my scalar $r_or = ($t || "fallback");
+    check($o->{"fetches"} == $f0 + 1 && $r_or eq "alpha", "B4 || calls FETCH once");
+
+    my int $f1 = $o->{"fetches"};
+    my scalar $r_dor = ($t // "fallback");
+    check($o->{"fetches"} == $f1 + 1 && $r_dor eq "alpha", "B4 // calls FETCH once");
+
+    # Mutate underlying value; extracted results must not alias container
+    $o->{"v"} = "changed";
+    check($r_or eq "alpha" && $r_dor eq "alpha", "B4 || and // do not alias tied container");
+
+    # //= on defined (including 0 and "") skips STORE & calls FETCH once
+    $o->{"v"} = 0;
+    my int $s0 = $o->{"stores"};
+    my int $f2 = $o->{"fetches"};
+    my scalar $d0 = ($t //= 99);
+    check($o->{"fetches"} == $f2 + 1 && $o->{"stores"} == $s0 && $d0 == 0, "B4 0 //= short-circuits without STORE");
+
+    $o->{"v"} = "";
+    $s0 = $o->{"stores"};
+    $f2 = $o->{"fetches"};
+    $t //= "nonempty";
+    check($o->{"fetches"} == $f2 + 1 && $o->{"stores"} == $s0 && $o->{"v"} eq "", "B4 '' //= void short-circuits without STORE");
+
+    $o->{"v"} = undef;
+    $s0 = $o->{"stores"};
+    my scalar $d1 = ($t //= "assigned");
+    check($o->{"stores"} == $s0 + 1 && $d1 eq "assigned" && $o->{"v"} eq "assigned",
+          "B4 undef //= stores once and assigns");
+
+    untie($t);
+}
+
+func box_param_helper(array @pa, hash %ph) scalar {
+    my scalar $cl = func () str {
+        push(@pa, "c");
+        @pa = (@pa, "r");
+        $ph{"k2"} = 2;
+        %ph = ("inside" => $ph{"k1"} + $ph{"k2"});
+        return join(",", @pa) . "|" . $ph{"inside"};
+    };
+    @pa = ("x");
+    $ph{"k1"} = 10;
+    my str $res = $cl->();
+    return $res . "|" . join(",", @pa) . "|" . $ph{"inside"};
+}
+
+async func box_async_fn(array @aa, hash %hh) str {
+    my scalar $inner = func () str {
+        @aa = ("async_a");
+        %hh = ("ak" => "7");
+        return "ok";
+    };
+    $inner->();
+    return join(",", @aa) . ":" . $hh{"ak"};
+}
+
+func test_b5_array_hash_boxing() void {
+    # 1. Local @arr and %hash rebound both outside and inside closure
+    my array @arr = ("a", "b");
+    my hash %h = ("x" => 1);
+    my scalar $f = func () str {
+        push(@arr, "from_cl");
+        my str $before = join(",", @arr) . ":" . $h{"x"};
+        @arr = ("rebound1", "rebound2");
+        %h = ("y" => 42);
+        return $before;
+    };
+    @arr = ("outer1");
+    $h{"x"} = 9;
+    my str $r1 = $f->();
+    check($r1 eq "outer1,from_cl:9", "B5 closure sees outer rebind of @arr and %h");
+    check(join(",", @arr) eq "rebound1,rebound2" && $h{"y"} == 42 && !exists($h{"x"}),
+          "B5 outer sees closure rebind of @arr and %h");
+
+    # 2. Function parameters boxed when captured
+    my array @a_in = ("ignore");
+    my hash %h_in = ("z" => 0);
+    my str $pr = box_param_helper(@a_in, %h_in);
+    check($pr eq "x,c,r|12|x,c,r|12", "B5 array & hash param closure capture boxing got=" . $pr);
+
+    # 3. Destructured slurp @rest and %hrest boxed when captured
+    my ($head, @rest) = ("H", "r1", "r2");
+    my ($h2, %hrest) = ("H2", "a", "10", "b", "20");
+    my scalar $df = func () str {
+        @rest = ("new_r");
+        %hrest = ("c" => "30");
+        return $head . ":" . $h2;
+    };
+    $df->();
+    check(join(",", @rest) eq "new_r" && $hrest{"c"} eq "30" && !exists($hrest{"a"}),
+          "B5 destructured slurp @rest/%hrest boxing");
+
+    # 4. Async func parameter boxing
+    my str $ares = await box_async_fn(["u"], {"v" => 1});
+    check($ares eq "async_a:7", "B5 async array/hash param boxing got=" . $ares);
+}
+
+func test_b6_cstruct_compound() void {
+    my R17CS $cs;
+    $cs->label = "ab";
+    $cs->label x= 3;
+    check($cs->label eq "ababab", "B6 cstruct str x= repeat");
+
+    $cs->label x= 0;
+    check($cs->label eq "", "B6 cstruct str x= 0 clears");
+
+    $cs->label = "z";
+    $cs->label x= 1;
+    check($cs->label eq "z", "B6 cstruct str x= 1 keeps");
+
+    # Large repeat clamps cleanly without overflow (default str field buffer is 256 bytes, max 255)
+    $cs->label = "abcdefgh";
+    $cs->label x= 100;
+    check(bytes($cs->label) <= 255 && substr($cs->label, 0, 16) eq "abcdefghabcdefgh",
+          "B6 cstruct str x= clamps to buffer");
+
+    # str &&= / ||=
+    $g_r17_se = 0;
+    $cs->label = "";
+    $cs->label &&= bump_se_str("no");
+    check($g_r17_se == 0 && $cs->label eq "", "B6 cstruct str &&= '' short-circuits");
+    $cs->label = "0";
+    $cs->label &&= bump_se_str("no");
+    check($g_r17_se == 0 && $cs->label eq "0", "B6 cstruct str &&= '0' short-circuits");
+    $cs->label ||= bump_se_str("truthy");
+    check($g_r17_se == 1 && $cs->label eq "truthy", "B6 cstruct str ||= '0' assigns");
+    $cs->label ||= bump_se_str("skip");
+    check($g_r17_se == 1 && $cs->label eq "truthy", "B6 cstruct str ||= truthy short-circuits");
+    $cs->label &&= bump_se_str("next");
+    check($g_r17_se == 2 && $cs->label eq "next", "B6 cstruct str &&= truthy assigns");
+
+    # num %= and &&= / ||=
+    $cs->nv = 17.9;
+    $cs->nv %= 5;
+    check(math::abs($cs->nv - 2.0) < 1e-9, "B6 cstruct num %= floored mod");
+    my int $div0 = 0;
+    try {
+        $cs->nv %= 0;
+    } catch ($e) {
+        $div0 = 1;
+    }
+    check($div0 == 1, "B6 cstruct num %= 0 throws");
+
+    $g_r17_se = 0;
+    $cs->nv = 0.0;
+    $cs->nv &&= bump_se_num(4.5);
+    check($g_r17_se == 0 && math::abs($cs->nv) < 1e-9, "B6 cstruct num &&= 0.0 short-circuits");
+    $cs->nv ||= bump_se_num(3.25);
+    check($g_r17_se == 1 && math::abs($cs->nv - 3.25) < 1e-9, "B6 cstruct num ||= 0.0 assigns");
+    $cs->nv ||= bump_se_num(9.0);
+    check($g_r17_se == 1 && math::abs($cs->nv - 3.25) < 1e-9, "B6 cstruct num ||= nonzero short-circuits");
+    $cs->nv &&= bump_se_num(7.5);
+    check($g_r17_se == 2 && math::abs($cs->nv - 7.5) < 1e-9, "B6 cstruct num &&= nonzero assigns");
+
+    # int &&= / ||=
+    $g_r17_se = 0;
+    $cs->iv = 0;
+    $cs->iv &&= bump_se_int(9);
+    check($g_r17_se == 0 && $cs->iv == 0, "B6 cstruct int &&= 0 short-circuits");
+    $cs->iv ||= bump_se_int(11);
+    check($g_r17_se == 1 && $cs->iv == 11, "B6 cstruct int ||= 0 assigns");
+    $cs->iv ||= bump_se_int(99);
+    check($g_r17_se == 1 && $cs->iv == 11, "B6 cstruct int ||= nonzero short-circuits");
+    $cs->iv &&= bump_se_int(22);
+    check($g_r17_se == 2 && $cs->iv == 22, "B6 cstruct int &&= nonzero assigns");
+}
+
+func test_b7_destructure_tied() void {
+    my scalar $t1 = "";
+    my scalar $t2 = "";
+    my scalar $tb = "";
+    my scalar $o1 = tie($t1, "R17TieScalar", "i1");
+    my scalar $o2 = tie($t2, "R17TieScalar", "i2");
+    my scalar $ob = tie($tb, "R17TieScalar", "ib");
+    my scalar $o_our = tie($g_r17_our_t, "R17TieScalar", "io");
+    my scalar $reader = func () scalar { return $tb; };
+
+    ($t1, $t2, $tb, $g_r17_our_t) = ("A1", "A2", "AB", "AO");
+    check($o1->{"stores"} == 1 && $o1->{"v"} eq "A1", "B7 tied local t1 STORE invoked");
+    check($o2->{"stores"} == 1 && $o2->{"v"} eq "A2", "B7 tied local t2 STORE invoked");
+    check($ob->{"stores"} == 1 && $ob->{"v"} eq "AB" && $reader->() eq "AB", "B7 tied boxed scalar STORE invoked");
+    check($o_our->{"stores"} == 1 && $o_our->{"v"} eq "AO", "B7 tied our scalar STORE invoked");
+
+    untie($t1);
+    untie($t2);
+    untie($tb);
+    untie($g_r17_our_t);
+}
+
+func main() int {
+    test_b1_release_weakref();
+    test_b3_map_grep_redo();
+    test_b4_tied_or_dor();
+    test_b5_array_hash_boxing();
+    test_b6_cstruct_compound();
+    test_b7_destructure_tied();
+    say("AUDIT_R17_COMPILER_RUNTIME_OK");
+    return 0;
+}

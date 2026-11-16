@@ -1,0 +1,136 @@
+# Cycle 17 2-way parity suite (Compiled vs Bytecode VM)
+
+package R17ParTie;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init, "f" => 0, "s" => 0}, $cls);
+}
+func FETCH(scalar $s) scalar {
+    $s->{"f"} = $s->{"f"} + 1;
+    return $s->{"v"};
+}
+func STORE(scalar $s, scalar $v) void {
+    $s->{"s"} = $s->{"s"} + 1;
+    $s->{"v"} = $v;
+}
+
+package R17ParTieHash;
+func TIEHASH(str $cls) scalar {
+    my hash %h = ();
+    my array @ks = ("café", "a" . chr(0) . "b");
+    $h{"café"} = "u8";
+    $h{"a" . chr(0) . "b"} = "nul";
+    return bless({"d" => \%h, "ks" => \@ks}, $cls);
+}
+func FETCH(scalar $s, str $k) scalar { return $s->{"d"}->{$k}; }
+func EXISTS(scalar $s, str $k) int { return exists($s->{"d"}->{$k}) ? 1 : 0; }
+func FIRSTKEY(scalar $s) scalar { return $s->{"ks"}->[0]; }
+func NEXTKEY(scalar $s, str $prev) scalar {
+    if ($prev eq $s->{"ks"}->[0]) { return $s->{"ks"}->[1]; }
+    return undef;
+}
+
+package R17ParDtor;
+our int $dtor_count = 0;
+func reset() void { $dtor_count = 0; }
+func count() int { return $dtor_count; }
+func new() scalar { return bless({}, "R17ParDtor"); }
+func DESTROY(scalar $self) void { $dtor_count = $dtor_count + 1; }
+
+package main;
+
+func box_fn(array @pa, hash %ph) str {
+    my scalar $c = func () str {
+        @pa = ("P1", "P2");
+        %ph = ("pk" => "pv");
+        return "in";
+    };
+    $c->();
+    return join(",", @pa) . "|" . $ph{"pk"};
+}
+
+func main() int {
+    # B3: map & grep redo with owned elements and inner locals
+    my int $mc = 0;
+    my array @mr = map {
+        my str $t = $_ . "!";
+        $mc = $mc + 1;
+        if ($mc == 2) { redo; }
+        $t . $mc;
+    } ("a", "b");
+    my int $gc = 0;
+    my array @gr = grep {
+        my str $g = "(" . $_ . ")";
+        $gc = $gc + 1;
+        if ($gc == 1) { redo; }
+        $g eq "(y)";
+    } (lc("X"), lc("Y"));
+    say("B3=" . join(",", @mr) . "|" . join(",", @gr) . "|" . $gc);
+
+    # B4: ||, //, //= tied single-FETCH & skip STORE
+    my scalar $t = "";
+    my scalar $o = tie($t, "R17ParTie", "val");
+    my scalar $a = ($t || "fb");
+    my int $f1 = $o->{"f"};
+    my scalar $b = ($t // "fb");
+    my int $f2 = $o->{"f"};
+    $o->{"v"} = "other";
+    my int $s_pre = $o->{"s"};
+    $o->{"v"} = 0;
+    my scalar $c = ($t //= 88);
+    my int $s_mid = $o->{"s"};
+    $o->{"v"} = undef;
+    my scalar $d = ($t //= 99);
+    say("B4=" . $a . ":" . $b . ":" . $f1 . ":" . $f2 . ":" . ($s_mid - $s_pre) . ":" . ($o->{"s"} - $s_mid) . ":" . $c . ":" . $d);
+    untie($t);
+
+    # B5: @array / %hash closure boxing
+    my array @la = ("1");
+    my hash %lh = ("a" => "1");
+    my scalar $lf = func () void {
+        @la = ("2", "3");
+        %lh = ("b" => "4");
+    };
+    @la = ("0");
+    $lf->();
+    say("B5=" . join(",", @la) . "|" . $lh{"b"} . "|" . box_fn(["z"], {"z" => 0}));
+
+    # B7: non-decl destructure triggers STORE on tied scalars
+    my scalar $d1 = "";
+    my scalar $d2 = "";
+    my scalar $od1 = tie($d1, "R17ParTie", "0");
+    my scalar $od2 = tie($d2, "R17ParTie", "0");
+    ($d1, $d2) = ("P", "Q");
+    say("B7=" . $od1->{"s"} . ":" . $od1->{"v"} . ":" . $od2->{"s"} . ":" . $od2->{"v"});
+    untie($d1);
+    untie($d2);
+
+    # B11: forward goto cleans block local destructor
+    R17ParDtor::reset();
+    if (1) {
+        my scalar $dt = R17ParDtor::new();
+        goto PAR_FWD;
+    }
+    say("UNREACHABLE");
+PAR_FWD:
+    core::gc_collect();
+    say("B11=" . R17ParDtor::count());
+
+    # B12: 0-param closure excess args
+    my scalar $zcl = func () int { return 123; };
+    say("B12=" . $zcl->(9, 8, 7));
+
+    # B13: tied hash UTF-8 & NUL keys preserve length
+    my hash %th = ();
+    tie(%th, "R17ParTieHash");
+    my array @ks = keys(%th);
+    my str $ek_res = "";
+    while (1) {
+        my array @kv = each(%th);
+        if (size(@kv) == 0) { last; }
+        $ek_res = $ek_res . bytes($kv[0]) . ":" . $kv[1] . ",";
+    }
+    say("B13=" . bytes($ks[0]) . ":" . bytes($ks[1]) . "|" . $ek_res);
+    untie(%th);
+
+    return 0;
+}

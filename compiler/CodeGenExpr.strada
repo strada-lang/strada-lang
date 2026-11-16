@@ -1415,9 +1415,27 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 if ($sf_obj_cl == 1 && $sf_push == 1) { emit($cg, "strada_cleanup_push(__csf_o); "); }
                 if ($sf_type == TYPE_STR()) {
-                    if ($op ne "//=") {
-                        my int $sf_max = $sf_sz - 1;
-                        if ($sf_max < 0) { $sf_max = 0; }
+                    my int $sf_max = $sf_sz - 1;
+                    if ($sf_max < 0) { $sf_max = 0; }
+                    if ($op eq "x=") {
+                        emit($cg, "int64_t __csf_cnt = ");
+                        emit_int_operand($cg, $sf_rhs);
+                        emit($cg, "; void *__csf_p = strada_cstruct_ptr(__csf_o); if (__csf_p && " . $sf_sz . " > 0) { char *__csf_dst = (char*)__csf_p + " . $sf_off . "; if (__csf_cnt <= 0) { __csf_dst[0] = '\\0'; } else if (__csf_cnt > 1) { size_t __csf_cur = strnlen(__csf_dst, " . $sf_max . "); if (__csf_cur > 0) { size_t __csf_pos = __csf_cur; for (int64_t __csf_ci = 1; __csf_ci < __csf_cnt && __csf_pos < (size_t)" . $sf_max . "; __csf_ci++) { size_t __csf_take = (size_t)" . $sf_max . " - __csf_pos; if (__csf_take > __csf_cur) __csf_take = __csf_cur; memcpy(__csf_dst + __csf_pos, __csf_dst, __csf_take); __csf_pos += __csf_take; } __csf_dst[__csf_pos] = '\\0'; } } } ");
+                    } elsif ($op eq "&&=" || $op eq "||=") {
+                        emit($cg, "void *__csf_p = strada_cstruct_ptr(__csf_o); if (__csf_p && " . $sf_sz . " > 0) { char *__csf_dst = (char*)__csf_p + " . $sf_off . "; size_t __csf_clen = strnlen(__csf_dst, " . $sf_max . "); int __csf_tr = (__csf_clen > 0 && !(__csf_clen == 1 && __csf_dst[0] == '0')); ");
+                        if ($op eq "&&=") { emit($cg, "if (__csf_tr) { "); }
+                        else { emit($cg, "if (!__csf_tr) { "); }
+                        emit($cg, "StradaValue *__csf_r = ");
+                        gen_expression($cg, $sf_rhs);
+                        emit($cg, "; ");
+                        if ($sf_rhs_cl == 1 && $sf_push == 1) { emit($cg, "strada_cleanup_push(__csf_r); "); }
+                        emit($cg, "char *__csf_rs = strada_to_str(__csf_r); size_t __csf_rl = __csf_rs ? strlen(__csf_rs) : 0; if (__csf_rl > " . $sf_max . ") __csf_rl = " . $sf_max . "; if (__csf_rs && __csf_rl > 0) memcpy(__csf_dst, __csf_rs, __csf_rl); __csf_dst[__csf_rl] = '\\0'; free(__csf_rs); ");
+                        if ($sf_rhs_cl == 1) {
+                            if ($sf_push == 1) { emit($cg, "strada_cleanup_pop_decref(__csf_r); "); }
+                            else { emit($cg, "strada_decref(__csf_r); "); }
+                        }
+                        emit($cg, "} } ");
+                    } elsif ($op ne "//=") {
                         emit($cg, "StradaValue *__csf_r = ");
                         gen_expression($cg, $sf_rhs);
                         emit($cg, "; void *__csf_p = strada_cstruct_ptr(__csf_o); if (__csf_p) { ");
@@ -1442,59 +1460,74 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "__csf_ret; })");
                     }
                 } elsif ($sf_type == TYPE_NUM()) {
-                    emit($cg, "double __csf_d = ");
-                    if ($op eq "//=") {
-                        emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ")");
-                    } elsif ($op eq "=") {
+                    if ($op eq "&&=" || $op eq "||=") {
+                        emit($cg, "double __csf_d = strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); ");
+                        if ($op eq "&&=") { emit($cg, "if (__csf_d != 0.0) { "); }
+                        else { emit($cg, "if (__csf_d == 0.0) { "); }
+                        emit($cg, "__csf_d = ");
                         emit_num_operand($cg, $sf_rhs);
-                    } elsif ($op eq "+=") {
-                        emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") + (");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "-=") {
-                        emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") - (");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "*=") {
-                        emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") * (");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "/=") {
-                        emit($cg, "({ double __csf_rhs = ");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, "; if (__csf_rhs == 0.0) { ");
-                        if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
-                        emit($cg, "strada_throw(\"Illegal division by zero\"); } strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") / __csf_rhs; })");
-                    } elsif ($op eq "**=") {
-                        emit($cg, "pow(strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), ");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "&=") {
-                        emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") & (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "))");
-                    } elsif ($op eq "|=") {
-                        emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") | (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "))");
-                    } elsif ($op eq "^=") {
-                        emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") ^ (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "))");
-                    } elsif ($op eq "<<=") {
-                        emit($cg, "({ int64_t __csf_sh = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; (double)((__csf_sh < 0 || __csf_sh >= 64) ? 0 : (int64_t)((uint64_t)(int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") << __csf_sh)); })");
-                    } elsif ($op eq ">>=") {
-                        emit($cg, "({ int64_t __csf_cur = (int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); int64_t __csf_sh = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; (double)((__csf_sh < 0 || __csf_sh >= 64) ? (__csf_cur < 0 ? -1 : 0) : (__csf_cur >> __csf_sh)); })");
+                        emit($cg, "; strada_cstruct_set_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_d); } ");
                     } else {
-                        emit_num_operand($cg, $sf_rhs);
-                    }
-                    emit($cg, "; ");
-                    if ($op ne "//=") {
-                        emit($cg, "strada_cstruct_set_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_d); ");
+                        emit($cg, "double __csf_d = ");
+                        if ($op eq "//=") {
+                            emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ")");
+                        } elsif ($op eq "=") {
+                            emit_num_operand($cg, $sf_rhs);
+                        } elsif ($op eq "+=") {
+                            emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") + (");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "-=") {
+                            emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") - (");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "*=") {
+                            emit($cg, "strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") * (");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "/=") {
+                            emit($cg, "({ double __csf_rhs = ");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, "; if (__csf_rhs == 0.0) { ");
+                            if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
+                            emit($cg, "strada_throw(\"Illegal division by zero\"); } strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") / __csf_rhs; })");
+                        } elsif ($op eq "%=") {
+                            emit($cg, "({ int64_t __csf_rhs = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; if (__csf_rhs == 0) { ");
+                            if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
+                            emit($cg, "strada_safe_mod(0, 0); } (double)strada_floored_mod((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), __csf_rhs); })");
+                        } elsif ($op eq "**=") {
+                            emit($cg, "pow(strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), ");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "&=") {
+                            emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") & (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "))");
+                        } elsif ($op eq "|=") {
+                            emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") | (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "))");
+                        } elsif ($op eq "^=") {
+                            emit($cg, "(double)((int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") ^ (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "))");
+                        } elsif ($op eq "<<=") {
+                            emit($cg, "({ int64_t __csf_sh = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; (double)((__csf_sh < 0 || __csf_sh >= 64) ? 0 : (int64_t)((uint64_t)(int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") << __csf_sh)); })");
+                        } elsif ($op eq ">>=") {
+                            emit($cg, "({ int64_t __csf_cur = (int64_t)strada_cstruct_get_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); int64_t __csf_sh = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; (double)((__csf_sh < 0 || __csf_sh >= 64) ? (__csf_cur < 0 ? -1 : 0) : (__csf_cur >> __csf_sh)); })");
+                        } else {
+                            emit_num_operand($cg, $sf_rhs);
+                        }
+                        emit($cg, "; ");
+                        if ($op ne "//=") {
+                            emit($cg, "strada_cstruct_set_double(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_d); ");
+                        }
                     }
                     if ($sf_obj_cl == 1) {
                         if ($sf_push == 1) { emit($cg, "strada_cleanup_pop_decref(__csf_o); "); }
@@ -1502,65 +1535,74 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     }
                     if ($is_void == 1) { emit($cg, "strada_undef_static(); })"); } else { emit($cg, "strada_new_num(__csf_d); })"); }
                 } else {
-                    emit($cg, "int64_t __csf_v = ");
-                    if ($op eq "//=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ")");
-                    } elsif ($op eq "=") {
+                    if ($op eq "&&=" || $op eq "||=") {
+                        emit($cg, "int64_t __csf_v = strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); ");
+                        if ($op eq "&&=") { emit($cg, "if (__csf_v != 0) { "); }
+                        else { emit($cg, "if (__csf_v == 0) { "); }
+                        emit($cg, "__csf_v = ");
                         emit_int_operand($cg, $sf_rhs);
-                    } elsif ($op eq "+=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") + (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "-=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") - (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "*=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") * (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "/=") {
-                        emit($cg, "({ int64_t __csf_rhs = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; if (__csf_rhs == 0) { ");
-                        if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
-                        emit($cg, "strada_throw(\"Illegal division by zero\"); } strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") / __csf_rhs; })");
-                    } elsif ($op eq "%=") {
-                        emit($cg, "({ int64_t __csf_rhs = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; if (__csf_rhs == 0) { ");
-                        if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
-                        emit($cg, "strada_safe_mod(0, 0); } strada_floored_mod(strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), __csf_rhs); })");
-                    } elsif ($op eq "**=") {
-                        emit($cg, "(int64_t)pow((double)strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), ");
-                        emit_num_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "&=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") & (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "|=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") | (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "^=") {
-                        emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") ^ (");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, ")");
-                    } elsif ($op eq "<<=") {
-                        emit($cg, "({ int64_t __csf_sh = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; (__csf_sh < 0 || __csf_sh >= 64) ? 0 : (int64_t)((uint64_t)strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") << __csf_sh); })");
-                    } elsif ($op eq ">>=") {
-                        emit($cg, "({ int64_t __csf_cur = strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); int64_t __csf_sh = ");
-                        emit_int_operand($cg, $sf_rhs);
-                        emit($cg, "; (__csf_sh < 0 || __csf_sh >= 64) ? (__csf_cur < 0 ? -1 : 0) : (__csf_cur >> __csf_sh); })");
+                        emit($cg, "; strada_cstruct_set_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_v); } ");
                     } else {
-                        emit_int_operand($cg, $sf_rhs);
-                    }
-                    emit($cg, "; ");
-                    if ($op ne "//=") {
-                        emit($cg, "strada_cstruct_set_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_v); ");
+                        emit($cg, "int64_t __csf_v = ");
+                        if ($op eq "//=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ")");
+                        } elsif ($op eq "=") {
+                            emit_int_operand($cg, $sf_rhs);
+                        } elsif ($op eq "+=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") + (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "-=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") - (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "*=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") * (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "/=") {
+                            emit($cg, "({ int64_t __csf_rhs = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; if (__csf_rhs == 0) { ");
+                            if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
+                            emit($cg, "strada_throw(\"Illegal division by zero\"); } strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") / __csf_rhs; })");
+                        } elsif ($op eq "%=") {
+                            emit($cg, "({ int64_t __csf_rhs = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; if (__csf_rhs == 0) { ");
+                            if ($sf_obj_cl == 1 && $sf_push == 0) { emit($cg, "strada_decref(__csf_o); "); }
+                            emit($cg, "strada_safe_mod(0, 0); } strada_floored_mod(strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), __csf_rhs); })");
+                        } elsif ($op eq "**=") {
+                            emit($cg, "(int64_t)pow((double)strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "), ");
+                            emit_num_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "&=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") & (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "|=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") | (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "^=") {
+                            emit($cg, "strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") ^ (");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, ")");
+                        } elsif ($op eq "<<=") {
+                            emit($cg, "({ int64_t __csf_sh = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; (__csf_sh < 0 || __csf_sh >= 64) ? 0 : (int64_t)((uint64_t)strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ") << __csf_sh); })");
+                        } elsif ($op eq ">>=") {
+                            emit($cg, "({ int64_t __csf_cur = strada_cstruct_get_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . "); int64_t __csf_sh = ");
+                            emit_int_operand($cg, $sf_rhs);
+                            emit($cg, "; (__csf_sh < 0 || __csf_sh >= 64) ? (__csf_cur < 0 ? -1 : 0) : (__csf_cur >> __csf_sh); })");
+                        } else {
+                            emit_int_operand($cg, $sf_rhs);
+                        }
+                        emit($cg, "; ");
+                        if ($op ne "//=") {
+                            emit($cg, "strada_cstruct_set_int(__csf_o, \"" . $sf_name . "\", " . $sf_off . ", __csf_v); ");
+                        }
                     }
                     if ($sf_obj_cl == 1) {
                         if ($sf_push == 1) { emit($cg, "strada_cleanup_pop_decref(__csf_o); "); }
@@ -3144,7 +3186,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit_num_operand($cg, $expr->{"value"});
                 emit($cg, ")");
             }
-            } elsif ($op eq "&&=" || $op eq "||=") {
+            } elsif ($op eq "&&=" || $op eq "||=" || $op eq "//=") {
                 my int $lca_tie = 0;
                 if ($cg->{"uses_tie"} == 1 && $target_type == NODE_VARIABLE() && $target->{"sigil"} eq "$" &&
                     $target->{"name"} ne "__program_name" && index($target->{"name"}, "::") < 0) {
@@ -3155,6 +3197,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     my int $lca_rhs_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"value"}) == 1;
                     my str $tcond = "!strada_to_bool(__lca_cur)";
                     if ($op eq "&&=") { $tcond = "strada_to_bool(__lca_cur)"; }
+                    elsif ($op eq "//=") { $tcond = "!strada_defined_bool(__lca_cur)"; }
                     emit($cg, "(strada_scalar_is_tied(");
                     gen_expression($cg, $target);
                     emit($cg, ") ? ({ StradaValue *__lca_cur = strada_tied_scalar_fetch(");
@@ -3183,6 +3226,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
                 my str $lca_cond = "!strada_to_bool(";
                 if ($op eq "&&=") { $lca_cond = "strada_to_bool("; }
+                elsif ($op eq "//=") { $lca_cond = "!strada_defined_bool("; }
                 emit($cg, "({ if (" . $lca_cond);
                 gen_expression($cg, $target);
                 emit($cg, ")) { StradaValue *__lca_rhs = ");
@@ -3379,6 +3423,75 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             }
         }
         return;
+}
+
+func gen_short_circuit_or_op(scalar $cg, scalar $expr, str $pred_fn, str $pfx) void {
+    my scalar $left = $expr->{"left"};
+    my scalar $right = $expr->{"right"};
+    my int $left_needs_cleanup = needs_temp_cleanup($cg, $left);
+    my int $left_needs_incref = return_needs_incref($cg, $left);
+    my int $right_needs_incref = return_needs_incref($cg, $right);
+    my str $lvar = "__" . $pfx . "_l";
+    my str $rvar = "__" . $pfx . "_r";
+
+    if ($cg->{"cleanup_enabled"} == 1) {
+        my int $push = cleanup_push_useful($cg);
+        emit($cg, "({ StradaValue *" . $lvar . " = ");
+        gen_expression($cg, $left);
+        emit($cg, "; ");
+        if ($cg->{"uses_tie"} == 1) {
+            emit($cg, "int " . $lvar . "_own = " . $left_needs_cleanup . "; ");
+            emit($cg, "int " . $lvar . "_inc = " . $left_needs_incref . "; ");
+            if ($push == 1 && $left_needs_cleanup == 1) {
+                emit($cg, "strada_cleanup_push(" . $lvar . "); ");
+            }
+            emit($cg, "if (strada_scalar_is_tied(" . $lvar . ")) { StradaValue *" . $lvar . "_tf = strada_tied_scalar_fetch(" . $lvar . "); ");
+            if ($left_needs_cleanup == 1) {
+                if ($push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $lvar . "); "); }
+                else { emit($cg, "strada_decref(" . $lvar . "); "); }
+            }
+            emit($cg, $lvar . " = " . $lvar . "_tf; " . $lvar . "_own = 1; " . $lvar . "_inc = 0; ");
+            if ($push == 1) { emit($cg, "strada_cleanup_push(" . $lvar . "); "); }
+            emit($cg, "} ");
+            emit($cg, "StradaValue *" . $rvar . "; if (" . $pred_fn . "(" . $lvar . ")) { ");
+            if ($push == 1) { emit($cg, "if (" . $lvar . "_own) strada_cleanup_pop(); "); }
+            emit($cg, $rvar . " = " . $lvar . "; if (" . $lvar . "_inc) strada_incref(" . $rvar . "); } else { ");
+            if ($push == 1) { emit($cg, "if (" . $lvar . "_own) strada_cleanup_pop_decref(" . $lvar . "); "); }
+            else { emit($cg, "if (" . $lvar . "_own) strada_decref(" . $lvar . "); "); }
+            emit($cg, $rvar . " = ");
+            gen_expression($cg, $right);
+            emit($cg, "; ");
+            if ($right_needs_incref == 1) { emit($cg, "strada_incref(" . $rvar . "); "); }
+            emit($cg, "} " . $rvar . "; })");
+        } else {
+            if ($push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(" . $lvar . "); "); }
+            emit($cg, "StradaValue *" . $rvar . "; if (" . $pred_fn . "(" . $lvar . ")) { ");
+            if ($push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_pop(); "); }
+            emit($cg, $rvar . " = " . $lvar . "; ");
+            if ($left_needs_incref == 1) { emit($cg, "strada_incref(" . $rvar . "); "); }
+            emit($cg, "} else { ");
+            if ($left_needs_cleanup == 1) {
+                if ($push == 1) { emit($cg, "strada_cleanup_pop_decref(" . $lvar . "); "); }
+                else { emit($cg, "strada_decref(" . $lvar . "); "); }
+            }
+            emit($cg, $rvar . " = ");
+            gen_expression($cg, $right);
+            emit($cg, "; ");
+            if ($right_needs_incref == 1) { emit($cg, "strada_incref(" . $rvar . "); "); }
+            emit($cg, "} " . $rvar . "; })");
+        }
+    } else {
+        # No cleanup - simpler form (avoids double-evaluation)
+        emit($cg, "({ StradaValue *" . $lvar . " = ");
+        gen_expression($cg, $left);
+        emit($cg, "; ");
+        if ($cg->{"uses_tie"} == 1) {
+            emit($cg, "if (strada_scalar_is_tied(" . $lvar . ")) " . $lvar . " = strada_tied_scalar_fetch(" . $lvar . "); ");
+        }
+        emit($cg, $pred_fn . "(" . $lvar . ") ? " . $lvar . " : ");
+        gen_expression($cg, $right);
+        emit($cg, "; })");
+    }
 }
 
 func gen_binop_node(scalar $cg, scalar $expr) void {
@@ -3839,84 +3952,10 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
             emit($cg, ")");
         } elsif ($op eq "||") {
             # Perl-style || - return left if truthy, otherwise return right
-            my scalar $left = $expr->{"left"};
-            my scalar $right = $expr->{"right"};
-            my int $left_needs_cleanup = needs_temp_cleanup($cg, $left);
-            my int $left_needs_incref = return_needs_incref($cg, $left);
-            my int $right_needs_incref = return_needs_incref($cg, $right);
-
-            if ($cg->{"cleanup_enabled"} == 1) {
-                my int $or_push = cleanup_push_useful($cg);
-                emit($cg, "({ StradaValue *__or_l = ");
-                gen_expression($cg, $left);
-                emit($cg, "; ");
-                if ($or_push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__or_l); "); }
-                emit($cg, "StradaValue *__or_r; if (strada_to_bool(__or_l)) { ");
-                if ($or_push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                emit($cg, "__or_r = __or_l; ");
-                if ($left_needs_incref == 1) {
-                    emit($cg, "strada_incref(__or_r); ");
-                }
-                emit($cg, "} else { ");
-                if ($left_needs_cleanup == 1) {
-                    if ($or_push == 1) { emit($cg, "strada_cleanup_pop_decref(__or_l); "); }
-                    else { emit($cg, "strada_decref(__or_l); "); }
-                }
-                emit($cg, "__or_r = ");
-                gen_expression($cg, $right);
-                emit($cg, "; ");
-                if ($right_needs_incref == 1) {
-                    emit($cg, "strada_incref(__or_r); ");
-                }
-                emit($cg, "} __or_r; })");
-            } else {
-                # No cleanup - simpler form (avoids double-evaluation)
-                emit($cg, "({ StradaValue *__or_l = ");
-                gen_expression($cg, $left);
-                emit($cg, "; strada_to_bool(__or_l) ? __or_l : ");
-                gen_expression($cg, $right);
-                emit($cg, "; })");
-            }
+            gen_short_circuit_or_op($cg, $expr, "strada_to_bool", "or");
         } elsif ($op eq "//") {
             # Defined-or - return left if defined, otherwise return right
-            my scalar $left = $expr->{"left"};
-            my scalar $right = $expr->{"right"};
-            my int $left_needs_cleanup = needs_temp_cleanup($cg, $left);
-            my int $left_needs_incref = return_needs_incref($cg, $left);
-            my int $right_needs_incref = return_needs_incref($cg, $right);
-
-            if ($cg->{"cleanup_enabled"} == 1) {
-                my int $dor_push = cleanup_push_useful($cg);
-                emit($cg, "({ StradaValue *__dor_l = ");
-                gen_expression($cg, $left);
-                emit($cg, "; ");
-                if ($dor_push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__dor_l); "); }
-                emit($cg, "StradaValue *__dor_r; if (strada_defined_bool(__dor_l)) { ");
-                if ($dor_push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                emit($cg, "__dor_r = __dor_l; ");
-                if ($left_needs_incref == 1) {
-                    emit($cg, "strada_incref(__dor_r); ");
-                }
-                emit($cg, "} else { ");
-                if ($left_needs_cleanup == 1) {
-                    if ($dor_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dor_l); "); }
-                    else { emit($cg, "strada_decref(__dor_l); "); }
-                }
-                emit($cg, "__dor_r = ");
-                gen_expression($cg, $right);
-                emit($cg, "; ");
-                if ($right_needs_incref == 1) {
-                    emit($cg, "strada_incref(__dor_r); ");
-                }
-                emit($cg, "} __dor_r; })");
-            } else {
-                # No cleanup - simpler form
-                emit($cg, "({ StradaValue *__dor_l = ");
-                gen_expression($cg, $left);
-                emit($cg, "; strada_defined_bool(__dor_l) ? __dor_l : ");
-                gen_expression($cg, $right);
-                emit($cg, "; })");
-            }
+            gen_short_circuit_or_op($cg, $expr, "strada_defined_bool", "dor");
         } elsif ($op eq "&") {
             emit($cg, "strada_new_int(");
             emit_int_operand($cg, $expr->{"left"});
@@ -7656,7 +7695,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $m_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
-        $cg->{"loop_redo_depth"} = $saved_map_depth + 1;
+        scope_push($cg);
+        $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
@@ -7727,6 +7767,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             pop($cg->{"loop_tmps_marks"});
         }
+        scope_pop($cg);
         scope_pop($cg);
         restore_block_type_state($cg, $map_saved_st);
 
@@ -7978,7 +8019,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $g_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
-        $cg->{"loop_redo_depth"} = $saved_grep_depth + 1;
+        scope_push($cg);
+        $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
@@ -8038,6 +8080,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             pop($cg->{"loop_tmps_marks"});
         }
+        scope_pop($cg);
         scope_pop($cg);
         restore_block_type_state($cg, $grep_saved_st);
 
@@ -8137,9 +8180,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         while ($i < $param_count) {
             my scalar $p = $params->[$i];
             my str $ap_cname = escape_c_keyword($p->{"name"});
-            my str $ap_sig = "" . $p->{"sigil"};
             my str $ap_emit = $ap_cname;
-            if (($anon_cand_boxed{$ap_cname} + 0) == 1 && length("" . $p->{"struct_name"}) == 0 && $ap_sig ne "@" && $ap_sig ne "%") {
+            if (($anon_cand_boxed{$ap_cname} + 0) == 1 && length("" . $p->{"struct_name"}) == 0) {
                 $ap_emit = "__rawp_" . $ap_cname;
             }
             if ($anon_has_try == 1) {
@@ -8305,7 +8347,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if (length("" . $ap->{"struct_name"}) > 0) {
                 $cg->{"struct_vars"}->{$ap_c} = "" . $ap->{"struct_name"};
             }
-            if (($anon_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0 && $ap_sig ne "@" && $ap_sig ne "%") {
+            if (($anon_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0) {
                 $cg->{"active_boxed_vars"}->{$ap_c} = 1;
                 emit_indent($cg);
                 if ($cg->{"func_has_try"} == 1) {
@@ -8314,7 +8356,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "StradaValue **__cell_" . $ap_c . " = strada_cell_alloc();\n");
                 }
                 emit_indent($cg);
-                emit($cg, "(*__cell_" . $ap_c . ") = strada_copy_scalar_il(__rawp_" . $ap_c . ");\n");
+                if ($ap_sig eq "@" || $ap_sig eq "%") {
+                    emit($cg, "strada_incref(__rawp_" . $ap_c . "); (*__cell_" . $ap_c . ") = __rawp_" . $ap_c . ";\n");
+                } else {
+                    emit($cg, "(*__cell_" . $ap_c . ") = strada_copy_scalar_il(__rawp_" . $ap_c . ");\n");
+                }
                 my str $apc_track = "@cell:" . $ap_c;
                 scope_track_var($cg, $apc_track);
                 if (cleanup_push_useful($cg) == 1) {

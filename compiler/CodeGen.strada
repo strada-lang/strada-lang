@@ -3559,7 +3559,7 @@ func ast_collect_anon_var_refs(scalar $n, scalar $out_hash, int $inside_anon) vo
         }
     }
     if ($inside_anon == 1) {
-        if ($type == NODE_VARIABLE() && ("" . $n->{"sigil"}) ne "@" && ("" . $n->{"sigil"}) ne "%") {
+        if ($type == NODE_VARIABLE()) {
             my str $vn = "" . $n->{"name"};
             if (length($vn) > 0 && index($vn, "::") < 0) {
                 $out_hash->{escape_c_keyword($vn)} = 1;

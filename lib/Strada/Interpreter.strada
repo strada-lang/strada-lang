@@ -325,6 +325,121 @@ func eval_scan_regex_body(str $code, int $pos, int $len, int $allow_cc) int {
     return -1;
 }
 
+func eval_is_regex_prefix(str $prev_sig, str $prev_word) int {
+    if ($prev_sig eq "" || $prev_sig eq "~" || $prev_sig eq "=" || $prev_sig eq "(" ||
+        $prev_sig eq "[" || $prev_sig eq "{" || $prev_sig eq "," || $prev_sig eq ";" ||
+        $prev_sig eq "!" || $prev_sig eq "?" || $prev_sig eq ":" || $prev_sig eq "&" ||
+        $prev_sig eq "|") {
+        return 1;
+    }
+    if ($prev_word eq "return" || $prev_word eq "if" || $prev_word eq "elsif" ||
+        $prev_word eq "unless" || $prev_word eq "while" || $prev_word eq "until" ||
+        $prev_word eq "split" || $prev_word eq "match") {
+        return 1;
+    }
+    return 0;
+}
+
+func eval_is_heredoc_prefix(str $prev_sig, str $prev_word) int {
+    if (eval_is_regex_prefix($prev_sig, $prev_word) == 1 || $prev_sig eq ".") {
+        return 1;
+    }
+    if ($prev_word eq "say" || $prev_word eq "print" || $prev_word eq "warn" ||
+        $prev_word eq "throw" || $prev_word eq "die" || $prev_word eq "push" ||
+        $prev_word eq "unshift") {
+        return 1;
+    }
+    return 0;
+}
+
+func eval_try_skip_regex(str $code, int $i, int $start, int $len, str $prev_sig, str $prev_word) int {
+    my str $c = substr($code, $i, 1);
+    if (($c eq "s" || $c eq "t" || $c eq "y" || $c eq "m") &&
+        ($i == $start || eval_is_ident_char(substr($code, $i - 1, 1)) == 0)) {
+        my str $w = eval_read_word($code, $i, $len);
+        if ($w eq "s" || $w eq "tr" || $w eq "y" || $w eq "m") {
+            my int $after_w = $i + length($w);
+            if ($after_w < $len && substr($code, $after_w, 1) eq "/") {
+                my int $use_cc = ($w eq "s" || $w eq "m") ? 1 : 0;
+                my int $end1 = eval_scan_regex_body($code, $after_w + 1, $len, $use_cc);
+                if ($end1 >= 0) {
+                    if ($w ne "m") {
+                        my int $end2 = eval_scan_regex_body($code, $end1, $len, 0);
+                        if ($end2 >= 0) { $end1 = $end2; }
+                    }
+                    while ($end1 < $len && (substr($code, $end1, 1) =~ /[a-zA-Z]/)) {
+                        $end1 = $end1 + 1;
+                    }
+                    return $end1;
+                }
+            }
+        }
+    }
+    if ($c eq "/" && eval_is_regex_prefix($prev_sig, $prev_word) == 1) {
+        if ($i + 1 < $len && substr($code, $i + 1, 1) eq "/" && $prev_sig ne "~") {
+            return -1;
+        }
+        my int $endr = eval_scan_regex_body($code, $i + 1, $len, 1);
+        if ($endr >= 0) {
+            while ($endr < $len && (substr($code, $endr, 1) =~ /[a-zA-Z]/)) {
+                $endr = $endr + 1;
+            }
+            return $endr;
+        }
+    }
+    return -1;
+}
+
+func eval_try_parse_heredoc(str $code, int $i, int $len, str $prev_sig, str $prev_word) scalar {
+    if ($i + 1 >= $len || substr($code, $i, 2) ne "<<") { return undef; }
+    if (eval_is_heredoc_prefix($prev_sig, $prev_word) == 0) { return undef; }
+    my int $hp = $i + 2;
+    if ($hp >= $len) { return undef; }
+    my str $hc0 = substr($code, $hp, 1);
+    if (eval_is_ident_char($hc0) == 1 && !($hc0 ge "0" && $hc0 le "9")) {
+        my str $tag = eval_read_word($code, $hp, $len);
+        return { "tag" => $tag, "end" => $hp + length($tag) };
+    }
+    my int $qp = $hp;
+    while ($qp < $len && (substr($code, $qp, 1) eq " " || substr($code, $qp, 1) eq "\t")) {
+        $qp = $qp + 1;
+    }
+    if ($qp < $len) {
+        my str $qc = substr($code, $qp, 1);
+        if ($qc eq "'" || $qc eq "\"") {
+            my int $qe = $qp + 1;
+            while ($qe < $len && substr($code, $qe, 1) ne $qc && substr($code, $qe, 1) ne "\n") {
+                $qe = $qe + 1;
+            }
+            if ($qe < $len && substr($code, $qe, 1) eq $qc && $qe > $qp + 1) {
+                return { "tag" => substr($code, $qp + 1, $qe - ($qp + 1)), "end" => $qe + 1 };
+            }
+        }
+    }
+    return undef;
+}
+
+func eval_skip_heredoc_bodies(str $code, int $pos, int $len, array @tags) int {
+    my int $i = $pos;
+    my int $ti = 0;
+    my int $tc = size(@tags);
+    while ($ti < $tc && $i < $len) {
+        my str $tag = $tags[$ti];
+        $ti = $ti + 1;
+        while ($i < $len) {
+            my int $nl = index($code, "\n", $i);
+            my int $lend = ($nl < 0) ? $len : $nl;
+            my str $hline = substr($code, $i, $lend - $i);
+            if (length($hline) > 0 && substr($hline, length($hline) - 1, 1) eq "\r") {
+                $hline = substr($hline, 0, length($hline) - 1);
+            }
+            $i = ($nl < 0) ? $len : ($nl + 1);
+            if ($hline eq $tag) { last; }
+        }
+    }
+    return $i;
+}
+
 func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
     my int $i = $start;
     my int $depth = 0;
@@ -333,9 +448,17 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
     my int $seen_brace = 0;
     my str $prev_sig = "";
     my str $prev_word = "";
+    my array @heredoc_tags = ();
 
     while ($i < $len) {
         my str $c = substr($code, $i, 1);
+        if ($c eq "\n" && size(@heredoc_tags) > 0) {
+            $i = eval_skip_heredoc_bodies($code, $i + 1, $len, @heredoc_tags);
+            @heredoc_tags = ();
+            $prev_sig = "\"";
+            $prev_word = "";
+            next;
+        }
         if ($c eq "#") {
             while ($i < $len && substr($code, $i, 1) ne "\n") {
                 $i = $i + 1;
@@ -370,55 +493,23 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
             next;
         }
 
-        if (($c eq "s" || $c eq "t" || $c eq "y" || $c eq "m") &&
-            ($i == $start || eval_is_ident_char(substr($code, $i - 1, 1)) == 0)) {
-            my str $w = eval_read_word($code, $i, $len);
-            if ($w eq "s" || $w eq "tr" || $w eq "y" || $w eq "m") {
-                my int $after_w = $i + length($w);
-                if ($after_w < $len && substr($code, $after_w, 1) eq "/") {
-                    my int $use_cc = ($w eq "s" || $w eq "m") ? 1 : 0;
-                    my int $end1 = eval_scan_regex_body($code, $after_w + 1, $len, $use_cc);
-                    if ($end1 >= 0) {
-                        if ($w ne "m") {
-                            my int $end2 = eval_scan_regex_body($code, $end1, $len, 0);
-                            if ($end2 >= 0) { $end1 = $end2; }
-                        }
-                        while ($end1 < $len && (substr($code, $end1, 1) =~ /[a-zA-Z]/)) {
-                            $end1 = $end1 + 1;
-                        }
-                        $i = $end1;
-                        $prev_sig = "/";
-                        $prev_word = "";
-                        next;
-                    }
-                }
+        if ($c eq "<") {
+            my scalar $hd = eval_try_parse_heredoc($code, $i, $len, $prev_sig, $prev_word);
+            if (defined($hd)) {
+                push(@heredoc_tags, $hd->{"tag"});
+                $i = $hd->{"end"};
+                $prev_sig = "\"";
+                $prev_word = "";
+                next;
             }
         }
 
-        if ($c eq "/") {
-            my int $is_rx = 0;
-            if ($prev_sig eq "" || $prev_sig eq "~" || $prev_sig eq "=" || $prev_sig eq "(" ||
-                $prev_sig eq "[" || $prev_sig eq "{" || $prev_sig eq "," || $prev_sig eq ";" ||
-                $prev_sig eq "!" || $prev_sig eq "?" || $prev_sig eq ":" || $prev_sig eq "&" ||
-                $prev_sig eq "|") {
-                $is_rx = 1;
-            } elsif ($prev_word eq "return" || $prev_word eq "if" || $prev_word eq "elsif" ||
-                     $prev_word eq "unless" || $prev_word eq "while" || $prev_word eq "until" ||
-                     $prev_word eq "split" || $prev_word eq "match") {
-                $is_rx = 1;
-            }
-            if ($is_rx == 1) {
-                my int $endr = eval_scan_regex_body($code, $i + 1, $len, 1);
-                if ($endr >= 0) {
-                    while ($endr < $len && (substr($code, $endr, 1) =~ /[a-zA-Z]/)) {
-                        $endr = $endr + 1;
-                    }
-                    $i = $endr;
-                    $prev_sig = "/";
-                    $prev_word = "";
-                    next;
-                }
-            }
+        my int $rx_end = eval_try_skip_regex($code, $i, $start, $len, $prev_sig, $prev_word);
+        if ($rx_end >= 0) {
+            $i = $rx_end;
+            $prev_sig = "/";
+            $prev_word = "";
+            next;
         }
 
         if (eval_is_ident_char($c) == 1) {
@@ -434,7 +525,7 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
             $seen_brace = 1;
         } elsif ($c eq "}") {
             if ($depth > 0) { $depth = $depth - 1; }
-            if ($brace_mode == 1 && $seen_brace == 1 && $depth == 0 && $pdepth == 0 && $bdepth == 0) {
+            if ($brace_mode == 1 && $seen_brace == 1 && $depth == 0 && $pdepth == 0 && $bdepth == 0 && size(@heredoc_tags) == 0) {
                 return $i + 1;
             }
         } elsif ($c eq "(") {
@@ -446,7 +537,12 @@ func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
         } elsif ($c eq "]") {
             if ($bdepth > 0) { $bdepth = $bdepth - 1; }
         } elsif ($brace_mode == 0 && $c eq ";" && $depth == 0 && $pdepth == 0 && $bdepth == 0) {
-            return $i + 1;
+            if (size(@heredoc_tags) == 0) {
+                return $i + 1;
+            }
+            my int $nl = index($code, "\n", $i + 1);
+            if ($nl < 0) { return $len; }
+            return eval_skip_heredoc_bodies($code, $nl + 1, $len, @heredoc_tags);
         }
 
         if (eval_is_ws_char($c) == 0) {
@@ -513,9 +609,20 @@ func eval_append_trailing_semi(str $code) str {
     my int $len = length($code);
     my int $i = 0;
     my str $last_sig = "";
+    my str $prev_word = "";
     my int $in_line_cmt = 0;
+    my int $saw_heredoc_eof = 0;
+    my array @heredoc_tags = ();
     while ($i < $len) {
         my str $c = substr($code, $i, 1);
+        if ($c eq "\n" && size(@heredoc_tags) > 0) {
+            $in_line_cmt = 0;
+            $i = eval_skip_heredoc_bodies($code, $i + 1, $len, @heredoc_tags);
+            @heredoc_tags = ();
+            if ($i >= $len) { $saw_heredoc_eof = 1; }
+            $prev_word = "";
+            next;
+        }
         if (eval_is_ws_char($c) == 1) {
             if ($c eq "\n") { $in_line_cmt = 0; }
             $i = $i + 1;
@@ -526,7 +633,7 @@ func eval_append_trailing_semi(str $code) str {
             while ($i < $len && substr($code, $i, 1) ne "\n") {
                 $i = $i + 1;
             }
-            if ($i < $len) { $in_line_cmt = 0; }
+            if ($i < $len && size(@heredoc_tags) == 0) { $in_line_cmt = 0; }
             next;
         }
         if ($c eq "/" && $i + 1 < $len && substr($code, $i + 1, 1) eq "*") {
@@ -539,9 +646,11 @@ func eval_append_trailing_semi(str $code) str {
             next;
         }
         $in_line_cmt = 0;
+        $saw_heredoc_eof = 0;
         if ($c eq "\"" || $c eq "'") {
             my str $q = $c;
             $last_sig = $q;
+            $prev_word = "";
             $i = $i + 1;
             while ($i < $len) {
                 my str $sc = substr($code, $i, 1);
@@ -557,13 +666,38 @@ func eval_append_trailing_semi(str $code) str {
             }
             next;
         }
+        if ($c eq "<") {
+            my scalar $hd = eval_try_parse_heredoc($code, $i, $len, $last_sig, $prev_word);
+            if (defined($hd)) {
+                push(@heredoc_tags, $hd->{"tag"});
+                $last_sig = "\"";
+                $prev_word = "";
+                $i = $hd->{"end"};
+                next;
+            }
+        }
+        my int $rx_end = eval_try_skip_regex($code, $i, 0, $len, $last_sig, $prev_word);
+        if ($rx_end >= 0) {
+            $last_sig = "/";
+            $prev_word = "";
+            $i = $rx_end;
+            next;
+        }
+        if (eval_is_ident_char($c) == 1) {
+            my str $w = eval_read_word($code, $i, $len);
+            $prev_word = $w;
+            $last_sig = "w";
+            $i = $i + length($w);
+            next;
+        }
         $last_sig = $c;
+        $prev_word = "";
         $i = $i + 1;
     }
     if (length($last_sig) == 0 || $last_sig eq ";") {
         return $code;
     }
-    if ($in_line_cmt == 1) {
+    if ($in_line_cmt == 1 || $saw_heredoc_eof == 1) {
         return $code . "\n;";
     }
     return $code . ";";

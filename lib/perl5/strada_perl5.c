@@ -199,20 +199,24 @@ static SV* perl5_sv_from_conv(const Perl5ConvArg *ca) {
     return &PL_sv_undef;
 }
 
+static StradaValue* perl5_strada_from_sv_nomg(SV *sv) {
+    if (!sv || !SvOK(sv)) {
+        return strada_new_str("");
+    }
+    STRLEN len = 0;
+    const char *p = SvPV_nomg(sv, len);
+    if (SvUTF8(sv)) {
+        return strada_new_str_len_utf8(p ? p : "", (size_t)len);
+    }
+    return strada_new_str_len(p ? p : "", (size_t)len);
+}
+
 static StradaValue* perl5_strada_from_sv(SV *sv) {
     if (!sv) {
         return strada_new_str("");
     }
     SvGETMAGIC(sv);
-    if (!SvOK(sv)) {
-        return strada_new_str("");
-    }
-    STRLEN len = 0;
-    const char *p = SvPV(sv, len);
-    if (SvUTF8(sv)) {
-        return strada_new_str_len_utf8(p ? p : "", (size_t)len);
-    }
-    return strada_new_str_len(p ? p : "", (size_t)len);
+    return perl5_strada_from_sv_nomg(sv);
 }
 
 /* Initialize the Perl interpreter */
@@ -564,7 +568,7 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
                 SV *sv = POPs;
                 if (sv) SvGETMAGIC(sv);
                 if (sv && SvOK(sv)) {
-                    temp[i] = perl5_strada_from_sv(sv);
+                    temp[i] = perl5_strada_from_sv_nomg(sv);
                 } else {
                     temp[i] = strada_new_undef();
                 }
@@ -718,7 +722,7 @@ char* strada_perl5_eval_raw(const char *code) {
 
     if (SvTRUE(ERRSV)) {
         STRLEN len;
-        const char *err = SvPV(ERRSV, len);
+        const char *err = SvPV_nomg(ERRSV, len);
         return strdup(err);
     }
 
@@ -726,7 +730,7 @@ char* strada_perl5_eval_raw(const char *code) {
         SvGETMAGIC(result);
         if (SvOK(result)) {
             STRLEN len;
-            const char *str = SvPV(result, len);
+            const char *str = SvPV_nomg(result, len);
             return strdup(str);
         }
     }
@@ -806,7 +810,7 @@ char* strada_perl5_get_scalar_raw(const char *name) {
         SvGETMAGIC(sv);
         if (SvOK(sv)) {
             STRLEN len;
-            const char *str = SvPV(sv, len);
+            const char *str = SvPV_nomg(sv, len);
             return strdup(str);
         }
     }
@@ -822,7 +826,7 @@ char* strada_perl5_get_error_raw(void) {
 
     if (SvTRUE(ERRSV)) {
         STRLEN len;
-        const char *err = SvPV(ERRSV, len);
+        const char *err = SvPV_nomg(ERRSV, len);
         return strdup(err);
     }
 
@@ -863,7 +867,7 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
             (void)POPs;
         }
         STRLEN len;
-        const char *err = SvPV(ERRSV, len);
+        const char *err = SvPV_nomg(ERRSV, len);
         result = strdup(err);
     } else if (count > 0) {
         SV *ret = POPs;
@@ -871,7 +875,7 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
             SvGETMAGIC(ret);
             if (SvOK(ret)) {
                 STRLEN len;
-                const char *str = SvPV(ret, len);
+                const char *str = SvPV_nomg(ret, len);
                 result = strdup(str);
             }
         }

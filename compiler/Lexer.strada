@@ -3733,73 +3733,85 @@ func lex_hd_find_line_end(str $source, int $src_len, int $scan_pos) scalar {
 }
 
 func lex_next_token(scalar $lexer) scalar {
-    # Clear after_sigil and after_arrow flags unless we just set them
-    # (re-set below if the current token is a sigil or -> / ::)
-    my int $saved_after_sigil = $lexer->{"after_sigil"};
-    my int $saved_after_arrow = $lexer->{"after_arrow"};
-    my int $saved_after_member_arrow = $lexer->{"after_member_arrow"};
-    my int $saved_expect_subst = $lexer->{"expect_subst"};
-    $lexer->{"after_sigil"} = 0;
-    $lexer->{"after_arrow"} = 0;
-    $lexer->{"after_member_arrow"} = 0;
+    my int $saved_after_sigil = 0;
+    my int $saved_after_arrow = 0;
+    my int $saved_after_member_arrow = 0;
+    my int $saved_expect_subst = 0;
+    my int $code = 0;
+    my int $token_line = 0;
+    my int $token_col = 0;
 
-    lex_skip_whitespace($lexer);
+    while (1) {
+        # Clear after_sigil and after_arrow flags unless we just set them
+        # (re-set below if the current token is a sigil or -> / ::)
+        $saved_after_sigil = $lexer->{"after_sigil"};
+        $saved_after_arrow = $lexer->{"after_arrow"};
+        $saved_after_member_arrow = $lexer->{"after_member_arrow"};
+        $saved_expect_subst = $lexer->{"expect_subst"};
+        $lexer->{"after_sigil"} = 0;
+        $lexer->{"after_arrow"} = 0;
+        $lexer->{"after_member_arrow"} = 0;
 
-    my int $code = lex_current_code($lexer);
+        lex_skip_whitespace($lexer);
 
-    # Capture line/column at token start (after whitespace). tok_col is
-    # exposed on the lexer so lex_tokenize_file can stamp the returned
-    # token's "column" centrally (one site instead of ~55 creation sites).
-    my int $token_line = $lexer->{"line"};
-    my int $token_col = $lexer->{"column"};
-    $lexer->{"tok_col"} = $token_col;
+        $code = lex_current_code($lexer);
 
-    # Check for EOF
-    if (lex_at_end($lexer) == 1) {
-        if ($lexer->{"pp_depth"} > 0) {
-            lex_error($lexer, "unterminated #ifdef/#ifndef (missing #endif)", $token_line, 1);
+        # Capture line/column at token start (after whitespace). tok_col is
+        # exposed on the lexer so lex_tokenize_file can stamp the returned
+        # token's "column" centrally (one site instead of ~55 creation sites).
+        $token_line = $lexer->{"line"};
+        $token_col = $lexer->{"column"};
+        $lexer->{"tok_col"} = $token_col;
+
+        # Check for EOF
+        if (lex_at_end($lexer) == 1) {
+            if ($lexer->{"pp_depth"} > 0) {
+                lex_error($lexer, "unterminated #ifdef/#ifndef (missing #endif)", $token_line, 1);
+            }
+            my hash %token = ();
+            $token{"type"} = "EOF";
+            $token{"value"} = "";
+            $token{"line"} = $token_line;
+            return \%token;
         }
-        my hash %token = ();
-        $token{"type"} = "EOF";
-        $token{"value"} = "";
-        $token{"line"} = $token_line;
-        return \%token;
-    }
 
-    # Skip line comments
-    if ($code == '#') {
-        if (lex_pp_directive($lexer) == 0) {
-            lex_skip_comment($lexer);
+        # Skip line comments
+        if ($code == '#') {
+            if (lex_pp_directive($lexer) == 0) {
+                lex_skip_comment($lexer);
+            }
+            next;
         }
-        return lex_next_token($lexer);
-    }
 
-    # Skip block comments (/* ... */)
-    if ($code == '/') {
-        my int $next_code = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
-        if ($next_code == '*') {
-            lex_skip_block_comment($lexer);
-            return lex_next_token($lexer);
-        }
-    }
-
-    # Skip POD blocks (=head1, =pod, etc. at start of line)
-    if ($code == '=') {
-        # Check if we're at start of line (pos 0 or prev char was newline)
-        my int $pos = $lexer->{"pos"};
-        my int $at_line_start = 0;
-        if ($pos == 0) {
-            $at_line_start = 1;
-        } else {
-            my int $prev = char_at($lexer->{"source"}, $pos - 1);
-            if ($prev == '\n') {
-                $at_line_start = 1;
+        # Skip block comments (/* ... */)
+        if ($code == '/') {
+            my int $next_code = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            if ($next_code == '*') {
+                lex_skip_block_comment($lexer);
+                next;
             }
         }
-        if ($at_line_start == 1 && lex_is_pod_start($lexer) == 1) {
-            lex_skip_pod($lexer);
-            return lex_next_token($lexer);
+
+        # Skip POD blocks (=head1, =pod, etc. at start of line)
+        if ($code == '=') {
+            # Check if we're at start of line (pos 0 or prev char was newline)
+            my int $pos = $lexer->{"pos"};
+            my int $at_line_start = 0;
+            if ($pos == 0) {
+                $at_line_start = 1;
+            } else {
+                my int $prev = char_at($lexer->{"source"}, $pos - 1);
+                if ($prev == '\n') {
+                    $at_line_start = 1;
+                }
+            }
+            if ($at_line_start == 1 && lex_is_pod_start($lexer) == 1) {
+                lex_skip_pod($lexer);
+                next;
+            }
         }
+
+        last;
     }
 
     # Check for regex/substitution after =~ or !~ or operand position BEFORE identifier check

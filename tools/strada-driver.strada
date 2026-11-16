@@ -1056,11 +1056,10 @@ func main() int {
         my array @__plib = split_ws(env("STRADA_PCRE2_LIBS")); @link_flags = (@link_flags, @__plib);
     }
 
-    # Extra plain C/O/A files for the link line
+    # Extra plain C/O/A files for the link line (.a archives deferred until after import_object .o files)
     my array @extra_files = ();
     @extra_files = (@extra_files, @EXTRA_C_FILES);
     @extra_files = (@extra_files, @EXTRA_O_FILES);
-    @extra_files = (@extra_files, @EXTRA_A_FILES);
 
     # ---- Preprocessor (stradapp) if -D defines were given ----
     my str $preprocessor = $HOME_DIR . "/stradapp";
@@ -1253,6 +1252,9 @@ func main() int {
             info("Skipping runtime (included in archive)");
         }
     }
+    if (size(@EXTRA_A_FILES) > 0) {
+        @extra_files = (@extra_files, @EXTRA_A_FILES);
+    }
 
     # link_lib deps: availability-filter each (a multi-driver module declares
     # all backends even when only some are installed).
@@ -1333,13 +1335,18 @@ func main() int {
         }
     }
     my int $needs_vm_link = $needs_vm_inc;
-    my int $has_user_vm = 0;
+    my int $user_vm_mask = 0;
     my int $ei = 0;
     while ($ei < size(@extra_files)) {
-        my str $eb = basename_of($extra_files[$ei]);
-        if (is_eval_artifact($extra_files[$ei]) == 1) { $needs_vm_link = 1; }
-        if ($eb eq "vm.c" || $eb eq "vm.o" || $eb eq "vm_compiler.c" || $eb eq "vm_compiler.o") {
-            $has_user_vm = 1;
+        my str $epath = $extra_files[$ei];
+        my str $eb = basename_of($epath);
+        if (is_eval_artifact($epath) == 1) { $needs_vm_link = 1; }
+        if ($eb eq "vm.c" || $eb eq "vm.o") {
+            $user_vm_mask = $user_vm_mask | 1;
+        } elsif ($eb eq "vm_compiler.c" || $eb eq "vm_compiler.o") {
+            $user_vm_mask = $user_vm_mask | 2;
+        } elsif (ew($eb, ".a") == 1) {
+            $user_vm_mask = $user_vm_mask | archive_vm_mask($epath);
         }
         $ei = $ei + 1;
     }
@@ -1353,11 +1360,15 @@ func main() int {
         }
         if ($has_inc == 0) { @include_flags = (@include_flags, $interp_inc); }
     }
-    if ($needs_vm_link == 1 && $OBJECT_ONLY == 0 && $has_user_vm == 0) {
+    if ($needs_vm_link == 1 && $OBJECT_ONLY == 0 && $user_vm_mask != 3) {
         ensure_vm_objects();
-        @extra_files = (@extra_files, $VM_OBJ, $VM_COMP_OBJ);
-        if ($STATIC_LIB == 1) {
-            @EXTRA_O_FILES = (@EXTRA_O_FILES, $VM_OBJ, $VM_COMP_OBJ);
+        if (($user_vm_mask & 1) == 0) {
+            @extra_files = (@extra_files, $VM_OBJ);
+            if ($STATIC_LIB == 1) { @EXTRA_O_FILES = (@EXTRA_O_FILES, $VM_OBJ); }
+        }
+        if (($user_vm_mask & 2) == 0) {
+            @extra_files = (@extra_files, $VM_COMP_OBJ);
+            if ($STATIC_LIB == 1) { @EXTRA_O_FILES = (@EXTRA_O_FILES, $VM_COMP_OBJ); }
         }
     }
 
@@ -1436,6 +1447,21 @@ func scratch_path(str $input, str $suffix) str {
 # ---------------------------------------------------------------------------
 # Linking (the big shared/object/static-lib/static/executable branch)
 # ---------------------------------------------------------------------------
+
+func archive_vm_mask(str $path) int {
+    if (ew($path, ".a") == 0 || !(-f $path)) { return 0; }
+    my str $out = core::qx("ar t " . sq($path) . " 2>/dev/null");
+    my int $mask = 0;
+    my array @lines = split("\n", $out);
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        my str $m = basename_of(trim($lines[$i]));
+        if ($m eq "vm.o") { $mask = $mask | 1; }
+        elsif ($m eq "vm_compiler.o") { $mask = $mask | 2; }
+        $i = $i + 1;
+    }
+    return $mask;
+}
 
 func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
              array @link_flags, array @extra_files, int $skip_runtime) void {
@@ -1713,7 +1739,11 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         my int $efi = 0;
         while ($efi < size(@extra_files)) {
             my str $efb = basename_of($extra_files[$efi]);
-            if ($efb eq "vm.o" || $efb eq "vm.c" || is_eval_artifact($extra_files[$efi]) == 1) { $has_vm_obj = 1; last; }
+            if ($efb eq "vm.o" || $efb eq "vm.c" || is_eval_artifact($extra_files[$efi]) == 1
+                || archive_vm_mask($extra_files[$efi]) != 0) {
+                $has_vm_obj = 1;
+                last;
+            }
             $efi = $efi + 1;
         }
         if ($has_vm_obj == 1 || file_contains($cfile, "dlopen") == 1 || file_contains($cfile, "strada_dl_open") == 1

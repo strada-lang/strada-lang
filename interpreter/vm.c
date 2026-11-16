@@ -97,10 +97,13 @@ void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type) {
     hdr->is_utf8 = 0;
     hdr->gc_finalized = 0;
     if (g_active_vm) {
+        VM *avm = g_active_vm;
         hdr->gc_immortal = 0;
-        hdr->gc_next = g_active_vm->gc_objects;
-        g_active_vm->gc_objects = hdr;
-        g_active_vm->gc_count++;
+        if (__builtin_expect(avm->is_worker_vm, 0)) pthread_mutex_lock(&avm->gc_mutex);
+        hdr->gc_next = avm->gc_objects;
+        avm->gc_objects = hdr;
+        avm->gc_count++;
+        if (__builtin_expect(avm->is_worker_vm, 0)) pthread_mutex_unlock(&avm->gc_mutex);
     } else if (g_compiling_prog) {
         hdr->gc_immortal = 1;
         hdr->gc_next = g_compiling_prog->compile_objects;
@@ -1031,6 +1034,10 @@ static VM *vm_new_worker(VM *parent) {
         vm->globals = root->globals;
         vm->default_fh = root->default_fh;
         vm->recursion_limit = root->recursion_limit;
+        pthread_mutex_lock(&root->gc_mutex);
+        vm->worker_next = root->workers_head;
+        root->workers_head = vm;
+        pthread_mutex_unlock(&root->gc_mutex);
     } else {
         vm->globals = vm_hash_new(64);
     }
@@ -1115,37 +1122,47 @@ typedef struct {
     int dfidx;
 } VMFinalizerItem;
 
+static void vm_gc_mark_vm_roots(VM *tvm, VMObjHeader ***work, size_t *wlen, size_t *wcap) {
+    if (!tvm) return;
+    for (size_t i = 0; i < tvm->stack_top; i++) {
+        vm_gc_mark_val(tvm->stack[i], work, wlen, wcap);
+    }
+    for (size_t i = 0; i < tvm->frame_count; i++) {
+        VMFrame *f = &tvm->frames[i];
+        if (f->locals && f->chunk) {
+            int lc = f->chunk->local_count + 1;
+            for (int j = 0; j < lc; j++) {
+                vm_gc_mark_val(f->locals[j], work, wlen, wcap);
+            }
+        }
+        if (f->closure) {
+            vm_gc_mark_val(VM_MAKE_PTR(f->closure), work, wlen, wcap);
+        }
+    }
+    for (int i = 0; i < tvm->global_save_count; i++) {
+        vm_gc_mark_val(tvm->global_saves[i].saved_value, work, wlen, wcap);
+        if (tvm->global_saves[i].is_hash_elem && tvm->global_saves[i].hash) {
+            vm_gc_mark_val(VM_MAKE_PTR(tvm->global_saves[i].hash), work, wlen, wcap);
+        }
+    }
+    vm_gc_mark_val(tvm->current_exception, work, wlen, wcap);
+    vm_gc_mark_val(tvm->pending_exc, work, wlen, wcap);
+    vm_gc_mark_val(tvm->default_fh, work, wlen, wcap);
+    for (VMObjHeader *o = tvm->gc_objects; o; o = o->gc_next) {
+        if (o->gc_immortal) {
+            vm_gc_mark_val(VM_MAKE_PTR(o), work, wlen, wcap);
+        }
+    }
+}
+
 static void vm_gc_mark_all(VM *vm) {
     VMObjHeader **work = NULL;
     size_t wlen = 0, wcap = 0;
 
-    for (size_t i = 0; i < vm->stack_top; i++) {
-        vm_gc_mark_val(vm->stack[i], &work, &wlen, &wcap);
-    }
-    for (size_t i = 0; i < vm->frame_count; i++) {
-        VMFrame *f = &vm->frames[i];
-        if (f->locals && f->chunk) {
-            int lc = f->chunk->local_count + 1;
-            for (int j = 0; j < lc; j++) {
-                vm_gc_mark_val(f->locals[j], &work, &wlen, &wcap);
-            }
-        }
-        if (f->closure) {
-            vm_gc_mark_val(VM_MAKE_PTR(f->closure), &work, &wlen, &wcap);
-        }
-    }
+    vm_gc_mark_vm_roots(vm, &work, &wlen, &wcap);
     if (vm->globals) {
         vm_gc_mark_val(VM_MAKE_PTR(vm->globals), &work, &wlen, &wcap);
     }
-    for (int i = 0; i < vm->global_save_count; i++) {
-        vm_gc_mark_val(vm->global_saves[i].saved_value, &work, &wlen, &wcap);
-        if (vm->global_saves[i].is_hash_elem && vm->global_saves[i].hash) {
-            vm_gc_mark_val(VM_MAKE_PTR(vm->global_saves[i].hash), &work, &wlen, &wcap);
-        }
-    }
-    vm_gc_mark_val(vm->current_exception, &work, &wlen, &wcap);
-    vm_gc_mark_val(vm->pending_exc, &work, &wlen, &wcap);
-    vm_gc_mark_val(vm->default_fh, &work, &wlen, &wcap);
     if (vm->argv) {
         vm_gc_mark_val(VM_MAKE_PTR(vm->argv), &work, &wlen, &wcap);
     }
@@ -1154,10 +1171,10 @@ static void vm_gc_mark_all(VM *vm) {
             vm_gc_mark_val(vm->program->attrs[i].default_val, &work, &wlen, &wcap);
         }
     }
-    for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
-        if (o->gc_immortal) {
-            vm_gc_mark_val(VM_MAKE_PTR(o), &work, &wlen, &wcap);
-        }
+    for (VM *w = vm->workers_head; w; w = w->worker_next) {
+        pthread_mutex_lock(&w->gc_mutex);
+        vm_gc_mark_vm_roots(w, &work, &wlen, &wcap);
+        pthread_mutex_unlock(&w->gc_mutex);
     }
 
     while (wlen > 0) {
@@ -1219,33 +1236,49 @@ static void vm_gc_mark_all(VM *vm) {
     /* Scalar references (VMScalarRef) are proxy objects for a backing cell or global slot.
      * Keep any VMScalarRef alive while its backing variable is live so weak scalar refs
      * do not clear prematurely while the referent variable remains in scope. */
-    if (vm->has_weakrefs) {
+    int any_weak = vm->has_weakrefs;
+    if (!any_weak) {
+        for (VM *w = vm->workers_head; w; w = w->worker_next) {
+            if (w->has_weakrefs) { any_weak = 1; break; }
+        }
+    }
+    if (any_weak) {
         int changed = 1;
         while (changed) {
             changed = 0;
             for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
                 if (o->obj_type == VM_OBJ_SREF && !o->gc_marked && !o->gc_immortal) {
                     VMScalarRef *sr = (VMScalarRef*)o;
-                    int backing_live = 0;
-                    if (sr->global_name) {
-                        backing_live = 1;
-                    } else if (VM_IS_PTR(sr->cell)) {
-                        VMObjHeader *ch = (VMObjHeader*)VM_TO_PTR(sr->cell);
-                        if (ch->gc_marked || ch->gc_immortal) backing_live = 1;
-                    }
-                    if (backing_live) {
+                    if (sr->global_name || (VM_IS_PTR(sr->cell) &&
+                        (((VMObjHeader*)VM_TO_PTR(sr->cell))->gc_marked ||
+                         ((VMObjHeader*)VM_TO_PTR(sr->cell))->gc_immortal))) {
                         o->gc_marked = 1;
                         changed = 1;
                     }
                 }
             }
+            for (VM *w = vm->workers_head; w; w = w->worker_next) {
+                if (!w->has_weakrefs) continue;
+                pthread_mutex_lock(&w->gc_mutex);
+                for (VMObjHeader *o = w->gc_objects; o; o = o->gc_next) {
+                    if (o->obj_type == VM_OBJ_SREF && !o->gc_marked && !o->gc_immortal) {
+                        VMScalarRef *sr = (VMScalarRef*)o;
+                        if (sr->global_name || (VM_IS_PTR(sr->cell) &&
+                            (((VMObjHeader*)VM_TO_PTR(sr->cell))->gc_marked ||
+                             ((VMObjHeader*)VM_TO_PTR(sr->cell))->gc_immortal))) {
+                            o->gc_marked = 1;
+                            changed = 1;
+                        }
+                    }
+                }
+                pthread_mutex_unlock(&w->gc_mutex);
+            }
         }
     }
 }
 
-static void vm_gc_clear_weakrefs(VM *vm) {
-    if (!vm->has_weakrefs) return;
-    for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
+static void vm_gc_clear_weakrefs_list(VMObjHeader *head) {
+    for (VMObjHeader *o = head; o; o = o->gc_next) {
         if (o->obj_type == VM_OBJ_WEAKREF) {
             VMWeakRef *wr = (VMWeakRef*)o;
             if (VM_IS_PTR(wr->target)) {
@@ -1255,6 +1288,28 @@ static void vm_gc_clear_weakrefs(VM *vm) {
                 }
             }
         }
+    }
+}
+
+static void vm_gc_clear_weakrefs(VM *vm) {
+    if (vm->has_weakrefs) {
+        vm_gc_clear_weakrefs_list(vm->gc_objects);
+    }
+    for (VM *w = vm->workers_head; w; w = w->worker_next) {
+        if (!w->has_weakrefs) continue;
+        pthread_mutex_lock(&w->gc_mutex);
+        vm_gc_clear_weakrefs_list(w->gc_objects);
+        pthread_mutex_unlock(&w->gc_mutex);
+    }
+}
+
+static void vm_gc_reset_worker_marks(VM *vm) {
+    for (VM *w = vm->workers_head; w; w = w->worker_next) {
+        pthread_mutex_lock(&w->gc_mutex);
+        for (VMObjHeader *o = w->gc_objects; o; o = o->gc_next) {
+            o->gc_marked = 0;
+        }
+        pthread_mutex_unlock(&w->gc_mutex);
     }
 }
 
@@ -1344,26 +1399,30 @@ static size_t vm_collect_finalizer_items(VM *vm, VMFinalizerItem **out_items, in
 static void vm_gc_collect_ex(VM *vm, int propagate_try) {
     if (!vm || vm->is_worker_vm || vm->gc_pause > 0 || vm->exec_base > 0) return;
 
+    pthread_mutex_lock(&vm->gc_mutex);
     pthread_mutex_lock(&vm->globals_mutex);
     vm_gc_mark_all(vm);
     vm_gc_clear_weakrefs(vm);
-    pthread_mutex_unlock(&vm->globals_mutex);
-
     VMFinalizerItem *fin = NULL;
     size_t fin_count = vm_collect_finalizer_items(vm, &fin, 1);
+    pthread_mutex_unlock(&vm->globals_mutex);
+
     if (fin_count > 0) {
+        pthread_mutex_unlock(&vm->gc_mutex);
         vm_run_destroy_batch_ex(vm, fin, fin_count, propagate_try);
         free(fin);
+        pthread_mutex_lock(&vm->gc_mutex);
+        pthread_mutex_lock(&vm->globals_mutex);
         for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
             o->gc_marked = 0;
         }
-        pthread_mutex_lock(&vm->globals_mutex);
+        vm_gc_reset_worker_marks(vm);
         vm_gc_mark_all(vm);
         vm_gc_clear_weakrefs(vm);
         pthread_mutex_unlock(&vm->globals_mutex);
     }
 
-    pthread_mutex_lock(&vm->gc_mutex);
+    VMObjHeader *dead_list = NULL;
     VMObjHeader **pp = &vm->gc_objects;
     while (*pp) {
         VMObjHeader *hdr = *pp;
@@ -1372,11 +1431,19 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
             pp = &hdr->gc_next;
         } else {
             *pp = hdr->gc_next;
+            hdr->gc_next = dead_list;
+            dead_list = hdr;
             vm->gc_count--;
-            vm_gc_free_one(hdr);
         }
     }
+    vm_gc_reset_worker_marks(vm);
     pthread_mutex_unlock(&vm->gc_mutex);
+
+    while (dead_list) {
+        VMObjHeader *next = dead_list->gc_next;
+        vm_gc_free_one(dead_list);
+        dead_list = next;
+    }
     vm->gc_threshold = (vm->gc_count < 2048) ? 4096 : (vm->gc_count * 2);
 }
 
@@ -1432,21 +1499,36 @@ void vm_free(VM *vm) {
     }
     vm_suspend(vm);
     if (vm->is_worker_vm && vm->root_vm) {
+        VM *root_vm = vm->root_vm;
+        pthread_mutex_lock(&root_vm->gc_mutex);
+        VM **wp = &root_vm->workers_head;
+        while (*wp) {
+            if (*wp == vm) {
+                *wp = vm->worker_next;
+                break;
+            }
+            wp = &(*wp)->worker_next;
+        }
+        vm->worker_next = NULL;
+        if (vm->has_weakrefs) {
+            root_vm->has_weakrefs = 1;
+        }
         if (vm->gc_objects) {
             VMObjHeader *tail = vm->gc_objects;
             size_t cnt = 1;
+            tail->gc_marked = 0;
             while (tail->gc_next) {
                 tail = tail->gc_next;
+                tail->gc_marked = 0;
                 cnt++;
             }
-            pthread_mutex_lock(&vm->root_vm->gc_mutex);
-            tail->gc_next = vm->root_vm->gc_objects;
-            vm->root_vm->gc_objects = vm->gc_objects;
-            vm->root_vm->gc_count += cnt;
-            pthread_mutex_unlock(&vm->root_vm->gc_mutex);
+            tail->gc_next = root_vm->gc_objects;
+            root_vm->gc_objects = vm->gc_objects;
+            root_vm->gc_count += cnt;
             vm->gc_objects = NULL;
             vm->gc_count = 0;
         }
+        pthread_mutex_unlock(&root_vm->gc_mutex);
     } else {
         pthread_mutex_lock(&vm->gc_mutex);
         VMObjHeader *obj = vm->gc_objects;
@@ -1522,7 +1604,27 @@ static inline void vm_locals_free(VM *avm, VMValue *p, int count) {
         }
         return;
     }
-    free(p);
+    if (avm && avm->is_worker_vm) {
+        pthread_mutex_lock(&avm->gc_mutex);
+        free(p);
+        pthread_mutex_unlock(&avm->gc_mutex);
+    } else {
+        free(p);
+    }
+}
+
+static void vm_frames_grow(VM *vm) {
+    if (vm->is_worker_vm) pthread_mutex_lock(&vm->gc_mutex);
+    vm->frame_cap *= 2;
+    vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+    if (vm->is_worker_vm) pthread_mutex_unlock(&vm->gc_mutex);
+}
+
+static void vm_global_saves_grow(VM *vm) {
+    if (vm->is_worker_vm) pthread_mutex_lock(&vm->gc_mutex);
+    vm->global_save_cap *= 2;
+    vm->global_saves = realloc(vm->global_saves, vm->global_save_cap * sizeof(VMGlobalSave));
+    if (vm->is_worker_vm) pthread_mutex_unlock(&vm->gc_mutex);
 }
 
 static inline VMValue *locals_alloc(int count, int skip_zero) {
@@ -3360,8 +3462,10 @@ static void vm_stack_grow(VM *vm, size_t need) {
     VMValue *ns = realloc(vm->stack, newcap * sizeof(VMValue));
     if (!ns) { fprintf(stderr, "VM: out of memory growing value stack\n"); exit(1); }
     memset(ns + vm->stack_cap, 0, (newcap - vm->stack_cap) * sizeof(VMValue));
+    if (vm->is_worker_vm) pthread_mutex_lock(&vm->gc_mutex);
     vm->stack = ns;
     vm->stack_cap = newcap;
+    if (vm->is_worker_vm) pthread_mutex_unlock(&vm->gc_mutex);
 }
 
 /* Unwrap a weak reference slot; if its target is non-undef, run GC while keeping
@@ -4491,6 +4595,19 @@ static VMArray *vm_materialize_array(VM *vm, VMArray *src) {
     return cp;
 }
 
+static inline VMValue vm_tied_key_str(VMValue k) {
+    if (VM_IS_PTR(k)) {
+        enum VMObjType t = VM_PTR_TYPE(k);
+        if (t == VM_OBJ_STR) return vm_val_copy(k);
+        if (t == VM_OBJ_STRBUF) {
+            VMStrBuf *sb = VM_AS_STRBUF(k);
+            return vm_make_str_flag(sb->data ? sb->data : "", sb->len, sb->hdr.is_utf8);
+        }
+    }
+    char kbuf[256];
+    return vm_str(vm_to_cstr(k, kbuf, sizeof(kbuf)));
+}
+
 static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_firstkey) {
     int fk_fidx = vm_tied_array_find_method(vm, tied_obj, "FIRSTKEY");
     if (has_firstkey) *has_firstkey = (fk_fidx >= 0);
@@ -4500,8 +4617,7 @@ static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_fir
     vm->gc_pause++;
     VMValue k = vm_tied_array_call(vm, tied_obj, fk_fidx, NULL, 0);
     while (!vm->has_pending_exc && !VM_IS_UNDEF(k)) {
-        char kbuf[256];
-        vm_array_push(keys, vm_str(vm_to_cstr(k, kbuf, sizeof(kbuf))));
+        vm_array_push(keys, vm_tied_key_str(k));
         if (nk_fidx < 0) break;
         k = vm_tied_array_call(vm, tied_obj, nk_fidx, &k, 1);
     }
@@ -5191,15 +5307,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     VMChunk *chunk = &vm->program->funcs[func_idx];
     if (vm->frame_count >= vm->frame_cap) {
-        vm->frame_cap *= 2;
-        vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+        vm_frames_grow(vm);
     }
     VMFrame *frame = &vm->frames[vm->frame_count++];
     frame->chunk = chunk;
     frame->ip = chunk->code;
     {
         int cnt = chunk->local_count + 1;
-        int zf = cargc < cnt ? cargc : cnt;
+        int pmax = cnt;
+        if (!chunk->has_variadic && chunk->fixed_param_count >= 0 && chunk->fixed_param_count < pmax) {
+            pmax = chunk->fixed_param_count;
+        }
+        int zf = cargc < pmax ? cargc : pmax;
         frame->locals = vm_locals_alloc(vm, cnt, zf);
         for (int ci = 0; ci < zf; ci++) frame->locals[ci] = cargs[ci];
     }
@@ -6439,8 +6558,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             exit(1);
         }
         if (__builtin_expect(vm->frame_count >= vm->frame_cap, 0)) {
-            vm->frame_cap *= 2;
-            vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+            vm_frames_grow(vm);
         }
         VMFrame *nf = &vm->frames[vm->frame_count++];
         nf->chunk = callee;
@@ -6455,7 +6573,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         int lcnt = callee->local_count + 1;
         if (__builtin_expect(!callee->has_variadic, 1)) {
             int pmax = lcnt;
-            if (callee->fixed_param_count > 0 && callee->fixed_param_count < pmax) {
+            if (callee->fixed_param_count >= 0 && callee->fixed_param_count < pmax) {
                 pmax = callee->fixed_param_count;
             }
             int zf = argc < pmax ? argc : pmax;
@@ -6510,6 +6628,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             locals = frame->locals;
         }
         int lc = chunk->local_count;
+        frame->locals = NULL;
         vm_locals_free(vm, locals, lc + 1);
         if (__builtin_expect(vm->exc_top > 0, 0)) {
             while (vm->exc_top > 0 && vm->exc_stack[vm->exc_top - 1].frame_count >= vm->frame_count) {
@@ -8541,8 +8660,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VMChunk *callee = &vm->program->funcs[fidx];
                 frame->ip = ip; vm->stack_top = sp;
                 if (vm->frame_count >= vm->frame_cap) {
-                    vm->frame_cap *= 2;
-                    vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+                    vm_frames_grow(vm);
                 }
                 VMFrame *nf = &vm->frames[vm->frame_count++];
                 nf->chunk = callee; nf->ip = callee->code;
@@ -8570,7 +8688,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     free(tmp);
                 } else {
                     int pmax = lcnt;
-                    if (callee->fixed_param_count > 0 && callee->fixed_param_count < pmax) {
+                    if (callee->fixed_param_count >= 0 && callee->fixed_param_count < pmax) {
                         pmax = callee->fixed_param_count;
                     }
                     int zf = (argc + 1 < pmax) ? (argc + 1) : pmax;
@@ -8580,7 +8698,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         VMValue av = stack[--sp];
                         if (i + 1 < pmax) nloc[i + 1] = av;
                     }
-                    nloc[0] = stack[--sp]; /* self */
+                    VMValue sv = stack[--sp]; /* self */
+                    if (pmax > 0) nloc[0] = sv;
                 }
                 frame = nf; chunk = callee; ip = callee->code; locals = nf->locals;
                 vm->stack_top = sp;
@@ -8630,8 +8749,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     VMChunk *callee = &vm->program->funcs[al_fidx];
                     frame->ip = ip; vm->stack_top = sp;
                     if (vm->frame_count >= vm->frame_cap) {
-                        vm->frame_cap *= 2;
-                        vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+                        vm_frames_grow(vm);
                     }
                     VMFrame *nf = &vm->frames[vm->frame_count++];
                     nf->chunk = callee; nf->ip = callee->code;
@@ -9388,8 +9506,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             frame->ip = ip; vm->stack_top = sp;
 
             if (vm->frame_count >= vm->frame_cap) {
-                vm->frame_cap *= 2;
-                vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+                vm_frames_grow(vm);
             }
             VMFrame *nf = &vm->frames[vm->frame_count++];
             nf->chunk = callee; nf->ip = callee->code;
@@ -9420,17 +9537,25 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     for (int i = fixed; i < eff_argc; i++) vm_array_push(va, tmp_args[i]);
                     if (fixed < lcnt) nf->locals[fixed] = VM_MAKE_PTR(va);
                 } else {
-                    for (int i = 0; i < eff_argc && i < lcnt; i++) {
+                    int pmax = lcnt;
+                    if (callee->fixed_param_count >= 0 && callee->fixed_param_count < pmax) {
+                        pmax = callee->fixed_param_count;
+                    }
+                    for (int i = 0; i < eff_argc && i < pmax; i++) {
                         nf->locals[i] = tmp_args[i];
                     }
                 }
                 if (tmp_args != tmp_buf) free(tmp_args);
             } else {
-                int zf = argc < lcnt ? argc : lcnt;
+                int pmax = lcnt;
+                if (callee->fixed_param_count >= 0 && callee->fixed_param_count < pmax) {
+                    pmax = callee->fixed_param_count;
+                }
+                int zf = argc < pmax ? argc : pmax;
                 nf->locals = vm_locals_alloc(vm, lcnt, zf);
                 for (int i = argc - 1; i >= 0; i--) {
                     VMValue av = stack[--sp];
-                    if (i < lcnt) nf->locals[i] = av;
+                    if (i < pmax) nf->locals[i] = av;
                 }
             }
             frame = nf; chunk = callee; ip = callee->code; locals = nf->locals;
@@ -9577,7 +9702,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 while (vm->frame_count > vm->exec_base) {
                     VMFrame *f = &vm->frames[vm->frame_count - 1];
                     int gsd = f->global_save_depth;
-                    vm_locals_free(vm, f->locals, f->chunk->local_count + 1);
+                    VMValue *fl = f->locals;
+                    f->locals = NULL;
+                    vm_locals_free(vm, fl, f->chunk->local_count + 1);
                     vm->frame_count--;
                     vm->stack_top = base_sp;
                     vm_unwind_global_saves(vm, gsd);
@@ -9594,7 +9721,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             while (vm->frame_count > eh_copy.frame_count) {
                 VMFrame *f = &vm->frames[vm->frame_count - 1];
                 int lc = f->chunk->local_count;
-                vm_locals_free(vm, f->locals, lc + 1);
+                VMValue *fl = f->locals;
+                f->locals = NULL;
+                vm_locals_free(vm, fl, lc + 1);
                 vm->frame_count--;
             }
             vm->stack_top = eh_copy.stack_base;
@@ -9613,7 +9742,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             while (vm->frame_count > vm->exec_base) {
                 VMFrame *f = &vm->frames[vm->frame_count - 1];
                 int gsd = f->global_save_depth;
-                vm_locals_free(vm, f->locals, f->chunk->local_count + 1);
+                VMValue *fl = f->locals;
+                f->locals = NULL;
+                vm_locals_free(vm, fl, f->chunk->local_count + 1);
                 vm->frame_count--;
                 vm->stack_top = base_sp;
                 vm_unwind_global_saves(vm, gsd);
@@ -9630,7 +9761,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VMFrame *f = &vm->frames[vm->frame_count - 1];
                 int gsd = f->global_save_depth;
                 size_t f_sp = f->stack_base;
-                vm_locals_free(vm, f->locals, f->chunk->local_count + 1);
+                VMValue *fl = f->locals;
+                f->locals = NULL;
+                vm_locals_free(vm, fl, f->chunk->local_count + 1);
                 vm->frame_count--;
                 vm->stack_top = f_sp;
                 vm_unwind_global_saves(vm, gsd);
@@ -9711,8 +9844,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t name_idx = read_u16(ip); ip += 2;
         const char *name = chunk->str_consts[name_idx];
         if (vm->global_save_count >= vm->global_save_cap) {
-            vm->global_save_cap *= 2;
-            vm->global_saves = realloc(vm->global_saves, vm->global_save_cap * sizeof(VMGlobalSave));
+            vm_global_saves_grow(vm);
         }
         VMGlobalSave *gs = &vm->global_saves[vm->global_save_count++];
         memset(gs, 0, sizeof(*gs));
@@ -9806,8 +9938,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             }
         }
         if (vm->global_save_count >= vm->global_save_cap) {
-            vm->global_save_cap *= 2;
-            vm->global_saves = realloc(vm->global_saves, vm->global_save_cap * sizeof(VMGlobalSave));
+            vm_global_saves_grow(vm);
         }
         VMGlobalSave *gs = &vm->global_saves[vm->global_save_count++];
         memset(gs, 0, sizeof(*gs));
@@ -11337,9 +11468,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                             stack = vm->stack; RELOAD();
                             SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
                         } else {
-                            char kbuf[256];
-                            VMValue key_str = (VM_IS_PTR(k) && VM_PTR_TYPE(k) == VM_OBJ_STR)
-                                ? vm_val_copy(k) : vm_str(vm_to_cstr(k, kbuf, sizeof(kbuf)));
+                            VMValue key_str = vm_tied_key_str(k);
                             h->tied_last_key = key_str;
                             int ffidx = vm_tied_array_find_method(vm, h->tied_obj, "FETCH");
                             VMValue v = (ffidx >= 0) ? vm_tied_array_call(vm, h->tied_obj, ffidx, &k, 1) : VM_UNDEF_VAL;

@@ -733,6 +733,10 @@ static StradaValue* r12_coro_body(void *ctx, int argc, StradaValue **argv) {
 
 #ifdef STRADA_CYCLE_GC
 static int g_r12_tied_destroyed = 0;
+static StradaValue* r12_tiescalar(StradaValue *self, StradaValue *args) {
+    (void)self; (void)args;
+    return strada_bless(strada_new_hash(), "R12TiedObj");
+}
 static StradaValue* r12_tied_destroy(StradaValue *self, StradaValue *args) {
     (void)self; (void)args;
     g_r12_tied_destroyed++;
@@ -801,6 +805,7 @@ static void test_r12_runtime(void) {
 #ifdef STRADA_CYCLE_GC
     /* R12-RT3: dead untied cycle owning a tied scalar */
     g_r12_tied_destroyed = 0;
+    strada_method_register("R12TiedObj", "TIESCALAR", r12_tiescalar);
     strada_method_register("R12TiedObj", "DESTROY", r12_tied_destroy);
     {
         StradaValue *ca = strada_new_hash();
@@ -1453,6 +1458,58 @@ void test_r14_runtime() {
     printf("R14 runtime tests OK\n");
 }
 
+static void test_r17_runtime(void) {
+    printf("Testing R17 runtime fixes...\n");
+
+    /* R17: strada_release on weak STRADA_REF (in-place weakened, target alive) */
+    {
+        StradaValue *t = strada_new_hash();
+        StradaValue *sv_a = strada_new_str("alive");
+        strada_hv_store(t, "k", sv_a);
+        strada_decref(sv_a);
+        StradaValue *strong1 = strada_new_ref(t, '%');
+        StradaValue *strong2 = strada_new_ref(t, '%');
+        strada_decref(t); /* t owned by strong1 and strong2 (refcount == 2) */
+
+        /* strong2->refcount == 1 and t->refcount == 2 -> in-place weaken */
+        strada_weaken(&strong2);
+        assert(strada_isweak(strong2) == 1);
+
+        StradaValue *rel = strada_release(strong2);
+        assert(rel && rel->type == STRADA_UNDEF);
+        strada_decref(rel);
+        assert(strada_isweak(strong2) == 0);
+        strada_decref(strong2);
+
+        /* strong1 & t must remain intact and live */
+        StradaValue *v = strada_hv_fetch_owned(strong1->value.rv, "k");
+        assert(v && v->type == STRADA_STR && strcmp(v->value.pv, "alive") == 0);
+        strada_decref(v);
+        strada_decref(strong1);
+    }
+
+    /* R17: strada_release on weak STRADA_REF after target already died */
+    {
+        StradaValue *t = strada_new_array();
+        StradaValue *el = strada_new_int(42);
+        strada_array_push(t->value.av, el);
+        strada_decref(el);
+        StradaValue *strong = strada_new_ref(t, '@');
+        strada_decref(t);
+        StradaValue *w = strong;
+        strada_incref(w);
+        strada_weaken(&w);
+        assert(strada_isweak(w) == 1);
+        strada_decref(strong); /* frees t and nullifies w->value.rv */
+        StradaValue *rel = strada_release(w);
+        strada_decref(rel);
+        strada_decref(w);
+    }
+
+    printf("R17 runtime tests OK\n");
+}
+
+
 int main() {
     printf("=== Strada Runtime Test ===\n\n");
     
@@ -1540,6 +1597,7 @@ int main() {
     test_r12_runtime();
     test_r13_runtime();
     test_r14_runtime();
+    test_r17_runtime();
     
     printf("=== All tests completed ===\n");
     

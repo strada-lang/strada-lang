@@ -1055,6 +1055,8 @@ typedef struct VM {
     pthread_t owner_thread;
     int is_worker_vm;
     struct VM *root_vm;
+    struct VM *workers_head;
+    struct VM *worker_next;
     pthread_mutex_t gc_mutex;
     pthread_mutex_t globals_mutex;
     void *regex_cache;

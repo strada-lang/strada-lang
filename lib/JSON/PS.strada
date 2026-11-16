@@ -153,8 +153,18 @@ func false() scalar {
 func is_bool(scalar $value) int {
     my int $b = 0;
     __C__ {
+        int res = 0;
+        StradaValue *v = value;
+        if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied
+            && v->type != STRADA_HASH && v->type != STRADA_ARRAY) {
+            StradaValue *fetched = strada_tied_scalar_fetch(v);
+            res = strada_is_bool(fetched) ? 1 : 0;
+            if (fetched) strada_decref(fetched);
+        } else {
+            res = strada_is_bool(v) ? 1 : 0;
+        }
         strada_decref(b);
-        b = strada_new_int(strada_is_bool(value) ? 1 : 0);
+        b = strada_new_int(res);
     }
     return $b;
 }
@@ -302,6 +312,22 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
     # Prevent infinite recursion
     if ($depth > 512) {
         return "null";
+    }
+
+    # Unwrap tied scalars once before defined/is_bool/ref/typeof inspection
+    my int $is_tied_scalar = 0;
+    my scalar $unwrapped = undef;
+    __C__ {
+        if (value && !STRADA_IS_TAGGED_INT(value) && value->meta && value->meta->is_tied
+            && value->type != STRADA_HASH && value->type != STRADA_ARRAY) {
+            strada_decref(is_tied_scalar);
+            is_tied_scalar = strada_new_int(1);
+            strada_decref(unwrapped);
+            unwrapped = strada_tied_scalar_fetch(value);
+        }
+    }
+    if ($is_tied_scalar) {
+        return JSON::PS::do_encode($unwrapped, $canonical, $depth + 1);
     }
 
     # Handle undef -> null

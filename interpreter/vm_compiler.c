@@ -397,11 +397,14 @@ static void reset_compiler_globals(void) {
     reset_pkg_func_aliases();
 }
 
+#define VM_MAX_GOTO_SCOPE 64
+
 typedef struct TryCtx {
     int handlers_active;        /* number of active OP_TRY_BEGIN frames on exc_stack for this try */
     StradaValue *finally_block; /* non-NULL if this try statement has a finally block */
     LoopCtx *enclosing_loop;    /* ctx->loop_ctx when this try was entered */
     int local_restore_depth;    /* ctx->local_restore_count when this try was entered */
+    int enclosing_scope_depth;  /* ctx->scope_depth when this try was entered */
     struct TryCtx *parent;
 } TryCtx;
 
@@ -413,6 +416,8 @@ typedef struct {
     int local_restore_depth;
     int actual_local_count;
     int has_actual_lc;
+    int scope_depth;
+    void *scope_path[VM_MAX_GOTO_SCOPE];
 } VMLabelDef;
 
 typedef struct {
@@ -453,7 +458,24 @@ typedef struct {
     VMGotoPatch *gotos;
     int goto_count;
     int goto_cap;
+    void *scope_nodes[VM_MAX_GOTO_SCOPE];
+    int scope_saved_lc[VM_MAX_GOTO_SCOPE];
+    int scope_depth;
 } CompCtx;
+
+static inline void ctx_push_scope(CompCtx *ctx, void *scope_node, int saved_lc) {
+    if (ctx->scope_depth < VM_MAX_GOTO_SCOPE) {
+        ctx->scope_nodes[ctx->scope_depth] = scope_node;
+        ctx->scope_saved_lc[ctx->scope_depth] = saved_lc;
+        ctx->scope_depth++;
+    }
+}
+
+static inline void ctx_pop_scope(CompCtx *ctx) {
+    if (ctx->scope_depth > 0) {
+        ctx->scope_depth--;
+    }
+}
 
 /* Resolve an `our` or `const` variable name using package qualification (matching compiled C)
  * while still finding unqualified eval-promoted or file-scope globals. Returned pointer stays
@@ -873,6 +895,7 @@ static void emit_try_unwind_for_return(CompCtx *ctx) {
     }
 
     TryCtx *saved_try = ctx->try_ctx;
+    int saved_sd = ctx->scope_depth;
     for (TryCtx *tc = saved_try; tc != NULL; tc = tc->parent) {
         while (cur_lr > tc->local_restore_depth) {
             emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
@@ -883,10 +906,12 @@ static void emit_try_unwind_for_return(CompCtx *ctx) {
         if (tc->finally_block) {
             ctx->try_ctx = tc->parent;
             ctx->local_restore_count = cur_lr;
+            ctx->scope_depth = tc->enclosing_scope_depth;
             for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
             compile_block(ctx, tc->finally_block);
         }
     }
+    ctx->scope_depth = saved_sd;
     ctx->try_ctx = saved_try;
     ctx->local_restore_count = saved_lr_count;
     if (saved_lr_count > 0) {
@@ -913,6 +938,7 @@ static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
 
     if (ctx->try_ctx) {
         TryCtx *saved_try = ctx->try_ctx;
+        int saved_sd = ctx->scope_depth;
         for (TryCtx *tc = saved_try; tc != NULL && loop_in_chain(tc->enclosing_loop, target); tc = tc->parent) {
             while (cur_lr > tc->local_restore_depth && cur_lr > target->local_restore_depth) {
                 emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
@@ -923,10 +949,12 @@ static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
             if (tc->finally_block) {
                 ctx->try_ctx = tc->parent;
                 ctx->local_restore_count = cur_lr;
+                ctx->scope_depth = tc->enclosing_scope_depth;
                 for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
                 compile_block(ctx, tc->finally_block);
             }
         }
+        ctx->scope_depth = saved_sd;
         ctx->try_ctx = saved_try;
         ctx->local_restore_count = saved_lr_count;
         if (saved_lr_count > 0) {
@@ -961,7 +989,16 @@ static VMLabelDef *vm_ctx_ensure_label(CompCtx *ctx, const char *name) {
     return lbl;
 }
 
-static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int local_d) {
+static void vm_label_record_scope(VMLabelDef *lbl, void **scope_stack, int scope_d) {
+    int n = scope_d < VM_MAX_GOTO_SCOPE ? scope_d : VM_MAX_GOTO_SCOPE;
+    lbl->scope_depth = n;
+    for (int i = 0; i < n; i++) {
+        lbl->scope_path[i] = scope_stack[i];
+    }
+}
+
+static int prescan_vm_labels_ex(CompCtx *ctx, StradaValue *node, int try_h, int local_d,
+                                void **scope_stack, int scope_d) {
     if (!node || STRADA_IS_TAGGED_INT(node)) return local_d;
     node = ast_deref(node);
     if (!node || STRADA_IS_TAGGED_INT(node)) return local_d;
@@ -970,7 +1007,7 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
         if (av) {
             int len = strada_array_length(av);
             for (int i = 0; i < len; i++) {
-                prescan_vm_labels(ctx, strada_array_get(av, i), try_h, local_d);
+                prescan_vm_labels_ex(ctx, strada_array_get(av, i), try_h, local_d, scope_stack, scope_d);
             }
         }
         return local_d;
@@ -983,20 +1020,20 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
     case NI_ASYNC_FUNC:
         return local_d;
     case NI_SORT:
-        prescan_vm_labels(ctx, ast_get(node, "array"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "array"), try_h, local_d, scope_stack, scope_d);
         return local_d;
     case NI_MAP:
     case NI_GREP: {
-        prescan_vm_labels(ctx, ast_get(node, "array"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "array"), try_h, local_d, scope_stack, scope_d);
         StradaValue *blk = ast_get(node, "block");
         if (!blk || STRADA_IS_TAGGED_INT(blk)) blk = ast_get(node, "body");
-        prescan_vm_labels(ctx, blk, try_h, local_d);
+        prescan_vm_labels_ex(ctx, blk, try_h, local_d, scope_stack, scope_d);
         return local_d;
     }
     case NI_DO_EXPR: {
         StradaValue *blk = ast_get(node, "block");
         if (!blk || STRADA_IS_TAGGED_INT(blk)) blk = ast_get(node, "body");
-        prescan_vm_labels(ctx, blk, try_h, local_d);
+        prescan_vm_labels_ex(ctx, blk, try_h, local_d, scope_stack, scope_d);
         return local_d;
     }
     case NI_LOCAL_DECL:
@@ -1007,43 +1044,68 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
             VMLabelDef *lbl = vm_ctx_ensure_label(ctx, name);
             lbl->try_handler_depth = try_h;
             lbl->local_restore_depth = local_d;
+            vm_label_record_scope(lbl, scope_stack, scope_d);
         }
-        return prescan_vm_labels(ctx, ast_get(node, "statement"), try_h, local_d);
+        return prescan_vm_labels_ex(ctx, ast_get(node, "statement"), try_h, local_d, scope_stack, scope_d);
     }
     case NI_BLOCK: {
+        int pushed = 0;
+        if (scope_d < VM_MAX_GOTO_SCOPE) {
+            scope_stack[scope_d++] = (void *)node;
+            pushed = 1;
+        }
         StradaValue *stmts = ast_get(node, "statements");
         int count = (int)ast_int(node, "statement_count");
         int cur_ld = local_d;
         for (int i = 0; i < count; i++) {
-            cur_ld = prescan_vm_labels(ctx, ast_arr_get(stmts, i), try_h, cur_ld);
+            cur_ld = prescan_vm_labels_ex(ctx, ast_arr_get(stmts, i), try_h, cur_ld, scope_stack, scope_d);
         }
+        if (pushed) scope_d--;
         return local_d;
     }
     case NI_IF_STMT: {
-        prescan_vm_labels(ctx, ast_get(node, "condition"), try_h, local_d);
-        prescan_vm_labels(ctx, ast_get(node, "then_block"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "condition"), try_h, local_d, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "then_block"), try_h, local_d, scope_stack, scope_d);
         StradaValue *elsif_conds = ast_get(node, "elsif_conditions");
         StradaValue *elsif_blocks = ast_get(node, "elsif_blocks");
         int elsif_count = (int)ast_int(node, "elsif_count");
         for (int i = 0; i < elsif_count; i++) {
-            if (elsif_conds) prescan_vm_labels(ctx, ast_arr_get(elsif_conds, i), try_h, local_d);
-            prescan_vm_labels(ctx, ast_arr_get(elsif_blocks, i), try_h, local_d);
+            if (elsif_conds) prescan_vm_labels_ex(ctx, ast_arr_get(elsif_conds, i), try_h, local_d, scope_stack, scope_d);
+            prescan_vm_labels_ex(ctx, ast_arr_get(elsif_blocks, i), try_h, local_d, scope_stack, scope_d);
         }
-        prescan_vm_labels(ctx, ast_get(node, "else_block"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "else_block"), try_h, local_d, scope_stack, scope_d);
         return local_d;
     }
     case NI_WHILE_STMT:
-    case NI_DO_WHILE_STMT:
+    case NI_DO_WHILE_STMT: {
+        const char *lbl_name = ast_str(node, "label");
+        if (lbl_name && lbl_name[0]) {
+            VMLabelDef *lbl = vm_ctx_ensure_label(ctx, lbl_name);
+            lbl->try_handler_depth = try_h;
+            lbl->local_restore_depth = local_d;
+            vm_label_record_scope(lbl, scope_stack, scope_d);
+        }
+        prescan_vm_labels_ex(ctx, ast_get(node, "condition"), try_h, local_d, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "body"), try_h, local_d, scope_stack, scope_d);
+        return local_d;
+    }
     case NI_FOREACH_STMT: {
         const char *lbl_name = ast_str(node, "label");
         if (lbl_name && lbl_name[0]) {
             VMLabelDef *lbl = vm_ctx_ensure_label(ctx, lbl_name);
             lbl->try_handler_depth = try_h;
             lbl->local_restore_depth = local_d;
+            vm_label_record_scope(lbl, scope_stack, scope_d);
         }
-        prescan_vm_labels(ctx, ast_get(node, "condition"), try_h, local_d);
-        prescan_vm_labels(ctx, ast_get(node, "iterable"), try_h, local_d);
-        prescan_vm_labels(ctx, ast_get(node, "body"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "array"), try_h, local_d, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "iterable"), try_h, local_d, scope_stack, scope_d);
+        int pushed = 0;
+        if (scope_d < VM_MAX_GOTO_SCOPE) {
+            scope_stack[scope_d++] = (void *)node;
+            pushed = 1;
+        }
+        prescan_vm_labels_ex(ctx, ast_get(node, "body"), try_h, local_d, scope_stack, scope_d);
+        if (pushed) scope_d--;
         return local_d;
     }
     case NI_FOR_STMT: {
@@ -1052,21 +1114,28 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
             VMLabelDef *lbl = vm_ctx_ensure_label(ctx, lbl_name);
             lbl->try_handler_depth = try_h;
             lbl->local_restore_depth = local_d;
+            vm_label_record_scope(lbl, scope_stack, scope_d);
         }
-        int cur_ld = prescan_vm_labels(ctx, ast_get(node, "init"), try_h, local_d);
-        prescan_vm_labels(ctx, ast_get(node, "condition"), try_h, cur_ld);
-        prescan_vm_labels(ctx, ast_get(node, "increment"), try_h, cur_ld);
-        prescan_vm_labels(ctx, ast_get(node, "body"), try_h, cur_ld);
-        return cur_ld;
+        int pushed = 0;
+        if (scope_d < VM_MAX_GOTO_SCOPE) {
+            scope_stack[scope_d++] = (void *)node;
+            pushed = 1;
+        }
+        int cur_ld = prescan_vm_labels_ex(ctx, ast_get(node, "init"), try_h, local_d, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "condition"), try_h, cur_ld, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "increment"), try_h, cur_ld, scope_stack, scope_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "body"), try_h, cur_ld, scope_stack, scope_d);
+        if (pushed) scope_d--;
+        return local_d;
     }
     case NI_SWITCH: {
-        prescan_vm_labels(ctx, ast_get(node, "expr"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "expr"), try_h, local_d, scope_stack, scope_d);
         StradaValue *blocks = ast_get(node, "blocks");
         int case_count = (int)ast_int(node, "case_count");
         for (int i = 0; i < case_count; i++) {
-            prescan_vm_labels(ctx, ast_arr_get(blocks, i), try_h, local_d);
+            prescan_vm_labels_ex(ctx, ast_arr_get(blocks, i), try_h, local_d, scope_stack, scope_d);
         }
-        prescan_vm_labels(ctx, ast_get(node, "default_block"), try_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "default_block"), try_h, local_d, scope_stack, scope_d);
         return local_d;
     }
     case NI_TRY_CATCH: {
@@ -1075,14 +1144,20 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
         StradaValue *finally_block = ast_get(node, "finally_block");
         int has_finally = (finally_block && !STRADA_IS_TAGGED_INT(finally_block)) ? 1 : 0;
         int try_inner_h = try_h + ((has_finally && catch_count > 0) ? 2 : 1);
-        prescan_vm_labels(ctx, ast_get(node, "try_block"), try_inner_h, local_d);
+        prescan_vm_labels_ex(ctx, ast_get(node, "try_block"), try_inner_h, local_d, scope_stack, scope_d);
         int catch_inner_h = try_h + (has_finally ? 1 : 0);
         for (int i = 0; i < catch_count; i++) {
-            StradaValue *cc = ast_arr_get(catches, i);
-            prescan_vm_labels(ctx, ast_get(cc, "catch_block"), catch_inner_h, local_d);
+            StradaValue *cc = ast_deref(ast_arr_get(catches, i));
+            int pushed = 0;
+            if (cc && scope_d < VM_MAX_GOTO_SCOPE) {
+                scope_stack[scope_d++] = (void *)cc;
+                pushed = 1;
+            }
+            prescan_vm_labels_ex(ctx, ast_get(cc, "catch_block"), catch_inner_h, local_d, scope_stack, scope_d);
+            if (pushed) scope_d--;
         }
         if (has_finally) {
-            prescan_vm_labels(ctx, finally_block, try_h, local_d);
+            prescan_vm_labels_ex(ctx, finally_block, try_h, local_d, scope_stack, scope_d);
         }
         return local_d;
     }
@@ -1094,13 +1169,18 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
                 StradaValue *cv = ast_deref(hv->entries[i].value);
                 if (cv && !STRADA_IS_TAGGED_INT(cv) &&
                     (cv->type == STRADA_HASH || cv->type == STRADA_ARRAY)) {
-                    prescan_vm_labels(ctx, cv, try_h, local_d);
+                    prescan_vm_labels_ex(ctx, cv, try_h, local_d, scope_stack, scope_d);
                 }
             }
         }
         return local_d;
     }
     }
+}
+
+static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int local_d) {
+    void *scope_stack[VM_MAX_GOTO_SCOPE];
+    return prescan_vm_labels_ex(ctx, node, try_h, local_d, scope_stack, 0);
 }
 
 static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_local_d) {
@@ -1118,6 +1198,7 @@ static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_
 
     if (ctx->try_ctx && cur_try_h > target_try_h) {
         TryCtx *saved_try = ctx->try_ctx;
+        int saved_sd = ctx->scope_depth;
         int remaining_h = cur_try_h;
         for (TryCtx *tc = saved_try; tc != NULL && remaining_h > target_try_h; tc = tc->parent) {
             while (cur_lr > tc->local_restore_depth && cur_lr > target_local_d) {
@@ -1134,10 +1215,12 @@ static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_
             if (tc->finally_block && remaining_h >= target_try_h) {
                 ctx->try_ctx = tc->parent;
                 ctx->local_restore_count = cur_lr;
+                ctx->scope_depth = tc->enclosing_scope_depth;
                 for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
                 compile_block(ctx, tc->finally_block);
             }
         }
+        ctx->scope_depth = saved_sd;
         ctx->try_ctx = saved_try;
         ctx->local_restore_count = saved_lr_count;
         if (saved_lr_count > 0) {
@@ -4891,6 +4974,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         int saved_lc = ctx->local_count;
         int saved_lr = ctx->local_restore_count;
         StradaValue *block = ast_deref(ast_get(node, "block"));
+        ctx_push_scope(ctx, (void *)block, saved_lc);
         StradaValue *stmts = block ? ast_get(block, "statements") : NULL;
         int count = block ? (int)ast_int(block, "statement_count") : 0;
         if (count <= 0) {
@@ -4908,6 +4992,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
             }
         }
+        ctx_pop_scope(ctx);
         while (ctx->local_restore_count > saved_lr) {
             ctx->local_restore_count--;
             char *lr_name = ctx->local_restores[ctx->local_restore_count];
@@ -5017,7 +5102,14 @@ static void compile_block_expr_inner(CompCtx *ctx, StradaValue *body, int fallba
 static void compile_block_expr(CompCtx *ctx, StradaValue *body, int fallback_slot) {
     int saved_lrc = ctx->local_restore_count;
     int saved_lc = ctx->local_count;
+    StradaValue *db = body ? ast_deref(body) : NULL;
+    int pushed = 0;
+    if (db && !STRADA_IS_TAGGED_INT(db)) {
+        ctx_push_scope(ctx, (void *)db, saved_lc);
+        pushed = 1;
+    }
     compile_block_expr_inner(ctx, body, fallback_slot);
+    if (pushed) ctx_pop_scope(ctx);
     while (ctx->local_restore_count > saved_lrc) {
         ctx->local_restore_count--;
         emit_local_restore(ctx->chunk, ctx->local_restores[ctx->local_restore_count]);
@@ -5949,6 +6041,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             lbl->actual_local_count = ctx->local_count;
             lbl->has_actual_lc = 1;
         }
+        ctx_push_scope(ctx, (void *)ast_deref(node), saved_for_lc);
         StradaValue *init = ast_get(node, "init");
         if (init && !STRADA_IS_TAGGED_INT(init)) compile_stmt(ctx, init);
 
@@ -6000,6 +6093,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
+        ctx_pop_scope(ctx);
         emit_clear_locals_range(ctx->chunk, saved_for_lc, ctx->local_count);
         ctx->local_count = saved_for_lc;
         break;
@@ -6029,6 +6123,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             }
         }
         int saved_fe_lc = ctx->local_count;
+        ctx_push_scope(ctx, (void *)ast_deref(node), saved_fe_lc);
 
         int arr_slot = ctx_add_local(ctx, "__fe_arr", '$');
         emit_reset_store_local(ctx, arr_slot);
@@ -6133,6 +6228,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
+        ctx_pop_scope(ctx);
         emit_clear_locals_range(ctx->chunk, saved_fe_lc, ctx->local_count);
         ctx->local_count = saved_fe_lc;
         break;
@@ -6226,11 +6322,33 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         for (TryCtx *tc = ctx->try_ctx; tc != NULL; tc = tc->parent) {
             cur_try_h += tc->handlers_active;
         }
+        int same_ancestry = 1;
+        if (lbl->try_handler_depth > cur_try_h || lbl->scope_depth > ctx->scope_depth) {
+            same_ancestry = 0;
+        } else {
+            for (int si = 0; si < lbl->scope_depth && si < VM_MAX_GOTO_SCOPE; si++) {
+                if (ctx->scope_nodes[si] != lbl->scope_path[si]) {
+                    same_ancestry = 0;
+                    break;
+                }
+            }
+        }
+        if (!same_ancestry) {
+            fprintf(stderr, "VM compile error: cannot goto into inner scope or try block '%s'\n", target ? target : "");
+            ctx->errors++;
+            break;
+        }
         if (cur_try_h > lbl->try_handler_depth || ctx->local_restore_count > lbl->local_restore_depth) {
             emit_try_unwind_to_depth(ctx, lbl->try_handler_depth, lbl->local_restore_depth);
         }
-        if (lbl->has_actual_lc && ctx->local_count > lbl->actual_local_count) {
-            emit_clear_locals_range(ctx->chunk, lbl->actual_local_count, ctx->local_count);
+        int clear_from = ctx->local_count;
+        if (lbl->has_actual_lc) {
+            clear_from = lbl->actual_local_count;
+        } else if (lbl->scope_depth < ctx->scope_depth) {
+            clear_from = ctx->scope_saved_lc[lbl->scope_depth];
+        }
+        if (ctx->local_count > clear_from) {
+            emit_clear_locals_range(ctx->chunk, clear_from, ctx->local_count);
         }
         vm_chunk_emit(ctx->chunk, OP_JMP);
         size_t poff = emit_patch_u16(ctx);
@@ -6312,6 +6430,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         tctx.finally_block = has_finally ? finally_block : NULL;
         tctx.enclosing_loop = ctx->loop_ctx;
         tctx.local_restore_depth = ctx->local_restore_count;
+        tctx.enclosing_scope_depth = ctx->scope_depth;
         tctx.parent = ctx->try_ctx;
 
         size_t finally_rethrow_patch = 0;
@@ -6362,7 +6481,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
             int had_catch_all = 0;
             for (int i = 0; i < catch_count; i++) {
-                StradaValue *cc = ast_arr_get(catches, i);
+                StradaValue *cc = ast_deref(ast_arr_get(catches, i));
                 const char *var_name = ast_str(cc, "catch_var");
                 const char *type_name = ast_str(cc, "catch_type");
 
@@ -6377,6 +6496,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     size_t next_catch = emit_patch_u16(ctx);
 
                     int saved_catch_lc = ctx->local_count;
+                    if (cc) ctx_push_scope(ctx, (void *)cc, saved_catch_lc);
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
                     vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
@@ -6384,6 +6504,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    if (cc) ctx_pop_scope(ctx);
                     emit_clear_locals_range(ctx->chunk, saved_catch_lc, ctx->local_count);
                     ctx->local_count = saved_catch_lc;
 
@@ -6397,6 +6518,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 } else {
                     /* Untyped catch-all */
                     int saved_catch_lc = ctx->local_count;
+                    if (cc) ctx_push_scope(ctx, (void *)cc, saved_catch_lc);
                     int slot = ctx_add_local(ctx, var_name[0] ? var_name : "__exc", '$');
                     vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
@@ -6404,6 +6526,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
                     compile_block(ctx, ast_get(cc, "catch_block"));
+                    if (cc) ctx_pop_scope(ctx);
                     emit_clear_locals_range(ctx->chunk, saved_catch_lc, ctx->local_count);
                     ctx->local_count = saved_catch_lc;
 
@@ -6651,13 +6774,10 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                             vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
                             vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
                         } else {
-                            slot = ctx_add_local(ctx, vname, vsigil);
-                            if (slot >= 0 && slot < 256) ctx->local_types[slot] = ltype;
-                            emit_scalar_type_coerce(ctx, ltype);
-                            vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
-                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                            fprintf(stderr, "VM compile error: undeclared variable '%c%s' in destructuring assignment\n",
+                                    vsigil, vname ? vname : "");
+                            ctx->errors++;
+                            vm_chunk_emit(ctx->chunk, OP_POP);
                         }
                     }
                 }
@@ -6778,9 +6898,11 @@ static void compile_block(CompCtx *ctx, StradaValue *block) {
 
     int saved_lr = ctx->local_restore_count;
     int saved_lc = ctx->local_count;
+    ctx_push_scope(ctx, (void *)block, saved_lc);
     for (int i = 0; i < count; i++) {
         compile_stmt(ctx, ast_arr_get(stmts, i));
     }
+    ctx_pop_scope(ctx);
     while (ctx->local_restore_count > saved_lr) {
         ctx->local_restore_count--;
         char *lr_name = ctx->local_restores[ctx->local_restore_count];

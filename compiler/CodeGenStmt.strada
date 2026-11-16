@@ -220,13 +220,9 @@ func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
                 my str $c_name = escape_c_keyword($hs->{"name"});
                 my int $box_scalar = 0;
                 if ($ht == NODE_VAR_DECL()) {
-                    my str $sigil = $hs->{"sigil"};
-                    my int $vt = $hs->{"var_type"};
                     my str $vst = resolve_var_decl_struct_name($cg, $hs);
-                    if ($sigil ne "%" && $sigil ne "@" && $vt != TYPE_HASH() && $vt != TYPE_ARRAY()) {
-                        if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($vst) == 0) {
-                            $box_scalar = 1;
-                        }
+                    if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($vst) == 0) {
+                        $box_scalar = 1;
                     }
                 }
                 goto_hoist_one_var($cg, \%hoisted, $c_name, $box_scalar);
@@ -242,9 +238,8 @@ func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
                 while ($di < $dvc) {
                     my scalar $dv = $dvars->[$di];
                     my str $dc_name = escape_c_keyword($dv->{"name"});
-                    my str $dsig = "" . $dv->{"sigil"};
                     my int $dbox = 0;
-                    if ($dsig ne "@" && $dsig ne "%" && ($cg->{"cand_boxed_vars"}->{$dc_name} + 0) == 1) {
+                    if (($cg->{"cand_boxed_vars"}->{$dc_name} + 0) == 1) {
                         $dbox = 1;
                     }
                     goto_hoist_one_var($cg, \%hoisted, $dc_name, $dbox);
@@ -614,11 +609,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($predecl == 2) {
             $box_scalar = 1;
             $target_lval = "(*__cell_" . $c_name . ")";
-        } elsif ($predecl == 0 && $sigil ne "%" && $sigil ne "@" && $var_type != TYPE_HASH() && $var_type != TYPE_ARRAY()) {
-            if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($var_st_name) == 0) {
-                $box_scalar = 1;
-                $target_lval = "(*__cell_" . $c_name . ")";
-            }
+        } elsif ($predecl == 0 && ($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($var_st_name) == 0) {
+            $box_scalar = 1;
+            $target_lval = "(*__cell_" . $c_name . ")";
         }
         # Track the slot (and whether its cleanup push was elided) BEFORE
         # evaluating $init so any throw/return/goto/loop-control inside the
@@ -634,8 +627,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
         }
 
+        my str $saved_decl_boxed = "" . $cg->{"declaring_boxed_var"};
+        if ($box_scalar == 1) {
+            $cg->{"declaring_boxed_var"} = $c_name;
+        }
         if ($sigil eq "%" || $var_type == TYPE_HASH()) {
-            emit_var_decl_target_slot($cg, $c_name, $target_lval, 0, $predecl);
+            emit_var_decl_target_slot($cg, $c_name, $target_lval, $box_scalar, $predecl);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 my scalar $init = $stmt->{"init"};
@@ -680,7 +677,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         # Initializing from a borrowed value: incref to share ownership.
                         # (%var / %{...} sources are copied above; owned temps like `our` already have +1 ref.)
                         if (needs_temp_cleanup($cg, $init) == 0) {
-                            emit($cg, "; strada_incref(" . $c_name . ")");
+                            emit($cg, "; strada_incref(" . $target_lval . ")");
                         }
                     }
                 }
@@ -689,12 +686,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # Handle initial capacity: my hash %name{size};
             if ($stmt->{"initial_capacity"}) {
-                emit($cg, "; strada_hash_reserve_sv(" . $c_name . ", ");
+                emit($cg, "; strada_hash_reserve_sv(" . $target_lval . ", ");
                 emit_int_operand($cg, $stmt->{"initial_capacity"});
                 emit($cg, ")");
             }
         } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
-            emit_var_decl_target_slot($cg, $c_name, $target_lval, 0, $predecl);
+            emit_var_decl_target_slot($cg, $c_name, $target_lval, $box_scalar, $predecl);
             if ($stmt->{"init"}) {
                 emit($cg, " = ");
                 # Handle empty () which parser returns as anon_hash
@@ -727,9 +724,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     if ($init_needs_cleanup == 1) {
                         emit($cg, "strada_new_array(); { StradaValue *__arr_init_tmp = ");
                         gen_expression($cg, $init);
-                        emit($cg, "; strada_array_push(" . $c_name . "->value.av, __arr_init_tmp); strada_decref(__arr_init_tmp); }");
+                        emit($cg, "; strada_array_push(" . $target_lval . "->value.av, __arr_init_tmp); strada_decref(__arr_init_tmp); }");
                     } else {
-                        emit($cg, "strada_new_array(); strada_array_push(" . $c_name . "->value.av, ");
+                        emit($cg, "strada_new_array(); strada_array_push(" . $target_lval . "->value.av, ");
                         gen_expression($cg, $init);
                         emit($cg, ")");
                     }
@@ -778,7 +775,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                             $cg->{"call_context"} = 0;
                         }
                         if (needs_temp_cleanup($cg, $init) == 0) {
-                            emit($cg, "; strada_incref(" . $c_name . ")");
+                            emit($cg, "; strada_incref(" . $target_lval . ")");
                         }
                     }
                 }
@@ -787,16 +784,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # Handle initial capacity: my array $name[size];
             if ($stmt->{"initial_capacity"}) {
-                emit($cg, "; strada_reserve_sv(" . $c_name . ", ");
+                emit($cg, "; strada_reserve_sv(" . $target_lval . ", ");
                 emit_int_operand($cg, $stmt->{"initial_capacity"});
                 emit($cg, ")");
             }
         } else {
             emit_var_decl_target_slot($cg, $c_name, $target_lval, $box_scalar, $predecl);
-            my str $saved_decl_boxed = "" . $cg->{"declaring_boxed_var"};
-            if ($box_scalar == 1) {
-                $cg->{"declaring_boxed_var"} = $c_name;
-            }
             if ($stmt->{"init"}) {
                 my scalar $init = $stmt->{"init"};
                 my int $init_type = $init->{"type"};
@@ -891,8 +884,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, " = strada_new_undef()");
                 }
             }
-            $cg->{"declaring_boxed_var"} = $saved_decl_boxed;
         }
+        $cg->{"declaring_boxed_var"} = $saved_decl_boxed;
         emit($cg, ";\n");
         # Track native struct type and active boxing state for subsequent references
         $cg->{"struct_vars"}->{$c_name} = $var_st_name;
@@ -1252,14 +1245,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 my int $ds_box = 0;
                 if ($ds_predecl == 2) {
                     $ds_box = 1;
-                } elsif ($ds_predecl == 0 && $vsigil ne "@" && $vsigil ne "%" && ($cg->{"cand_boxed_vars"}->{$name} + 0) == 1) {
+                } elsif ($ds_predecl == 0 && ($cg->{"cand_boxed_vars"}->{$name} + 0) == 1) {
                     $ds_box = 1;
                 }
+                my str $ds_init_val = "strada_new_undef()";
+                if ($vsigil eq "%") { $ds_init_val = "strada_new_hash()"; }
+                elsif ($vsigil eq "@") { $ds_init_val = "strada_new_array()"; }
                 if ($ds_box == 1) {
                     $cg->{"active_boxed_vars"}->{$name} = 1;
                     if ($ds_predecl > 0) {
                         emit_indent($cg);
-                        emit($cg, "strada_decref((*__cell_" . $name . ")); (*__cell_" . $name . ") = strada_new_undef();\n");
+                        emit($cg, "strada_decref((*__cell_" . $name . ")); (*__cell_" . $name . ") = " . $ds_init_val . ";\n");
                     } else {
                         emit_indent($cg);
                         if ($cg->{"func_has_try"} == 1) {
@@ -1268,7 +1264,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                             emit($cg, "StradaValue **__cell_" . $name . " = strada_cell_alloc();\n");
                         }
                         emit_indent($cg);
-                        emit($cg, "(*__cell_" . $name . ") = strada_new_undef();\n");
+                        emit($cg, "(*__cell_" . $name . ") = " . $ds_init_val . ";\n");
                         my str $ds_track = "@cell:" . $name;
                         scope_track_var($cg, $ds_track);
                         if ($ds_push == 1) {
@@ -1405,6 +1401,36 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if (length($ds_our_key) > 0) {
                     emit_indent($cg);
                     emit($cg, "strada_global_set_cstr(" . c_str_lit($ds_our_key) . ", " . $ds_el_expr . ");\n");
+                } elsif ($is_decl == 0 && $cg->{"uses_tie"} == 1) {
+                    emit_indent($cg);
+                    emit($cg, "if (strada_scalar_is_tied(" . $ds_ref . ")) {\n");
+                    indent($cg);
+                    emit_indent($cg);
+                    emit($cg, "StradaValue *__dt_v = " . $ds_el_expr . ";\n");
+                    if ($ds_push == 1 && $cg->{"cleanup_enabled"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_push(__dt_v);\n");
+                        emit_indent($cg);
+                        emit($cg, "strada_tied_scalar_store(" . $ds_ref . ", __dt_v);\n");
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_pop_decref(__dt_v);\n");
+                    } else {
+                        emit_indent($cg);
+                        emit($cg, "strada_tied_scalar_store(" . $ds_ref . ", __dt_v);\n");
+                        emit_indent($cg);
+                        emit($cg, "strada_decref(__dt_v);\n");
+                    }
+                    dedent($cg);
+                    emit_indent($cg);
+                    emit($cg, "} else {\n");
+                    indent($cg);
+                    emit_indent($cg);
+                    emit($cg, "strada_decref(" . $ds_ref . ");\n");
+                    emit_indent($cg);
+                    emit($cg, $ds_ref . " = " . $ds_el_expr . ";\n");
+                    dedent($cg);
+                    emit_indent($cg);
+                    emit($cg, "}\n");
                 } else {
                     # Decref old value if already assigned
                     emit_indent($cg);
@@ -4103,8 +4129,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             }
             $cg->{"func_locals_seen"}->{$mp_cname} = 1;
             my int $mp_box = 0;
-            if (($cand_boxed{$mp_cname} + 0) == 1 && length("" . $mp->{"struct_name"}) == 0
-                && $mp_sigil ne "@" && $mp_sigil ne "%") {
+            if (($cand_boxed{$mp_cname} + 0) == 1 && length("" . $mp->{"struct_name"}) == 0) {
                 $mp_box = 1;
             }
             my str $mp_slot = $mp_cname;
@@ -4250,10 +4275,9 @@ func gen_function(scalar $cg, scalar $fn) void {
             my scalar $param = $params->[$i];
             my int $ptype = $param->{"param_type"};
             my str $c_param_name = escape_c_keyword($param->{"name"});
-            my str $psigil = "" . $param->{"sigil"};
             my str $sig_pname = $c_param_name;
             if ($cg->{"is_destroy_method"} != 1 && ($cand_boxed{$c_param_name} + 0) == 1
-                && length("" . $param->{"struct_name"}) == 0 && $psigil ne "@" && $psigil ne "%") {
+                && length("" . $param->{"struct_name"}) == 0) {
                 $sig_pname = "__rawp_" . $c_param_name;
             }
             if ($cg->{"func_has_try"} == 1) {
@@ -4397,8 +4421,7 @@ func gen_function(scalar $cg, scalar $fn) void {
                 $cg->{"func_locals_seen"}->{$c_param_name} = 1;
                 my str $p_sigil = "" . $param->{"sigil"};
                 my int $box_param = 0;
-                if (($cand_boxed{$c_param_name} + 0) == 1 && length("" . $param->{"struct_name"}) == 0
-                    && $p_sigil ne "@" && $p_sigil ne "%") {
+                if (($cand_boxed{$c_param_name} + 0) == 1 && length("" . $param->{"struct_name"}) == 0) {
                     $box_param = 1;
                 }
                 if ($box_param == 1) {
@@ -4409,7 +4432,11 @@ func gen_function(scalar $cg, scalar $fn) void {
                     } else {
                         emit($cg, "StradaValue **__cell_" . $c_param_name . " = strada_cell_alloc();\n");
                     }
-                    emit($cg, "(*__cell_" . $c_param_name . ") = strada_copy_scalar_il(__rawp_" . $c_param_name . ");\n");
+                    if ($p_sigil eq "@" || $p_sigil eq "%") {
+                        emit($cg, "strada_incref(__rawp_" . $c_param_name . "); (*__cell_" . $c_param_name . ") = __rawp_" . $c_param_name . ";\n");
+                    } else {
+                        emit($cg, "(*__cell_" . $c_param_name . ") = strada_copy_scalar_il(__rawp_" . $c_param_name . ");\n");
+                    }
                     my str $cell_track = "@cell:" . $c_param_name;
                     scope_track_var($cg, $cell_track);
                     if (cleanup_push_useful($cg) == 1) {
@@ -4595,9 +4622,8 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     while ($i < $param_count) {
         my scalar $p = $params->[$i];
         my str $pname = escape_c_keyword($p->{"name"});
-        my str $psigil = "" . $p->{"sigil"};
         emit($cg, "    ");
-        if (($async_cand_boxed{$pname} + 0) == 1 && length("" . $p->{"struct_name"}) == 0 && $psigil ne "@" && $psigil ne "%") {
+        if (($async_cand_boxed{$pname} + 0) == 1 && length("" . $p->{"struct_name"}) == 0) {
             if ($cg->{"func_has_try"} == 1) {
                 emit($cg, "StradaValue * volatile __rawp_" . $pname . " = (*__captures[" . $i . "]);\n");
             } else {
@@ -4736,7 +4762,7 @@ func gen_async_function(scalar $cg, scalar $fn) void {
         if (length("" . $ap->{"struct_name"}) > 0) {
             $cg->{"struct_vars"}->{$ap_c} = "" . $ap->{"struct_name"};
         }
-        if (($async_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0 && $ap_sig ne "@" && $ap_sig ne "%") {
+        if (($async_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0) {
             $cg->{"active_boxed_vars"}->{$ap_c} = 1;
             emit_indent($cg);
             if ($cg->{"func_has_try"} == 1) {
@@ -4745,7 +4771,11 @@ func gen_async_function(scalar $cg, scalar $fn) void {
                 emit($cg, "StradaValue **__cell_" . $ap_c . " = strada_cell_alloc();\n");
             }
             emit_indent($cg);
-            emit($cg, "(*__cell_" . $ap_c . ") = strada_copy_scalar_il(__rawp_" . $ap_c . ");\n");
+            if ($ap_sig eq "@" || $ap_sig eq "%") {
+                emit($cg, "strada_incref(__rawp_" . $ap_c . "); (*__cell_" . $ap_c . ") = __rawp_" . $ap_c . ";\n");
+            } else {
+                emit($cg, "(*__cell_" . $ap_c . ") = strada_copy_scalar_il(__rawp_" . $ap_c . ");\n");
+            }
             my str $ac_track = "@cell:" . $ap_c;
             scope_track_var($cg, $ac_track);
             if (cleanup_push_useful($cg) == 1) {

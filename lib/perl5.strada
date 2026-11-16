@@ -246,7 +246,7 @@ static StradaValue* perl5_strada_from_sv(SV *sv) {
         return strada_new_str("");
     }
     STRLEN len = 0;
-    const char *p = SvPV(sv, len);
+    const char *p = SvPV_nomg(sv, len);
     if (SvUTF8(sv)) {
         return strada_new_str_len_utf8(p ? p : "", (size_t)len);
     }
