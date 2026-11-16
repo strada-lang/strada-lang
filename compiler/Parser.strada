@@ -940,6 +940,33 @@ func parser_is_simple_ident(str $s) int {
     return 1;
 }
 
+# Parse a hash subscript/slice key expression, auto-quoting a single bareword
+# identifier or keyword before `}` (or `,` in hash slices) unless it is a
+# declared `const` or standard filehandle.
+func parse_hash_key_expr(scalar $parser, int $allow_comma) scalar {
+    my scalar $ktok = parser_current($parser);
+    if ($ktok->{"is_word"} != 0) {
+        my str $kval = $ktok->{"value"};
+        my str $knxt = parser_peek($parser)->{"type"};
+        my int $is_term = 0;
+        if ($knxt eq "RBRACE") {
+            $is_term = 1;
+        } elsif ($allow_comma == 1 && $knxt eq "COMMA") {
+            $is_term = 1;
+        }
+        my scalar $cn = $parser->{"const_names"};
+        my scalar $cv = $cn->{$kval};
+        if ($is_term == 1 && !$cv
+            && $kval ne "STDIN" && $kval ne "STDOUT" && $kval ne "STDERR") {
+            my scalar $knode = ast_new_str_literal($kval);
+            ast_set_line($knode, parser_current_line($parser));
+            parser_advance($parser);
+            return $knode;
+        }
+    }
+    return parse_expression($parser);
+}
+
 # Primary expressions: literals, variables, parenthesized, etc.
 func parse_primary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
@@ -1412,7 +1439,7 @@ func parse_primary(scalar $parser) scalar {
         # Check for hash access $var{key} - Perl style: accesses %var
         if (parser_check($parser, "LBRACE")) {
             parser_advance($parser);
-            my scalar $key = parse_expression($parser);
+            my scalar $key = parse_hash_key_expr($parser, 0);
             parser_expect($parser, "RBRACE");
             my scalar $var = ast_new_variable($var_name, "%");
             ast_set_line($var, $var_line);
@@ -1744,6 +1771,7 @@ func parse_primary(scalar $parser) scalar {
     if ($type eq "IDENT") {
         my str $name = $tok->{"value"};
         my int $call_line = $tok->{"line"};
+        my int $ident_pos = $parser->{"pos"};
         parser_advance($parser);
 
         # Check for function call
@@ -1939,8 +1967,17 @@ func parse_primary(scalar $parser) scalar {
             }
         }
 
-        # Just an identifier (bareword string in some contexts)
-        return ast_new_str_literal($name);
+        # Bareword class invocant before ->method() (e.g. Foo->new())
+        if (parser_check($parser, "ARROW")) {
+            my scalar $after_arrow = parser_peek($parser);
+            if ($after_arrow->{"is_word"} != 0) {
+                return ast_new_str_literal($name);
+            }
+        }
+
+        # Disallow barewords in general expression position (e.g. `i < 4` missing `$`)
+        $parser->{"pos"} = $ident_pos;
+        parser_error($parser, "bareword '" . $name . "' not allowed (missing '$' or '()')");
     }
 
     # inherit() function call when used inside a function body
@@ -2209,7 +2246,7 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
             # Hash dereference ->{key}
             elsif (parser_check($parser, "LBRACE")) {
                 parser_advance($parser);
-                my scalar $key = parse_expression($parser);
+                my scalar $key = parse_hash_key_expr($parser, 0);
                 parser_expect($parser, "RBRACE");
                 $left = ast_new_deref_hash($left, $key);
             }
@@ -2331,21 +2368,21 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                 parser_advance($parser);
                 my array @keys = ();
                 my int $key_count = 0;
-                push(@keys, parse_expression($parser));
+                push(@keys, parse_hash_key_expr($parser, 1));
                 $key_count = $key_count + 1;
                 while (parser_check($parser, "COMMA")) {
                     parser_advance($parser);
                     if (parser_check($parser, "RBRACE")) {
                         last;
                     }
-                    push(@keys, parse_expression($parser));
+                    push(@keys, parse_hash_key_expr($parser, 1));
                     $key_count = $key_count + 1;
                 }
                 parser_expect($parser, "RBRACE");
                 $left = ast_new_hash_slice($left, \@keys, $key_count);
             } else {
                 parser_advance($parser);
-                my scalar $key = parse_expression($parser);
+                my scalar $key = parse_hash_key_expr($parser, 0);
                 parser_expect($parser, "RBRACE");
                 $left = ast_new_hash_access($left, $key);
             }
@@ -3261,7 +3298,7 @@ func parse_local_decl(scalar $parser) scalar {
     # Check for local $hash{key} — hash element localization
     if (parser_check($parser, "LBRACE")) {
         parser_advance($parser);
-        my scalar $key_expr = parse_expression($parser);
+        my scalar $key_expr = parse_hash_key_expr($parser, 0);
         parser_expect($parser, "RBRACE");
 
         my scalar $decl = ast_new_local_decl($name, $sigil, 0);

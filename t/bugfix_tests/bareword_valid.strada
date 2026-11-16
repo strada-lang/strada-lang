@@ -1,0 +1,18 @@
+# EXPECT: 1,2,3,3+4,5,9,BwCls:hi
+# Valid Perl bareword contexts remain accepted after rejecting general barewords:
+# fat comma keys, hash/deref/slice/local keys (including keywords), const lookup,
+# and Class->method() invocants.
+package BwCls;
+func greet(str $c, str $w) str { return $c . ":" . $w; }
+
+package main;
+const str $K = "cval";
+our hash %g = (key => 8);
+
+func main() int {
+    my hash %h = (name => 1, default => 2, a => 3, b => 4, cval => 5);
+    my scalar $r = \%h;
+    local $g{key} = 9;
+    say($h{name} . "," . $h{default} . "," . $r->{a} . "," . join("+", @h{a, b}) . "," . $h{K} . "," . $g{key} . "," . BwCls->greet("hi"));
+    return 0;
+}

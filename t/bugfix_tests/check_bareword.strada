@@ -1,0 +1,9 @@
+# COMPILE-ERROR: bareword 'i' not allowed
+# Bareword identifiers in general expressions (e.g. `i < 4` missing `$`)
+# must fail at parse time instead of silently becoming string literals.
+func main() int {
+    for (my int $i = 0; i < 4; $i = $i + 1) {
+        say($i);
+    }
+    return 0;
+}

@@ -249,6 +249,23 @@ if [ "$rc" -eq 0 ]; then
     FAILURES=$((FAILURES + 1))
 fi
 
+# --- 12. Bareword typo reports exact file:line:col and caret ---------------
+cat > "$WORK/bareword_loop.strada" <<'EOF'
+func main() int {
+    for (my int $i = 0; i < 4; $i = $i + 1) {}
+    return 0;
+}
+EOF
+out="$("$STRADA" --check "$WORK/bareword_loop.strada" 2>&1)"
+check "bareword typo has file:line:col" \
+    "bareword_loop.strada:2:25: bareword 'i' not allowed" "$out"
+if printf '%s\n' "$out" | grep -qE '^ {24}\^$'; then
+    echo "PASS: bareword caret aligned under column 25"
+else
+    echo "FAIL: bareword caret aligned under column 25"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 if [ $FAILURES -gt 0 ]; then
     echo "diagnostics: $FAILURES case(s) FAILED"

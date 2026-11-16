@@ -453,7 +453,7 @@ func format_pod(str $pod_content, int $raw_mode) str {
         # Regular paragraph
         my str $formatted = format_pod_inline($line);
         my int $para_indent = 2 + $indent_level;
-        my str $wrapped = word_wrap($formatted, $term_width - para_indent - 2, $para_indent);
+        my str $wrapped = word_wrap($formatted, $term_width - $para_indent - 2, $para_indent);
         $output = $output . $wrapped . "\n";
         $i = $i + 1;
     }
