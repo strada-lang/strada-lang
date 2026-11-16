@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* Opcodes */
 typedef enum {
@@ -1012,6 +1013,16 @@ typedef struct VM {
     int refcount;
     int locals_detached;
     uint8_t pending_call_context;
+    /* Thread safety + per-VM caches */
+    pthread_t owner_thread;
+    int is_worker_vm;
+    struct VM *root_vm;
+    pthread_mutex_t gc_mutex;
+    pthread_mutex_t globals_mutex;
+    void *regex_cache;
+    VMValue *locals_pool;
+    size_t locals_top;
+    size_t locals_cap;
 } VM;
 
 /* Program API */

@@ -92,6 +92,7 @@ static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
         }
         if (ev) strada_decref(ev);
     }
+    SvSETMAGIC(sv);
     if (fetched) strada_cleanup_pop_decref(fetched);
 }
 
@@ -199,7 +200,11 @@ static SV* perl5_sv_from_conv(const Perl5ConvArg *ca) {
 }
 
 static StradaValue* perl5_strada_from_sv(SV *sv) {
-    if (!sv || !SvOK(sv)) {
+    if (!sv) {
+        return strada_new_str("");
+    }
+    SvGETMAGIC(sv);
+    if (!SvOK(sv)) {
         return strada_new_str("");
     }
     STRLEN len = 0;
@@ -557,7 +562,8 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
         if (temp) {
             for (int i = 0; i < count; i++) {
                 SV *sv = POPs;
-                if (SvOK(sv)) {
+                if (sv) SvGETMAGIC(sv);
+                if (sv && SvOK(sv)) {
                     temp[i] = perl5_strada_from_sv(sv);
                 } else {
                     temp[i] = strada_new_undef();
@@ -716,10 +722,13 @@ char* strada_perl5_eval_raw(const char *code) {
         return strdup(err);
     }
 
-    if (result && SvOK(result)) {
-        STRLEN len;
-        const char *str = SvPV(result, len);
-        return strdup(str);
+    if (result) {
+        SvGETMAGIC(result);
+        if (SvOK(result)) {
+            STRLEN len;
+            const char *str = SvPV(result, len);
+            return strdup(str);
+        }
     }
 
     return strdup("");
@@ -777,6 +786,7 @@ void strada_perl5_set_scalar_raw(const char *name, const char *value) {
         } else {
             sv_setsv(sv, &PL_sv_undef);
         }
+        SvSETMAGIC(sv);
     }
 }
 
@@ -792,10 +802,13 @@ char* strada_perl5_get_scalar_raw(const char *name) {
     }
 
     SV *sv = get_sv(name, 0);
-    if (sv && SvOK(sv)) {
-        STRLEN len;
-        const char *str = SvPV(sv, len);
-        return strdup(str);
+    if (sv) {
+        SvGETMAGIC(sv);
+        if (SvOK(sv)) {
+            STRLEN len;
+            const char *str = SvPV(sv, len);
+            return strdup(str);
+        }
     }
 
     return strdup("");
@@ -854,10 +867,13 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
         result = strdup(err);
     } else if (count > 0) {
         SV *ret = POPs;
-        if (SvOK(ret)) {
-            STRLEN len;
-            const char *str = SvPV(ret, len);
-            result = strdup(str);
+        if (ret) {
+            SvGETMAGIC(ret);
+            if (SvOK(ret)) {
+                STRLEN len;
+                const char *str = SvPV(ret, len);
+                result = strdup(str);
+            }
         }
     }
 

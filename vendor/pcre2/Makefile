@@ -3,7 +3,7 @@
 
 CC ?= gcc
 CFLAGS ?= -O2
-CFLAGS += -DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=8 -DPCRE2_STATIC -I. -Isrc
+CFLAGS += -fPIC -DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=8 -DPCRE2_STATIC -I. -Isrc
 # Unicode support: the Strada runtime compiles patterns with PCRE2_UTF|PCRE2_UCP
 # whenever the subject string carries the UTF-8 flag (see
 # strada_regex_set_subject_for_sv). Without SUPPORT_UNICODE, that pcre2_compile

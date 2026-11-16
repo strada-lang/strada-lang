@@ -1,0 +1,94 @@
+# Cycle 16 Valgrind Leak Test (Compiled Compiler & Runtime fixes)
+
+package R16LkTie;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init}, $cls);
+}
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $val) void { $s->{"v"} = $val; }
+
+package R16LkTieArr;
+func TIEARRAY(str $cls) scalar { return bless({"d" => ["a", "b", "c"]}, $cls); }
+func FETCHSIZE(scalar $s) int { return size($s->{"d"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"d"}->[$i]; }
+func STORE(scalar $s, int $i, scalar $v) void { $s->{"d"}->[$i] = $v; }
+
+package main;
+
+struct R16LkStruct {
+    str label;
+}
+
+func make_r16_lk_struct() R16LkStruct {
+    my R16LkStruct $o;
+    $o->label = "orig";
+    return $o;
+}
+
+func main() int {
+    # S1-1: tied compound float/str
+    my scalar $ts = "";
+    tie($ts, "R16LkTie", 1.5);
+    $ts += 2.25;
+    $ts *= "2.0";
+    $ts -= 1.5;
+    untie($ts);
+
+    # S2-2: tied short-circuit void and value context
+    my scalar $tsc = "";
+    tie($tsc, "R16LkTie", "ok");
+    $tsc ||= "skip";
+    my scalar $v1 = ($tsc ||= "skip2");
+    if ($v1 ne "ok") { return 1; }
+    untie($tsc);
+
+    # S2-1: @{$r} / %{$r} deref retain
+    my array @keep = ();
+    {
+        my scalar $ar = ["x", "y"];
+        my scalar $hr = {"k" => "v"};
+        my array @a = @{$ar};
+        my hash %h = %{$hr};
+        push(@keep, \@a);
+        push(@keep, \%h);
+    }
+
+    # S2-3: tied array slice
+    my array @ta = ();
+    tie(@ta, "R16LkTieArr");
+    @ta[0, 2] = ("X", "Z");
+    untie(@ta);
+
+    # S2-4: non-decl destructuring captured
+    my array @ca = ();
+    my hash %ch = ();
+    my str $cs = "a";
+    my scalar $h0 = "";
+    my scalar $cf = func () int {
+        ($h0, @ca) = ("h", "p", "q");
+        ($h0, %ch) = ("h", "k", "v");
+        return size(@ca) + scalar(keys(%ch));
+    };
+    my scalar $cg = func () str { return $cs; };
+    my int $r4 = $cf->();
+    ($h0, $cs) = ("h2", "b");
+    if ($r4 != 3 || $cg->() ne "b") { return 2; }
+
+    # S2-6: struct str assign in value context
+    my str $got_s = (make_r16_lk_struct()->label = "next");
+    if ($got_s ne "next") { return 3; }
+
+    # S2-7: heredoc rest of line
+    my str $hd = <<'END_LK' . ":" . join("-", qw[a b]);
+hello
+END_LK
+    if ($hd ne "hello:a-b") { return 4; }
+
+    # S3-9: negative shift
+    my int $sr = (-8 >> 100);
+    if ($sr != -1) { return 5; }
+
+    core::gc_collect();
+    say("LEAK_AUDIT_R16_OK");
+    return 0;
+}

@@ -15823,126 +15823,143 @@ StradaValue* strada_regex_match_all(const char *str, const char *pattern) {
     return sv;
 }
 
-char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags) {
-    regmatch_t match;
-
-    regex_t *rx = regex_cache_compile_posix(pattern, flags);
-    if (!rx) return strdup(str);
-
-    if (regexec(rx, str, 1, &match, 0) != 0) {
-        /* rx is owned by the cache — do NOT free */
-        return strdup(str);
-    }
-
-    // Calculate result length
-    size_t before_len = match.rm_so;
-    size_t after_start = match.rm_eo;
-    size_t after_len = strlen(str) - after_start;
-    size_t repl_len = strlen(replacement);
-
-    /* Overflow check before malloc */
-    if (before_len > SIZE_MAX - repl_len ||
-        before_len + repl_len > SIZE_MAX - after_len ||
-        before_len + repl_len + after_len > SIZE_MAX - 1) {
-        return strdup(str);
-    }
-
-    size_t total = before_len + repl_len + after_len + 1;
-    char *result = malloc(total);
-    if (!result) return strdup(str);
-
-    /* Use memcpy with explicit lengths to avoid any reliance on terminators
-     * inside intermediate slices, and so this stays correct if the source
-     * string ever contains embedded NULs. */
-    memcpy(result, str, before_len);
-    memcpy(result + before_len, replacement, repl_len);
-    memcpy(result + before_len + repl_len, str + after_start, after_len);
-    result[before_len + repl_len + after_len] = '\0';
-
-    /* rx is owned by the cache — do NOT free */
-    return result;
+static char* strada_posix_dup_bytes(const char *src, size_t len) {
+    char *copy = malloc(len + 1);
+    if (!copy) return strdup("");
+    if (len > 0 && src) memcpy(copy, src, len);
+    copy[len] = '\0';
+    return copy;
 }
 
-char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags) {
+static int strada_posix_regex_replace_impl(const char *str, size_t str_len, const char *pattern,
+                                           const char *replacement, size_t repl_len,
+                                           const char *flags, int global,
+                                           char **result_out, size_t *out_len_out) {
+    if (!str) { str = ""; str_len = 0; }
+    if (!replacement) { replacement = ""; repl_len = 0; }
     regex_t *rx = regex_cache_compile_posix(pattern, flags);
-    if (!rx) return strdup(str);
+    if (!rx) {
+        *result_out = strada_posix_dup_bytes(str, str_len);
+        if (out_len_out) *out_len_out = str_len;
+        return 0;
+    }
 
-    size_t str_len = strlen(str);
-    size_t repl_len = strlen(replacement);
-
-    /* Initial guess: 2x input. Overflow-safe. */
-    size_t result_cap = (str_len > SIZE_MAX / 2 - 1) ? str_len + 1 : str_len * 2 + 1;
-    char *result = malloc(result_cap);
-    if (!result) return strdup(str);
+    size_t cap = (str_len > SIZE_MAX / 2 - 1) ? str_len + 1 : str_len * 2 + 1;
+    if (cap < repl_len + 1) {
+        cap = (repl_len <= SIZE_MAX - 1) ? repl_len + 1 : SIZE_MAX;
+    }
+    char *result = malloc(cap);
+    if (!result) {
+        *result_out = strada_posix_dup_bytes(str, str_len);
+        if (out_len_out) *out_len_out = str_len;
+        return 0;
+    }
     size_t result_len = 0;
-    result[0] = '\0';
-
+    int count = 0;
     const char *p = str;
+    const char *end = str + str_len;
     regmatch_t match;
 
-    while (regexec(rx, p, 1, &match, 0) == 0) {
+    while (p <= end && regexec(rx, p, 1, &match, (p > str) ? REG_NOTBOL : 0) == 0) {
         size_t before = (size_t)match.rm_so;
-        const char *tail = p + match.rm_eo;
-        size_t tail_len = strlen(tail);
-
-        /* Ensure capacity for: current + before + repl + tail + NUL.
-         * Overflow-checked. */
+        size_t m_eo = (size_t)match.rm_eo;
+        if (p + m_eo > end) break;
+        const char *tail = p + m_eo;
+        size_t tail_len = (size_t)(end - tail);
         if (result_len > SIZE_MAX - before ||
             result_len + before > SIZE_MAX - repl_len ||
             result_len + before + repl_len > SIZE_MAX - tail_len ||
             result_len + before + repl_len + tail_len > SIZE_MAX - 1) {
             free(result);
-            return strdup(str);
+            *result_out = strada_posix_dup_bytes(str, str_len);
+            if (out_len_out) *out_len_out = str_len;
+            return 0;
         }
         size_t needed = result_len + before + repl_len + tail_len + 1;
-        if (needed > result_cap) {
-            size_t new_cap = result_cap;
+        if (needed > cap) {
+            size_t new_cap = cap;
             while (new_cap < needed) {
                 if (new_cap > SIZE_MAX / 2) { new_cap = needed; break; }
                 new_cap *= 2;
             }
-            char *new_result = realloc(result, new_cap);
-            if (!new_result) { free(result); return strdup(str); }
-            result = new_result;
-            result_cap = new_cap;
+            char *nr = realloc(result, new_cap);
+            if (!nr) {
+                free(result);
+                *result_out = strada_posix_dup_bytes(str, str_len);
+                if (out_len_out) *out_len_out = str_len;
+                return 0;
+            }
+            result = nr;
+            cap = new_cap;
         }
-
-        memcpy(result + result_len, p, before);
-        result_len += before;
-        memcpy(result + result_len, replacement, repl_len);
-        result_len += repl_len;
-        result[result_len] = '\0';
-
+        if (before > 0) { memcpy(result + result_len, p, before); result_len += before; }
+        if (repl_len > 0) { memcpy(result + result_len, replacement, repl_len); result_len += repl_len; }
+        count++;
         p = tail;
-        if (match.rm_eo == 0) break;  // Prevent infinite loop on empty matches
+        if (!global || match.rm_eo == 0) break;
     }
 
-    /* Copy remaining tail */
-    size_t tail_len = strlen(p);
-    if (result_len > SIZE_MAX - tail_len - 1) { free(result); return strdup(str); }
-    if (result_len + tail_len + 1 > result_cap) {
-        char *new_result = realloc(result, result_len + tail_len + 1);
-        if (!new_result) { free(result); return strdup(str); }
-        result = new_result;
+    size_t tail_len = (p <= end) ? (size_t)(end - p) : 0;
+    if (result_len > SIZE_MAX - tail_len - 1) {
+        free(result);
+        *result_out = strada_posix_dup_bytes(str, str_len);
+        if (out_len_out) *out_len_out = str_len;
+        return 0;
     }
-    memcpy(result + result_len, p, tail_len);
-    result_len += tail_len;
+    if (result_len + tail_len + 1 > cap) {
+        char *nr = realloc(result, result_len + tail_len + 1);
+        if (!nr) {
+            free(result);
+            *result_out = strada_posix_dup_bytes(str, str_len);
+            if (out_len_out) *out_len_out = str_len;
+            return 0;
+        }
+        result = nr;
+    }
+    if (tail_len > 0) {
+        memcpy(result + result_len, p, tail_len);
+        result_len += tail_len;
+    }
     result[result_len] = '\0';
+    *result_out = result;
+    if (out_len_out) *out_len_out = result_len;
+    return count;
+}
 
-    /* rx is owned by the cache — do NOT free */
-    return result;
+char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags) {
+    char *out = NULL;
+    size_t out_len = 0;
+    strada_posix_regex_replace_impl(str, str ? strlen(str) : 0, pattern,
+                                    replacement, replacement ? strlen(replacement) : 0,
+                                    flags, 0, &out, &out_len);
+    return out;
+}
+
+char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags) {
+    char *out = NULL;
+    size_t out_len = 0;
+    strada_posix_regex_replace_impl(str, str ? strlen(str) : 0, pattern,
+                                    replacement, replacement ? strlen(replacement) : 0,
+                                    flags, 1, &out, &out_len);
+    return out;
 }
 
 /* strada_regex_replace_capture: POSIX fallback — substitute AND set captures, return match count */
-int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement,
-                                  const char *flags, int global, char **result_out) {
+static int strada_regex_replace_capture_impl(const char *str, size_t subject_length,
+                                             const char *pattern, const char *replacement, size_t repl_len,
+                                             const char *flags, int global,
+                                             char **result_out, size_t *out_len) {
     regex_t *rx = regex_cache_compile_posix(pattern, flags);
-    if (!rx) { *result_out = strdup(str); return 0; }
+    if (!rx) {
+        *result_out = strada_posix_dup_bytes(str ? str : "", subject_length);
+        if (out_len) *out_len = subject_length;
+        return 0;
+    }
 
     /* Match with captures to set $1, $2, etc. */
     size_t nmatch = rx->re_nsub + 1;
     regmatch_t *matches = malloc(sizeof(regmatch_t) * nmatch);
-    int matched = (regexec(rx, str, nmatch, matches, 0) == 0);
+    int matched = matches && (regexec(rx, str ? str : "", nmatch, matches, 0) == 0);
 
     /* Build captures array */
     StradaArray *captures = strada_array_new();
@@ -15968,27 +15985,31 @@ int strada_regex_replace_capture(const char *str, const char *pattern, const cha
     last_regex_captures = sv;
 
     if (!matched) {
-        *result_out = strdup(str);
+        *result_out = strada_posix_dup_bytes(str ? str : "", subject_length);
+        if (out_len) *out_len = subject_length;
         return 0;
     }
 
-    /* Do the actual substitution */
-    if (global) {
-        *result_out = strada_regex_replace_all(str, pattern, replacement, flags);
-    } else {
-        *result_out = strada_regex_replace(str, pattern, replacement, flags);
-    }
-    return 1;
+    return strada_posix_regex_replace_impl(str, subject_length, pattern, replacement, repl_len,
+                                           flags, global, result_out, out_len);
+}
+
+int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement,
+                                  const char *flags, int global, char **result_out) {
+    size_t slen = str ? strlen(str) : 0;
+    size_t rlen = replacement ? strlen(replacement) : 0;
+    return strada_regex_replace_capture_impl(str, slen, pattern, replacement, rlen,
+                                             flags, global, result_out, NULL);
 }
 
 int strada_regex_replace_capture_len(const char *str, size_t subject_length, int is_utf8,
                                       const char *pattern, const char *replacement,
                                       const char *flags, int global,
                                       char **result_out, size_t *out_len) {
-    (void)subject_length; (void)is_utf8;
-    int cnt = strada_regex_replace_capture(str, pattern, replacement, flags, global, result_out);
-    if (out_len) *out_len = (*result_out) ? strlen(*result_out) : 0;
-    return cnt;
+    (void)is_utf8;
+    size_t rlen = replacement ? strlen(replacement) : 0;
+    return strada_regex_replace_capture_impl(str, subject_length, pattern, replacement, rlen,
+                                             flags, global, result_out, out_len);
 }
 
 int strada_regex_replace_capture_len2(const char *str, size_t subject_length, int is_utf8,
@@ -15996,10 +16017,9 @@ int strada_regex_replace_capture_len2(const char *str, size_t subject_length, in
                                        const char *replacement, size_t repl_len,
                                        const char *flags, int global,
                                        char **result_out, size_t *out_len) {
-    (void)pat_len; (void)repl_len;
-    return strada_regex_replace_capture_len(str, subject_length, is_utf8,
-                                            pattern, replacement, flags, global,
-                                            result_out, out_len);
+    (void)is_utf8; (void)pat_len;
+    return strada_regex_replace_capture_impl(str, subject_length, pattern, replacement, repl_len,
+                                             flags, global, result_out, out_len);
 }
 
 StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv,
@@ -16010,6 +16030,7 @@ StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv,
     strada_cleanup_push(p_sv);
     StradaValue *r_sv = strada_to_str_sv(repl_sv);
     const char *s = (s_sv && !STRADA_IS_TAGGED_INT(s_sv) && s_sv->value.pv) ? s_sv->value.pv : "";
+    size_t slen = (s_sv && !STRADA_IS_TAGGED_INT(s_sv) && s_sv->type == STRADA_STR && s_sv->value.pv) ? STRADA_STR_BYTELEN(s_sv) : strlen(s);
     int s_utf8 = (s_sv && !STRADA_IS_TAGGED_INT(s_sv) && s_sv->type == STRADA_STR && STRADA_STR_IS_UTF8(s_sv)) ? 1 : 0;
     const char *p = (p_sv && !STRADA_IS_TAGGED_INT(p_sv) && p_sv->value.pv) ? p_sv->value.pv : "";
     size_t plen = (p_sv && !STRADA_IS_TAGGED_INT(p_sv) && p_sv->type == STRADA_STR && p_sv->value.pv) ? STRADA_STR_BYTELEN(p_sv) : strlen(p);
@@ -16027,8 +16048,10 @@ StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv,
         return res;
     }
     int r_utf8 = (r_sv && !STRADA_IS_TAGGED_INT(r_sv) && r_sv->type == STRADA_STR && STRADA_STR_IS_UTF8(r_sv)) ? 1 : 0;
-    char *out = global ? strada_regex_replace_all(s, p, r, flags) : strada_regex_replace(s, p, r, flags);
-    StradaValue *res = strada_new_str_len_utf8_flag(out ? out : "", out ? strlen(out) : 0, s_utf8 || r_utf8);
+    char *out = NULL;
+    size_t out_len = 0;
+    strada_posix_regex_replace_impl(s, slen, p, r, rlen, flags, global, &out, &out_len);
+    StradaValue *res = strada_new_str_len_utf8_flag(out ? out : "", out ? out_len : slen, s_utf8 || r_utf8);
     free(out);
     strada_decref(r_sv);
     strada_cleanup_pop_decref(p_sv);
@@ -16559,7 +16582,7 @@ void strada_free_value(StradaValue *sv) {
      * pool and reused by the next Pkg::new with the same shape. */
     int did_forget_weak = 0;
     if (!skip_destroy && sv->type == STRADA_HASH && sv->meta && sv->meta->blessed_package &&
-        !strada_threading_active && !strada_instance_pool_draining &&
+        !sv->meta->ext_destroy && !strada_threading_active && !strada_instance_pool_draining &&
         has_no_destroy_cached(sv->meta->blessed_package)) {
 #ifdef STRADA_CYCLE_GC
         if (!cc_self_collecting) cc_forget(sv);
@@ -17258,10 +17281,17 @@ static void cc_def_hv(StradaHash *hv) {
     cc_deferred.hvs[cc_deferred.nhv++] = hv;
 }
 static void cc_run_one_destroy(StradaValue *obj) {
-    if (!obj || STRADA_IS_TAGGED_INT(obj) || !obj->meta || !obj->meta->blessed_package || SV_IS_WEAK(obj)) return;
-    if (obj->type != STRADA_REF && obj->type != STRADA_HASH && obj->type != STRADA_ARRAY
-        && obj->type != STRADA_CLOSURE && obj->type != STRADA_FILEHANDLE) return;
-    if (!strada_validate_blessed_package(obj->meta->blessed_package)) return;
+    if (!obj || STRADA_IS_TAGGED_INT(obj) || !obj->meta || SV_IS_WEAK(obj)) return;
+    int has_ext = (obj->meta->ext_destroy != NULL);
+    const char *bp = obj->meta->blessed_package;
+    if (!has_ext && !bp) return;
+    if (!has_ext) {
+        if (obj->type != STRADA_REF && obj->type != STRADA_HASH && obj->type != STRADA_ARRAY
+            && obj->type != STRADA_CLOSURE && obj->type != STRADA_FILEHANDLE) return;
+        if (!strada_validate_blessed_package(bp)) return;
+    } else if (bp && !strada_validate_blessed_package(bp)) {
+        obj->meta->blessed_package = NULL;
+    }
     StradaValue *destroy_exc = strada_run_destroy_guarded(obj);
     if (destroy_exc) {
         if (!strada_deferred_destroy_exc) {
@@ -35589,32 +35619,23 @@ int strada_tied_scalar_store(StradaValue *sv, StradaValue *val) {
  * and returns FETCH as a BORROWED StradaValue* (matching NODE_ASSIGN's
  * borrowed-result ownership contract). */
 /* Refresh tied_cache via FETCH after a STORE and return a BORROWED StradaValue*. */
-static StradaValue* strada_tied_scalar_refresh_cache(StradaValue *sv) {
+StradaValue* strada_tied_scalar_cache_take(StradaValue *sv, StradaValue *fetched) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_mortal(fetched);
     strada_incref(sv);
     strada_cleanup_push(sv);
-    if (sv->meta && sv->meta->tied_cache) {
-        StradaValue *old_cache = sv->meta->tied_cache;
-        sv->meta->tied_cache = NULL;
-        strada_decref(old_cache);
-    }
-    if (!sv->meta || !sv->meta->is_tied || !sv->meta->tied_obj) {
-        strada_cleanup_pop_decref(sv);
-        return strada_undef_static();
-    }
-    StradaValue *fetched = strada_tied_scalar_fetch(sv);
     if (!sv->meta || !sv->meta->is_tied) {
         strada_cleanup_pop_decref(sv);
         return strada_mortal(fetched);
     }
     if (sv->meta->tied_cache) {
-        StradaValue *old_cache2 = sv->meta->tied_cache;
+        StradaValue *old_cache = sv->meta->tied_cache;
         sv->meta->tied_cache = fetched;
-        int pinned = !STRADA_IS_TAGGED_INT(fetched);
+        int pinned = fetched && !STRADA_IS_TAGGED_INT(fetched);
         if (pinned) {
             strada_incref(fetched);
             strada_cleanup_push(fetched);
         }
-        strada_decref(old_cache2);
+        strada_decref(old_cache);
         if (pinned) {
             if (sv->meta && sv->meta->tied_cache == fetched) {
                 strada_cleanup_pop_decref(fetched);
@@ -35632,6 +35653,23 @@ static StradaValue* strada_tied_scalar_refresh_cache(StradaValue *sv) {
     }
     strada_cleanup_pop_decref(sv);
     return fetched;
+}
+
+static StradaValue* strada_tied_scalar_refresh_cache(StradaValue *sv) {
+    strada_incref(sv);
+    strada_cleanup_push(sv);
+    if (sv->meta && sv->meta->tied_cache) {
+        StradaValue *old_cache = sv->meta->tied_cache;
+        sv->meta->tied_cache = NULL;
+        strada_decref(old_cache);
+    }
+    if (!sv->meta || !sv->meta->is_tied || !sv->meta->tied_obj) {
+        strada_cleanup_pop_decref(sv);
+        return strada_undef_static();
+    }
+    StradaValue *res = strada_tied_scalar_cache_take(sv, strada_tied_scalar_fetch(sv));
+    strada_cleanup_pop_decref(sv);
+    return res;
 }
 
 StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val) {
@@ -35676,24 +35714,16 @@ StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int 
     }
     StradaValue *cur = strada_tied_scalar_fetch(sv);
     strada_cleanup_push(cur);
-    int cur_is_int = STRADA_IS_TAGGED_INT(cur) || (cur && cur->type == STRADA_INT && !(cur->flags & STRADA_SVf_UV));
-    int rhs_is_int = STRADA_IS_TAGGED_INT(rhs) || (rhs && rhs->type == STRADA_INT && !(rhs->flags & STRADA_SVf_UV));
     StradaValue *next = NULL;
     switch (op) {
         case '+':
-            next = (cur_is_int && rhs_is_int)
-                ? strada_new_int(strada_to_int(cur) + strada_to_int(rhs))
-                : strada_new_num(strada_to_num(cur) + strada_to_num(rhs));
+            next = strada_sv_add(cur, rhs);
             break;
         case '-':
-            next = (cur_is_int && rhs_is_int)
-                ? strada_new_int(strada_to_int(cur) - strada_to_int(rhs))
-                : strada_new_num(strada_to_num(cur) - strada_to_num(rhs));
+            next = strada_sv_sub(cur, rhs);
             break;
         case '*':
-            next = (cur_is_int && rhs_is_int)
-                ? strada_new_int(strada_to_int(cur) * strada_to_int(rhs))
-                : strada_new_num(strada_to_num(cur) * strada_to_num(rhs));
+            next = strada_sv_mul(cur, rhs);
             break;
         case '/': {
             double ca = strada_to_num(cur);

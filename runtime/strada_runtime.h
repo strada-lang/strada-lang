@@ -2270,6 +2270,7 @@ StradaValue* strada_tied_hash_nextkey_sv(StradaValue *sv, StradaValue *lastkey);
 void strada_tied_hash_clear(StradaValue *sv);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
+StradaValue* strada_tied_scalar_cache_take(StradaValue *sv, StradaValue *fetched);
 StradaValue* strada_copy_scalar(StradaValue *sv);
 #ifdef STRADA_TCC_COMPAT
 #define strada_copy_scalar_il strada_copy_scalar

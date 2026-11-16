@@ -104,10 +104,126 @@ __C__ {
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /* VM bytecode backend for eval (linked from runtime/vm.o + runtime/vm_compiler.o) */
 #include "vm.h"
 #include "vm_compiler.h"
+
+static pthread_mutex_t g_eval_vm_mutex;
+static pthread_once_t g_eval_vm_once = PTHREAD_ONCE_INIT;
+static void eval_vm_init_once(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_eval_vm_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+static inline void eval_vm_lock(void) {
+    pthread_once(&g_eval_vm_once, eval_vm_init_once);
+    pthread_mutex_lock(&g_eval_vm_mutex);
+}
+static inline void eval_vm_unlock(void) {
+    pthread_mutex_unlock(&g_eval_vm_mutex);
+}
+
+#define EVAL_ACTIVE_MAX 64
+typedef struct {
+    VM *vms[EVAL_ACTIVE_MAX];
+    int depth;
+} EvalActiveStack;
+#ifndef STRADA_NO_TLS
+static __thread EvalActiveStack g_eval_active_stack = {{NULL}, 0};
+static EvalActiveStack *eval_active_stack_get(void) { return &g_eval_active_stack; }
+#else
+static pthread_key_t g_eval_active_key;
+static pthread_once_t g_eval_active_once = PTHREAD_ONCE_INIT;
+static void eval_active_destroy(void *p) { free(p); }
+static void eval_active_key_init(void) { pthread_key_create(&g_eval_active_key, eval_active_destroy); }
+static EvalActiveStack *eval_active_stack_get(void) {
+    pthread_once(&g_eval_active_once, eval_active_key_init);
+    EvalActiveStack *s = (EvalActiveStack *)pthread_getspecific(g_eval_active_key);
+    if (!s) {
+        s = calloc(1, sizeof(EvalActiveStack));
+        pthread_setspecific(g_eval_active_key, s);
+    }
+    return s;
+}
+#endif
+
+static int eval_sv_equal(StradaValue *a, StradaValue *b, int depth) {
+    if (a == b) return 1;
+    if (depth > 32) return 0;
+    if (!a || !b) return 0;
+    if (STRADA_IS_TAGGED_INT(a) || STRADA_IS_TAGGED_INT(b)) return a == b;
+    if (a->type != b->type) return 0;
+    switch (a->type) {
+    case STRADA_UNDEF: return 1;
+    case STRADA_INT: return a->value.iv == b->value.iv;
+    case STRADA_NUM: return memcmp(&a->value.nv, &b->value.nv, sizeof(double)) == 0;
+    case STRADA_STR: {
+        size_t al = STRADA_STR_BYTELEN(a), bl = STRADA_STR_BYTELEN(b);
+        if (al != bl || STRADA_STR_IS_UTF8(a) != STRADA_STR_IS_UTF8(b)) return 0;
+        if (al == 0) return 1;
+        return memcmp(a->value.pv ? a->value.pv : "", b->value.pv ? b->value.pv : "", al) == 0;
+    }
+    case STRADA_ARRAY: {
+        StradaArray *aa = a->value.av, *ba = b->value.av;
+        if (!aa || !ba) return aa == ba;
+        if (aa->size != ba->size) return 0;
+        for (size_t i = 0; i < aa->size; i++) {
+            if (!eval_sv_equal(aa->elements[i], ba->elements[i], depth + 1)) return 0;
+        }
+        return 1;
+    }
+    case STRADA_HASH: {
+        StradaHash *ah = a->value.hv, *bh = b->value.hv;
+        if (!ah || !bh) return ah == bh;
+        if (ah->num_entries != bh->num_entries) return 0;
+        for (size_t i = 0; i < ah->next_slot; i++) {
+            if (!ah->entries[i].key) continue;
+            StradaValue *ksv = strada_new_str_len(ah->entries[i].key->data, ah->entries[i].key->len);
+            int ex = strada_hash_exists_sv(bh, ksv);
+            StradaValue *bv = ex ? strada_hash_get_sv(bh, ksv) : NULL;
+            strada_decref(ksv);
+            if (!ex || !eval_sv_equal(ah->entries[i].value, bv, depth + 1)) return 0;
+        }
+        return 1;
+    }
+    case STRADA_REF:
+        return eval_sv_equal(a->value.rv, b->value.rv, depth + 1);
+    default:
+        return 0;
+    }
+}
+
+static void eval_seed_changed_globals(VM *parent_vm, StradaValue *pre_snap, StradaValue *post_ref) {
+    if (!parent_vm || !post_ref || STRADA_IS_TAGGED_INT(post_ref)) return;
+    if (post_ref->type == STRADA_REF && !strada_is_slot_ref(post_ref) && post_ref->value.rv) post_ref = post_ref->value.rv;
+    if (!post_ref || post_ref->type != STRADA_HASH || !post_ref->value.hv) return;
+    StradaValue *pre_h = pre_snap;
+    if (pre_h && !STRADA_IS_TAGGED_INT(pre_h) && pre_h->type == STRADA_REF && !strada_is_slot_ref(pre_h) && pre_h->value.rv) {
+        pre_h = pre_h->value.rv;
+    }
+    StradaHash *pre_hv = (pre_h && !STRADA_IS_TAGGED_INT(pre_h) && pre_h->type == STRADA_HASH) ? pre_h->value.hv : NULL;
+    StradaHash *post_hv = post_ref->value.hv;
+    StradaValue *delta = strada_new_hash();
+    for (size_t i = 0; i < post_hv->next_slot; i++) {
+        if (!post_hv->entries[i].key) continue;
+        StradaValue *ksv = strada_new_str_len(post_hv->entries[i].key->data, post_hv->entries[i].key->len);
+        int changed = 1;
+        if (pre_hv && strada_hash_exists_sv(pre_hv, ksv)) {
+            StradaValue *pv = strada_hash_get_sv(pre_hv, ksv);
+            if (eval_sv_equal(pv, post_hv->entries[i].value, 0)) changed = 0;
+        }
+        if (changed) {
+            strada_hash_set_sv(delta->value.hv, ksv, post_hv->entries[i].value);
+        }
+        strada_decref(ksv);
+    }
+    vm_seed_globals(parent_vm, delta, NULL);
+    strada_decref(delta);
+}
 }
 
 # Persistent VM eval / REPL session state
@@ -393,6 +509,66 @@ func eval_strip_our_init(str $chunk) str {
     return $chunk;
 }
 
+func eval_append_trailing_semi(str $code) str {
+    my int $len = length($code);
+    my int $i = 0;
+    my str $last_sig = "";
+    my int $in_line_cmt = 0;
+    while ($i < $len) {
+        my str $c = substr($code, $i, 1);
+        if (eval_is_ws_char($c) == 1) {
+            if ($c eq "\n") { $in_line_cmt = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "#") {
+            $in_line_cmt = 1;
+            while ($i < $len && substr($code, $i, 1) ne "\n") {
+                $i = $i + 1;
+            }
+            if ($i < $len) { $in_line_cmt = 0; }
+            next;
+        }
+        if ($c eq "/" && $i + 1 < $len && substr($code, $i + 1, 1) eq "*") {
+            $in_line_cmt = 0;
+            $i = $i + 2;
+            while ($i + 1 < $len && (substr($code, $i, 1) ne "*" || substr($code, $i + 1, 1) ne "/")) {
+                $i = $i + 1;
+            }
+            if ($i + 1 < $len) { $i = $i + 2; } else { $i = $len; }
+            next;
+        }
+        $in_line_cmt = 0;
+        if ($c eq "\"" || $c eq "'") {
+            my str $q = $c;
+            $last_sig = $q;
+            $i = $i + 1;
+            while ($i < $len) {
+                my str $sc = substr($code, $i, 1);
+                if ($sc eq "\\" && $i + 1 < $len) {
+                    $i = $i + 2;
+                    next;
+                }
+                if ($sc eq $q) {
+                    $i = $i + 1;
+                    last;
+                }
+                $i = $i + 1;
+            }
+            next;
+        }
+        $last_sig = $c;
+        $i = $i + 1;
+    }
+    if (length($last_sig) == 0 || $last_sig eq ";") {
+        return $code;
+    }
+    if ($in_line_cmt == 1) {
+        return $code . "\n;";
+    }
+    return $code . ";";
+}
+
 func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
     my str $top = "";
     my str $top_persist = "";
@@ -463,9 +639,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
             my int $end = eval_scan_unit($code, $pos, $len, 0);
             my str $chunk = substr($code, $pos, $end - $pos);
             $chunk =~ s/\s+$//;
-            if (length($chunk) > 0 && substr($chunk, length($chunk) - 1, 1) ne ";") {
-                $chunk = $chunk . ";";
-            }
+            $chunk = eval_append_trailing_semi($chunk);
             $top = $top . $chunk . "\n";
             if ($kw eq "our") {
                 $top_persist = $top_persist . eval_strip_our_init($chunk) . "\n";
@@ -535,9 +709,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
             $end = eval_scan_unit($code, $pos, $len, 0);
             $chunk = substr($code, $pos, $end - $pos);
             $chunk =~ s/\s+$//;
-            if (length($chunk) > 0 && substr($chunk, length($chunk) - 1, 1) ne ";") {
-                $chunk = $chunk . ";";
-            }
+            $chunk = eval_append_trailing_semi($chunk);
         }
 
         if (length($chunk) > 0) {
@@ -576,24 +748,34 @@ func init() void {
 
 # Reset the eval engine state
 func reset() void {
-    %g_eval_vm_globals = ();
-    %g_eval_vm_our_names = ();
-    %g_eval_vm_funcs = ();
-    $g_eval_vm_pkg = "main";
-    $g_eval_vm_decls = "";
-    $g_eval_vm_decls_globals = 0;
-    core::gc_collect();
+    __C__ { eval_vm_lock(); }
+    try {
+        %g_eval_vm_globals = ();
+        %g_eval_vm_our_names = ();
+        %g_eval_vm_funcs = ();
+        $g_eval_vm_pkg = "main";
+        $g_eval_vm_decls = "";
+        $g_eval_vm_decls_globals = 0;
+        core::gc_collect();
+    } finally {
+        __C__ { eval_vm_unlock(); }
+    }
 }
 
 # Set search paths used by subsequent VM eval/REPL compiles.
 func set_eval_lib_paths(scalar $paths) void {
-    @g_eval_vm_lib_paths = ();
-    if (!defined($paths)) { return; }
-    my int $i = 0;
-    my int $n = size($paths);
-    while ($i < $n) {
-        push(@g_eval_vm_lib_paths, $paths->[$i]);
-        $i = $i + 1;
+    __C__ { eval_vm_lock(); }
+    try {
+        @g_eval_vm_lib_paths = ();
+        if (!defined($paths)) { return; }
+        my int $i = 0;
+        my int $n = size($paths);
+        while ($i < $n) {
+            push(@g_eval_vm_lib_paths, $paths->[$i]);
+            $i = $i + 1;
+        }
+    } finally {
+        __C__ { eval_vm_unlock(); }
     }
 }
 
@@ -748,123 +930,119 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         return undef;
     }
 
-    my str $prev_vm_pkg = $g_eval_vm_pkg;
-    my scalar $units = split_eval_units_ex($trimmed, $prev_vm_pkg, $is_load);
-    my str $next_vm_pkg = $units->{"last_pkg"};
-    my str $body_pkg = $units->{"body_pkg"};
-    my str $body_src = ($is_load == 1) ? "" : $units->{"body"};
-
-    my str $source = $g_eval_vm_decls;
-    if (length($g_eval_vm_decls) > 0) {
-        $source = $source . "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n";
+    my scalar $vm_result = undef;
+    my scalar $globals_ref = undef;
+    my int $had_vm_exc = 0;
+    my scalar $vm_exc = undef;
+    my int $locked = 0;
+    __C__ {
+        eval_vm_lock();
+        strada_decref(locked);
+        locked = STRADA_MAKE_TAGGED_INT(1);
     }
-    if (length($body_src) > 0) {
-        $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
-    } else {
-        $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
-    }
-
-    my array @lib_paths = ();
-    if (defined($extra_libs)) {
-        my int $eli = 0;
-        my int $elcnt = size($extra_libs);
-        while ($eli < $elcnt) {
-            push(@lib_paths, $extra_libs->[$eli]);
-            $eli = $eli + 1;
-        }
-    }
-    my int $gli = 0;
-    my int $glcnt = size(@g_eval_vm_lib_paths);
-    while ($gli < $glcnt) {
-        push(@lib_paths, $g_eval_vm_lib_paths[$gli]);
-        $gli = $gli + 1;
-    }
-
-    # Parse
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
-
-    # Collect global declarations introduced by this call (after prior persistent decls)
-    my hash %newly_declared = ();
-    my scalar $pglobals = $program->{"globals"};
-    my int $pglobal_cnt = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
-    my int $top_new_globals = $pglobal_cnt - $g_eval_vm_decls_globals;
-    if ($top_new_globals < 0) { $top_new_globals = 0; }
-    my int $pgi = $g_eval_vm_decls_globals;
-    while ($pgi < $pglobal_cnt) {
-        my scalar $pg = $pglobals->[$pgi];
-        if (defined($pg) && ($pg->{"type"} == NI::VAR_DECL || $pg->{"type"} == NI::OUR_DECL)) {
-            my str $gn = $pg->{"name"};
-            my str $gpkg = defined($pg->{"package"}) ? $pg->{"package"} : "";
-            if (length($gpkg) > 0 && $gpkg ne "main" && index($gn, "::") < 0) {
-                $gn = $gpkg . "::" . $gn;
+    try {
+        $globals_ref = \%g_eval_vm_globals;
+        __C__ {
+            EvalActiveStack *es_pre = eval_active_stack_get();
+            if (es_pre->depth > 0 && es_pre->vms[es_pre->depth - 1]) {
+                vm_export_globals(es_pre->vms[es_pre->depth - 1], globals_ref);
             }
-            if (length($gn) > 0) {
-                my int $has_init = (defined($pg->{"init"}) && (length(ref($pg->{"init"})) > 0 || $pg->{"init"} != 0)) ? 1 : 0;
-                if (!($pg->{"type"} == NI::OUR_DECL && exists(%g_eval_vm_our_names, $gn) && $has_init == 0)) {
-                    $newly_declared{$gn} = 1;
+        }
+        my str $prev_vm_pkg = $g_eval_vm_pkg;
+        my scalar $units = split_eval_units_ex($trimmed, $prev_vm_pkg, $is_load);
+        my str $next_vm_pkg = $units->{"last_pkg"};
+        my str $body_pkg = $units->{"body_pkg"};
+        my str $body_src = ($is_load == 1) ? "" : $units->{"body"};
+
+        my str $source = $g_eval_vm_decls;
+        if (length($g_eval_vm_decls) > 0) {
+            $source = $source . "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n";
+        }
+        if (length($body_src) > 0) {
+            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
+        } else {
+            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
+        }
+
+        my array @lib_paths = ();
+        if (defined($extra_libs)) {
+            my int $eli = 0;
+            my int $elcnt = size($extra_libs);
+            while ($eli < $elcnt) {
+                push(@lib_paths, $extra_libs->[$eli]);
+                $eli = $eli + 1;
+            }
+        }
+        my int $gli = 0;
+        my int $glcnt = size(@g_eval_vm_lib_paths);
+        while ($gli < $glcnt) {
+            push(@lib_paths, $g_eval_vm_lib_paths[$gli]);
+            $gli = $gli + 1;
+        }
+
+        # Parse
+        my scalar $tokens = lex_tokenize($source);
+        my scalar $parser = parser_new($tokens);
+        parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");
+        my array @empty = ();
+        my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+
+        # Collect global declarations introduced by this call (after prior persistent decls)
+        my hash %newly_declared = ();
+        my scalar $pglobals = $program->{"globals"};
+        my int $pglobal_cnt = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
+        my int $top_new_globals = $pglobal_cnt - $g_eval_vm_decls_globals;
+        if ($top_new_globals < 0) { $top_new_globals = 0; }
+        my int $pgi = $g_eval_vm_decls_globals;
+        while ($pgi < $pglobal_cnt) {
+            my scalar $pg = $pglobals->[$pgi];
+            if (defined($pg) && ($pg->{"type"} == NI::VAR_DECL || $pg->{"type"} == NI::OUR_DECL)) {
+                my str $gn = $pg->{"name"};
+                my str $gpkg = defined($pg->{"package"}) ? $pg->{"package"} : "";
+                if (length($gpkg) > 0 && $gpkg ne "main" && index($gn, "::") < 0) {
+                    $gn = $gpkg . "::" . $gn;
+                }
+                if (length($gn) > 0) {
+                    my int $has_init = (defined($pg->{"init"}) && (length(ref($pg->{"init"})) > 0 || $pg->{"init"} != 0)) ? 1 : 0;
+                    if (!($pg->{"type"} == NI::OUR_DECL && exists(%g_eval_vm_our_names, $gn) && $has_init == 0)) {
+                        $newly_declared{$gn} = 1;
+                    }
                 }
             }
+            $pgi = $pgi + 1;
         }
-        $pgi = $pgi + 1;
-    }
 
-    # Promote top-level my declarations in __eval__ to persistent our declarations,
-    # and rewrite trailing expression statement of __eval__ to NI::RETURN_STMT.
-    my hash %added_our = ();
-    my hash %new_funcs = ();
-    my str $added_our_stubs = "";
-    my int $added_our_cnt = 0;
-    my scalar $pfuncs = $program->{"functions"};
-    my int $pfcount = $program->{"function_count"};
-    my str $eval_entry_name = "__eval__";
-    my int $seen_top_start = (length($g_eval_vm_decls) == 0) ? 1 : 0;
-    my int $has_new_main = 0;
-    my int $pfi = 0;
-    while ($pfi < $pfcount) {
-        my scalar $pfn = $pfuncs->[$pfi];
-        my str $fn_name = $pfn->{"name"};
-        my str $bare = defined($pfn->{"bare_name"}) ? ("" . $pfn->{"bare_name"}) : "";
-        if ($fn_name eq "__eval__" || $bare eq "__eval__") {
-            $eval_entry_name = $fn_name;
-            my scalar $body = $pfn->{"body"};
-            if (defined($body)) {
-                my scalar $stmts = $body->{"statements"};
-                my int $scnt = $body->{"statement_count"};
-                my int $si = 0;
-                while ($si < $scnt) {
-                    my scalar $st = $stmts->[$si];
-                    if (defined($st) && $st->{"type"} == NI::VAR_DECL) {
-                        my str $vn = $st->{"name"};
-                        my str $vsig = $st->{"sigil"};
-                        my int $vt = $st->{"var_type"};
-                        $st->{"type"} = NI::OUR_DECL;
-                        $st->{"package"} = $body_pkg;
-                        my str $qvn = ($body_pkg ne "" && $body_pkg ne "main" && index($vn, "::") < 0) ? ($body_pkg . "::" . $vn) : $vn;
-                        if (length($vn) > 0) {
-                            $newly_declared{$qvn} = 1;
-                            if (!exists(%g_eval_vm_our_names, $qvn) && !exists(%added_our, $qvn)) {
-                                $added_our{$qvn} = 1;
-                                $added_our_stubs = $added_our_stubs . "package " . $body_pkg . ";\nour " . $vsig . $vn . ";\n";
-                                $added_our_cnt = $added_our_cnt + 1;
-                                my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
-                                $od->{"package"} = $body_pkg;
-                                ast_add_global($program, $od);
-                            }
-                        }
-                    } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
-                        $st->{"is_decl"} = 0;
-                        my scalar $dvars = $st->{"vars"};
-                        my int $dvc = $st->{"var_count"};
-                        my int $dvi = 0;
-                        while ($dvi < $dvc) {
-                            my scalar $dv = $dvars->[$dvi];
-                            my str $vn = $dv->{"name"};
-                            my str $vsig = defined($dv->{"sigil"}) ? $dv->{"sigil"} : "\$";
-                            my int $vt = defined($dv->{"var_type"}) ? $dv->{"var_type"} : 0;
+        # Promote top-level my declarations in __eval__ to persistent our declarations,
+        # and rewrite trailing expression statement of __eval__ to NI::RETURN_STMT.
+        my hash %added_our = ();
+        my hash %new_funcs = ();
+        my str $added_our_stubs = "";
+        my int $added_our_cnt = 0;
+        my scalar $pfuncs = $program->{"functions"};
+        my int $pfcount = $program->{"function_count"};
+        my str $eval_entry_name = "__eval__";
+        my int $seen_top_start = (length($g_eval_vm_decls) == 0) ? 1 : 0;
+        my int $has_new_main = 0;
+        my int $pfi = 0;
+        while ($pfi < $pfcount) {
+            my scalar $pfn = $pfuncs->[$pfi];
+            my str $fn_name = $pfn->{"name"};
+            my str $bare = defined($pfn->{"bare_name"}) ? ("" . $pfn->{"bare_name"}) : "";
+            if ($fn_name eq "__eval__" || $bare eq "__eval__") {
+                $eval_entry_name = $fn_name;
+                my scalar $body = $pfn->{"body"};
+                if (defined($body)) {
+                    my scalar $stmts = $body->{"statements"};
+                    my int $scnt = $body->{"statement_count"};
+                    my int $si = 0;
+                    while ($si < $scnt) {
+                        my scalar $st = $stmts->[$si];
+                        if (defined($st) && $st->{"type"} == NI::VAR_DECL) {
+                            my str $vn = $st->{"name"};
+                            my str $vsig = $st->{"sigil"};
+                            my int $vt = $st->{"var_type"};
+                            $st->{"type"} = NI::OUR_DECL;
+                            $st->{"package"} = $body_pkg;
                             my str $qvn = ($body_pkg ne "" && $body_pkg ne "main" && index($vn, "::") < 0) ? ($body_pkg . "::" . $vn) : $vn;
                             if (length($vn) > 0) {
                                 $newly_declared{$qvn} = 1;
@@ -877,85 +1055,144 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                                     ast_add_global($program, $od);
                                 }
                             }
-                            $dvi = $dvi + 1;
-                        }
-                    }
-                    $si = $si + 1;
-                }
-                eval_vm_rewrite_tail_return($body);
-            }
-        } elsif ($bare eq "__strada_eval_top_start__" || $fn_name eq "__strada_eval_sep____strada_eval_top_start__") {
-            $seen_top_start = 1;
-        } else {
-            if ($seen_top_start == 1 && $fn_name eq "main") {
-                $has_new_main = 1;
-            }
-            $new_funcs{$fn_name} = defined($pfn->{"param_count"}) ? $pfn->{"param_count"} : 0;
-        }
-        $pfi = $pfi + 1;
-    }
-    if ($is_load == 0 && length($body_src) == 0 && $has_new_main == 1) {
-        $eval_entry_name = "main";
-    }
-
-    # Compile to bytecode and execute
-    my scalar $vm_result = undef;
-    my scalar $globals_ref = \%g_eval_vm_globals;
-    my scalar $skip_ref = \%newly_declared;
-    my int $compiled_ok = 0;
-    my int $had_vm_exc = 0;
-    my scalar $vm_exc = undef;
-    __C__ {
-        VMProgram *vprog = vm_compile_program(program);
-        if (vprog) {
-            /* Locate runtime header path for __C__ blocks compiled inside VM eval */
-            {
-                const char *shome = getenv("STRADA_HOME");
-                char __rt[1200];
-                char __hdr[1400];
-                int __found_rt = 0;
-                if (shome && shome[0]) {
-                    snprintf(__rt, sizeof(__rt), "%s/runtime", shome);
-                    snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
-                    if (access(__hdr, R_OK) == 0) __found_rt = 1;
-                }
-                if (!__found_rt) {
-                    char __exe[1024];
-                    ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
-                    if (__n > 0) {
-                        __exe[__n] = 0;
-                        char *__sl = strrchr(__exe, '/');
-                        if (__sl) {
-                            *__sl = 0;
-                            snprintf(__rt, sizeof(__rt), "%s/../runtime", __exe);
-                            snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
-                            if (access(__hdr, R_OK) != 0) {
-                                snprintf(__rt, sizeof(__rt), "%s/runtime", __exe);
-                                snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                        } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
+                            $st->{"is_decl"} = 0;
+                            my scalar $dvars = $st->{"vars"};
+                            my int $dvc = $st->{"var_count"};
+                            my int $dvi = 0;
+                            while ($dvi < $dvc) {
+                                my scalar $dv = $dvars->[$dvi];
+                                my str $vn = $dv->{"name"};
+                                my str $vsig = defined($dv->{"sigil"}) ? $dv->{"sigil"} : "\$";
+                                my int $vt = defined($dv->{"var_type"}) ? $dv->{"var_type"} : 0;
+                                my str $qvn = ($body_pkg ne "" && $body_pkg ne "main" && index($vn, "::") < 0) ? ($body_pkg . "::" . $vn) : $vn;
+                                if (length($vn) > 0) {
+                                    $newly_declared{$qvn} = 1;
+                                    if (!exists(%g_eval_vm_our_names, $qvn) && !exists(%added_our, $qvn)) {
+                                        $added_our{$qvn} = 1;
+                                        $added_our_stubs = $added_our_stubs . "package " . $body_pkg . ";\nour " . $vsig . $vn . ";\n";
+                                        $added_our_cnt = $added_our_cnt + 1;
+                                        my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
+                                        $od->{"package"} = $body_pkg;
+                                        ast_add_global($program, $od);
+                                    }
+                                }
+                                $dvi = $dvi + 1;
                             }
-                            if (access(__hdr, R_OK) == 0) __found_rt = 1;
+                        }
+                        $si = $si + 1;
+                    }
+                    eval_vm_rewrite_tail_return($body);
+                }
+            } elsif ($bare eq "__strada_eval_top_start__" || $fn_name eq "__strada_eval_sep____strada_eval_top_start__") {
+                $seen_top_start = 1;
+            } else {
+                if ($seen_top_start == 1 && $fn_name eq "main") {
+                    $has_new_main = 1;
+                }
+                $new_funcs{$fn_name} = defined($pfn->{"param_count"}) ? $pfn->{"param_count"} : 0;
+            }
+            $pfi = $pfi + 1;
+        }
+        if ($is_load == 0 && length($body_src) == 0 && $has_new_main == 1) {
+            $eval_entry_name = "main";
+        }
+
+        # Compile to bytecode under lock, commit persistent declarations before execution so nested/threaded eval sees them
+        my scalar $skip_ref = \%newly_declared;
+        my int $compiled_ok = 0;
+        my int $vprog_handle = 0;
+        __C__ {
+            VMProgram *vprog = vm_compile_program(program);
+            if (vprog) {
+                /* Locate runtime header path for __C__ blocks compiled inside VM eval */
+                {
+                    const char *shome = getenv("STRADA_HOME");
+                    char __rt[1200];
+                    char __hdr[1400];
+                    int __found_rt = 0;
+                    if (shome && shome[0]) {
+                        snprintf(__rt, sizeof(__rt), "%s/runtime", shome);
+                        snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                        if (access(__hdr, R_OK) == 0) __found_rt = 1;
+                    }
+                    if (!__found_rt) {
+                        char __exe[1024];
+                        ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
+                        if (__n > 0) {
+                            __exe[__n] = 0;
+                            char *__sl = strrchr(__exe, '/');
+                            if (__sl) {
+                                *__sl = 0;
+                                snprintf(__rt, sizeof(__rt), "%s/../runtime", __exe);
+                                snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                                if (access(__hdr, R_OK) != 0) {
+                                    snprintf(__rt, sizeof(__rt), "%s/runtime", __exe);
+                                    snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                                }
+                                if (access(__hdr, R_OK) == 0) __found_rt = 1;
+                            }
                         }
                     }
+                    if (__found_rt) {
+                        free(vprog->runtime_include_path);
+                        vprog->runtime_include_path = strdup(__rt);
+                    }
                 }
-                if (__found_rt) {
-                    free(vprog->runtime_include_path);
-                    vprog->runtime_include_path = strdup(__rt);
-                }
+                strada_decref(compiled_ok);
+                compiled_ok = STRADA_MAKE_TAGGED_INT(1);
+                strada_decref(vprog_handle);
+                vprog_handle = strada_new_int((int64_t)(uintptr_t)vprog);
             }
-            strada_decref(compiled_ok);
-            compiled_ok = STRADA_MAKE_TAGGED_INT(1);
+        }
+        if ($compiled_ok == 0) {
+            throw("VM compilation failed");
+        }
+        $g_eval_vm_pkg = $next_vm_pkg;
+        if (length($units->{"top_persist"}) > 0) {
+            $g_eval_vm_decls = $g_eval_vm_decls . "package " . $prev_vm_pkg . ";\n" . $units->{"top_persist"} . "\n";
+            $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $top_new_globals;
+        }
+        if ($added_our_cnt > 0) {
+            $g_eval_vm_decls = $g_eval_vm_decls . $added_our_stubs;
+            $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $added_our_cnt;
+            foreach my str $ovn (keys(%added_our)) {
+                $g_eval_vm_our_names{$ovn} = 1;
+            }
+        }
+        foreach my str $nvn (keys(%newly_declared)) {
+            $g_eval_vm_our_names{$nvn} = 1;
+        }
+        foreach my str $fnk (keys(%new_funcs)) {
+            $g_eval_vm_funcs{$fnk} = $new_funcs{$fnk};
+        }
+
+        __C__ {
+            VMProgram *exec_vprog = (VMProgram *)(uintptr_t)strada_to_int(vprog_handle);
             char *ebuf = strada_to_str(eval_entry_name);
             const char *req_entry = (ebuf && ebuf[0]) ? ebuf : "__eval__";
             const char *entry = NULL;
-            if (vm_program_find_func(vprog, req_entry) >= 0) entry = req_entry;
-            else if (vm_program_find_func(vprog, "main") >= 0) entry = "main";
+            if (vm_program_find_func(exec_vprog, req_entry) >= 0) entry = req_entry;
+            else if (vm_program_find_func(exec_vprog, "main") >= 0) entry = "main";
             if (entry) {
-                VM *vvm = vm_new(vprog);
+                EvalActiveStack *es_run = eval_active_stack_get();
+                StradaValue *pre_snap = (es_run->depth > 0) ? strada_clone(globals_ref) : NULL;
+                VM *vvm = vm_new(exec_vprog);
                 vvm->trap_uncaught = 1;
+                vm_seed_globals(vvm, globals_ref, skip_ref);
+                int pushed = 0;
+                if (es_run->depth < EVAL_ACTIVE_MAX) {
+                    es_run->vms[es_run->depth++] = vvm;
+                    pushed = 1;
+                }
+                if (strada_to_int(locked)) {
+                    eval_vm_unlock();
+                    strada_decref(locked);
+                    locked = STRADA_MAKE_TAGGED_INT(0);
+                }
                 int __cm = strada_cleanup_mark();
                 int __lm = strada_local_depth_get();
                 if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-                    vm_seed_globals(vvm, globals_ref, skip_ref);
                     vm_run_globals_init(vvm);
                     if (!vvm->has_exception) {
                         VMValue vres = vm_execute(vvm, entry);
@@ -979,7 +1216,6 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                         vm_exc = vm_value_to_sv(vvm->current_exception);
                         vvm->has_exception = 0;
                     }
-                    vm_export_globals(vvm, globals_ref);
                     STRADA_TRY_POP();
                 } else {
                     STRADA_TRY_POP();
@@ -992,33 +1228,29 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                     strada_decref(vm_exc);
                     vm_exc = __ce ? __ce : strada_new_str("C exception");
                 }
+                eval_vm_lock();
+                strada_decref(locked);
+                locked = STRADA_MAKE_TAGGED_INT(1);
+                if (pushed && es_run->depth > 0 && es_run->vms[es_run->depth - 1] == vvm) {
+                    es_run->depth--;
+                }
+                vm_export_globals(vvm, globals_ref);
+                if (es_run->depth > 0 && es_run->vms[es_run->depth - 1]) {
+                    eval_seed_changed_globals(es_run->vms[es_run->depth - 1], pre_snap, globals_ref);
+                }
+                if (pre_snap) strada_decref(pre_snap);
                 vm_suspend(vvm);
                 vm_free(vvm);
             }
             free(ebuf);
-            vm_program_free(vprog);
+            vm_program_free(exec_vprog);
         }
-    }
-    if ($compiled_ok == 0) {
-        throw("VM compilation failed");
-    }
-    $g_eval_vm_pkg = $next_vm_pkg;
-    if (length($units->{"top_persist"}) > 0) {
-        $g_eval_vm_decls = $g_eval_vm_decls . "package " . $prev_vm_pkg . ";\n" . $units->{"top_persist"} . "\n";
-        $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $top_new_globals;
-    }
-    if ($added_our_cnt > 0) {
-        $g_eval_vm_decls = $g_eval_vm_decls . $added_our_stubs;
-        $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $added_our_cnt;
-        foreach my str $ovn (keys(%added_our)) {
-            $g_eval_vm_our_names{$ovn} = 1;
+    } finally {
+        __C__ {
+            if (strada_to_int(locked)) {
+                eval_vm_unlock();
+            }
         }
-    }
-    foreach my str $nvn (keys(%newly_declared)) {
-        $g_eval_vm_our_names{$nvn} = 1;
-    }
-    foreach my str $fnk (keys(%new_funcs)) {
-        $g_eval_vm_funcs{$fnk} = $new_funcs{$fnk};
     }
     if ($had_vm_exc == 1) {
         throw($vm_exc);

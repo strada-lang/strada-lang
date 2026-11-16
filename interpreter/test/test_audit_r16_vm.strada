@@ -1,0 +1,144 @@
+# Cycle 16 2-way parity suite (Compiled vs Bytecode VM)
+
+package R16ParTie;
+func TIESCALAR(str $cls, scalar $v) scalar { return bless({"v" => $v, "f" => 0, "s" => 0}, $cls); }
+func FETCH(scalar $s) scalar { $s->{"f"}++; return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"s"}++; $s->{"v"} = $v; }
+
+package R16ParTieArr;
+func TIEARRAY(str $cls) scalar { return bless({"d" => ["p", "q", "r"], "s" => 0}, $cls); }
+func FETCHSIZE(scalar $s) int { return size($s->{"d"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"d"}->[$i]; }
+func STORE(scalar $s, int $i, scalar $v) void { $s->{"s"}++; $s->{"d"}->[$i] = $v; }
+
+package main;
+
+our str $g_r16_fe = "";
+
+func fall_undef() scalar {
+    my int $x = 123;
+}
+
+func test_closures_control() str {
+    my scalar $fn1 = undef;
+    OUTER: while (1) {
+        my int $x = 55;
+        $fn1 = func () int { return $x; };
+        last OUTER;
+    }
+    my int $iter = 0;
+    my scalar $fn2 = undef;
+    while ($iter < 2) {
+        $iter++;
+        my int $y = $iter * 10;
+        if ($iter == 1) {
+            $fn2 = func () int { return $y; };
+            redo;
+        }
+    }
+    my scalar $fn3 = undef;
+    try {
+        my int $z = 88;
+        $fn3 = func () int { return $z; };
+        throw("err16");
+    } catch ($e) {
+    }
+    my hash %h = ("a" => 1);
+    $h{"a"} += 2;
+    return $fn1->() . ":" . $fn2->() . ":" . $fn3->();
+}
+
+func test_try_finally_nested_closure() int {
+    my int $n = 0;
+    OUT: for (my int $i = 0; $i < 2; $i++) {
+        my int $cap = $i + 50;
+        my scalar $f = func () int { return $cap; };
+        $n = $n + $f->();
+        next OUT;
+    }
+    return $n;
+}
+
+func test_tr_tied() str {
+    my scalar $t = "";
+    my scalar $o = tie($t, "R16ParTie", "abc");
+    my int $c1 = ($t =~ tr/a-z/A-Z/);
+    my str $v1 = $o->{"v"};
+    my str $r2 = ($t =~ y/A/Z/r);
+    my str $v2 = $o->{"v"};
+    my int $st = $o->{"s"};
+    untie($t);
+    return $c1 . ":" . $v1 . ":" . $r2 . ":" . $v2 . ":" . $st;
+}
+
+func main() int {
+    say("CTL=" . test_closures_control() . ":" . test_try_finally_nested_closure());
+
+    my (int $di, num $dn) = ("14.8", "2.75");
+    my str $d1 = $di . ":" . $dn;
+    $di = "9.9";
+    say("DESTR=" . $d1 . ":" . $di);
+
+    my int $fsum = 0;
+    foreach my int $fi ("1.8", "2.9") { $fsum = $fsum + $fi; }
+    foreach $g_r16_fe ("a", "b") { }
+    my str $lcap = "";
+    my scalar $getc = func () str { return $lcap; };
+    foreach $lcap ("m", "n") { }
+    say("FE=" . $fsum . ":" . $g_r16_fe . ":" . $getc->());
+
+    say("FALL=" . (defined(fall_undef()) ? "D" : "U"));
+
+    my array @s = sort {
+        do {
+            goto G_CMP;
+            0;
+        G_CMP:
+            $b <=> $a;
+        }
+    } (1, 4, 2);
+    say("SORT=" . join(",", @s));
+
+    my str $u = "éaéb";
+    my str $nu = "x" . chr(0) . "yz" . chr(0) . "yz";
+    say("RINDEX=" . rindex($u, "é") . ":" . rindex($u, "é", 1) . ":" . rindex($nu, "yz"));
+
+    my int $m1 = ("café" =~ /\w+/) ? 1 : 0;
+    my int $m2 = ("café" =~ /(é)/) ? 1 : 0;
+    my str $cb = $1;
+    my int $mf = ("café" =~ /(NOMATCH)/) ? 1 : 0;
+    my str $ca = $1;
+    my str $nr = regex_replace_all("a" . chr(0) . "b", chr(0), ":");
+    say("RE=" . $m1 . ":" . $m2 . ":" . $cb . ":" . $mf . ":" . $ca . ":" . $nr);
+
+    say("TR=" . test_tr_tied());
+
+    my int $sh = -8 >> 100;
+    my int $sh2 = -8;
+    $sh2 >>= 100;
+    say("SHR=" . $sh . ":" . $sh2 . ":" . (100 >> 64) . ":" . (100 >> -1));
+
+    my array @ta = ();
+    my scalar $ao = tie(@ta, "R16ParTieArr");
+    @ta[0, 2] = ("X", "Z");
+    say("SLICE=" . $ao->{"s"} . ":" . $ao->{"d"}->[0] . "," . $ao->{"d"}->[1] . "," . $ao->{"d"}->[2]);
+    untie(@ta);
+
+    my scalar $ts = "";
+    my scalar $to = tie($ts, "R16ParTie", "keep");
+    $ts ||= "new";
+    my scalar $tv = ($ts ||= "new2");
+    say("SC=" . $to->{"s"} . ":" . $tv);
+    untie($ts);
+
+    our str $g_th = "0";
+    my int $cap_th = 20;
+    my scalar $th = thread::create(func () scalar {
+        $g_th = "done";
+        return $cap_th + 22;
+    });
+    my scalar $th_r = thread::join($th);
+    say("TH=" . $th_r . ":" . $g_th);
+
+    return 0;
+}

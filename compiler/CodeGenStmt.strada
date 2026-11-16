@@ -861,8 +861,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     if (needs_temp_cleanup($cg, $init) == 0) {
                         emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
-                } elsif ($init_type == NODE_DEREF_ARRAY()) {
-                    # Same as NODE_SUBSCRIPT.
+                } elsif ($init_type == NODE_DEREF_ARRAY() || ($init_type == NODE_DEREF_SCALAR() && $init->{"sigil"} ne "$")) {
+                    # Same as NODE_SUBSCRIPT (@{$ref} / %{$ref} when $ref is non-temp).
                     if (needs_temp_cleanup($cg, $init) == 0) {
                         emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
@@ -1378,7 +1378,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if (length($ds_our_key) > 0) {
                     emit($cg, "strada_global_set_cstr(" . c_str_lit($ds_our_key) . ", __ds_slurp);\n");
                 } else {
-                    emit($cg, "strada_decref(" . $name . "); " . $name . " = __ds_slurp;\n");
+                    my str $ds_slurp_ref = scalar_var_c_ref($cg, $var->{"name"}, $name);
+                    emit($cg, "strada_decref(" . $ds_slurp_ref . "); " . $ds_slurp_ref . " = __ds_slurp;\n");
                 }
                 dedent($cg);
                 emit_indent($cg);

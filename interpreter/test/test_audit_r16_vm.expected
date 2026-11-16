@@ -1,0 +1,12 @@
+CTL=55:10:88:101
+DESTR=14:2.75:9
+FE=3:b:n
+FALL=U
+SORT=4,2,1
+RINDEX=2:0:5
+RE=1:1:é:0:é:a:b
+TR=3:ABC:ZBC:ABC:1
+SHR=-1:-1:0:0
+SLICE=2:X,q,Z
+SC=0:keep
+TH=42:done

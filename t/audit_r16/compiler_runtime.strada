@@ -1,0 +1,185 @@
+# Cycle 16 Compiler & Runtime Regression Suite
+
+package R16TieScalar;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init, "fetches" => 0, "stores" => 0}, $cls);
+}
+func FETCH(scalar $s) scalar {
+    $s->{"fetches"} = $s->{"fetches"} + 1;
+    return $s->{"v"};
+}
+func STORE(scalar $s, scalar $val) void {
+    $s->{"stores"} = $s->{"stores"} + 1;
+    $s->{"v"} = $val;
+}
+
+package R16TieArray;
+func TIEARRAY(str $cls) scalar {
+    return bless({"d" => ["x", "y", "z", "w"], "stores" => 0}, $cls);
+}
+func FETCHSIZE(scalar $s) int { return size($s->{"d"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"d"}->[$i]; }
+func STORE(scalar $s, int $i, scalar $v) void {
+    $s->{"stores"} = $s->{"stores"} + 1;
+    $s->{"d"}->[$i] = $v;
+}
+
+package main;
+
+struct R16CStr {
+    str name;
+}
+
+func make_r16_cstr() R16CStr {
+    my R16CStr $o;
+    $o->name = "orig";
+    return $o;
+}
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func test_s1_tied_compound() void {
+    my scalar $s = "";
+    my scalar $obj = tie($s, "R16TieScalar", 1.5);
+    $s += 2.25;
+    check(math::abs($obj->{"v"} - 3.75) < 1e-9, "S1-1 float += preserved");
+    $obj->{"v"} = "2.5";
+    $s *= 3;
+    check(math::abs($obj->{"v"} - 7.5) < 1e-9, "S1-1 num-str *= preserved");
+    $obj->{"v"} = 10.5;
+    $s -= 4.25;
+    check(math::abs($obj->{"v"} - 6.25) < 1e-9, "S1-1 float -= preserved");
+    untie($s);
+}
+
+func test_s2_1_deref_retain() void {
+    my array @keep = ();
+    {
+        my scalar $aref = ["alpha", "beta"];
+        my scalar $href = {"k" => "val"};
+        my array @a1 = @{$aref};
+        my hash %h1 = %{$href};
+        my array @a2 = ();
+        @a2 = @{$aref};
+        my hash %h2 = ();
+        %h2 = %{$href};
+        $aref = undef;
+        $href = undef;
+        push(@keep, \@a1);
+        push(@keep, \%h1);
+        push(@keep, \@a2);
+        push(@keep, \%h2);
+    }
+    core::gc_collect();
+    check($keep[0]->[1] eq "beta" && $keep[2]->[0] eq "alpha", "S2-1 @{\$r} retains array");
+    check($keep[1]->{"k"} eq "val" && $keep[3]->{"k"} eq "val", "S2-1 %{\$r} retains hash");
+}
+
+func test_s2_2_tied_shortcircuit() void {
+    my scalar $t = "";
+    my scalar $o = tie($t, "R16TieScalar", "truthy");
+    my int $bstores = $o->{"stores"};
+    # Short-circuit skips STORE on both void and value context
+    $t ||= "fallback";
+    my scalar $v1 = ($t ||= "fallback2");
+    check($o->{"stores"} == $bstores && $v1 eq "truthy", "S2-2 ||= short-circuit borrowed value");
+
+    $o->{"v"} = 0;
+    my scalar $v2 = ($t &&= 99);
+    check($o->{"stores"} == $bstores && $v2 == 0, "S2-2 &&= short-circuit borrowed value");
+
+    my scalar $v3 = ($t ||= 42);
+    check($o->{"stores"} == $bstores + 1 && $v3 == 42 && $o->{"v"} == 42, "S2-2 ||= assign path stores");
+    untie($t);
+}
+
+func test_s2_3_tied_array_slice() void {
+    my array @ta = ();
+    my scalar $o = tie(@ta, "R16TieArray");
+    @ta[0, 2] = ("A", "C");
+    @ta[1..2] = ("B", "C2");
+    check($o->{"stores"} == 4, "S2-3 tied array slice invoked STORE 4 times");
+    check($o->{"d"}->[0] eq "A" && $o->{"d"}->[1] eq "B" && $o->{"d"}->[2] eq "C2" && $o->{"d"}->[3] eq "w", "S2-3 tied slice stored values");
+    untie(@ta);
+}
+
+func test_s2_4_destructure_captured() void {
+    my array @ca = ();
+    my hash %ch = ();
+    my str $cs = "init";
+    my scalar $head = "";
+    my scalar $setter = func () scalar {
+        ($head, @ca) = ("h", "one", "two");
+        ($head, %ch) = ("h", "k", "v9");
+        return join(",", @ca) . "|" . $ch{"k"};
+    };
+    my scalar $reader = func () str { return $cs; };
+    my str $res = $setter->();
+    ($head, $cs) = ("h2", "updated");
+    check($head eq "h2" && $res eq "one,two|v9" && $reader->() eq "updated",
+          "S2-4 non-decl destructuring updates captured slurp & boxed scalar");
+}
+
+func test_s2_6_cstruct_str_value() void {
+    my str $res = (make_r16_cstr()->name = "after");
+    my R16CStr $s2;
+    $s2->name = "pre";
+    my str $res2 = ($s2->name .= "_post");
+    check($res eq "after" && $res2 eq "pre_post", "S2-6 struct str assign in value context copies string");
+}
+
+func hd_take(str $hd, scalar $extra) str {
+    return $hd . "|" . (defined($extra) ? $extra : "U");
+}
+
+func test_s2_7_heredoc_rest_line() void {
+    my str $dummy = "x";
+    my int $m_ok = ($dummy =~ m/x/) ? 1 : 0;
+    my scalar $u_or = undef;
+    my str $r1 = hd_take(<<'HD1', join(":", qw[p q]));
+line1
+HD1
+    my str $r2 = hd_take(<<'HD2', $u_or // "def");
+line2
+HD2
+    my str $c3 = "aa";
+    $c3 =~ s/a/b/;
+    my str $r3 = hd_take(<<'HD3', ($c3 =~ /b/) ? "re" : "no"); # comment on hd line
+line3
+HD3
+    my str $r4 = hd_take(<<'HD4', "q\"test");
+line4
+HD4
+    check($m_ok == 1, "S2-7 sanity");
+    check($r1 eq "line1|p:q", "S2-7 heredoc + qw[] on same line");
+    check($r2 eq "line2|def", "S2-7 heredoc + // defined-or on same line");
+    check($r3 eq "line3|re", "S2-7 heredoc + /regex/ + #comment on same line");
+    check($r4 eq "line4|q\"test", "S2-7 heredoc + string literal on same line");
+}
+
+func test_s3_9_shr() void {
+    my int $a = (-8 >> 100);
+    my int $b = -8;
+    $b >>= 100;
+    my int $c = (100 >> 64);
+    my int $d = (100 >> -1);
+    check($a == -1 && $b == -1 && $c == 0 && $d == 0, "S3-9 compiled >> and >>= match");
+}
+
+func main() int {
+    test_s1_tied_compound();
+    test_s2_1_deref_retain();
+    test_s2_2_tied_shortcircuit();
+    test_s2_3_tied_array_slice();
+    test_s2_4_destructure_captured();
+    test_s2_6_cstruct_str_value();
+    test_s2_7_heredoc_rest_line();
+    test_s3_9_shr();
+    say("AUDIT_R16_COMPILER_RUNTIME_OK");
+    return 0;
+}

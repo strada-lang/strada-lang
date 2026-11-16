@@ -179,6 +179,8 @@ TESTS=(
     "test_audit_r14_eval_jit_leaks"
     "test_audit_r15_leaks"
     "test_audit_r15_eval_jit_leaks"
+    "test_audit_r16_leaks"
+    "test_audit_r16_eval_jit_leaks"
     "test_mem_simplify"
 )
 
@@ -221,7 +223,7 @@ for test in "${TESTS[@]}"; do
         test_audit_r7_leaks|test_audit_r8_leaks|test_audit_r9_leaks|test_audit_r11_leaks|test_audit_r12_leaks)
             EXTRA_FLAGS="-lpthread"
             ;;
-        test_audit_r13_leaks|test_audit_r14_leaks|test_audit_r15_leaks)
+        test_audit_r13_leaks|test_audit_r14_leaks|test_audit_r15_leaks|test_audit_r16_leaks)
             EXTRA_FLAGS="${STRADA_ZLIB_LIBS:--lz}"
             if [ -f "$STRADA_DIR/config.sh" ]; then
                 . "$STRADA_DIR/config.sh"
@@ -230,7 +232,7 @@ for test in "${TESTS[@]}"; do
                 EXTRA_FLAGS="-L lib -lz -lsqlite3 -lpthread"
             fi
             ;;
-        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks|test_audit_r8_eval_jit_leaks|test_audit_r9_eval_jit_leaks|test_audit_r11_eval_jit_leaks|test_audit_r12_eval_jit_leaks|test_audit_r13_eval_jit_leaks|test_audit_r14_eval_jit_leaks|test_audit_r15_eval_jit_leaks)
+        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks|test_audit_r8_eval_jit_leaks|test_audit_r9_eval_jit_leaks|test_audit_r11_eval_jit_leaks|test_audit_r12_eval_jit_leaks|test_audit_r13_eval_jit_leaks|test_audit_r14_eval_jit_leaks|test_audit_r15_eval_jit_leaks|test_audit_r16_eval_jit_leaks)
             EXTRA_FLAGS="-O0 --no-use-artifacts -L lib"
             ;;
         test_import_lib_devirt)

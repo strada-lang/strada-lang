@@ -1049,14 +1049,43 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                     # '#' Strada comment to end of line
                     while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
                 } elsif ($cc == '/' && $sc + 1 < $len && char_at($src, $sc + 1) == '/') {
-                    if ($can_regex == 1) {
-                        # '//' comment in dead code (or empty regex //)
-                        while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
-                    } else {
+                    if ($can_regex == 0) {
                         # Binary '//' defined-or operator
                         $sc = $sc + 2;
                         $can_regex = 1;
                         $can_subst = 0;
+                    } else {
+                        # Empty regex '//' only if immediately followed by optional regex flags + delim/op; else '//' line comment
+                        my int $nj = $sc + 2;
+                        while ($nj < $len) {
+                            my int $fc = char_at($src, $nj);
+                            if ($fc == 'i' || $fc == 'm' || $fc == 's' || $fc == 'x' || $fc == 'g') {
+                                $nj = $nj + 1;
+                            } else {
+                                last;
+                            }
+                        }
+                        while ($nj < $len && (char_at($src, $nj) == ' ' || char_at($src, $nj) == '\t' || char_at($src, $nj) == '\r')) {
+                            $nj = $nj + 1;
+                        }
+                        my int $is_empty_rx = 0;
+                        if ($nj >= $len) {
+                            $is_empty_rx = 1;
+                        } else {
+                            my int $nc = char_at($src, $nj);
+                            if ($nc == ',' || $nc == ')' || $nc == ';' || $nc == ']' || $nc == '}' ||
+                                $nc == ':' || $nc == '=' || $nc == '?' || $nc == '&' || $nc == '|' ||
+                                $nc == '.' || $nc == '#' || $nc == '\n') {
+                                $is_empty_rx = 1;
+                            }
+                        }
+                        if ($is_empty_rx == 1) {
+                            $sc = $sc + 2;
+                            $can_regex = 0;
+                            $can_subst = 0;
+                        } else {
+                            while ($sc < $len && char_at($src, $sc) != '\n') { $sc = $sc + 1; }
+                        }
                     }
                 } elsif ($cc == '/' && $sc + 1 < $len && char_at($src, $sc + 1) == '*') {
                     # /* ... */ block comment
@@ -3453,6 +3482,256 @@ func lex_is_q_delim(scalar $lexer, int $had_ws, int $delim) int {
     return 0;
 }
 
+func lex_hd_close_delim(int $open) int {
+    if ($open == '(') { return 41; }  # ')'
+    if ($open == '[') { return 93; }  # ']'
+    if ($open == '{') { return 125; } # '}'
+    if ($open == '<') { return 62; }  # '>'
+    return $open;
+}
+
+func lex_hd_scan_delim(str $source, int $src_len, int $pos, int $open, scalar $st) int {
+    my int $close = lex_hd_close_delim($open);
+    my int $paired = 0;
+    if ($close != $open) { $paired = 1; }
+    my int $depth = 1;
+    $pos = $pos + 1;
+    while ($pos < $src_len) {
+        my int $ch = char_at($source, $pos);
+        if ($ch == '\n') {
+            $st->{"extra_lines"} = $st->{"extra_lines"} + 1;
+            $pos = $pos + 1;
+            next;
+        }
+        if ($ch == '\\' && $pos + 1 < $src_len) {
+            if (char_at($source, $pos + 1) == '\n') {
+                $st->{"extra_lines"} = $st->{"extra_lines"} + 1;
+            }
+            $pos = $pos + 2;
+            next;
+        }
+        if ($ch == $close) {
+            $depth = $depth - 1;
+            $pos = $pos + 1;
+            if ($depth == 0) { return $pos; }
+            next;
+        }
+        if ($paired == 1 && $ch == $open) {
+            $depth = $depth + 1;
+        }
+        $pos = $pos + 1;
+    }
+    return $pos;
+}
+
+func lex_hd_find_line_end(str $source, int $src_len, int $scan_pos) scalar {
+    my hash %st = ();
+    $st{"pos"} = $scan_pos;
+    $st{"extra_lines"} = 0;
+    my int $can_regex = 1;
+    my int $can_subst = 0;
+    my int $after_sigil = 0;
+    my int $after_arrow = 0;
+
+    while ($scan_pos < $src_len) {
+        my int $sc = char_at($source, $scan_pos);
+        if ($sc == '\n') {
+            $st{"pos"} = $scan_pos;
+            return \%st;
+        }
+        if ($sc == ' ' || $sc == '\t' || $sc == '\r') {
+            $scan_pos = $scan_pos + 1;
+            next;
+        }
+        if ($sc == '#') {
+            while ($scan_pos < $src_len && char_at($source, $scan_pos) != '\n') {
+                $scan_pos = $scan_pos + 1;
+            }
+            $st{"pos"} = $scan_pos;
+            return \%st;
+        }
+        if ($sc == '/' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '*') {
+            $scan_pos = $scan_pos + 2;
+            while ($scan_pos < $src_len) {
+                my int $b1 = char_at($source, $scan_pos);
+                if ($b1 == '\n') {
+                    $st{"extra_lines"} = $st{"extra_lines"} + 1;
+                } elsif ($b1 == '*' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '/') {
+                    $scan_pos = $scan_pos + 2;
+                    last;
+                }
+                $scan_pos = $scan_pos + 1;
+            }
+            next;
+        }
+        if ($sc == '"' || $sc == '\'') {
+            $scan_pos = lex_hd_scan_delim($source, $src_len, $scan_pos, $sc, \%st);
+            $can_regex = 0;
+            $can_subst = 0;
+            $after_sigil = 0;
+            $after_arrow = 0;
+            next;
+        }
+        if (($sc == '=' || $sc == '!') && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '~') {
+            $scan_pos = $scan_pos + 2;
+            $can_regex = 1;
+            $can_subst = 1;
+            $after_sigil = 0;
+            $after_arrow = 0;
+            next;
+        }
+        if ($sc == '/' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '/') {
+            if ($can_regex == 0) {
+                $scan_pos = $scan_pos + 2;
+                $can_regex = 1;
+            } else {
+                $scan_pos = $scan_pos + 2;
+                $can_regex = 0;
+            }
+            $can_subst = 0;
+            $after_sigil = 0;
+            $after_arrow = 0;
+            next;
+        }
+        if ($sc == '/' && $can_regex == 1 && $after_sigil == 0 && $after_arrow == 0) {
+            my int $rj = $scan_pos + 1;
+            my int $rclosed = 0;
+            while ($rj < $src_len && char_at($source, $rj) != '\n') {
+                my int $rc = char_at($source, $rj);
+                if ($rc == '\\' && $rj + 1 < $src_len && char_at($source, $rj + 1) != '\n') {
+                    $rj = $rj + 2;
+                } elsif ($rc == '/') {
+                    $rj = $rj + 1;
+                    $rclosed = 1;
+                    last;
+                } else {
+                    $rj = $rj + 1;
+                }
+            }
+            if ($rclosed == 1) {
+                $scan_pos = $rj;
+                $can_regex = 0;
+            } else {
+                $scan_pos = $scan_pos + 1;
+                $can_regex = 1;
+            }
+            $can_subst = 0;
+            $after_sigil = 0;
+            $after_arrow = 0;
+            next;
+        }
+        if (($sc >= 'a' && $sc <= 'z') || ($sc >= 'A' && $sc <= 'Z') || $sc == '_') {
+            my int $ws = $scan_pos;
+            while ($scan_pos < $src_len) {
+                my int $wc = char_at($source, $scan_pos);
+                if (($wc >= 'a' && $wc <= 'z') || ($wc >= 'A' && $wc <= 'Z') || ($wc >= '0' && $wc <= '9') || $wc == '_') {
+                    $scan_pos = $scan_pos + 1;
+                } else {
+                    last;
+                }
+            }
+            my str $word = substr($source, $ws, $scan_pos - $ws);
+            if ($after_sigil == 0 && $after_arrow == 0) {
+                if ($can_subst == 1 && ($word eq "s" || $word eq "tr" || $word eq "y")) {
+                    if ($scan_pos < $src_len && char_at($source, $scan_pos) == '/') {
+                        $scan_pos = lex_hd_scan_delim($source, $src_len, $scan_pos, 47, \%st); # '/'
+                        if ($scan_pos > 0 && $scan_pos < $src_len && char_at($source, $scan_pos - 1) == '/') {
+                            $scan_pos = lex_hd_scan_delim($source, $src_len, $scan_pos - 1, 47, \%st); # '/'
+                        }
+                        $can_regex = 0;
+                        $can_subst = 0;
+                        next;
+                    }
+                }
+                if ($can_regex == 1 && $word eq "m" && $scan_pos < $src_len && char_at($source, $scan_pos) == '/') {
+                    $scan_pos = lex_hd_scan_delim($source, $src_len, $scan_pos, 47, \%st); # '/'
+                    $can_regex = 0;
+                    $can_subst = 0;
+                    next;
+                }
+                if ($can_regex == 1 && ($word eq "q" || $word eq "qq" || $word eq "qw")) {
+                    my int $qp = $scan_pos;
+                    my int $had_ws = 0;
+                    while ($qp < $src_len) {
+                        my int $qwc = char_at($source, $qp);
+                        if ($qwc == ' ' || $qwc == '\t' || $qwc == '\r') {
+                            $had_ws = 1;
+                            $qp = $qp + 1;
+                        } else {
+                            last;
+                        }
+                    }
+                    if ($qp < $src_len) {
+                        my int $qd = char_at($source, $qp);
+                        my int $qok = 0;
+                        if ($qd == '(' || $qd == '[' || $qd == '{') {
+                            $qok = 1;
+                        } elsif ($had_ws == 0) {
+                            my int $qnxt = 0;
+                            if ($qp + 1 < $src_len) { $qnxt = char_at($source, $qp + 1); }
+                            if ($qd == '/') { $qok = 1; }
+                            elsif ($qd == '!' && $qnxt != '=' && $qnxt != '~') { $qok = 1; }
+                            elsif ($qd == '<' && $qnxt != '=' && $qnxt != '<') { $qok = 1; }
+                            elsif ($qd == '|' && $qnxt != '|') { $qok = 1; }
+                        }
+                        if ($qok == 1) {
+                            $scan_pos = lex_hd_scan_delim($source, $src_len, $qp, $qd, \%st);
+                            $can_regex = 0;
+                            $can_subst = 0;
+                            $after_sigil = 0;
+                            $after_arrow = 0;
+                            next;
+                        }
+                    }
+                }
+            }
+            $after_sigil = 0;
+            $after_arrow = 0;
+            if ($word eq "return" || $word eq "throw" || $word eq "die" || $word eq "warn" ||
+                $word eq "if" || $word eq "elsif" || $word eq "unless" || $word eq "while" || $word eq "until") {
+                $can_regex = 1;
+            } else {
+                $can_regex = 0;
+            }
+            $can_subst = 0;
+            next;
+        }
+        if ($sc == '$' || $sc == '@' || $sc == '%') {
+            $after_sigil = 1;
+            $after_arrow = 0;
+            $can_regex = 0;
+            $can_subst = 0;
+            $scan_pos = $scan_pos + 1;
+            next;
+        }
+        if (($sc == '-' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '>') ||
+            ($sc == ':' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == ':')) {
+            $after_arrow = 1;
+            $after_sigil = 0;
+            $can_regex = 0;
+            $can_subst = 0;
+            $scan_pos = $scan_pos + 2;
+            next;
+        }
+        $after_sigil = 0;
+        $after_arrow = 0;
+        if ($sc == ')' || $sc == ']' || $sc == '}' || ($sc >= '0' && $sc <= '9')) {
+            $can_regex = 0;
+        } elsif ($sc == '(' || $sc == '[' || $sc == '{' || $sc == ',' || $sc == ';' ||
+                 $sc == '=' || $sc == '?' || $sc == ':' || $sc == '+' || $sc == '-' ||
+                 $sc == '*' || $sc == '/' || $sc == '&' || $sc == '|' || $sc == '^' ||
+                 $sc == '!' || $sc == '~' || $sc == '<' || $sc == '>' || $sc == '.') {
+            $can_regex = 1;
+        } else {
+            $can_regex = 0;
+        }
+        $can_subst = 0;
+        $scan_pos = $scan_pos + 1;
+    }
+    $st{"pos"} = $scan_pos;
+    return \%st;
+}
+
 func lex_next_token(scalar $lexer) scalar {
     # Clear after_sigil and after_arrow flags unless we just set them
     # (re-set below if the current token is a sigil or -> / ::)
@@ -3917,66 +4196,9 @@ func lex_next_token(scalar $lexer) scalar {
             my int $scan_pos = $lexer->{"heredoc_resume_pos"};
             my int $scan_line = $lexer->{"heredoc_resume_line"};
             if ($scan_pos == 0) {
-                $scan_pos = $lexer->{"pos"};
-                my int $extra_lines = 0;
-                my int $hd_dq = 0;
-                my int $hd_sq = 0;
-                my int $hd_in_cmt = 0;
-                while ($scan_pos < $src_len) {
-                    my int $sc = char_at($source, $scan_pos);
-                    if ($hd_in_cmt == 1) {
-                        if ($sc == '\n') {
-                            $extra_lines = $extra_lines + 1;
-                        } elsif ($sc == '*' && $scan_pos + 1 < $src_len && char_at($source, $scan_pos + 1) == '/') {
-                            $hd_in_cmt = 0;
-                            $scan_pos = $scan_pos + 2;
-                            next;
-                        }
-                        $scan_pos = $scan_pos + 1;
-                        next;
-                    }
-                    if ($hd_dq == 1) {
-                        if ($sc == '\n') {
-                            $extra_lines = $extra_lines + 1;
-                        } elsif ($sc == '\\' && $scan_pos + 1 < $src_len) {
-                            if (char_at($source, $scan_pos + 1) == '\n') { $extra_lines = $extra_lines + 1; }
-                            $scan_pos = $scan_pos + 2;
-                            next;
-                        } elsif ($sc == '"') {
-                            $hd_dq = 0;
-                        }
-                    } elsif ($hd_sq == 1) {
-                        if ($sc == '\n') {
-                            $extra_lines = $extra_lines + 1;
-                        } elsif ($sc == '\\' && $scan_pos + 1 < $src_len) {
-                            if (char_at($source, $scan_pos + 1) == '\n') { $extra_lines = $extra_lines + 1; }
-                            $scan_pos = $scan_pos + 2;
-                            next;
-                        } elsif ($sc == '\'') {
-                            $hd_sq = 0;
-                        }
-                    } else {
-                        if ($sc == '\n') { last; }
-                        if ($sc == '"') {
-                            $hd_dq = 1;
-                        } elsif ($sc == '\'') {
-                            $hd_sq = 1;
-                        } elsif ($sc == '#') {
-                            while ($scan_pos < $src_len && char_at($source, $scan_pos) != '\n') {
-                                $scan_pos = $scan_pos + 1;
-                            }
-                            last;
-                        } elsif ($sc == '/' && $scan_pos + 1 < $src_len) {
-                            my int $sc2 = char_at($source, $scan_pos + 1);
-                            if ($sc2 == '*') {
-                                $hd_in_cmt = 1;
-                                $scan_pos = $scan_pos + 2;
-                                next;
-                            }
-                        }
-                    }
-                    $scan_pos = $scan_pos + 1;
-                }
+                my scalar $hd_end = lex_hd_find_line_end($source, $src_len, $lexer->{"pos"});
+                $scan_pos = $hd_end->{"pos"};
+                my int $extra_lines = $hd_end->{"extra_lines"};
                 if ($scan_pos >= $src_len) {
                     lex_error($lexer, "Unterminated heredoc (missing '" . $delim . "')", $token_line, $token_col);
                 }

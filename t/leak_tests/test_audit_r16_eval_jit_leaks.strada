@@ -1,0 +1,60 @@
+# Cycle 16 Valgrind Leak Test (Eval VM / Nested / Threaded / Regex / Trailing #)
+use lib "lib";
+use Eval;
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    my scalar $a = Strada::Interpreter::eval("1 + 2 # cmt");
+    my scalar $b = Strada::Interpreter::eval("3 + 4; # semi cmt");
+    my scalar $c = Strada::Interpreter::eval("# only cmt");
+    if ($a != 3 || $b != 7 || defined($c)) { return 1; }
+
+    # Nested reentrant eval + closures + regex UTF-8/NUL + destructure + foreach + sort
+    Strada::Interpreter::eval("our \$r16_leak_nested_cb;");
+    Strada::Interpreter::vm_eval_globals()->{"r16_leak_nested_cb"} = func (str $code) scalar {
+        return Strada::Interpreter::eval($code);
+    };
+    my scalar $n = Strada::Interpreter::eval(q{
+        our $nv = 10;
+        my scalar $in = $r16_leak_nested_cb->(q{
+            $nv = 25;
+            our $nin = 5;
+            my str $destr_s = "";
+            if (1) {
+                my (int $i, num $d) = ("7.8", "1.5");
+                $i = "7.9";
+                $destr_s = $i . ":" . $d;
+            }
+            my array @s = sort { do { goto OK; 0; OK: $a <=> $b; } } (3, 1, 2);
+            my str $u = "café";
+            ($u =~ /(é)/) ? 1 : 0;
+            ($u =~ /(NONE)/) ? 1 : 0;
+            my str $c1 = $1;
+            $destr_s . ":" . join(",", @s) . ":" . $c1;
+        });
+        $nv . ":" . $in;
+    });
+    if ($n ne "25:7:1.5:1,2,3:é" || Strada::Interpreter::eval("\$nin") != 5) { return 2; }
+
+    # Threaded eval + thread::create inside VM
+    my scalar $th = thread::create(func () scalar {
+        return Strada::Interpreter::eval("10 + 11");
+    });
+    if (thread::join($th) != 21) { return 3; }
+
+    my scalar $tvm = Strada::Interpreter::eval(q{
+        our $g = "a";
+        my int $x = 5;
+        my scalar $w = thread::create(func () scalar {
+            $g = "b";
+            return $x + 1;
+        });
+        thread::join($w);
+    });
+    if ($tvm != 6) { return 4; }
+
+    Strada::Interpreter::reset();
+    say("LEAK_AUDIT_R16_EVAL_OK");
+    return 0;
+}

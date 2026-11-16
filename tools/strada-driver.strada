@@ -284,6 +284,25 @@ func file_contains(str $path, str $needle) int {
     return 0;
 }
 
+func is_eval_artifact(str $path) int {
+    my str $bn = basename_of($path);
+    if ($bn eq "Eval.o" || $bn eq "Eval.a" || $bn eq "Eval.strada.o" ||
+        $bn eq "Strada_Eval.o" || $bn eq "Strada_Eval.a" || $bn eq "Strada_Eval.strada.o" ||
+        $bn eq "Strada_Interpreter.o" || $bn eq "Strada_Interpreter.strada.o" ||
+        ew($path, "/Strada/Interpreter.o") == 1 ||
+        ew($path, "/Strada/Interpreter.strada.o") == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+func c_uses_vm_symbols(str $content, str $vm_hdr_inc, str $vmc_hdr_inc, str $vm_comp_sym) int {
+    if (index($content, $vm_hdr_inc) >= 0 || index($content, $vmc_hdr_inc) >= 0 || index($content, $vm_comp_sym) >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
 # nm | grep __strada_export_info — detect a Strada module object/archive/.so.
 func is_strada_module(str $file) int {
     my str $out = core::qx("nm " . sq($file) . " 2>/dev/null");
@@ -1298,16 +1317,27 @@ func main() int {
     my str $vm_hdr_inc = "#include " . $Q . "vm.h" . $Q;
     my str $vmc_hdr_inc = "#include " . $Q . "vm_compiler.h" . $Q;
     my str $vm_comp_sym = "vm_compile" . $US . "program(";
-    my int $needs_vm_inc = 0;
-    if (index($gen, $vm_hdr_inc) >= 0 || index($gen, $vmc_hdr_inc) >= 0 || index($gen, $vm_comp_sym) >= 0) {
-        $needs_vm_inc = 1;
+    my int $needs_vm_inc = c_uses_vm_symbols($gen, $vm_hdr_inc, $vmc_hdr_inc, $vm_comp_sym);
+    if ($needs_vm_inc == 0 && length($ACTIVE_SHARD_DIR) > 0 && (-f ($ACTIVE_SHARD_DIR . "/shards.txt"))) {
+        my array @vms_lines = split("\n", core::slurp($ACTIVE_SHARD_DIR . "/shards.txt"));
+        my int $vsi = 0;
+        while ($vsi < size(@vms_lines)) {
+            my str $vsc_path = trim($vms_lines[$vsi]);
+            if (length($vsc_path) > 0 && (-f $vsc_path)) {
+                if (c_uses_vm_symbols(core::slurp($vsc_path), $vm_hdr_inc, $vmc_hdr_inc, $vm_comp_sym) == 1) {
+                    $needs_vm_inc = 1;
+                    last;
+                }
+            }
+            $vsi = $vsi + 1;
+        }
     }
     my int $needs_vm_link = $needs_vm_inc;
     my int $has_user_vm = 0;
     my int $ei = 0;
     while ($ei < size(@extra_files)) {
         my str $eb = basename_of($extra_files[$ei]);
-        if ($eb eq "Eval.o" || $eb eq "Eval.a") { $needs_vm_link = 1; }
+        if (is_eval_artifact($extra_files[$ei]) == 1) { $needs_vm_link = 1; }
         if ($eb eq "vm.c" || $eb eq "vm.o" || $eb eq "vm_compiler.c" || $eb eq "vm_compiler.o") {
             $has_user_vm = 1;
         }
@@ -1620,8 +1650,37 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         if (run_argv(@cc3) != 0) { error("Runtime compilation failed"); }
         info("Creating archive " . $output);
         my array @arcmd = ("ar", "rcs", $output, $objf, $rtobj);
-        @arcmd = (@arcmd, @extra_objs);
-        @arcmd = (@arcmd, @EXTRA_O_FILES);
+        my hash %seen_arc = ();
+        $seen_arc{$output} = 1;
+        $seen_arc{$objf} = 1;
+        $seen_arc{$rtobj} = 1;
+        my int $aei = 0;
+        while ($aei < size(@extra_objs)) {
+            my str $aeo = $extra_objs[$aei];
+            if (!defined($seen_arc{$aeo})) {
+                $seen_arc{$aeo} = 1;
+                @arcmd = (@arcmd, $aeo);
+            }
+            $aei = $aei + 1;
+        }
+        my int $afi = 0;
+        while ($afi < size(@extra_files)) {
+            my str $ef = $extra_files[$afi];
+            if (ew($ef, ".o") == 1 && !defined($seen_arc{$ef})) {
+                $seen_arc{$ef} = 1;
+                @arcmd = (@arcmd, $ef);
+            }
+            $afi = $afi + 1;
+        }
+        my int $aoi = 0;
+        while ($aoi < size(@EXTRA_O_FILES)) {
+            my str $eo = $EXTRA_O_FILES[$aoi];
+            if (ew($eo, ".o") == 1 && !defined($seen_arc{$eo})) {
+                $seen_arc{$eo} = 1;
+                @arcmd = (@arcmd, $eo);
+            }
+            $aoi = $aoi + 1;
+        }
         if (run_argv(@arcmd) != 0) { error("ar failed"); }
     } elsif ($STATIC_LINK == 1) {
         if ($TCC_MODE == 1) { warn("--tcc is not supported with --static; compiling with the C compiler"); }
@@ -1654,7 +1713,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         my int $efi = 0;
         while ($efi < size(@extra_files)) {
             my str $efb = basename_of($extra_files[$efi]);
-            if ($efb eq "vm.o" || $efb eq "vm.c" || $efb eq "Eval.o") { $has_vm_obj = 1; last; }
+            if ($efb eq "vm.o" || $efb eq "vm.c" || is_eval_artifact($extra_files[$efi]) == 1) { $has_vm_obj = 1; last; }
             $efi = $efi + 1;
         }
         if ($has_vm_obj == 1 || file_contains($cfile, "dlopen") == 1 || file_contains($cfile, "strada_dl_open") == 1

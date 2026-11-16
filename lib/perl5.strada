@@ -227,6 +227,7 @@ static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
         sv_setpvn(sv, "", 0);
         SvUTF8_off(sv);
     }
+    SvSETMAGIC(sv);
     if (owned) strada_decref(owned);
 }
 
@@ -237,7 +238,11 @@ static SV* perl5_sv_from_strada(StradaValue *v) {
 }
 
 static StradaValue* perl5_strada_from_sv(SV *sv) {
-    if (!sv || !SvOK(sv)) {
+    if (!sv) {
+        return strada_new_str("");
+    }
+    SvGETMAGIC(sv);
+    if (!SvOK(sv)) {
         return strada_new_str("");
     }
     STRLEN len = 0;

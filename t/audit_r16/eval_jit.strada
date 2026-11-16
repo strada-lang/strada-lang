@@ -1,0 +1,172 @@
+# Cycle 16 Eval & Interpreter / Thread-Safety Regression Suite
+use lib "lib";
+use Eval;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    # S3-11: trailing comment must not swallow auto-semicolon
+    my scalar $c1 = Strada::Interpreter::eval("1 + 2 # trailing comment");
+    my scalar $c2 = Strada::Interpreter::eval("3 + 4; # semi then comment");
+    my scalar $c3 = Strada::Interpreter::eval("# only comment");
+    check($c1 == 3 && $c2 == 7 && !defined($c3), "S3-11 trailing comment eval");
+
+    # S3-10: nested / reentrant eval preserves & syncs state cleanly
+    Strada::Interpreter::eval("our \$r16_keep = 100;");
+    Strada::Interpreter::eval("our \$r16_hash = {\"k\" => \"old\"};");
+    Strada::Interpreter::eval("our \$r16_nested_eval_cb;");
+    Strada::Interpreter::vm_eval_globals()->{"r16_nested_eval_cb"} = func (str $code) scalar {
+        return Strada::Interpreter::eval($code);
+    };
+    my scalar $nres = Strada::Interpreter::eval(q{
+        my int $local_v = 10;
+        my scalar $inner = $r16_nested_eval_cb->(q{
+            $r16_keep = 250;
+            package R16InnerPkg;
+            our $inner_v = 42;
+            func get_iv() int { return $inner_v; }
+            package main;
+            $r16_hash->{"k"} . ":" . R16InnerPkg::get_iv();
+        });
+        our $outer_after = 77;
+        $r16_keep . ":" . $inner . ":" . $local_v . ":" . $r16_hash->{"k"};
+    });
+    check($nres eq "250:old:42:10:old", "S3-10 nested reentrant eval got=" . $nres);
+    my scalar $after_pkg = Strada::Interpreter::eval("\$outer_after");
+    my scalar $inner_kept = Strada::Interpreter::eval("R16InnerPkg::get_iv();");
+    check($after_pkg == 77 && $inner_kept == 42, "S3-10 nested eval outer+inner state preserved");
+
+    # S3-10: nested eval preserves live reference identity for unmodified outer globals
+    my scalar $id_ok = Strada::Interpreter::eval(q{
+        our $id_h = {"x" => 1};
+        my scalar $alias = $id_h;
+        $r16_nested_eval_cb->("my \$nop = 1;");
+        $alias->{"x"} = 88;
+        $id_h->{"x"};
+    });
+    check($id_ok == 88, "S3-10 nested eval keeps unmodified outer container identity");
+
+    # S3-10: multi-threaded eval does not corrupt global state
+    my scalar $t1 = thread::create(func () scalar {
+        return Strada::Interpreter::eval("40 + 1");
+    });
+    my scalar $t2 = thread::create(func () scalar {
+        return Strada::Interpreter::eval("40 + 2");
+    });
+    my scalar $r1 = thread::join($t1);
+    my scalar $r2 = thread::join($t2);
+    check($r1 == 41 && $r2 == 42, "S3-10 concurrent threaded eval");
+
+    # S3-1..S3-9 inside eval()
+    my scalar $vm_ok = Strada::Interpreter::eval(q{
+        # S3-1 skipped OP_CLEAR_LOCALS + closure capture
+        my scalar $cap_fn = undef;
+        OUTER16: while (1) {
+            my int $secret = 777;
+            $cap_fn = func () int { return $secret; };
+            my hash %h = ();
+            $h{"z"} = 1;
+            last OUTER16;
+        }
+        my int $k = 0;
+        my scalar $cap_redo = undef;
+        while ($k < 2) {
+            $k++;
+            my int $rv = $k * 100;
+            if ($k == 1) {
+                $cap_redo = func () int { return $rv; };
+                redo;
+            }
+        }
+        my hash %tmp_use = ("a" => 1);
+        $tmp_use{"a"} += 2;
+
+        # S3-2 NI_DESTRUCTURE typed local coercion (block-scoped so not promoted to our)
+        my int $di_chk = 0;
+        if (1) {
+            my (int $di, num $dn) = ("42.9", "3.25");
+            my int $d_init_ok = ($di == 42 && math::abs($dn - 3.25) < 1e-9) ? 1 : 0;
+            $di = "99.7";
+            $di_chk = ($d_init_ok == 1 && $di == 99) ? 1 : 0;
+        }
+
+        # S3-3 NI_FOREACH_STMT typed & our/captured
+        my int $fesum = 0;
+        foreach my int $fi ("1.9", "2.8") { $fesum = $fesum + $fi; }
+        our $fe_our = "";
+        foreach $fe_our ("u", "v") { }
+        my str $fe_cap = "";
+        my scalar $get_fc = func () str { return $fe_cap; };
+        foreach $fe_cap ("p", "q") { }
+
+        # S3-4 function fallthrough returns undef
+        func fall16() scalar { my int $z = 1; }
+        my int $fall_undef = defined(fall16()) ? 0 : 1;
+
+        # S3-5 sort with goto
+        my array @sorted = sort {
+            do {
+                goto DO_CMP;
+                0;
+            DO_CMP:
+                $a <=> $b;
+            }
+        } (3, 1, 2);
+
+        # S3-6 rindex UTF-8 & NUL
+        my str $u8r = "caféé";
+        my int $ri1 = rindex($u8r, "é");
+        my str $nu = "a" . chr(0) . "bc" . chr(0) . "bc";
+        my int $ri2 = rindex($nu, "bc");
+
+        # S3-7 UTF-8 regex PCRE2_UTF|UCP + failed capture preserve + NUL
+        my str $pat_s = "café";
+        my int $rm1 = ($pat_s =~ /\w+/) ? 1 : 0;
+        my int $rm2 = ($pat_s =~ /(é)/) ? 1 : 0;
+        my str $c_before = $1;
+        my int $rm_fail = ($pat_s =~ /(NOPE)/) ? 1 : 0;
+        my str $c_after = $1;
+        my str $s_nul = "a" . chr(0) . "b";
+        $s_nul = regex_replace_all($s_nul, chr(0), "-");
+
+        # S3-9 >> / >>= negative LHS
+        my int $sr1 = (-8 >> 100);
+        my int $sr2 = -8;
+        $sr2 >>= 100;
+
+        ($cap_fn->() == 777 && $cap_redo->() == 100 &&
+         $di_chk == 1 &&
+         $fesum == 3 && $fe_our eq "v" && $get_fc->() eq "q" &&
+         $fall_undef == 1 && join(",", @sorted) eq "1,2,3" &&
+         $ri1 == 4 && $ri2 == 5 &&
+         $rm1 == 1 && $rm2 == 1 && $rm_fail == 0 &&
+         $c_before eq "é" && $c_after eq "é" &&
+         $s_nul eq "a-b" && $sr1 == -1 && $sr2 == -1) ? 1 : 0;
+    });
+    check($vm_ok == 1, "S3-1..S3-9 inside eval");
+
+    # S3-10: threads sharing VM closure + globals + regex inside VM
+    my int $th_vm = Strada::Interpreter::eval(q{
+        our $g_shared = "init";
+        my int $val = 11;
+        my scalar $th = thread::create(func () scalar {
+            $g_shared = "from_thread";
+            my str $s = "abc123def";
+            my str $m = ($s =~ /(\d+)/) ? $1 : "";
+            return ($val + 31) . ":" . $m;
+        });
+        my scalar $res = thread::join($th);
+        ($res eq "42:123" && $g_shared eq "from_thread") ? 1 : 0;
+    });
+    check($th_vm == 1, "S3-10 thread::create inside VM");
+
+    say("AUDIT_R16_EVAL_JIT_OK");
+    return 0;
+}

@@ -807,6 +807,32 @@ func pp_advance_q_body(str $line, int $len, int $i, scalar $open_ref, scalar $cl
     return $i;
 }
 
+# Return 1 if '//' at $i in regex position looks like an empty regex literal (followed by
+# optional flags + delimiter/operator/EOL); returns 0 when it starts a '//' line comment.
+func pp_is_empty_regex_sl(str $line, int $i, int $len) int {
+    my int $nj = $i + 2;
+    while ($nj < $len) {
+        my str $fc = substr($line, $nj, 1);
+        if ($fc eq "i" || $fc eq "m" || $fc eq "s" || $fc eq "x" || $fc eq "g") {
+            $nj++;
+        } else {
+            last;
+        }
+    }
+    while ($nj < $len) {
+        my str $wc = substr($line, $nj, 1);
+        if ($wc eq " " || $wc eq "\t" || $wc eq "\r") { $nj++; } else { last; }
+    }
+    if ($nj >= $len) { return 1; }
+    my str $nc = substr($line, $nj, 1);
+    if ($nc eq "," || $nc eq ")" || $nc eq ";" || $nc eq "]" || $nc eq "}" ||
+        $nc eq ":" || $nc eq "=" || $nc eq "?" || $nc eq "&" || $nc eq "|" ||
+        $nc eq "." || $nc eq "#" || $nc eq "\n") {
+        return 1;
+    }
+    return 0;
+}
+
 # Find '__C__' outside Strada string literals, comments, and regexes; returns index or -1.
 func find_c_block_kw(str $line) int {
     my int $len = length($line);
@@ -850,11 +876,19 @@ func find_c_block_kw(str $line) int {
         if ($ch eq "'") { $in_sq = 1; $i++; next; }
         if ($ch eq "#") { return -1; }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            if ($can_regex == 1) { return -1; }
-            $i = $i + 2;
-            $can_regex = 1;
-            $can_subst = 0;
-            next;
+            if ($can_regex == 0) {
+                $i = $i + 2;
+                $can_regex = 1;
+                $can_subst = 0;
+                next;
+            }
+            if (pp_is_empty_regex_sl($line, $i, $len) == 1) {
+                $i = $i + 2;
+                $can_regex = 0;
+                $can_subst = 0;
+                next;
+            }
+            return -1;
         }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
             my int $ci = $i + 2;
@@ -1056,11 +1090,20 @@ func pp_detect_heredoc_tags(str $line) scalar {
         if ($ch eq "\"") { $in_dq = 1; $i = $i + 1; next; }
         if ($ch eq "'") { $in_sq = 1; $i = $i + 1; next; }
         if ($ch eq "#") { return \@tags; }
-        if ($can_regex == 0 && $ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            $i = $i + 2;
-            $can_regex = 1;
-            $can_subst = 0;
-            next;
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            if ($can_regex == 0) {
+                $i = $i + 2;
+                $can_regex = 1;
+                $can_subst = 0;
+                next;
+            }
+            if (pp_is_empty_regex_sl($line, $i, $len) == 1) {
+                $i = $i + 2;
+                $can_regex = 0;
+                $can_subst = 0;
+                next;
+            }
+            return \@tags;
         }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
             my int $ci = $i + 2;
@@ -1247,11 +1290,20 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             $can_subst = 1;
             next;
         }
-        if ($can_regex == 0 && $ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            $i = $i + 2;
-            $can_regex = 1;
-            $can_subst = 0;
-            next;
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+            if ($can_regex == 0) {
+                $i = $i + 2;
+                $can_regex = 1;
+                $can_subst = 0;
+                next;
+            }
+            if (pp_is_empty_regex_sl($line, $i, $len) == 1) {
+                $i = $i + 2;
+                $can_regex = 0;
+                $can_subst = 0;
+                next;
+            }
+            last;
         }
         if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
             $$cmt_ref = 1;

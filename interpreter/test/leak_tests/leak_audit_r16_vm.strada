@@ -1,0 +1,66 @@
+# Cycle 16 Bytecode VM Valgrind Leak Test (S3-1..S3-10)
+
+package R16VMLkTie;
+func TIESCALAR(str $cls, scalar $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"v"} = $v; }
+
+func fall_u() scalar { my int $z = 1; }
+
+func main() int {
+    # S3-1: VMCell aliasing on skipped OP_CLEAR_LOCALS
+    my scalar $cap = undef;
+    OUT: while (1) {
+        my int $x = 99;
+        $cap = func () int { return $x; };
+        last OUT;
+    }
+    my hash %h = ("a" => 1);
+    $h{"a"} += 2;
+    if ($cap->() != 99) { return 1; }
+
+    # S3-2 & S3-3: destructuring & foreach types + capture/our
+    my (int $di, num $dn) = ("8.7", "2.5");
+    our $fe_g = "";
+    foreach $fe_g ("u", "v") { }
+    my int $fs = 0;
+    foreach my int $fi ("1.9", "2.9") { $fs = $fs + $fi; }
+    if ($di != 8 || $fs != 3 || $fe_g ne "v") { return 2; }
+
+    # S3-4 & S3-5: fallthrough undef + sort goto
+    if (defined(fall_u())) { return 3; }
+    my array @s = sort { do { goto C; 0; C: $a <=> $b; } } (3, 1, 2);
+    if (join(",", @s) ne "1,2,3") { return 4; }
+
+    # S3-6 & S3-7: rindex UTF-8/NUL + regex UTF-8/capture preserve/NUL
+    if (rindex("caféé", "é") != 4) { return 5; }
+    my str $subj = "café";
+    if (!(($subj =~ /\w+/) && ($subj =~ /(é)/))) { return 6; }
+    if (($subj =~ /(NO)/)) { return 7; }
+    if ($1 ne "é") { return 8; }
+    my str $nr = regex_replace_all("a" . chr(0) . "b", chr(0), ":");
+    if ($nr ne "a:b") { return 9; }
+
+    # S3-8: OP_TR tied scalar
+    my scalar $ts = "";
+    my scalar $o = tie($ts, "R16VMLkTie", "abc");
+    my int $tc = ($ts =~ tr/a-z/A-Z/);
+    if ($tc != 3 || $o->{"v"} ne "ABC") { return 10; }
+    untie($ts);
+
+    # S3-9: shift
+    if ((-8 >> 100) != -1) { return 11; }
+
+    # S3-10: threads sharing closure + globals + regex
+    our $gth = "x";
+    my int $cv = 7;
+    my scalar $th = thread::create(func () scalar {
+        $gth = "y";
+        my str $m = ("ab9cd" =~ /(\d+)/) ? $1 : "";
+        return $cv . ":" . $m;
+    });
+    if (thread::join($th) ne "7:9" || $gth ne "y") { return 12; }
+
+    say("LEAK_AUDIT_R16_VM_OK");
+    return 0;
+}

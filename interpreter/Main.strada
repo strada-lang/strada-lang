@@ -321,12 +321,7 @@ func repl_eval(str $input) scalar {
     my str $trimmed = str_trim($input);
     if (length($trimmed) == 0) { return undef; }
 
-    # Auto-append semicolon for convenience if not ending with ; or }
-    my int $tlen = length($trimmed);
-    my str $last_char = substr($trimmed, $tlen - 1, 1);
-    if ($last_char ne ";" && $last_char ne "}") {
-        $trimmed = $trimmed . ";";
-    }
+    $trimmed = Strada::Interpreter::eval_append_trailing_semi($trimmed);
 
     return Strada::Interpreter::eval_string_vm_ex($trimmed, "<repl>", undef, 0);
 }
@@ -649,11 +644,7 @@ func eval_has_entry_func(str $src) int {
 func parse_eval_program(str $code) scalar {
     my str $trimmed = str_trim($code);
     if (length($trimmed) == 0) { return undef; }
-    my int $tlen = length($trimmed);
-    my str $last_char = substr($trimmed, $tlen - 1, 1);
-    if ($last_char ne ";" && $last_char ne "}") {
-        $trimmed = $trimmed . ";";
-    }
+    $trimmed = Strada::Interpreter::eval_append_trailing_semi($trimmed);
 
     my scalar $units = Strada::Interpreter::split_eval_units($trimmed, "main");
     my str $top_src = $units->{"top"};
