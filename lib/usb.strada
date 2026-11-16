@@ -590,7 +590,7 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h || length < 0) {
+        if (!h || length < 0 || (ep & 0x80) != 0) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
@@ -655,7 +655,7 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
         int tm = (int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h || length < 0) {
+        if (!h || length < 0 || (ep & 0x80) != 0) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
@@ -722,7 +722,7 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h || length < 0 || length > 65535) {
+        if (!h || length < 0 || length > 65535 || (rt & 0x80) != 0) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);

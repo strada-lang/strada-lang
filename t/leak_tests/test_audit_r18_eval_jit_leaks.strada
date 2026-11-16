@@ -1,0 +1,51 @@
+# Cycle 18 Valgrind Leak Test (Eval / JIT / Worker VM STW GC)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    my scalar $ok = Strada::Interpreter::eval(
+        "my hash %th = (\"a\" => 1, \"b\" => 2, \"c\" => 3, \"d\" => 4);\n" .
+        "delete(\$th{\"a\"}); delete(\$th{\"b\"}); delete(\$th{\"c\"});\n" .
+        "for (my int \$i = 0; \$i < 120; \$i = \$i + 1) { my str \$k = \"k\" . \$i; \$th{\$k} = \$i; delete(\$th{\$k}); }\n" .
+        "my int \$h_ok = (!exists(\$th{\"miss\"}) && \$th{\"d\"} == 4) ? 1 : 0;\n" .
+        "our str \$gv2 = \"X\";\n" .
+        "func jit_v2(int \$n) int { local \$gv2 = \"Y\"; return \$n + 1; }\n" .
+        "my int \$s2 = 0;\n" .
+        "for (my int \$i = 0; \$i < 140; \$i = \$i + 1) { \$s2 = \$s2 + jit_v2(\$i); }\n" .
+        "func jit_mod(scalar \$a, scalar \$b) int { return \$a % \$b; }\n" .
+        "my int \$m0 = 0; for (my int \$i = 0; \$i < 140; \$i = \$i + 1) { \$m0 = jit_mod(\"-9223372036854775808\", -1); }\n" .
+        "package R18ELkOv; use overload '\"\"' => \"ts\";\n" .
+        "func new(int \$n) scalar { return bless({\"n\" => \$n}, \"R18ELkOv\"); }\n" .
+        "func rec(int \$d) int { return \$d <= 0 ? 1 : rec(\$d - 1) + 1; }\n" .
+        "func ts(scalar \$s) str { return \"S\" . \$s->{\"n\"} . \":\" . rec(280); }\n" .
+        "package main;\n" .
+        "my scalar \$ov = R18ELkOv::new(5);\n" .
+        "func jit_app(scalar \$x) str { my str \$out = \"p\"; \$out .= \$x; \$out .= \"café\"; return \$out; }\n" .
+        "my str \$app_r = \"\"; for (my int \$i = 0; \$i < 130; \$i = \$i + 1) { \$app_r = jit_app(\$ov); }\n" .
+        "my scalar \$ch = async::channel(4);\n" .
+        "my scalar \$t1 = thread::create(func () { my scalar \$x = async::recv(\$ch); return \$x + 1; });\n" .
+        "my scalar \$t2 = thread::create(func () { my int \$sum = 0; for (my int \$k = 0; \$k < 300; \$k = \$k + 1) { my scalar \$tmp = {\"v\" => \$k}; \$sum = \$sum + \$k; } return \$sum; });\n" .
+        "core::gc_collect(); async::send(\$ch, 10);\n" .
+        "my int \$j1 = thread::join(\$t1); my int \$j2 = thread::join(\$t2);\n" .
+        "core::gc_collect();\n" .
+        "my hash %uk = (\"café\" => 1);\n" .
+        "my array @ks = keys(%uk); my array @ev = each(%uk);\n" .
+        "(\$h_ok == 1 && \$gv2 eq \"X\" && \$m0 == 0 && utf8::is_utf8(\$app_r) == 1 && utf8::is_utf8(\$ks[0]) == 1 && utf8::is_utf8(\$ev[0]) == 1 && \$j1 == 11) ? 1 : 0;"
+    );
+    if ($ok != 1) { return 1; }
+
+    Strada::JIT::init();
+    Strada::JIT::eval('func jtop(int $n) str { return "Q" . $n; }');
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        my str $r = Strada::JIT::eval("jtop(" . $i . ")");
+        if ($r ne "Q" . $i) { return 2; }
+    }
+    Strada::JIT::reset();
+
+    Strada::Interpreter::reset();
+    say("LEAK_AUDIT_R18_EVAL_OK");
+    return 0;
+}

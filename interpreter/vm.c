@@ -776,6 +776,9 @@ static inline void key_free_entry(VMHashEntry *e) {
     if (!e->key_interned) free(e->key);
 }
 
+static int vm_utf8_is_valid_str(const char *s, size_t len, int *out_nonascii);
+static inline VMValue vm_make_str_flag(const char *s, size_t len, int is_utf8);
+
 VMHash *vm_hash_new(int cap) {
     int c = VM_HASH_INLINE_CAP;
     if (cap > VM_HASH_INLINE_CAP) {
@@ -784,6 +787,7 @@ VMHash *vm_hash_new(int cap) {
     VMHash *h = (VMHash*)vm_pool_pop(VM_POOL_HASH, sizeof(VMHash), VM_OBJ_HASH, 0);
     h->capacity = c;
     h->size = 0;
+    h->tombstones = 0;
     h->class_id = 0;
     h->class_prog_id = 0;
     h->grow_gen = 0;
@@ -819,50 +823,45 @@ void vm_hash_free(VMHash *h) {
 static void vm_hash_grow(VMHash *h) {
     int old_cap = h->capacity;
     VMHashEntry *old = h->entries;
-    h->capacity *= 2;
+    VMHashEntry tmp_inline[VM_HASH_INLINE_CAP];
+    int new_cap = (h->size * 2 < old_cap) ? old_cap : (old_cap * 2);
+    h->capacity = new_cap;
     h->grow_gen++;
-    h->entries = calloc((size_t)h->capacity, sizeof(VMHashEntry));
+    if (new_cap == old_cap && old == h->inline_entries) {
+        memcpy(tmp_inline, old, sizeof(tmp_inline));
+        old = tmp_inline;
+        memset(h->inline_entries, 0, sizeof(h->inline_entries));
+    } else {
+        h->entries = calloc((size_t)h->capacity, sizeof(VMHashEntry));
+        if (!h->entries) { fprintf(stderr, "VM: out of memory\n"); exit(1); }
+    }
     h->size = 0;
+    h->tombstones = 0;
+    uint32_t mask = (uint32_t)(h->capacity - 1);
     for (int i = 0; i < old_cap; i++) {
         if (old[i].occupied == 1) {
-            uint32_t mask = (uint32_t)(h->capacity - 1);
             uint32_t idx = old[i].hash & mask;
             while (h->entries[idx].occupied == 1) idx = (idx + 1) & mask;
             h->entries[idx] = old[i];
             h->size++;
         }
     }
-    if (old != h->inline_entries) free(old);
+    if (old != h->inline_entries && old != tmp_inline) free(old);
 }
 
 static uint32_t vm_hash_set_nh_slot(VMHash *h, const char *key, size_t keylen, uint32_t hash, VMValue v) {
     if (!h || !key) return UINT32_MAX;
-    if (h->size * 4 >= h->capacity * 3) vm_hash_grow(h);
+    if ((h->size + h->tombstones) * 4 >= h->capacity * 3) vm_hash_grow(h);
     uint32_t klen = (uint32_t)keylen;
     uint32_t mask = (uint32_t)(h->capacity - 1);
     uint32_t idx = hash & mask;
     uint32_t first_tomb = UINT32_MAX;
-    for (;;) {
+    uint32_t dst = UINT32_MAX;
+    for (int probes = 0; probes < h->capacity; probes++) {
         uint8_t occ = h->entries[idx].occupied;
         if (occ == 0) {
-            uint32_t dst = (first_tomb != UINT32_MAX) ? first_tomb : idx;
-            const char *ikey = vm_intern_hash_key(g_active_vm, key, klen, hash);
-            if (ikey) {
-                h->entries[dst].key = (char *)ikey;
-                h->entries[dst].key_interned = 1;
-            } else {
-                char *k = malloc((size_t)klen + 1);
-                if (klen > 0) memcpy(k, key, klen);
-                k[klen] = '\0';
-                h->entries[dst].key = k;
-                h->entries[dst].key_interned = 0;
-            }
-            h->entries[dst].value = v;
-            h->entries[dst].hash = hash;
-            h->entries[dst].keylen = klen;
-            h->entries[dst].occupied = 1;
-            h->size++;
-            return dst;
+            dst = (first_tomb != UINT32_MAX) ? first_tomb : idx;
+            break;
         }
         if (occ == 2) {
             if (first_tomb == UINT32_MAX) first_tomb = idx;
@@ -874,6 +873,32 @@ static uint32_t vm_hash_set_nh_slot(VMHash *h, const char *key, size_t keylen, u
         }
         idx = (idx + 1) & mask;
     }
+    if (dst == UINT32_MAX) {
+        if (first_tomb != UINT32_MAX) {
+            dst = first_tomb;
+        } else {
+            vm_hash_grow(h);
+            return vm_hash_set_nh_slot(h, key, keylen, hash, v);
+        }
+    }
+    if (h->entries[dst].occupied == 2) h->tombstones--;
+    const char *ikey = vm_intern_hash_key(g_active_vm, key, klen, hash);
+    if (ikey) {
+        h->entries[dst].key = (char *)ikey;
+        h->entries[dst].key_interned = 1;
+    } else {
+        char *k = malloc((size_t)klen + 1);
+        if (klen > 0) memcpy(k, key, klen);
+        k[klen] = '\0';
+        h->entries[dst].key = k;
+        h->entries[dst].key_interned = 0;
+    }
+    h->entries[dst].value = v;
+    h->entries[dst].hash = hash;
+    h->entries[dst].keylen = klen;
+    h->entries[dst].occupied = 1;
+    h->size++;
+    return dst;
 }
 
 static void vm_hash_set_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash, VMValue v) {
@@ -894,13 +919,14 @@ static int32_t vm_hash_slot_idx_nh(VMHash *h, const char *key, size_t keylen, ui
     uint32_t klen = (uint32_t)keylen;
     uint32_t mask = (uint32_t)(h->capacity - 1);
     uint32_t idx = hash & mask;
-    for (;;) {
+    for (int probes = 0; probes < h->capacity; probes++) {
         if (h->entries[idx].occupied == 0) return -1;
         if (h->entries[idx].occupied == 1 && h->entries[idx].hash == hash &&
             h->entries[idx].keylen == klen && memcmp(h->entries[idx].key, key, klen) == 0)
             return (int32_t)idx;
         idx = (idx + 1) & mask;
     }
+    return -1;
 }
 
 static VMValue *vm_hash_slot_ptr_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash) {
@@ -935,7 +961,7 @@ static VMValue vm_hash_delete_ret_n(VMHash *h, const char *key, size_t keylen) {
     uint32_t hash = vm_hash_fn_n(key, klen);
     uint32_t mask = (uint32_t)(h->capacity - 1);
     uint32_t idx = hash & mask;
-    for (;;) {
+    for (int probes = 0; probes < h->capacity; probes++) {
         if (h->entries[idx].occupied == 0) return VM_UNDEF_VAL;
         if (h->entries[idx].occupied == 1 && h->entries[idx].hash == hash &&
             h->entries[idx].keylen == klen && memcmp(h->entries[idx].key, key, klen) == 0) {
@@ -947,11 +973,13 @@ static VMValue vm_hash_delete_ret_n(VMHash *h, const char *key, size_t keylen) {
             h->entries[idx].value = VM_UNDEF_VAL;
             h->entries[idx].occupied = 2;
             h->size--;
+            h->tombstones++;
             h->grow_gen++;
             return old;
         }
         idx = (idx + 1) & mask;
     }
+    return VM_UNDEF_VAL;
 }
 
 VMValue vm_hash_delete_ret(VMHash *h, const char *key) {
@@ -975,11 +1003,17 @@ int vm_hash_exists(VMHash *h, const char *key) {
     return vm_hash_exists_n(h, key, key ? strlen(key) : 0);
 }
 
+static inline VMValue vm_hash_make_key_str(const char *key, size_t len) {
+    int nonascii = 0;
+    int u8 = (vm_utf8_is_valid_str(key, len, &nonascii) && nonascii);
+    return vm_make_str_flag(key, len, u8);
+}
+
 VMArray *vm_hash_keys(VMHash *h) {
     VMArray *keys = vm_array_new(h->size > 0 ? h->size : 8);
     for (int i = 0; i < h->capacity; i++)
         if (h->entries[i].occupied == 1)
-            vm_array_push(keys, VM_MAKE_STR_N(h->entries[i].key, h->entries[i].keylen));
+            vm_array_push(keys, vm_hash_make_key_str(h->entries[i].key, h->entries[i].keylen));
     return keys;
 }
 
@@ -1270,8 +1304,13 @@ static VM *vm_new_base(VMProgram *prog) {
     vm->trap_uncaught = 0;
     vm->end_ran = 0;
     vm->refcount = 1;
+    vm->gc_safe = 1;
+    vm->gc_requested = 0;
     vm->owner_thread = pthread_self();
     pthread_mutex_init(&vm->gc_mutex, NULL);
+    pthread_mutex_init(&vm->gc_wait_mutex, NULL);
+    pthread_cond_init(&vm->gc_start_cond, NULL);
+    pthread_cond_init(&vm->gc_parked_cond, NULL);
     pthread_mutex_init(&vm->globals_mutex, NULL);
     g_active_vm = vm;
     return vm;
@@ -1287,16 +1326,21 @@ static VM *vm_new_worker(VM *parent) {
     VM *root = (parent && parent->root_vm) ? parent->root_vm : parent;
     VM *vm = vm_new_base(root ? root->program : NULL);
     vm->is_worker_vm = 1;
+    vm->gc_safe = 1;
+    vm->gc_threshold = SIZE_MAX;
     vm->root_vm = root;
     if (root) {
         vm_retain(root);
         vm->globals = root->globals;
         vm->default_fh = root->default_fh;
         vm->recursion_limit = root->recursion_limit;
-        pthread_mutex_lock(&root->gc_mutex);
+        pthread_mutex_lock(&root->gc_wait_mutex);
+        while (__atomic_load_n(&root->gc_requested, __ATOMIC_ACQUIRE)) {
+            pthread_cond_wait(&root->gc_start_cond, &root->gc_wait_mutex);
+        }
         vm->worker_next = root->workers_head;
         root->workers_head = vm;
-        pthread_mutex_unlock(&root->gc_mutex);
+        pthread_mutex_unlock(&root->gc_wait_mutex);
     } else {
         vm->globals = vm_hash_new(64);
     }
@@ -1659,9 +1703,92 @@ static size_t vm_collect_finalizer_items(VM *vm, VMFinalizerItem **out_items, in
     return count;
 }
 
+static __attribute__((noinline)) void vm_worker_park(VM *vm) {
+    VM *root = (vm && vm->is_worker_vm) ? vm->root_vm : NULL;
+    if (!root) return;
+    pthread_mutex_lock(&root->gc_wait_mutex);
+    __atomic_store_n(&vm->gc_safe, 1, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&root->gc_parked_cond);
+    while (__atomic_load_n(&root->gc_requested, __ATOMIC_ACQUIRE)) {
+        pthread_cond_wait(&root->gc_start_cond, &root->gc_wait_mutex);
+    }
+    __atomic_store_n(&vm->gc_safe, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&root->gc_wait_mutex);
+}
+
+static inline void vm_worker_poll_gc(VM *vm) {
+    if (__builtin_expect(vm && vm->is_worker_vm && vm->root_vm &&
+                         __atomic_load_n(&vm->root_vm->gc_requested, __ATOMIC_ACQUIRE), 0)) {
+        vm_worker_park(vm);
+    }
+}
+
+static void vm_worker_enter_active(VM *vm) {
+    if (!vm || !vm->is_worker_vm || !vm->root_vm) return;
+    VM *root = vm->root_vm;
+    pthread_mutex_lock(&root->gc_wait_mutex);
+    while (__atomic_load_n(&root->gc_requested, __ATOMIC_ACQUIRE)) {
+        pthread_cond_wait(&root->gc_start_cond, &root->gc_wait_mutex);
+    }
+    __atomic_store_n(&vm->gc_safe, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&root->gc_wait_mutex);
+}
+
+static int vm_worker_enter_safe(VM *vm) {
+    if (!vm || !vm->is_worker_vm || !vm->root_vm) return 1;
+    if (__atomic_load_n(&vm->gc_safe, __ATOMIC_ACQUIRE)) return 1;
+    VM *root = vm->root_vm;
+    pthread_mutex_lock(&root->gc_wait_mutex);
+    __atomic_store_n(&vm->gc_safe, 1, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&root->gc_requested, __ATOMIC_ACQUIRE)) {
+        pthread_cond_broadcast(&root->gc_parked_cond);
+    }
+    pthread_mutex_unlock(&root->gc_wait_mutex);
+    return 0;
+}
+
+static void vm_worker_leave_safe(VM *vm, int prev_safe) {
+    if (prev_safe) return;
+    vm_worker_enter_active(vm);
+}
+
+static int vm_gc_stw_begin(VM *vm) {
+    pthread_mutex_lock(&vm->gc_wait_mutex);
+    if (!vm->workers_head) {
+        pthread_mutex_unlock(&vm->gc_wait_mutex);
+        return 0;
+    }
+    __atomic_store_n(&vm->gc_requested, 1, __ATOMIC_RELEASE);
+    for (;;) {
+        int all_safe = 1;
+        for (VM *w = vm->workers_head; w; w = w->worker_next) {
+            if (!__atomic_load_n(&w->gc_safe, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&w->gc_threshold, 0, __ATOMIC_RELEASE);
+                all_safe = 0;
+            }
+        }
+        if (all_safe) break;
+        pthread_cond_wait(&vm->gc_parked_cond, &vm->gc_wait_mutex);
+    }
+    pthread_mutex_unlock(&vm->gc_wait_mutex);
+    return 1;
+}
+
+static void vm_gc_stw_end(VM *vm, int was_stw) {
+    if (!was_stw) return;
+    pthread_mutex_lock(&vm->gc_wait_mutex);
+    for (VM *w = vm->workers_head; w; w = w->worker_next) {
+        __atomic_store_n(&w->gc_threshold, SIZE_MAX, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&vm->gc_requested, 0, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&vm->gc_start_cond);
+    pthread_mutex_unlock(&vm->gc_wait_mutex);
+}
+
 static void vm_gc_collect_ex(VM *vm, int propagate_try) {
     if (!vm || vm->is_worker_vm || vm->gc_pause > 0 || vm->exec_base > 0) return;
 
+    int stw = vm_gc_stw_begin(vm);
     pthread_mutex_lock(&vm->gc_mutex);
     pthread_mutex_lock(&vm->globals_mutex);
     vm_gc_mark_all(vm);
@@ -1672,8 +1799,10 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
 
     if (fin_count > 0) {
         pthread_mutex_unlock(&vm->gc_mutex);
+        vm_gc_stw_end(vm, stw);
         vm_run_destroy_batch_ex(vm, fin, fin_count, propagate_try);
         free(fin);
+        stw = vm_gc_stw_begin(vm);
         pthread_mutex_lock(&vm->gc_mutex);
         pthread_mutex_lock(&vm->globals_mutex);
         for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
@@ -1701,6 +1830,7 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
     }
     vm_gc_reset_worker_marks(vm);
     pthread_mutex_unlock(&vm->gc_mutex);
+    vm_gc_stw_end(vm, stw);
 
     while (dead_list) {
         VMObjHeader *next = dead_list->gc_next;
@@ -1781,7 +1911,11 @@ void vm_free(VM *vm) {
     vm_suspend(vm);
     if (vm->is_worker_vm && vm->root_vm) {
         VM *root_vm = vm->root_vm;
-        pthread_mutex_lock(&root_vm->gc_mutex);
+        vm_worker_enter_safe(vm);
+        pthread_mutex_lock(&root_vm->gc_wait_mutex);
+        while (__atomic_load_n(&root_vm->gc_requested, __ATOMIC_ACQUIRE)) {
+            pthread_cond_wait(&root_vm->gc_start_cond, &root_vm->gc_wait_mutex);
+        }
         VM **wp = &root_vm->workers_head;
         while (*wp) {
             if (*wp == vm) {
@@ -1791,6 +1925,8 @@ void vm_free(VM *vm) {
             wp = &(*wp)->worker_next;
         }
         vm->worker_next = NULL;
+        pthread_mutex_unlock(&root_vm->gc_wait_mutex);
+        pthread_mutex_lock(&root_vm->gc_mutex);
         if (vm->has_weakrefs) {
             root_vm->has_weakrefs = 1;
         }
@@ -1840,6 +1976,9 @@ void vm_free(VM *vm) {
     vm_method_cache_clear(vm);
     vm_regex_cache_free(vm);
     pthread_mutex_destroy(&vm->gc_mutex);
+    pthread_mutex_destroy(&vm->gc_wait_mutex);
+    pthread_cond_destroy(&vm->gc_start_cond);
+    pthread_cond_destroy(&vm->gc_parked_cond);
     pthread_mutex_destroy(&vm->globals_mutex);
     VM *root = vm->root_vm;
     free(vm);
@@ -3788,14 +3927,17 @@ static int vm_c_call_method(VM *vm, StradaValue *self_sv, const char *method, St
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *nr = strada_method_call(self_sv, method, packed_args);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_res = nr;
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3809,14 +3951,17 @@ static int vm_c_call_closure(VM *vm, StradaValue *cl_sv, StradaValue *packed_arg
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *nr = strada_closure_call_array(cl_sv, packed_args);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_res = nr;
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3830,13 +3975,16 @@ static int vm_c_call_cblock(VM *vm, void (*fn)(StradaValue**), StradaValue **sv_
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         fn(sv_vars);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3850,15 +3998,18 @@ static int vm_c_call_0(VM *vm, StradaValue *(*fn)(void), VMValue *out_val, VMVal
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = fn();
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_val = r ? sv_to_vm(r) : VM_UNDEF_VAL;
         if (r) strada_decref(r);
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3874,9 +4025,11 @@ static int vm_c_call_1(VM *vm, StradaValue *(*fn)(StradaValue*), VMValue a0, VMV
     StradaValue *sv0 = vm_to_sv(a0);
     strada_cleanup_push(sv0);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = fn(sv0);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_val = r ? sv_to_vm(r) : VM_UNDEF_VAL;
         if (r) strada_decref(r);
@@ -3884,6 +4037,7 @@ static int vm_c_call_1(VM *vm, StradaValue *(*fn)(StradaValue*), VMValue a0, VMV
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3901,9 +4055,11 @@ static int vm_c_call_2(VM *vm, StradaValue *(*fn)(StradaValue*, StradaValue*), V
     StradaValue *sv1 = vm_to_sv(a1);
     strada_cleanup_push(sv1);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = fn(sv0, sv1);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_val = r ? sv_to_vm(r) : VM_UNDEF_VAL;
         if (r) strada_decref(r);
@@ -3911,6 +4067,7 @@ static int vm_c_call_2(VM *vm, StradaValue *(*fn)(StradaValue*, StradaValue*), V
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3930,9 +4087,11 @@ static int vm_c_call_3(VM *vm, StradaValue *(*fn)(StradaValue*, StradaValue*, St
     StradaValue *sv2 = vm_to_sv(a2);
     strada_cleanup_push(sv2);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = fn(sv0, sv1, sv2);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_val = r ? sv_to_vm(r) : VM_UNDEF_VAL;
         if (r) strada_decref(r);
@@ -3940,6 +4099,7 @@ static int vm_c_call_3(VM *vm, StradaValue *(*fn)(StradaValue*, StradaValue*, St
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3955,14 +4115,17 @@ static int vm_c_void_1(VM *vm, void (*fn)(StradaValue*), VMValue a0, VMValue *ou
     StradaValue *sv0 = vm_to_sv(a0);
     strada_cleanup_push(sv0);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         fn(sv0);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         strada_cleanup_drain_to(cm);
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -3986,9 +4149,11 @@ static int vm_c_call_downgrade(VM *vm, VMValue a0, int fail_ok, VMValue *out_val
     StradaValue *sv0 = vm_to_sv(a0);
     strada_cleanup_push(sv0);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = strada_utf8_downgrade(sv0, fail_ok);
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_val = r ? sv_to_vm(r) : VM_UNDEF_VAL;
         if (r) strada_decref(r);
@@ -3996,6 +4161,7 @@ static int vm_c_call_downgrade(VM *vm, VMValue a0, int fail_ok, VMValue *out_val
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -4009,14 +4175,17 @@ static int vm_c_dispatch_signals(VM *vm, VMValue *out_exc) {
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         strada_dispatch_signals();
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         strada_cleanup_drain_to(cm);
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -4030,6 +4199,7 @@ static int vm_c_call_generic(VM *vm, const VMGenericBuiltin *gb, StradaValue **s
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *r = NULL;
         switch (argc) {
@@ -4040,11 +4210,13 @@ static int vm_c_call_generic(VM *vm, const VMGenericBuiltin *gb, StradaValue **s
         case 4: r = ((VMGenericFn4)gb->fn)(sa[0], sa[1], sa[2], sa[3]); break;
         }
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_r = r;
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -4077,6 +4249,7 @@ static int vm_c_call_native_sym(VM *vm, VMNativeEntry *ne, StradaValue **call_ar
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *nr = NULL;
         if (ne->return_type == 7) {
@@ -4107,11 +4280,13 @@ static int vm_c_call_native_sym(VM *vm, VMNativeEntry *ne, StradaValue **call_ar
             }
         }
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         *out_nr = nr;
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         vm->gc_pause--;
@@ -4530,6 +4705,7 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
     g_active_vm = run_vm;
     int prev_trap = run_vm->trap_uncaught;
     run_vm->trap_uncaught = 1;
+    if (use_worker) vm_worker_enter_active(run_vm);
     run_vm->gc_pause++;
     VMValue vargs_buf[16];
     VMValue *vargs = (argc > 16) ? malloc((size_t)argc * sizeof(VMValue)) : vargs_buf;
@@ -4561,6 +4737,7 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
     }
     run_vm->trap_uncaught = prev_trap;
     if (use_worker) {
+        vm_worker_enter_safe(run_vm);
         vm_suspend(run_vm);
         vm_free(run_vm);
     }
@@ -4919,9 +5096,7 @@ static VMArray *vm_hash_to_flat_kv(VM *vm, VMHash *h) {
     VMArray *flat = vm_array_new(h->size > 0 ? h->size * 2 : 8);
     for (int i = 0; i < h->capacity; i++) {
         if (h->entries[i].occupied == 1) {
-            int nonascii = 0;
-            int u8 = (vm_utf8_is_valid_str(h->entries[i].key, h->entries[i].keylen, &nonascii) && nonascii);
-            vm_array_push(flat, vm_make_str_flag(h->entries[i].key, h->entries[i].keylen, u8));
+            vm_array_push(flat, vm_hash_make_key_str(h->entries[i].key, h->entries[i].keylen));
             vm_array_push(flat, vm_val_copy(h->entries[i].value));
         }
     }
@@ -5455,6 +5630,7 @@ static int vm_c_call_utf8_wb(VM *vm, int mode, VMValue a0, int fail_ok, VMValue 
     int lm = strada_local_depth_get();
     StradaValue * volatile slot = vm_to_sv(a0);
     vm->gc_pause++;
+    volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
         StradaValue *s_arg = slot;
         StradaValue *r = NULL;
@@ -5463,6 +5639,7 @@ static int vm_c_call_utf8_wb(VM *vm, int mode, VMValue a0, int fail_ok, VMValue 
         else r = strada_utf8_upgrade_slot(&s_arg);
         slot = s_arg;
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
         VMArray *pair = vm_array_new(2);
         vm_array_push(pair, slot ? sv_to_vm(slot) : VM_UNDEF_VAL);
@@ -5474,6 +5651,7 @@ static int vm_c_call_utf8_wb(VM *vm, int mode, VMValue a0, int fail_ok, VMValue 
         return 0;
     } else {
         STRADA_TRY_POP();
+        vm_worker_leave_safe(vm, _prev_safe);
         strada_local_restore_to(lm);
         strada_cleanup_drain_to(cm);
         if (slot) strada_decref(slot);
@@ -7169,7 +7347,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                         stack = vm->stack; RELOAD();
                     }
                     VMArray *pair = vm_array_new(2);
-                    vm_array_push(pair, VM_MAKE_STR_N(h->entries[h->iter_pos].key, h->entries[h->iter_pos].keylen));
+                    vm_array_push(pair, vm_hash_make_key_str(h->entries[h->iter_pos].key, h->entries[h->iter_pos].keylen));
                     vm_array_push(pair, vm_val_copy(ev));
                     h->iter_pos++;
                     SP_PUSH(VM_MAKE_PTR(pair));
@@ -7189,12 +7367,26 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             break;
         }
         case BUILTIN_CORE_SLEEP: {
-            if (argc >= 1) sleep((unsigned)vm_to_int(args[0]));
+            if (argc >= 1) {
+                unsigned sec = (unsigned)vm_to_int(args[0]);
+                vm->stack_top = sp;
+                int _ps = vm_worker_enter_safe(vm);
+                sleep(sec);
+                vm_worker_leave_safe(vm, _ps);
+                stack = vm->stack; RELOAD();
+            }
             SP_PUSH(VM_UNDEF_VAL);
             break;
         }
         case BUILTIN_CORE_USLEEP: {
-            if (argc >= 1) usleep((useconds_t)vm_to_int(args[0]));
+            if (argc >= 1) {
+                useconds_t us = (useconds_t)vm_to_int(args[0]);
+                vm->stack_top = sp;
+                int _ps = vm_worker_enter_safe(vm);
+                usleep(us);
+                vm_worker_leave_safe(vm, _ps);
+                stack = vm->stack; RELOAD();
+            }
             SP_PUSH(VM_UNDEF_VAL);
             break;
         }
@@ -7418,7 +7610,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         }
         case BUILTIN_CORE_WAIT: {
             int status;
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
             pid_t pid = wait(&status);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             if (__builtin_expect(strada_has_pending_signals(), 0)) {
                 vm->stack_top = sp;
                 int __th = vm_c_dispatch_signals(vm, &throw_exc);
@@ -7431,8 +7627,13 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_WAITPID: {
             if (argc >= 1) {
                 int status = 0;
+                pid_t target_pid = (pid_t)vm_to_int(args[0]);
                 int options = (argc >= 2) ? (int)vm_to_int(args[1]) : 0;
-                pid_t pid = waitpid((pid_t)vm_to_int(args[0]), &status, options);
+                vm->stack_top = sp;
+                int _ps = vm_worker_enter_safe(vm);
+                pid_t pid = waitpid(target_pid, &status, options);
+                vm_worker_leave_safe(vm, _ps);
+                stack = vm->stack; RELOAD();
                 if (__builtin_expect(strada_has_pending_signals(), 0)) {
                     vm->stack_top = sp;
                     int __th = vm_c_dispatch_signals(vm, &throw_exc);
@@ -7832,7 +8033,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 int64_t ns = vm_to_int(args[0]);
                 ts.tv_sec = ns / 1000000000;
                 ts.tv_nsec = ns % 1000000000;
+                vm->stack_top = sp;
+                int _ps = vm_worker_enter_safe(vm);
                 nanosleep(&ts, NULL);
+                vm_worker_leave_safe(vm, _ps);
+                stack = vm->stack; RELOAD();
             }
             SP_PUSH(VM_UNDEF_VAL);
             break;
@@ -7882,7 +8087,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             char hbuf[256];
             const char *host = vm_to_cstr(args[0], hbuf, 256);
             int port = (int)vm_to_int(args[1]);
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
             StradaValue *r = strada_socket_client(host, port);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             SP_PUSH(sv_to_vm(r)); strada_decref(r);
             break;
         }
@@ -7911,14 +8120,23 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_SOCKET_ACCEPT: RT_CALL_1(strada_socket_accept); break;
         case BUILTIN_CORE_SOCKET_RECV: {
             StradaValue *sock = vm_to_sv(args[0]);
-            StradaValue *r = strada_socket_recv(sock, (int)vm_to_int(args[1]));
+            int nbytes = (int)vm_to_int(args[1]);
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
+            StradaValue *r = strada_socket_recv(sock, nbytes);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             SP_PUSH(sv_to_vm(r)); strada_decref(r); strada_decref(sock);
             break;
         }
         case BUILTIN_CORE_SOCKET_SEND: {
             StradaValue *sock = vm_to_sv(args[0]);
             StradaValue *data = vm_to_sv(args[1]);
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
             int rc = strada_socket_send_sv(sock, data);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             SP_PUSH(VM_MAKE_INT(rc));
             strada_decref(sock); strada_decref(data);
             break;
@@ -8060,7 +8278,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_TERM_COLS: RT_CALL_0(strada_term_cols); break;
         case BUILTIN_CORE_READ_BYTE: {
             StradaValue *fd = vm_to_sv(args[0]);
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
             StradaValue *r = strada_read_byte(fd);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             SP_PUSH(sv_to_vm(r)); strada_decref(r); strada_decref(fd);
             break;
         }
@@ -8080,7 +8302,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_ASYNC_SEND: {
             StradaValue *ch = vm_to_sv(args[0]);
             StradaValue *val = vm_to_sv(args[1]);
+            vm->stack_top = sp;
+            int _ps = vm_worker_enter_safe(vm);
             strada_channel_send(ch, val);
+            vm_worker_leave_safe(vm, _ps);
+            stack = vm->stack; RELOAD();
             SP_PUSH(VM_UNDEF_VAL); strada_decref(ch); strada_decref(val);
             break;
         }
@@ -9966,15 +10192,18 @@ static inline void jb_call_c(JitBuf *b, void *fn) {
 
 /* Reload r12 (frame), r14 (stack), r15 (stack_top), r13 (locals = stack + local_base) from rbx (vm) */
 static void jb_reload_all(JitBuf *b) {
-    jb_mem(b, 1, 0x8B, JR_R12, JR_RBX, (int32_t)offsetof(VM, frames));
+    jb_mem(b, 1, 0x8B, JR_R14, JR_RBX, (int32_t)offsetof(VM, stack));
+    jb_mem(b, 1, 0x8B, JR_R15, JR_RBX, (int32_t)offsetof(VM, stack_top));
     jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
+    jb_rr(b, 1, 0x85, JR_RCX, JR_RCX); /* test rcx, rcx */
+    uint32_t j_no_frame = jb_jcc_placeholder(b, 0x84);
+    jb_mem(b, 1, 0x8B, JR_R12, JR_RBX, (int32_t)offsetof(VM, frames));
     jb_alu_ri32(b, 5, JR_RCX, 1); /* dec rcx */
     jb_rr(b, 1, 0x69, JR_RCX, JR_RCX); jb_u32(b, (uint32_t)sizeof(VMFrame));
     jb_rr(b, 1, 0x01, JR_RCX, JR_R12); /* add r12, rcx */
-    jb_mem(b, 1, 0x8B, JR_R14, JR_RBX, (int32_t)offsetof(VM, stack));
-    jb_mem(b, 1, 0x8B, JR_R15, JR_RBX, (int32_t)offsetof(VM, stack_top));
     jb_mem(b, 1, 0x8B, JR_RAX, JR_R12, (int32_t)offsetof(VMFrame, local_base));
     jb_sib8(b, 1, 0x8D, JR_R13, JR_R14, JR_RAX, 0); /* lea r13, [r14 + rax*8] */
+    jb_patch_here(b, j_no_frame);
 }
 
 /* Sync frame->ip = next_di and vm->stack_top = r15 */
@@ -10139,6 +10368,10 @@ static __attribute__((noinline)) int vm_jit_poll_signals(VM *vm) {
 }
 
 static __attribute__((noinline)) int vm_jit_poll_sig_and_gc(VM *vm) {
+    if (__builtin_expect(vm->is_worker_vm, 0)) {
+        vm_worker_poll_gc(vm);
+        return vm_jit_poll_signals(vm);
+    }
     if (vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0) {
         vm_gc_collect(vm);
         if (vm->has_pending_exc) return VM_JIT_EXC;
@@ -10313,14 +10546,17 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             int64_t ia = VM_INT_VAL(a), ib = VM_INT_VAL(b);
             if (okind == 0) r = VM_MAKE_INT(ia + ib);
             else if (okind == 1) r = VM_MAKE_INT(ia - ib);
-            else {
-                __int128 prod = (__int128)ia * (__int128)ib;
-                r = (prod >= VM_INT_MIN && prod <= VM_INT_MAX) ? VM_MAKE_INT((int64_t)prod) : VM_MAKE_FLOAT((double)ia * (double)ib);
-            }
+            else r = VM_MAKE_INT((int64_t)((uint64_t)ia * (uint64_t)ib));
         } else if (!VM_IS_PTR(a) && !VM_IS_PTR(b)) {
-            double da = VM_IS_FLOAT(a) ? VM_FLOAT_VAL(a) : (VM_IS_INT(a) ? (double)VM_INT_VAL(a) : 0.0);
-            double db = VM_IS_FLOAT(b) ? VM_FLOAT_VAL(b) : (VM_IS_INT(b) ? (double)VM_INT_VAL(b) : 0.0);
-            r = VM_MAKE_FLOAT(okind == 0 ? (da + db) : okind == 1 ? (da - db) : (da * db));
+            if (VM_IS_FLOAT(a) || VM_IS_FLOAT(b)) {
+                double da = VM_IS_FLOAT(a) ? VM_FLOAT_VAL(a) : (VM_IS_INT(a) ? (double)VM_INT_VAL(a) : 0.0);
+                double db = VM_IS_FLOAT(b) ? VM_FLOAT_VAL(b) : (VM_IS_INT(b) ? (double)VM_INT_VAL(b) : 0.0);
+                r = VM_MAKE_FLOAT(okind == 0 ? (da + db) : okind == 1 ? (da - db) : (da * db));
+            } else {
+                int64_t ia = VM_IS_INT(a) ? VM_INT_VAL(a) : 0;
+                int64_t ib = VM_IS_INT(b) ? VM_INT_VAL(b) : 0;
+                r = VM_MAKE_INT(okind == 0 ? (ia + ib) : okind == 1 ? (ia - ib) : (int64_t)((uint64_t)ia * (uint64_t)ib));
+            }
         } else {
             vm->stack_top = sp;
             r = vm_slow_bin_arith(vm, okind, a, b);
@@ -10358,8 +10594,11 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
         if (VM_BOTH_INT(a, b)) {
             int64_t bv = VM_INT_VAL(b);
             if (bv == 0) { vm->pending_exc = vm_str("Illegal modulus zero"); vm->has_pending_exc = 1; vm->stack_top = sp; return VM_JIT_EXC; }
-            int64_t av = VM_INT_VAL(a), r = av % bv;
-            if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            int64_t av = VM_INT_VAL(a), r = 0;
+            if (!(av == INT64_MIN && bv == -1)) {
+                r = av % bv;
+                if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            }
             J_PUSH(VM_MAKE_INT(r));
         } else {
             if (vm_obj_class_name(a) || vm_obj_class_name(b)) {
@@ -10373,8 +10612,11 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             }
             int64_t bv = vm_to_int(b);
             if (bv == 0) { vm->pending_exc = vm_str("Illegal modulus zero"); vm->has_pending_exc = 1; vm->stack_top = sp; return VM_JIT_EXC; }
-            int64_t av = vm_to_int(a), r = av % bv;
-            if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            int64_t av = vm_to_int(a), r = 0;
+            if (!(av == INT64_MIN && bv == -1)) {
+                r = av % bv;
+                if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            }
             J_PUSH(VM_MAKE_INT(r));
         }
         break;
@@ -10869,9 +11111,10 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
         if (__builtin_expect(vm_has_stringify(vm->program, rhs), 0)) {
             vm->stack_top = sp;
             rhs = vm_stringify_ov(vm, rhs);
-            stack = vm->stack; sp = vm->stack_top;
-            locals = stack + frame->local_base;
             if (vm->has_pending_exc) return VM_JIT_EXC;
+            stack = vm->stack; sp = vm->stack_top;
+            frame = &vm->frames[vm->frame_count - 1];
+            locals = stack + frame->local_base;
         }
         char buf[64]; size_t al;
         const char *as = vm_bytes_view(rhs, buf, sizeof(buf), &al);
@@ -10902,10 +11145,11 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                 VMValue rcopy = vm_make_str_flag(as, al, VM_IS_PTR(rhs) ? ((VMObjHeader*)VM_TO_PTR(rhs))->is_utf8 : 0);
                 J_PUSH(rcopy); vm->stack_top = sp;
                 lhs = vm_stringify_ov(vm, lhs);
-                stack = vm->stack; sp = vm->stack_top;
                 if (vm->has_pending_exc) return VM_JIT_EXC;
+                stack = vm->stack; sp = vm->stack_top;
                 rhs = J_POP();
                 as = vm_bytes_view(rhs, buf, sizeof(buf), &al);
+                frame = &vm->frames[vm->frame_count - 1];
                 locals = stack + frame->local_base;
                 loc = &locals[slot];
                 if (VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_CELL) loc = &VM_AS_CELL(*loc)->val;
@@ -10933,6 +11177,8 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
         uint16_t slot = di->b;
         const char *as = chunk->str_consts[str_idx];
         size_t al = chunk->str_const_lens ? chunk->str_const_lens[str_idx] : strlen(as);
+        int rhs_u8 = (chunk->str_const_vals && VM_IS_PTR(chunk->str_const_vals[str_idx]) &&
+                      ((VMObjHeader*)VM_TO_PTR(chunk->str_const_vals[str_idx]))->is_utf8) ? 1 : 0;
         VMValue *loc = &locals[slot];
         if (VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_CELL) loc = &VM_AS_CELL(*loc)->val;
         if (__builtin_expect(VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_TIED_SCALAR, 0)) {
@@ -10949,15 +11195,17 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             }
             if (al > 0) memcpy(sb->data + sb->len, as, al);
             sb->len += al; sb->data[sb->len] = 0;
+            if (rhs_u8) sb->hdr.is_utf8 = 1;
         } else {
             VMValue lhs = *loc;
             if (__builtin_expect(vm_has_stringify(vm->program, lhs), 0)) {
                 vm->stack_top = sp;
                 lhs = vm_stringify_ov(vm, lhs);
-                stack = vm->stack; sp = vm->stack_top;
                 if (vm->has_pending_exc) return VM_JIT_EXC;
+                stack = vm->stack; sp = vm->stack_top;
                 as = chunk->str_consts[str_idx];
                 al = chunk->str_const_lens ? chunk->str_const_lens[str_idx] : strlen(as);
+                frame = &vm->frames[vm->frame_count - 1];
                 locals = stack + frame->local_base;
                 loc = &locals[slot];
                 if (VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_CELL) loc = &VM_AS_CELL(*loc)->val;
@@ -10967,7 +11215,7 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             VMStrBuf *sb = malloc(sizeof(VMStrBuf));
             vm_gc_init_hdr(&sb->hdr, VM_OBJ_STRBUF);
             sb->shared = 0;
-            if (VM_IS_PTR(lhs) && ((VMObjHeader*)VM_TO_PTR(lhs))->is_utf8) sb->hdr.is_utf8 = 1;
+            if (rhs_u8 || (VM_IS_PTR(lhs) && ((VMObjHeader*)VM_TO_PTR(lhs))->is_utf8)) sb->hdr.is_utf8 = 1;
             sb->cap = (el + al) * 2 + 64; sb->data = malloc(sb->cap);
             if (el > 0) memcpy(sb->data, ex, el);
             if (al > 0) memcpy(sb->data + el, as, al);
@@ -11321,6 +11569,10 @@ static __attribute__((noinline)) int vm_jit_return_slow(VM *vm, VMValue res) {
 }
 
 static __attribute__((noinline)) int vm_jit_return_gc_only(VM *vm) {
+    if (__builtin_expect(vm->is_worker_vm, 0)) {
+        vm_worker_poll_gc(vm);
+        return VM_JIT_OK;
+    }
     if (vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0) {
         vm_gc_collect(vm);
         if (vm->has_pending_exc) return VM_JIT_EXC;
@@ -11760,6 +12012,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         case OP_ADD_TO_LOCAL: {
             uint16_t d = di->a, s = di->b;
             if (d > (uint16_t)max_loc || s > (uint16_t)max_loc) { bail_ok = 0; break; }
+            if (di->flags == 2) { jb_emit_step_helper(b, di, next_di, 0); break; }
             jb_mem(b, 1, 0x8B, JR_RAX, JR_R13, (int32_t)d * 8);
             jb_mem(b, 1, 0x8B, JR_RDX, JR_R13, (int32_t)s * 8);
             uint32_t j_notint = jb_j_not_both_int(b, JR_RAX, JR_RDX);
@@ -11781,6 +12034,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         case OP_SUB_TO_LOCAL_VAL: {
             uint16_t d = di->a;
             if (d > (uint16_t)max_loc) { bail_ok = 0; break; }
+            if (di->flags == 2) { jb_emit_step_helper(b, di, next_di, 0); break; }
             jb_mem(b, 1, 0x8B, JR_RAX, JR_R13, (int32_t)d * 8);
             jb_sib8(b, 1, 0x8B, JR_RDX, JR_R14, JR_R15, -8);
             uint32_t j_notint = jb_j_not_both_int(b, JR_RAX, JR_RDX);
@@ -12270,12 +12524,18 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_mov_rr(b, JR_RDI, JR_RBX);
             jb_mov_rr(b, JR_RSI, JR_RAX);
             jb_call_c(b, (void *)vm_jit_return_slow);
-            jb_push(b, JR_RAX); jb_reload_all(b); jb_pop(b, JR_RAX);
             /* vm_jit_return_slow returns 1 (stop->0), 0 (continue->0), or 2 (VM_JIT_EXC->2) */
+            jb_rr(b, 0, 0x85, JR_RAX, JR_RAX); /* test eax, eax */
+            uint32_t j_slow_cont = jb_jcc_placeholder(b, 0x84);
             jb_alu_ri32(b, 7, JR_RAX, VM_JIT_EXC);
             uint32_t j_ret_exc = jb_jcc_placeholder(b, 0x84);
             jb_u8(b, 0x31); jb_u8(b, 0xC0); /* xor eax, eax */
             jb_patch_here(b, j_ret_exc);
+            jb_pop(b, JR_RBP); jb_u8(b, 0xC3);
+
+            jb_patch_here(b, j_slow_cont);
+            jb_reload_all(b);
+            jb_u8(b, 0x31); jb_u8(b, 0xC0); /* xor eax, eax */
             jb_pop(b, JR_RBP); jb_u8(b, 0xC3);
             break;
         }
@@ -12808,6 +13068,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         } \
     } while (0)
 
+    #define VM_WORKER_SAFEPOINT(sync_ip) do { \
+        if (__builtin_expect(vm->is_worker_vm && vm->root_vm && \
+                             __atomic_load_n(&vm->root_vm->gc_requested, __ATOMIC_ACQUIRE), 0)) { \
+            frame->ip = (sync_ip); vm->stack_top = sp; \
+            vm_worker_park(vm); \
+            stack = vm->stack; RELOAD(); \
+        } \
+    } while (0)
+
     #define VM_VALUE_IS_TRUTHY(val_expr, res_bool) do { \
         VMValue _tv = (val_expr); \
         if (VM_IS_INT(_tv)) { (res_bool) = (_tv != VM_TAG_INT_BASE); } \
@@ -13082,11 +13351,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13119,11 +13391,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13152,11 +13427,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13341,11 +13619,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (target <= ip && __builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13376,11 +13657,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (target <= ip && __builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13413,11 +13697,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (target <= ip && __builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target; vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack; RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target; vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack; RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13629,8 +13916,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 throw_exc = vm_str("Illegal modulus zero");
                 goto L_vm_throw_exc;
             }
-            int64_t r = av % bv;
-            if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            int64_t r = 0;
+            if (!(av == INT64_MIN && bv == -1)) {
+                r = av % bv;
+                if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
+            }
             SP_PUSH(VM_MAKE_INT(r));
             DISPATCH();
         }
@@ -13894,6 +14184,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         VMInsn *target = chunk->dt_code + off;
         if (target <= ip) {
+            VM_WORKER_SAFEPOINT(target);
             if (__builtin_expect(vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0, 0)) {
                 frame->ip = target;
                 vm->stack_top = sp;
@@ -13926,13 +14217,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (target <= ip && __builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target;
-                vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack;
-                RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target;
+                    vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack;
+                    RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -13951,13 +14245,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
             }
             VMInsn *target = chunk->dt_code + off;
-            if (target <= ip && __builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
-                frame->ip = target;
-                vm->stack_top = sp;
-                int __th = vm_c_dispatch_signals(vm, &throw_exc);
-                stack = vm->stack;
-                RELOAD();
-                if (__th) goto L_vm_throw_exc;
+            if (target <= ip) {
+                VM_WORKER_SAFEPOINT(target);
+                if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
+                    frame->ip = target;
+                    vm->stack_top = sp;
+                    int __th = vm_c_dispatch_signals(vm, &throw_exc);
+                    stack = vm->stack;
+                    RELOAD();
+                    if (__th) goto L_vm_throw_exc;
+                }
             }
             VM_TRY_JIT_OSR(target);
             ip = target;
@@ -14120,6 +14417,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         frame->passed_argc = argc;
         frame->call_context = tc_ctx;
         chunk = callee; ip = callee->dt_code; locals = stack + base;
+        VM_WORKER_SAFEPOINT(ip);
         if (__builtin_expect((++sig_poll & 31) == 0 && strada_has_pending_signals(), 0)) {
             frame->ip = ip; vm->stack_top = sp;
             int __th = vm_c_dispatch_signals(vm, &throw_exc);
@@ -14161,6 +14459,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         stack[sp++] = result;
         frame = &vm->frames[vm->frame_count - 1];
         chunk = frame->chunk; ip = frame->ip; locals = stack + frame->local_base;
+        VM_WORKER_SAFEPOINT(ip);
         if (__builtin_expect(vm->gc_count >= vm->gc_threshold && vm->exec_base == 0 && vm->gc_pause == 0, 0)) {
             frame->ip = ip;
             vm->stack_top = sp;
@@ -16789,6 +17088,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t slot = di->b;
         const char *as = chunk->str_consts[str_idx];
         size_t al = chunk->str_const_lens ? chunk->str_const_lens[str_idx] : strlen(as);
+        int rhs_u8 = (chunk->str_const_vals && VM_IS_PTR(chunk->str_const_vals[str_idx]) &&
+                      ((VMObjHeader*)VM_TO_PTR(chunk->str_const_vals[str_idx]))->is_utf8) ? 1 : 0;
         VMValue *loc = &locals[slot];
         if (VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_CELL) loc = &VM_AS_CELL(*loc)->val;
         if (__builtin_expect(VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_TIED_SCALAR, 0)) {
@@ -16805,7 +17106,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 const char *ex = VM_IS_UNDEF(lhs) ? "" : vm_bytes_view(lhs, lbuf, sizeof(lbuf), &el);
                 VMString *vs = malloc(sizeof(VMString) + el + al + 1);
                 vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
-                if (vm_is_utf8(lhs)) vs->hdr.is_utf8 = 1;
+                if (rhs_u8 || vm_is_utf8(lhs)) vs->hdr.is_utf8 = 1;
                 vs->len = (uint32_t)(el + al);
                 if (el > 0) memcpy(vs->data, ex, el);
                 if (al > 0) memcpy(vs->data + el, as, al);
@@ -16827,6 +17128,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             }
             if (al > 0) memcpy(sb->data + sb->len, as, al);
             sb->len += al; sb->data[sb->len] = 0;
+            if (rhs_u8) sb->hdr.is_utf8 = 1;
         } else {
             VMValue lhs = *loc;
             if (__builtin_expect(vm_has_stringify(vm->program, lhs), 0)) {
@@ -16849,7 +17151,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VMStrBuf *sb = malloc(sizeof(VMStrBuf));
             vm_gc_init_hdr(&sb->hdr, VM_OBJ_STRBUF);
             sb->shared = 0;
-            if (VM_IS_PTR(lhs) && ((VMObjHeader*)VM_TO_PTR(lhs))->is_utf8) {
+            if (rhs_u8 || (VM_IS_PTR(lhs) && ((VMObjHeader*)VM_TO_PTR(lhs))->is_utf8)) {
                 sb->hdr.is_utf8 = 1;
             }
             sb->cap = (el + al) * 2 + 64; sb->data = malloc(sb->cap);
@@ -18105,13 +18407,21 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     CASE(OP_LOOP_NEXT): {
         uint16_t target = di->a;
-        if (__builtin_expect(target < chunk->dt_len, 1)) ip = chunk->dt_code + target;
+        if (__builtin_expect(target < chunk->dt_len, 1)) {
+            VMInsn *tgt = chunk->dt_code + target;
+            if (tgt <= ip) VM_WORKER_SAFEPOINT(tgt);
+            ip = tgt;
+        }
         DISPATCH();
     }
 
     CASE(OP_LOOP_REDO): {
         uint16_t target = di->a;
-        if (__builtin_expect(target < chunk->dt_len, 1)) ip = chunk->dt_code + target;
+        if (__builtin_expect(target < chunk->dt_len, 1)) {
+            VMInsn *tgt = chunk->dt_code + target;
+            if (tgt <= ip) VM_WORKER_SAFEPOINT(tgt);
+            ip = tgt;
+        }
         DISPATCH();
     }
 
@@ -18325,6 +18635,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     #undef SP_POP
     #undef RELOAD
     #undef VM_CHECK_EXC
+    #undef VM_WORKER_SAFEPOINT
     #undef VM_VALUE_IS_TRUTHY
     #undef DISPATCH
     #undef CASE

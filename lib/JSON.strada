@@ -928,8 +928,18 @@ func false() scalar {
 func is_bool(scalar $value) int {
     my int $b = 0;
     __C__ {
+        int res = 0;
+        StradaValue *v = value;
+        if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied
+            && v->type != STRADA_HASH && v->type != STRADA_ARRAY) {
+            StradaValue *fetched = strada_tied_scalar_fetch(v);
+            res = strada_is_bool(fetched) ? 1 : 0;
+            if (fetched) strada_decref(fetched);
+        } else {
+            res = strada_is_bool(v) ? 1 : 0;
+        }
         strada_decref(b);
-        b = strada_new_int(strada_is_bool(value) ? 1 : 0);
+        b = strada_new_int(res);
     }
     return $b;
 }

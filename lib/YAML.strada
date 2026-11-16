@@ -1060,8 +1060,8 @@ func parse_array(scalar $state, int $base_indent) scalar {
 
         my str $content = YAML::trim($line);
 
-        # Must start with -
-        if (substr($content, 0, 1) ne "-") {
+        # Must start with "- " or be bare "-"
+        if (substr($content, 0, 2) ne "- " && $content ne "-") {
             return $result;
         }
 

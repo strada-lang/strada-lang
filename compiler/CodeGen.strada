@@ -2136,6 +2136,11 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "ge");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "cmp");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "neg");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "&");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "|");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "^");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "<<");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, ">>");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "~");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "bool");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "!");
@@ -2374,6 +2379,16 @@ func emit_overload_binary_fallback(scalar $cg, str $op) void {
         emit($cg, "strada_safe_mod((int64_t)strada_to_int(__ol_l), (int64_t)strada_to_int(__ol_r))");
     } elsif ($op eq "**") {
         emit($cg, "strada_new_num(pow(strada_to_num(__ol_l), strada_to_num(__ol_r)))");
+    } elsif ($op eq "&") {
+        emit($cg, "strada_new_int_il(strada_to_int(__ol_l) & strada_to_int(__ol_r))");
+    } elsif ($op eq "|") {
+        emit($cg, "strada_new_int_il(strada_to_int(__ol_l) | strada_to_int(__ol_r))");
+    } elsif ($op eq "^") {
+        emit($cg, "strada_new_int_il(strada_to_int(__ol_l) ^ strada_to_int(__ol_r))");
+    } elsif ($op eq "<<") {
+        emit($cg, "({ int64_t __shl_l = strada_to_int(__ol_l); int64_t __shl_r = strada_to_int(__ol_r); strada_new_int_il((__shl_r < 0 || __shl_r >= 64) ? 0 : (int64_t)((uint64_t)__shl_l << (int)__shl_r)); })");
+    } elsif ($op eq ">>") {
+        emit($cg, "({ int64_t __shr_l = strada_to_int(__ol_l); int64_t __shr_r = strada_to_int(__ol_r); strada_new_int_il((__shr_r < 0 || __shr_r >= 64) ? (__shr_l < 0 ? -1 : 0) : (__shr_l >> (int)__shr_r)); })");
     } elsif ($op eq ".") {
         emit($cg, "strada_concat_sv(__ol_l, __ol_r)");
     } elsif ($op eq "==") {
@@ -4894,12 +4909,22 @@ func expr_is_numeric(scalar $cg, scalar $expr) int {
         my str $op = $expr->{"op"};
         if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "/"
             || $op eq "%" || $op eq "**") {
+            if ($cg->{"has_overloads"} != 0 && length("" . $cg->{"overloaded_ops"}->{$op}) > 0) {
+                if (could_be_blessed($expr->{"left"}) == 1 || could_be_blessed($expr->{"right"}) == 1) {
+                    return 0;
+                }
+            }
             return 1;
         }
         return 0;
     }
     if ($t == NODE_UNARY_OP()) {
         if ($expr->{"op"} eq "-") {
+            if ($cg->{"has_overloads"} != 0 && length("" . $cg->{"overloaded_ops"}->{"neg"}) > 0) {
+                if (could_be_blessed($expr->{"operand"}) == 1) {
+                    return 0;
+                }
+            }
             return 1;
         }
         return 0;
@@ -4946,12 +4971,22 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
             }
         }
         if ($op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>") {
+            if ($cg->{"has_overloads"} != 0 && length("" . $cg->{"overloaded_ops"}->{$op}) > 0) {
+                if (could_be_blessed($expr->{"left"}) == 1 || could_be_blessed($expr->{"right"}) == 1) {
+                    return 0;
+                }
+            }
             return 1;
         }
         return 0;
     }
     if ($type == NODE_UNARY_OP()) {
         if ($expr->{"op"} eq "~") {
+            if ($cg->{"has_overloads"} != 0 && length("" . $cg->{"overloaded_ops"}->{"~"}) > 0) {
+                if (could_be_blessed($expr->{"operand"}) == 1) {
+                    return 0;
+                }
+            }
             return 1;
         }
         return 0;
@@ -5952,8 +5987,9 @@ func pf_is_mutating_builtin(str $fn_name, int $argc) int {
         $cn eq "tied" || $cn eq "undef" || $cn eq "weaken" || $cn eq "free" ||
         $cn eq "release" || $cn eq "read" || $cn eq "sysread" || $cn eq "recv" ||
         $cn eq "accept" || $cn eq "open" || $cn eq "opendir" || $cn eq "pipe" ||
-        $cn eq "socketpair" || $cn eq "readline" || $cn eq "utf8::upgrade" ||
-        $cn eq "utf8::downgrade" || $cn eq "utf8::encode" || $cn eq "utf8::decode") {
+        $cn eq "socketpair" || $cn eq "readline" || $cn eq "vec_set" ||
+        $cn eq "utf8::upgrade" || $cn eq "utf8::downgrade" ||
+        $cn eq "utf8::encode" || $cn eq "utf8::decode") {
         return 1;
     }
     if (($cn eq "substr" || $cn eq "substr_bytes" || $cn eq "vec") && $argc >= 4) {
@@ -6110,6 +6146,7 @@ func pf_walk_node(scalar $cg, scalar $node, scalar $state) void {
             pf_walk_node($cg, $stgt, $state);
         }
         if ($node->{"replacement"}) { pf_walk_node($cg, $node->{"replacement"}, $state); }
+        if ($node->{"eval_expr"}) { pf_walk_node($cg, $node->{"eval_expr"}, $state); }
         return;
     }
     if ($nt == NODE_ASSIGN()) {
@@ -6312,20 +6349,73 @@ func prescan_func_locals(scalar $cg, scalar $fn, scalar $cand_boxed_ref) void {
     }
 }
 
+func lit_is_zero_int(str $val) int {
+    my int $n = length($val);
+    if ($n == 0) { return 1; }
+    my int $i = 0;
+    my str $ch0 = substr($val, 0, 1);
+    if ($ch0 eq "-" || $ch0 eq "+") {
+        $i = 1;
+    }
+    if ($i + 2 <= $n) {
+        my str $pfx = substr($val, $i, 2);
+        if ($pfx eq "0x" || $pfx eq "0X" || $pfx eq "0b" || $pfx eq "0B" || $pfx eq "0o" || $pfx eq "0O") {
+            $i = $i + 2;
+        }
+    }
+    my int $digits = 0;
+    while ($i < $n) {
+        my str $c = substr($val, $i, 1);
+        if ($c eq "0") {
+            $digits = $digits + 1;
+        } elsif ($c ne "_") {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    if ($digits > 0) { return 1; }
+    return 0;
+}
+
+func lit_is_zero_num(str $val) int {
+    my int $n = length($val);
+    if ($n == 0) { return 1; }
+    my int $i = 0;
+    my str $ch0 = substr($val, 0, 1);
+    if ($ch0 eq "-" || $ch0 eq "+") {
+        $i = 1;
+    }
+    my int $digits = 0;
+    while ($i < $n) {
+        my str $c = substr($val, $i, 1);
+        if ($c eq "e" || $c eq "E") {
+            last;
+        }
+        if ($c eq "0") {
+            $digits = $digits + 1;
+        } elsif ($c ne "." && $c ne "_") {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    if ($digits > 0) { return 1; }
+    return 0;
+}
+
 # Helper: emit a bool operand efficiently
 # For literals, emit the value directly; otherwise use strada_to_bool()
 func emit_bool_operand(scalar $cg, scalar $expr) void {
     my int $type = $expr->{"type"};
     if ($type == NODE_INT_LITERAL()) {
         my str $val = $expr->{"value"};
-        if ($val eq "0") {
+        if (lit_is_zero_int($val) == 1) {
             emit($cg, "0");
         } else {
             emit($cg, "1");
         }
     } elsif ($type == NODE_NUM_LITERAL()) {
         my str $val = $expr->{"value"};
-        if ($val eq "0" || $val eq "0.0") {
+        if (lit_is_zero_num($val) == 1) {
             emit($cg, "0");
         } else {
             emit($cg, "1");
@@ -6623,7 +6713,7 @@ func emit_condition(scalar $cg, scalar $expr) void {
     # Literals: emit 0 or 1 directly
     if ($type == NODE_INT_LITERAL()) {
         my str $val = $expr->{"value"};
-        if ($val eq "0") {
+        if (lit_is_zero_int($val) == 1) {
             emit($cg, "0");
         } else {
             emit($cg, "1");
@@ -6632,7 +6722,7 @@ func emit_condition(scalar $cg, scalar $expr) void {
     }
     if ($type == NODE_NUM_LITERAL()) {
         my str $val = $expr->{"value"};
-        if ($val eq "0" || $val eq "0.0") {
+        if (lit_is_zero_num($val) == 1) {
             emit($cg, "0");
         } else {
             emit($cg, "1");

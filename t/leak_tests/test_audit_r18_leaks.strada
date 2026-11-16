@@ -1,0 +1,93 @@
+# Cycle 18 Valgrind Leak Test (Compiled C3, C4, C7, R1, R2, R3, L4-L6)
+use lib "lib";
+use JSON;
+use YAML;
+use Template;
+
+package R18LkOv;
+use overload
+    "+" => "add",
+    "*" => "mul",
+    "&" => "band",
+    "~" => "bnot",
+    "neg" => "neg",
+    '""' => "to_s";
+func new(int $v) scalar { return bless({"v" => $v}, "R18LkOv"); }
+func to_s(scalar $s) str { return "O" . $s->{"v"}; }
+func add(scalar $s, scalar $o, int $rev) scalar { return R18LkOv::new($s->{"v"} + ($o + 0)); }
+func mul(scalar $s, scalar $o, int $rev) scalar { return R18LkOv::new($s->{"v"} * ($o + 0)); }
+func band(scalar $s, scalar $o, int $rev) scalar { return R18LkOv::new($s->{"v"} & ($o + 0)); }
+func bnot(scalar $s) scalar { return R18LkOv::new($s->{"v"} + 1); }
+func neg(scalar $s) scalar { return R18LkOv::new(-$s->{"v"}); }
+
+package R18LkTie;
+func TIESCALAR(str $c, scalar $v) scalar { return bless({"v" => $v}, $c); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"v"} = $v; }
+
+package R18LkPool;
+func new(int $v) scalar { return bless({"v" => $v}, "R18LkPool"); }
+func DESTROY(scalar $s) void { my int $x = $s->{"v"}; }
+
+package main;
+
+func main() int {
+    # C7: Directly blessed hash & array self-cycles + dumper_str
+    for (my int $i = 0; $i < 40; $i = $i + 1) {
+        my scalar $h = bless({"id" => $i}, "R18DirH");
+        $h->{"self"} = $h;
+        $h->{"k"} = 1;
+        $h->{"k"} = $h;
+        my str $dh = core::dumper_str($h);
+
+        my scalar $a = bless([$i], "R18DirA");
+        $a->[1] = $a;
+        my str $da = core::dumper_str($a);
+        if (index($dh, "R18DirH") < 0 || index($da, "R18DirA") < 0) { return 1; }
+    }
+
+    # C3 & C4: Overloaded operators & s///e mutation
+    my scalar $o1 = R18LkOv::new(7);
+    my int $r = (($o1 + 3) * 2)->{"v"} + ((~$o1) & 15)->{"v"} + (-$o1)->{"v"};
+    my int $c = 0;
+    my str $tx = "a_a_a";
+    $tx =~ s/a/"[" . ($c = $c + 1) . "]"/ge;
+    if ($r != 21 || $c != 3) { return 2; }
+
+    # R1: high-bit hash concat lookup & delete
+    my str $pfx = chr(210) . "_";
+    my hash %hm = ();
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        my str $k = $pfx . $i;
+        $hm{$k} = $i;
+    }
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        if ($hm{$pfx . $i} != $i) { return 3; }
+        delete($hm{$pfx . $i});
+    }
+
+    # R2: Pool + weakref + DESTROY
+    for (my int $i = 0; $i < 30; $i = $i + 1) {
+        my scalar $p = R18LkPool::new($i);
+        my scalar $w = $p;
+        core::weaken($w);
+        $p = undef;
+        if (defined($w)) { return 4; }
+    }
+
+    # R3: pack x/X counts
+    my str $pk = core::pack("x0 X0 A2 x-3 X-1 A2", "ab", "cd");
+    if ($pk ne "abcd") { return 5; }
+
+    # L4-L6: JSON::is_bool tied, YAML -foo, Template try/catch/final block
+    my scalar $tb = "";
+    tie($tb, "R18LkTie", JSON::true());
+    my int $ib = JSON::is_bool($tb);
+    untie($tb);
+    my scalar $yd = YAML::Load("k: -foo\narr:\n  - x\n");
+    my str $tp = Template::render("[% TRY %][% BLOCK rb %]OK[% END %][% END %][% PROCESS rb %]", {});
+    if ($ib != 1 || $yd->{"k"} ne "-foo" || $tp ne "OK") { return 6; }
+
+    say("LEAK_AUDIT_R18_OK");
+    return 0;
+}

@@ -2603,7 +2603,7 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
             StradaHashEntry *e = &hv->entries[idx];
             if (__builtin_expect(e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0, 1)) {
-                if (__builtin_expect(val && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_REF && !strada_is_slot_ref(val), 0)) {
+                if (__builtin_expect(val && !STRADA_IS_TAGGED_INT(val) && ((val->type == STRADA_REF && !strada_is_slot_ref(val)) || (val->type == STRADA_HASH && val->value.hv == hv)), 0)) {
                     strada_hash_set_ph_len(hv, key, key_len, hash, val);
                     return;
                 }
@@ -2660,7 +2660,7 @@ STRADA_HOT_INLINE void strada_hv_store_take_ph_len(StradaValue *sv, const char *
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
             StradaHashEntry *e = &hv->entries[idx];
             if (__builtin_expect(e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0, 1)) {
-                if (__builtin_expect(val && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_REF && !strada_is_slot_ref(val), 0)) {
+                if (__builtin_expect(val && !STRADA_IS_TAGGED_INT(val) && ((val->type == STRADA_REF && !strada_is_slot_ref(val)) || (val->type == STRADA_HASH && val->value.hv == hv)), 0)) {
                     strada_hash_set_take_ph_len(hv, key, key_len, hash, val);
                     return;
                 }

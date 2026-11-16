@@ -35,12 +35,12 @@ func fp_open(str $filename) int {
         _fp_file = fopen(fname, "rb");
         free(fname);
         _fp_eof = 0;
-        _fp_rem = 0;
+        _fp_rem = -1;
         if (_fp_file) {
             long pos = ftell(_fp_file);
-            if (fseek(_fp_file, 0, SEEK_END) == 0) {
+            if (pos >= 0 && fseek(_fp_file, 0, SEEK_END) == 0) {
                 long end = ftell(_fp_file);
-                if (end >= pos && pos >= 0) _fp_rem = end - pos;
+                if (end >= pos) _fp_rem = end - pos;
                 fseek(_fp_file, pos, SEEK_SET);
             }
         }
@@ -82,7 +82,7 @@ func fp_read_magic() int {
         char buf[4];
         if (_fp_file && fread(buf, 1, 4, _fp_file) == 4 &&
             buf[0] == 'S' && buf[1] == 'T' && buf[2] == 'F' && buf[3] == 'P') {
-            if (_fp_rem >= 4) _fp_rem -= 4; else _fp_rem = 0;
+            if (_fp_rem >= 4) _fp_rem -= 4; else if (_fp_rem >= 0) _fp_rem = 0;
             strada_decref(ok);
             ok = strada_new_int(1);
         } else {
@@ -97,7 +97,7 @@ func fp_read_u32() int {
     __C__ {
         uint32_t v = 0;
         if (_fp_file && fread(&v, 4, 1, _fp_file) == 1) {
-            if (_fp_rem >= 4) _fp_rem -= 4; else _fp_rem = 0;
+            if (_fp_rem >= 4) _fp_rem -= 4; else if (_fp_rem >= 0) _fp_rem = 0;
         } else {
             _fp_eof = 1;
             v = 0;
@@ -113,7 +113,7 @@ func fp_read_u64() int {
     __C__ {
         uint64_t v = 0;
         if (_fp_file && fread(&v, 8, 1, _fp_file) == 1) {
-            if (_fp_rem >= 8) _fp_rem -= 8; else _fp_rem = 0;
+            if (_fp_rem >= 8) _fp_rem -= 8; else if (_fp_rem >= 0) _fp_rem = 0;
             if (v > (uint64_t)INT64_MAX) {
                 _fp_eof = 1;
                 v = 0;
@@ -154,7 +154,7 @@ func fp_read_string(int $len) str {
         if (n < 0 || n > 1048576 || !_fp_file) {
             _fp_eof = 1;
         } else if (n > 0) {
-            if (_fp_rem > 0 && n > _fp_rem) {
+            if (_fp_rem >= 0 && n > _fp_rem) {
                 _fp_eof = 1;
             } else {
                 char *buf = (char *)malloc((size_t)n + 1);
@@ -163,7 +163,7 @@ func fp_read_string(int $len) str {
                     if (got < (size_t)n) {
                         _fp_eof = 1;
                     } else {
-                        if (_fp_rem >= (long)got) _fp_rem -= (long)got; else _fp_rem = 0;
+                        if (_fp_rem >= (long)got) _fp_rem -= (long)got; else if (_fp_rem >= 0) _fp_rem = 0;
                         buf[got] = '\0';
                         strada_decref(result);
                         result = strada_new_str_len(buf, got);
@@ -619,7 +619,8 @@ func main() int {
     }
 
     my int $file_count = fp_read_u32();
-    if (fp_error() != 0 || $file_count < 0 || $file_count * 12 > fp_remaining()) {
+    my int $rem0 = fp_remaining();
+    if (fp_error() != 0 || $file_count < 0 || ($rem0 >= 0 && $file_count * 12 > $rem0)) {
         say("Error: Corrupt file_count in STFP header");
         fp_close();
         return 1;
@@ -630,7 +631,8 @@ func main() int {
     my int $fi = 0;
     while ($fi < $file_count) {
         my int $name_len = fp_read_u32();
-        if (fp_error() != 0 || $name_len < 0 || $name_len > 1048576 || $name_len > fp_remaining()) {
+        my int $rem1 = fp_remaining();
+        if (fp_error() != 0 || $name_len < 0 || $name_len > 1048576 || ($rem1 >= 0 && $name_len > $rem1)) {
             say("Error: Corrupt filename length in STFP file");
             fp_close();
             return 1;
@@ -645,7 +647,8 @@ func main() int {
 
         my int $max_line = fp_read_u32();
         my int $nonzero_count = fp_read_u32();
-        if (fp_error() != 0 || $nonzero_count < 0 || $nonzero_count * 20 > fp_remaining()) {
+        my int $rem2 = fp_remaining();
+        if (fp_error() != 0 || $nonzero_count < 0 || ($rem2 >= 0 && $nonzero_count * 20 > $rem2)) {
             say("Error: Corrupt line count in STFP file");
             fp_close();
             return 1;
@@ -674,7 +677,8 @@ func main() int {
     }
 
     my int $func_count = fp_read_u32();
-    if (fp_error() != 0 || $func_count < 0 || $func_count * 28 > fp_remaining()) {
+    my int $rem3 = fp_remaining();
+    if (fp_error() != 0 || $func_count < 0 || ($rem3 >= 0 && $func_count * 28 > $rem3)) {
         say("Error: Corrupt func_count in STFP file");
         fp_close();
         return 1;
@@ -686,7 +690,8 @@ func main() int {
     $fi = 0;
     while ($fi < $func_count) {
         my int $name_len = fp_read_u32();
-        if (fp_error() != 0 || $name_len < 0 || $name_len > 1048576 || $name_len > fp_remaining()) {
+        my int $rem4 = fp_remaining();
+        if (fp_error() != 0 || $name_len < 0 || $name_len > 1048576 || ($rem4 >= 0 && $name_len > $rem4)) {
             say("Error: Corrupt function name length in STFP file");
             fp_close();
             return 1;

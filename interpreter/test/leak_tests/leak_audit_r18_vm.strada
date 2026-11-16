@@ -1,0 +1,85 @@
+# Cycle 18 Bytecode VM Valgrind Leak Test (V1-V9, C7, R1)
+
+package R18VmLkOv;
+use overload '""' => "ts";
+func new(int $n) scalar { return bless({"n" => $n}, "R18VmLkOv"); }
+func rec(int $d) int { return $d <= 0 ? 1 : rec($d - 1) + 1; }
+func ts(scalar $s) str { return "L" . $s->{"n"} . ":" . rec(280); }
+
+package main;
+
+our str $g_r18_lk = "base";
+
+func lk_v2(int $x) int {
+    local $g_r18_lk = "sub";
+    return $x + 1;
+}
+
+func lk_mod(scalar $a, scalar $b) int { return $a % $b; }
+
+func lk_app(scalar $ov) str {
+    my str $s = "p";
+    $s .= $ov;
+    $s .= "café";
+    return $s;
+}
+
+func main() int {
+    # V1: tombstone churn
+    my hash %h = ("a" => 1, "b" => 2, "c" => 3, "d" => 4);
+    delete($h{"a"}); delete($h{"b"}); delete($h{"c"});
+    for (my int $i = 0; $i < 120; $i = $i + 1) {
+        my str $k = "z_" . $i;
+        $h{$k} = $i;
+        delete($h{$k});
+    }
+    if (exists($h{"missing"}) || $h{"d"} != 4) { return 1; }
+
+    # V2-V5: JIT OP_RETURN slow path, 50-bit mul, INT64_MIN % -1, num accum
+    my int $s2 = 0;
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $s2 = $s2 + lk_v2($i); }
+    my int $m50 = 1048576 * 1073741824;
+    my int $mm = 0;
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $mm = lk_mod("-9223372036854775808", -1); }
+    my num $nx = 1.0;
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $nx += 2; $nx -= 1; }
+    if (typeof($m50) ne "int" || $mm != 0 || typeof($nx) ne "num") { return 2; }
+
+    # V6, V8, V9: append ov frame growth + UTF-8 const + hash keys/each UTF-8
+    my scalar $ov = R18VmLkOv::new(4);
+    my str $as = "";
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $as = lk_app($ov); }
+    my hash %uh = ("café" => 1);
+    my array @uks = keys(%uh);
+    my array @uev = each(%uh);
+    if (utf8::is_utf8($as) != 1 || utf8::is_utf8($uks[0]) != 1 || utf8::is_utf8($uev[0]) != 1) { return 3; }
+
+    # V7: Worker VM STW GC + blocking channel
+    my scalar $c1 = async::channel(2);
+    my scalar $c2 = async::channel(2);
+    my scalar $t1 = thread::create(func () {
+        async::send($c1, 1);
+        return async::recv($c2) + 1;
+    });
+    my scalar $t2 = thread::create(func () {
+        my int $sum = 0;
+        for (my int $i = 0; $i < 300; $i = $i + 1) { my scalar $x = {"i" => $i}; $sum = $sum + $i; }
+        return $sum;
+    });
+    async::recv($c1);
+    core::gc_collect();
+    async::send($c2, 10);
+    if (thread::join($t1) != 11) { return 4; }
+    thread::join($t2);
+    core::gc_collect();
+
+    # C7: directly-blessed cycle + dumper
+    my scalar $bh = bless({"a" => 1}, "R18VmDirH");
+    $bh->{"self"} = $bh;
+    my scalar $ba = bless([1], "R18VmDirA");
+    $ba->[1] = $ba;
+    if (index(core::dumper_str($bh), "R18VmDirH") < 0 || index(core::dumper_str($ba), "R18VmDirA") < 0) { return 5; }
+
+    say("LEAK_AUDIT_R18_VM_OK");
+    return 0;
+}

@@ -492,6 +492,14 @@ func register_blocks(scalar $nodes, scalar $table) void {
             my scalar $cases = $node->{"cases"};
             my int $j = 0;
             while ($j < size(@{$cases})) { register_blocks($cases->[$j]->{"body"}, $table); $j = $j + 1; }
+        } elsif ($t eq "try") {
+            register_blocks($node->{"body"}, $table);
+            my scalar $catches = $node->{"catches"};
+            if (defined($catches)) {
+                my int $j = 0;
+                while ($j < size(@{$catches})) { register_blocks($catches->[$j]->{"body"}, $table); $j = $j + 1; }
+            }
+            if (defined($node->{"final"})) { register_blocks($node->{"final"}, $table); }
         }
         $i = $i + 1;
     }

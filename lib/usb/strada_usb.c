@@ -868,7 +868,7 @@ int strada_usb_set_auto_detach_raw(void *handle, int enable) {
 
 /* Bulk write - returns bytes transferred or error */
 int strada_usb_bulk_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
-    if (!handle || length < 0 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || (length > 0 && !data) || ((endpoint & 0x80) != 0)) return LIBUSB_ERROR_INVALID_PARAM;
     int transferred = 0;
     int ret = libusb_bulk_transfer((libusb_device_handle *)handle,
                                     (unsigned char)endpoint,
@@ -914,7 +914,7 @@ char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int time
 
 /* Interrupt write */
 int strada_usb_interrupt_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
-    if (!handle || length < 0 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || (length > 0 && !data) || ((endpoint & 0x80) != 0)) return LIBUSB_ERROR_INVALID_PARAM;
     int transferred = 0;
     int ret = libusb_interrupt_transfer((libusb_device_handle *)handle,
                                          (unsigned char)endpoint,
@@ -953,7 +953,7 @@ char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int
 /* Control transfer write */
 int strada_usb_control_write_raw(void *handle, int request_type, int request,
                                   int value, int idx, const char *data, int length, int timeout) {
-    if (!handle || length < 0 || length > 65535 || (length > 0 && !data)) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || length > 65535 || (length > 0 && !data) || ((request_type & 0x80) != 0)) return LIBUSB_ERROR_INVALID_PARAM;
     return libusb_control_transfer((libusb_device_handle *)handle,
                                     (uint8_t)request_type, (uint8_t)request,
                                     (uint16_t)value, (uint16_t)idx,

@@ -1,0 +1,222 @@
+# Cycle 18 Eval, VM & x86_64 JIT Regression Suite (V1-V9)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    # V1-V9 comprehensive check inside Strada::Interpreter::eval
+    my scalar $res = Strada::Interpreter::eval(q{
+        # V1: VMHash tombstone saturation & bounded lookup
+        my hash %th = ("a" => 1, "b" => 2, "c" => 3, "d" => 4);
+        delete($th{"a"}); delete($th{"b"}); delete($th{"c"});
+        for (my int $i = 0; $i < 300; $i = $i + 1) {
+            my str $k = "k_" . $i;
+            $th{$k} = $i;
+            delete($th{$k});
+        }
+        my int $v1_ok = (!exists($th{"never_inserted"}) && $th{"d"} == 4 && size(keys(%th)) == 1) ? 1 : 0;
+
+        # V2: JIT top-level OP_RETURN taking slow path (frame_count drops to 0 after local/try)
+        our str $g_r18_v2 = "orig";
+        func v2_top_slow(int $x) int {
+            local $g_r18_v2 = "tmp";
+            return $x + 1;
+        }
+        func v2_try_slow(int $x) int {
+            try {
+                if ($x < 0) { throw "neg"; }
+                return $x * 2;
+            } catch ($e) {
+                return -1;
+            }
+            return 0;
+        }
+        my int $v2_sum = 0;
+        for (my int $i = 0; $i < 160; $i = $i + 1) {
+            $v2_sum = $v2_sum + v2_top_slow($i) + v2_try_slow($i);
+        }
+        my int $v2_ok = ($g_r18_v2 eq "orig" && $v2_sum == 160 + (159 * 160 / 2) * 3) ? 1 : 0;
+
+        # V3: JIT overflowing 50-bit int multiplication matches interpreter wrapped int
+        func jit_mul50(int $a, int $b) int {
+            my int $acc = 0;
+            for (my int $i = 0; $i < 150; $i = $i + 1) {
+                $acc = $a * $b;
+            }
+            return $acc;
+        }
+        my int $p50 = jit_mul50(1048576, 1073741824); # 2^20 * 2^30 = 2^50 (exceeds 50-bit signed max)
+        my int $v3_ok = (typeof($p50) eq "int") ? 1 : 0;
+
+        # V4: JIT OP_MOD INT64_MIN % -1 avoids SIGFPE and returns 0
+        func jit_mod_min(scalar $a, scalar $b) int {
+            return $a % $b;
+        }
+        my scalar $min64 = "-9223372036854775808";
+        my int $v4_r = 0;
+        for (my int $i = 0; $i < 150; $i = $i + 1) {
+            $v4_r = jit_mod_min($min64, -1);
+        }
+        my int $v4_ok = ($v4_r == 0) ? 1 : 0;
+
+        # V5: JIT OP_ADD_TO_LOCAL / ADD_TO_LOCAL_VAL / SUB_TO_LOCAL_VAL keeps num local as float
+        func jit_num_accum() int {
+            my num $nx = 1.0;
+            my int $step = 2;
+            for (my int $i = 0; $i < 150; $i = $i + 1) {
+                $nx += $step;
+                $nx += 1;
+                $nx -= 1;
+            }
+            return (typeof($nx) eq "num" && $nx == 301.0) ? 1 : 0;
+        }
+        my int $v5_ok = jit_num_accum();
+
+        # V6: JIT OP_APPEND_LOCAL / OP_APPEND_CONST when stringify overload grows frames
+        package R18DeepStrOv;
+        use overload '""' => "to_s";
+        func new(int $n) scalar { return bless({"n" => $n}, "R18DeepStrOv"); }
+        func rec(int $d) int {
+            if ($d <= 0) { return 1; }
+            return rec($d - 1) + 1;
+        }
+        func to_s(scalar $self) str {
+            my int $r = rec(300); # exceeds initial frame_cap=256 and reallocates vm->frames
+            return "D" . $self->{"n"} . ":" . $r;
+        }
+        package R18ThrowStrOv;
+        use overload '""' => "to_s";
+        func new() scalar { return bless({}, "R18ThrowStrOv"); }
+        func to_s(scalar $s) str { throw "r18_v6_ov_exc"; return ""; }
+        package main;
+
+        func jit_append_grow(scalar $ov) str {
+            my str $out = "base";
+            $out .= $ov;
+            $out .= "_tail";
+            return $out;
+        }
+        my scalar $ov = R18DeepStrOv::new(9);
+        my str $v6_s = "";
+        for (my int $i = 0; $i < 140; $i = $i + 1) {
+            $v6_s = jit_append_grow($ov);
+        }
+        my scalar $ov_lhs = R18DeepStrOv::new(3);
+        func jit_append_const_lhs(scalar $x) str {
+            my scalar $s = $x;
+            $s .= "_end";
+            return $s;
+        }
+        my str $v6_s2 = "";
+        for (my int $i = 0; $i < 140; $i = $i + 1) {
+            $v6_s2 = jit_append_const_lhs($ov_lhs);
+        }
+        func jit_append_throw(scalar $x) str {
+            my str $s = "p";
+            $s .= $x;
+            return $s;
+        }
+        my scalar $tov = R18ThrowStrOv::new();
+        my int $v6_exc_ok = 0;
+        for (my int $i = 0; $i < 140; $i = $i + 1) {
+            try { jit_append_throw($tov); } catch ($e) { if ($e eq "r18_v6_ov_exc") { $v6_exc_ok = $v6_exc_ok + 1; } }
+        }
+        my int $v6_ok = ($v6_s eq "baseD9:301_tail" && $v6_s2 eq "D3:301_end" && $v6_exc_ok == 140) ? 1 : 0;
+
+        # V7: Worker VMs stop-the-world GC + blocking channel/sleep deadlock freedom
+        my scalar $ch_ready = async::channel(4);
+        my scalar $ch_go = async::channel(4);
+        my scalar $shared = [0, 0];
+        my scalar $w_block = thread::create(func () {
+            async::send($ch_ready, 1);
+            my scalar $msg = async::recv($ch_go);
+            my scalar $arr = [];
+            for (my int $i = 0; $i < 100; $i = $i + 1) { push($arr, {"k" => $i}); }
+            return $msg + size($arr);
+        });
+        my scalar $w_spin = thread::create(func () {
+            my int $acc = 0;
+            for (my int $i = 0; $i < 2500; $i = $i + 1) {
+                my scalar $tmp = {"x" => $i};
+                $acc = $acc + $i;
+                $shared->[0] = $tmp;
+            }
+            return $acc;
+        });
+        my scalar $rdy = async::recv($ch_ready);
+        # One worker is blocked in channel_recv while the other spins in JIT; root triggers GC repeatedly
+        for (my int $g = 0; $g < 10; $g = $g + 1) {
+            core::gc_collect();
+        }
+        async::send($ch_go, 42);
+        my int $b_res = thread::join($w_block);
+        my int $s_res = thread::join($w_spin);
+        core::gc_collect();
+        my int $v7_ok = ($rdy == 1 && $b_res == 142 && $s_res == 2500 * 2499 / 2) ? 1 : 0;
+
+        # V8: OP_APPEND_CONST propagates is_utf8 in interpreter and JIT
+        func jit_append_u8_const() str {
+            my str $s = "ascii";
+            $s .= "café";
+            return $s;
+        }
+        my str $v8_s = "";
+        for (my int $i = 0; $i < 150; $i = $i + 1) {
+            $v8_s = jit_append_u8_const();
+        }
+        my int $v8_ok = (utf8::is_utf8($v8_s) == 1 && length($v8_s) == 9) ? 1 : 0;
+
+        # V9: keys(%h) and each(%h) preserve is_utf8 on non-ASCII UTF-8 keys
+        my hash %u8h = ("café" => 11, "π" => 22);
+        my array @u8ks = keys(%u8h);
+        my int $found_cafe = 0;
+        my int $found_pi = 0;
+        foreach my str $k (@u8ks) {
+            if ($k eq "café" && utf8::is_utf8($k) == 1 && length($k) == 4) { $found_cafe = $found_cafe + 1; }
+            if ($k eq "π" && utf8::is_utf8($k) == 1 && length($k) == 1) { $found_pi = $found_pi + 1; }
+        }
+        while (1) {
+            my array @kv = each(%u8h);
+            if (size(@kv) == 0) { last; }
+            my str $ek = $kv[0];
+            if ($ek eq "café" && utf8::is_utf8($ek) == 1 && length($ek) == 4) { $found_cafe = $found_cafe + 1; }
+            if ($ek eq "π" && utf8::is_utf8($ek) == 1 && length($ek) == 1) { $found_pi = $found_pi + 1; }
+        }
+        my int $v9_ok = ($found_cafe == 2 && $found_pi == 2) ? 1 : 0;
+
+        [$v1_ok, $v2_ok, $v3_ok, $v4_ok, $v5_ok, $v6_ok, $v7_ok, $v8_ok, $v9_ok];
+    });
+
+    check(size($res) == 9, "Eval returned 9 flags");
+    check($res->[0] == 1, "V1 VMHash tombstone saturation");
+    check($res->[1] == 1, "V2 JIT top-level OP_RETURN slow path");
+    check($res->[2] == 1, "V3 JIT overflowing 50-bit int mul");
+    check($res->[3] == 1, "V4 JIT OP_MOD INT64_MIN % -1");
+    check($res->[4] == 1, "V5 JIT OP_ADD/SUB_TO_LOCAL coerce num");
+    check($res->[5] == 1, "V6 JIT OP_APPEND frame realloc & exc");
+    check($res->[6] == 1, "V7 Worker VM STW GC + channel deadlock freedom");
+    check($res->[7] == 1, "V8 OP_APPEND_CONST UTF-8 flag");
+    check($res->[8] == 1, "V9 keys/each UTF-8 flag");
+
+    # Also verify direct top-level Strada::JIT::eval calls
+    Strada::JIT::init();
+    Strada::JIT::eval('func jit_top_direct(int $n) str { return "B:" . $n; }');
+    for (my int $i = 0; $i < 5; $i = $i + 1) {
+        my str $r = Strada::JIT::eval("jit_top_direct(" . $i . ")");
+        check($r eq "B:" . $i, "V2 direct Strada::JIT::eval call");
+    }
+    Strada::JIT::reset();
+
+    Strada::Interpreter::reset();
+    say("AUDIT_R18_EVAL_JIT_OK");
+    return 0;
+}

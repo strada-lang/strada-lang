@@ -1,0 +1,168 @@
+# Cycle 18 2-way parity suite (Compiled vs Bytecode VM / JIT)
+
+package R18ParOv;
+use overload
+    "+" => "add",
+    "*" => "mul",
+    "/" => "div",
+    "%" => "mod",
+    "**" => "pow",
+    "neg" => "neg",
+    '""' => "to_s";
+
+func new(int $v) scalar { return bless({"v" => $v}, "R18ParOv"); }
+func to_s(scalar $s) str { return "POv(" . $s->{"v"} . ")"; }
+func add(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18ParOv" ? $o->{"v"} : ($o + 0); return R18ParOv::new($s->{"v"} + $ov); }
+func mul(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18ParOv" ? $o->{"v"} : ($o + 0); return R18ParOv::new($s->{"v"} * $ov); }
+func div(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18ParOv" ? $o->{"v"} : ($o + 0); return R18ParOv::new($s->{"v"} / $ov); }
+func mod(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18ParOv" ? $o->{"v"} : ($o + 0); return R18ParOv::new($s->{"v"} % $ov); }
+func pow(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18ParOv" ? $o->{"v"} : ($o + 0); return R18ParOv::new($s->{"v"} * 10 + $ov); }
+func neg(scalar $s) scalar { return R18ParOv::new(-$s->{"v"}); }
+
+package R18ParDeepStrOv;
+use overload '""' => "to_s";
+func new(int $n) scalar { return bless({"n" => $n}, "R18ParDeepStrOv"); }
+func rec(int $d) int {
+    if ($d <= 0) { return 1; }
+    return rec($d - 1) + 1;
+}
+func to_s(scalar $s) str { return "D" . $s->{"n"} . ":" . rec(300); }
+
+package main;
+
+our str $g_r18_par = "init";
+
+func jit_v2_fn(int $x) int {
+    local $g_r18_par = "inner";
+    return $x + 1;
+}
+
+func jit_mul50_fn(int $a, int $b) int {
+    my int $r = 0;
+    for (my int $i = 0; $i < 150; $i = $i + 1) {
+        $r = $a * $b;
+    }
+    return $r;
+}
+
+func jit_mod_fn(scalar $a, scalar $b) int {
+    return $a % $b;
+}
+
+func jit_num_fn() str {
+    my num $nx = 1.0;
+    my int $step = 2;
+    for (my int $i = 0; $i < 150; $i = $i + 1) {
+        $nx += $step;
+        $nx += 1;
+        $nx -= 1;
+    }
+    return typeof($nx) . ":" . ($nx == 301.0 ? 1 : 0);
+}
+
+func jit_append_ov(scalar $ov) str {
+    my str $s = "B";
+    $s .= $ov;
+    $s .= "_E";
+    return $s;
+}
+
+func jit_append_u8() str {
+    my str $s = "pre";
+    $s .= "café";
+    return $s;
+}
+
+func main() int {
+    # C1: self-append on typed vars
+    my int $ci = 42;
+    $ci = $ci . "z";
+    my num $cn = 2.5;
+    $cn = $cn . "q";
+    say("C1=" . $ci . "|" . $cn);
+
+    # C2 & C4: vec_set & s///e eval_expr prescan
+    my str $vb = "xxxx";
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        core::vec_set($vb, $i, 8, 65 + $i);
+    }
+    my int $sc = 0;
+    my str $st = "a_a_a";
+    $st =~ s/a/"[" . ($sc = $sc + 1) . "]"/ge;
+    say("C2C4=" . $vb . "|" . $st . "|" . $sc);
+
+    # C3: numeric overloads (+, *, /, %, **, neg)
+    my scalar $o = R18ParOv::new(9);
+    my int $c3v = (($o + 3) * 2)->{"v"} + ($o / 3)->{"v"} + ($o % 4)->{"v"} + ($o ** 2)->{"v"} + (-$o)->{"v"};
+    say("C3=" . $c3v);
+
+    # C5: non-canonical zero literals
+    my int $z = 0;
+    if (0x0 || 0b0 || 0o0 || 00 || -0 || 0.00 || 0.0 || 0. || 0e0 || 0.0e+0) { $z = 1; }
+    my int $zn = (!0x0 && !0.00 && !0e0 && (0x1 ? 1 : 0)) ? 1 : 0;
+    say("C5=" . $z . ":" . $zn);
+
+    # C7: directly-blessed dumper_str
+    my scalar $bh = bless({"x" => 1}, "R18DirH");
+    $bh->{"self"} = $bh;
+    my scalar $ba = bless([2], "R18DirA");
+    $ba->[1] = $ba;
+    my str $dh = core::dumper_str($bh);
+    my str $da = core::dumper_str($ba);
+    say("C7=" . ((index($dh, "R18DirH") >= 0 && index($da, "R18DirA") >= 0) ? 1 : 0));
+
+    # R1 & R3: high-bit hash concat lookup & pack x0/X0
+    my str $hpfx = chr(220) . "_";
+    my hash %hh = ();
+    my str $hk = $hpfx . "7";
+    $hh{$hk} = 99;
+    my str $pk = core::pack("x0 X0 A2", "ok");
+    say("R1R3=" . $hh{$hpfx . 7} . "|" . $pk);
+
+    # V1-V5: Hash tombstone stress, JIT OP_RETURN, mul50, INT64_MIN % -1, num accum
+    my hash %vh = ("a" => 1, "b" => 2, "c" => 3, "d" => 4);
+    delete($vh{"a"}); delete($vh{"b"}); delete($vh{"c"});
+    for (my int $i = 0; $i < 100; $i = $i + 1) {
+        my str $k = "t_" . $i;
+        $vh{$k} = $i;
+        delete($vh{$k});
+    }
+    my int $v2s = 0;
+    for (my int $i = 0; $i < 150; $i = $i + 1) { $v2s = $v2s + jit_v2_fn($i); }
+    my int $m50 = jit_mul50_fn(1048576, 1073741824);
+    my int $mmin = 0;
+    for (my int $i = 0; $i < 150; $i = $i + 1) { $mmin = jit_mod_fn("-9223372036854775808", -1); }
+    say("V1V5=" . (exists($vh{"z"}) ? 1 : 0) . ":" . $vh{"d"} . ":" . $v2s . ":" . $g_r18_par . ":" . typeof($m50) . ":" . $mmin . ":" . jit_num_fn());
+
+    # V6-V9: append ov frame growth, worker STW GC + channel, OP_APPEND_CONST UTF-8, keys/each UTF-8
+    my scalar $dov = R18ParDeepStrOv::new(8);
+    my str $vs6 = "";
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $vs6 = jit_append_ov($dov); }
+
+    my scalar $ch1 = async::channel(2);
+    my scalar $ch2 = async::channel(2);
+    my scalar $t_blk = thread::create(func () {
+        async::send($ch1, 1);
+        my scalar $v = async::recv($ch2);
+        return $v + 5;
+    });
+    my scalar $t_wrk = thread::create(func () {
+        my int $sum = 0;
+        for (my int $k = 0; $k < 600; $k = $k + 1) { my scalar $h = {"i" => $k}; $sum = $sum + $k; }
+        return $sum;
+    });
+    async::recv($ch1);
+    core::gc_collect();
+    async::send($ch2, 37);
+    my int $jr1 = thread::join($t_blk);
+    my int $jr2 = thread::join($t_wrk);
+
+    my str $vu8 = "";
+    for (my int $i = 0; $i < 150; $i = $i + 1) { $vu8 = jit_append_u8(); }
+    my hash %uk = ("café" => 1);
+    my array @uks = keys(%uk);
+    my array @uev = each(%uk);
+    say("V6V9=" . $vs6 . "|" . $jr1 . "|" . $jr2 . "|" . length($vu8) . ":" . utf8::is_utf8($vu8) . "|" . length($uks[0]) . ":" . utf8::is_utf8($uks[0]) . "|" . length($uev[0]) . ":" . utf8::is_utf8($uev[0]));
+
+    return 0;
+}

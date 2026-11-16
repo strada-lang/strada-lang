@@ -1,0 +1,240 @@
+# Cycle 18 Compiler, Runtime, JSON, YAML & Template Regression Suite
+use lib "lib";
+use JSON;
+use YAML;
+use Template;
+
+package R18NumOv;
+use overload
+    "+" => "add",
+    "-" => "sub",
+    "*" => "mul",
+    "/" => "div",
+    "%" => "mod",
+    "**" => "pow",
+    "neg" => "neg",
+    "&" => "band",
+    "|" => "bor",
+    "^" => "bxor",
+    "<<" => "bshl",
+    ">>" => "bshr",
+    "~" => "bnot",
+    '""' => "to_s";
+
+func new(int $v) scalar { return bless({"v" => $v}, "R18NumOv"); }
+func to_s(scalar $s) str { return "Ov(" . $s->{"v"} . ")"; }
+func add(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new($s->{"v"} + $ov + 100); }
+func sub(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new($rev ? ($ov - $s->{"v"} + 200) : ($s->{"v"} - $ov + 200)); }
+func mul(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new($s->{"v"} * $ov + 300); }
+func div(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new($s->{"v"} / $ov + 400); }
+func mod(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} % $ov) + 500); }
+func pow(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new($s->{"v"} * 10 + $ov + 600); }
+func neg(scalar $s) scalar { return R18NumOv::new(-$s->{"v"} + 700); }
+func band(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} & $ov) + 800); }
+func bor(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} | $ov) + 900); }
+func bxor(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} ^ $ov) + 1000); }
+func bshl(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} << $ov) + 1100); }
+func bshr(scalar $s, scalar $o, int $rev) scalar { my int $ov = ref($o) eq "R18NumOv" ? $o->{"v"} : ($o + 0); return R18NumOv::new(($s->{"v"} >> $ov) + 1200); }
+func bnot(scalar $s) scalar { return R18NumOv::new($s->{"v"} + 1300); }
+
+package R18BoolTie;
+func TIESCALAR(str $cls, scalar $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"v"} = $v; }
+
+package R18PoolWeaken;
+our int $destroyed = 0;
+func reset() void { $destroyed = 0; }
+func count() int { return $destroyed; }
+func new(int $id) scalar { return bless({"id" => $id}, "R18PoolWeaken"); }
+func DESTROY(scalar $self) void { $destroyed = $destroyed + 1; }
+
+package R18DirSelfH;
+package R18DirSelfA;
+
+package main;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func test_c1_self_append_typed() void {
+    my int $iv = 12;
+    my scalar $si = $iv;
+    $iv = $iv . "ab";
+    $si = $si . "cd";
+
+    my num $nv = 3.5;
+    my scalar $sn = $nv;
+    $nv = $nv . "x";
+    $sn = $sn . "y";
+
+    my int $bi = 5;
+    my scalar $peek_bi = func () { return $bi; };
+    $bi = $bi . "9";
+    my num $bn = 1.5;
+    my scalar $peek_bn = func () { return $bn; };
+    $bn = $bn . "9";
+
+    my str $sv = "hi";
+    $sv = $sv . "!";
+    check($iv == 12 && $si eq "12cd" && $nv == 3.5 && $sn eq "3.5y" && $bi eq "59" && $peek_bi->() eq "59" && $bn eq "1.59" && $peek_bn->() eq "1.59" && $sv eq "hi!", "C1 self-append on int/num/str");
+}
+
+func test_c2_vec_set_mutates() void {
+    my str $buf = "AAAA";
+    for (my int $i = 0; $i < 4; $i = $i + 1) {
+        core::vec_set($buf, $i, 8, 65 + $i);
+    }
+    my str $alias = $buf;
+    core::vec_set($buf, 0, 8, 90);
+    check($buf eq "ZBCD" && $alias eq "ABCD", "C2 vec_set marks local mutated");
+}
+
+func test_c3_numeric_bitwise_overloads() void {
+    my scalar $a = R18NumOv::new(10);
+    my scalar $b = R18NumOv::new(3);
+    my int $s_add = ($a + $b)->{"v"};
+    my int $s_sub = ($a - $b)->{"v"};
+    my int $s_mul = ($a * $b)->{"v"};
+    my int $s_div = ($a / 2)->{"v"};
+    my int $s_mod = ($a % 3)->{"v"};
+    my int $s_pow = ($a ** 4)->{"v"};
+    my int $s_neg = (-$a)->{"v"};
+    my int $s_and = ($a & $b)->{"v"};
+    my int $s_or  = ($a | $b)->{"v"};
+    my int $s_xor = ($a ^ $b)->{"v"};
+    my int $s_shl = ($a << 2)->{"v"};
+    my int $s_shr = ($a >> 1)->{"v"};
+    my int $s_not = (~$a)->{"v"};
+
+    check($s_add == 113 && $s_sub == 207 && $s_mul == 330 && $s_div == 405, "C3 arith overloads (+,-,*,/)");
+    check($s_mod == 501 && $s_pow == 704 && $s_neg == 690, "C3 arith overloads (%,**,neg)");
+    check($s_and == 802 && $s_or == 911 && $s_xor == 1009 && $s_shl == 1140 && $s_shr == 1205 && $s_not == 1310, "C3 bitwise overloads");
+}
+
+func test_c4_subst_eval_prescan() void {
+    my int $cnt = 0;
+    my str $text = "x_x_x_x";
+    $text =~ s/x/"[" . ($cnt = $cnt + 1) . "]"/ge;
+    my scalar $peek = func () { return $cnt; };
+    $text =~ s/\[/($cnt = $cnt + 10) ? "(" : ""/ge;
+    check($cnt == 44 && $peek->() == 44 && substr($text, 0, 2) eq "(1", "C4 s///e eval_expr mutation prescan");
+}
+
+func test_c5_noncanonical_zero_literals() void {
+    my int $hits = 0;
+    if (0x0) { $hits = $hits + 1; }
+    if (0b0) { $hits = $hits + 1; }
+    if (0o0) { $hits = $hits + 1; }
+    if (00)  { $hits = $hits + 1; }
+    if (-0)  { $hits = $hits + 1; }
+    if (0.00) { $hits = $hits + 1; }
+    if (0.0)  { $hits = $hits + 1; }
+    if (0.)   { $hits = $hits + 1; }
+    if (0e0)  { $hits = $hits + 1; }
+    if (0.0e+0) { $hits = $hits + 1; }
+    check($hits == 0, "C5 all non-canonical zero literals are falsy");
+
+    my int $t = 0;
+    $t = $t + (0x0 ? 10 : 1);
+    $t = $t + (0b0 ? 10 : 1);
+    $t = $t + (0.00 ? 10 : 1);
+    $t = $t + (0e0 ? 10 : 1);
+    $t = $t + ((!0.0e+0) ? 1 : 10);
+    $t = $t + ((0x0 || 0x1) ? 1 : 10);
+    $t = $t + ((-0.5 && 0.00) ? 10 : 1);
+    check($t == 7, "C5 ternary / ! / && / || on non-canonical zeros");
+}
+
+func test_c7_directly_blessed_dumper() void {
+    my scalar $bh = bless({"a" => 1}, "R18DirSelfH");
+    $bh->{"self"} = $bh;
+    $bh->{"next"} = 0;
+    $bh->{"next"} = $bh;
+    my str $dh = core::dumper_str($bh);
+    check(index($dh, "R18DirSelfH") >= 0, "C7 dumper_str directly blessed hash");
+
+    my scalar $ba = bless([10], "R18DirSelfA");
+    $ba->[1] = $ba;
+    my str $da = core::dumper_str($ba);
+    check(index($da, "R18DirSelfA") >= 0, "C7 dumper_str directly blessed array");
+}
+
+func test_r1_concat_hash_highbit() void {
+    my str $pfx = chr(200) . chr(255) . "_";
+    my hash %h = ();
+    for (my int $i = 0; $i < 10; $i = $i + 1) {
+        my str $k = $pfx . $i;
+        $h{$k} = $i * 7;
+    }
+    for (my int $i = 0; $i < 10; $i = $i + 1) {
+        check(exists($h{$pfx . $i}), "R1 exists concat high-bit key " . $i);
+        check($h{$pfx . $i} == $i * 7, "R1 get concat high-bit key " . $i);
+        $h{$pfx . $i} = $h{$pfx . $i} + 1;
+        check($h{$pfx . $i} == $i * 7 + 1, "R1 set concat high-bit key " . $i);
+        delete($h{$pfx . $i});
+        check(!exists($h{$pfx . $i}), "R1 delete concat high-bit key " . $i);
+    }
+}
+
+func test_r2_pool_destroy_weaken() void {
+    R18PoolWeaken::reset();
+    for (my int $i = 0; $i < 50; $i = $i + 1) {
+        my scalar $o = R18PoolWeaken::new($i);
+        my scalar $w = $o;
+        core::weaken($w);
+        check(defined($w) && $w->{"id"} == $i, "R2 weakref live before drop");
+        $o = undef;
+        check(!defined($w), "R2 weakref cleared on DESTROY");
+    }
+    check(R18PoolWeaken::count() == 50, "R2 all 50 DESTROY ran cleanly");
+}
+
+func test_r3_pack_x_counts() void {
+    my str $p1 = core::pack("x0 X0 A2", "ab");
+    my str $p2 = core::pack("A2 x-4 X-2 A2", "hi", "yo");
+    my str $p3 = core::pack("x3 X2 A1", "Z");
+    check($p1 eq "ab" && $p2 eq "hiyo" && bytes($p3) == 2 && substr($p3, 1, 1) eq "Z", "R3 pack x/X zero and negative counts");
+}
+
+func test_l4_l5_l6_stdlib() void {
+    # L4: JSON::is_bool with tied scalar
+    my scalar $tb = "";
+    tie($tb, "R18BoolTie", JSON::true());
+    my scalar $tf = "";
+    tie($tf, "R18BoolTie", JSON::false());
+    my scalar $tn = "";
+    tie($tn, "R18BoolTie", 123);
+    check(JSON::is_bool($tb) == 1 && JSON::is_bool($tf) == 1 && JSON::is_bool($tn) == 0, "L4 JSON::is_bool unwraps tied scalar");
+    untie($tb);
+    untie($tf);
+    untie($tn);
+
+    # L5: YAML array guard ("---" / "-foo" scalars vs "-" / "- " sequences)
+    my scalar $ydoc = YAML::Load("dashval: -foo\nsep: '---'\narr:\n  - a\n  - b\n");
+    check($ydoc->{"dashval"} eq "-foo" && $ydoc->{"sep"} eq "---" && size($ydoc->{"arr"}) == 2, "L5 YAML scalar starting with - not rejected");
+
+    # L6: Template blocks registered inside TRY / CATCH / FINAL
+    my str $tpl = "[% TRY %][% BLOCK t_blk %]IN_TRY[% END %][% CATCH %][% BLOCK c_blk %]IN_CATCH[% END %][% FINAL %][% BLOCK f_blk %]IN_FINAL[% END %][% END %][% PROCESS t_blk %]|[% PROCESS c_blk %]|[% PROCESS f_blk %]";
+    my str $tout = Template::render($tpl, {});
+    check($tout eq "IN_TRY|IN_CATCH|IN_FINAL", "L6 Template::Interp registers blocks inside TRY/CATCH/FINAL: got=" . $tout);
+}
+
+func main() int {
+    test_c1_self_append_typed();
+    test_c2_vec_set_mutates();
+    test_c3_numeric_bitwise_overloads();
+    test_c4_subst_eval_prescan();
+    test_c5_noncanonical_zero_literals();
+    test_c7_directly_blessed_dumper();
+    test_r1_concat_hash_highbit();
+    test_r2_pool_destroy_weaken();
+    test_r3_pack_x_counts();
+    test_l4_l5_l6_stdlib();
+    say("AUDIT_R18_COMPILER_RUNTIME_OK");
+    return 0;
+}

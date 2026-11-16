@@ -539,6 +539,7 @@ func connect_impl(str $host, int $port, int $verify) int {
                         close(sock_fd);
                         free(conn);
                     } else {
+                        SSL_CTX_set_mode(conn->ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
                         if (do_verify) {
                             /* Verify the peer cert chain against the system trust store. */
                             SSL_CTX_set_verify(conn->ctx, SSL_VERIFY_PEER, NULL);
@@ -609,6 +610,9 @@ func server(int $port, str $cert_file, str $key_file) int {
 
             const SSL_METHOD *method = TLS_server_method();
             conn->ctx = SSL_CTX_new(method);
+            if (conn->ctx) {
+                SSL_CTX_set_mode(conn->ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+            }
             if (!conn->ctx) {
                 free(conn);
             } else if (SSL_CTX_use_certificate_file(conn->ctx, cert_str, SSL_FILETYPE_PEM) <= 0) {
@@ -1039,18 +1043,20 @@ func attach_fd(int $fd, int $verify, str $host) int {
     my str $host_s = "" . $host;
     my int $result = 0;
     __C__ {
-        int raw_fd = (int)strada_to_int(fd);
+        int64_t fd64 = strada_to_int(fd);
         int do_verify = (int)strada_to_int(verify);
         char *hname = strada_to_str(host_s);
-        if (ssl_has_crlf(hname) || (do_verify && (!hname || !hname[0]))) {
-            /* Reject CRLF in host/SNI, or verification requested without
+        if (fd64 < 0 || fd64 > INT_MAX || ssl_has_crlf(hname) || (do_verify && (!hname || !hname[0]))) {
+            /* Reject invalid fd, CRLF in host/SNI, or verification requested without
              * hostname to bind, before allocating SSL_CTX/SSL. */
             free(hname);
         } else {
+            int raw_fd = (int)fd64;
             SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
             if (!ctx) {
                 free(hname);
             } else {
+                SSL_CTX_set_mode(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
                 if (do_verify) {
                     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
                     SSL_CTX_set_default_verify_paths(ctx);
@@ -1070,8 +1076,11 @@ func attach_fd(int $fd, int $verify, str $host) int {
                         if (!c) {
                             SSL_free(ssl);
                             SSL_CTX_free(ctx);
+                        } else if (SSL_set_fd(ssl, raw_fd) != 1) {
+                            free(c);
+                            SSL_free(ssl);
+                            SSL_CTX_free(ctx);
                         } else {
-                            SSL_set_fd(ssl, raw_fd);
                             SSL_set_connect_state(ssl);
                             int fl = fcntl(raw_fd, F_GETFL, 0);
                             if (fl >= 0) fcntl(raw_fd, F_SETFL, fl | O_NONBLOCK);
@@ -1097,15 +1106,18 @@ func attach_server_fd(int $server, int $fd) int {
     my int $result = 0;
     __C__ {
         SSLConnection *srv = (SSLConnection*)(intptr_t)strada_to_int(server);
-        int raw_fd = (int)strada_to_int(fd);
-        if (srv && srv->ctx) {
+        int64_t fd64 = strada_to_int(fd);
+        if (srv && srv->ctx && fd64 >= 0 && fd64 <= INT_MAX) {
+            int raw_fd = (int)fd64;
             SSL *ssl = SSL_new(srv->ctx);
             if (ssl) {
                 SSLConnection *c = calloc(1, sizeof(SSLConnection));
                 if (!c) {
                     SSL_free(ssl);
+                } else if (SSL_set_fd(ssl, raw_fd) != 1) {
+                    free(c);
+                    SSL_free(ssl);
                 } else {
-                    SSL_set_fd(ssl, raw_fd);
                     SSL_set_accept_state(ssl);
                     int fl = fcntl(raw_fd, F_GETFL, 0);
                     if (fl >= 0) fcntl(raw_fd, F_SETFL, fl | O_NONBLOCK);

@@ -832,6 +832,7 @@ struct VMHash {
     VMHashEntry *entries;
     int capacity;
     int size;
+    int tombstones;
     uint32_t class_id;
     uint32_t class_prog_id;
     uint32_t grow_gen;   /* bumped on grow/delete/reset to invalidate global_ic */
@@ -1150,6 +1151,11 @@ typedef struct VM {
     struct VM *workers_head;
     struct VM *worker_next;
     pthread_mutex_t gc_mutex;
+    pthread_mutex_t gc_wait_mutex;
+    pthread_cond_t gc_start_cond;
+    pthread_cond_t gc_parked_cond;
+    uint32_t gc_requested;
+    int gc_safe;
     pthread_mutex_t globals_mutex;
     void *regex_cache;
     VMValue jit_ret_val;

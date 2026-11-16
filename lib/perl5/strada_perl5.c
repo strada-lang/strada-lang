@@ -110,6 +110,7 @@ typedef struct {
     char *pv;
     size_t len;
     int is_utf8;
+    int is_uv;
 } Perl5ConvArg;
 
 static void perl5_conv_args_free(Perl5ConvArg *cargs, size_t count) {
@@ -127,6 +128,7 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
     dst->pv = NULL;
     dst->len = 0;
     dst->is_utf8 = 0;
+    dst->is_uv = 0;
     if (!arg) return;
 
     StradaValue *fetched = NULL;
@@ -145,6 +147,7 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
     } else if (arg->type == STRADA_INT) {
         dst->kind = P5_ARG_INT;
         dst->iv = arg->value.iv;
+        dst->is_uv = STRADA_INT_IS_UV(arg) ? 1 : 0;
     } else if (arg->type == STRADA_NUM) {
         dst->kind = P5_ARG_NUM;
         dst->nv = arg->value.nv;
@@ -186,7 +189,7 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
 
 static SV* perl5_sv_from_conv(const Perl5ConvArg *ca) {
     if (ca->kind == P5_ARG_INT) {
-        return sv_2mortal(newSViv((IV)ca->iv));
+        return sv_2mortal(ca->is_uv ? newSVuv((UV)(uint64_t)ca->iv) : newSViv((IV)ca->iv));
     }
     if (ca->kind == P5_ARG_NUM) {
         return sv_2mortal(newSVnv((NV)ca->nv));
