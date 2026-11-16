@@ -300,9 +300,9 @@ func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $n
         if ($hl_push == 1) { emit($cg, "strada_cleanup_push(__hl_tmp); "); }
         emit($cg, "StradaValue *__hl_res = ");
         if ($ascii == 1) {
-            emit($cg, "strada_hv_fetch_owned_ph(__hl_tmp, ");
+            emit($cg, "strada_hv_fetch_owned_ph_len(__hl_tmp, ");
             gen_str_literal_c($cg, $key_val);
-            emit($cg, ", " . djb2_hash_32($key_val) . "u)");
+            emit($cg, ", " . bytes($key_val) . "u, " . djb2_hash_32($key_val) . "u)");
         } else {
             emit($cg, "strada_hv_fetch_owned(__hl_tmp, ");
             gen_str_literal_c($cg, $key_val);
@@ -315,11 +315,11 @@ func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $n
         }
     } else {
         if ($ascii == 1) {
-            emit($cg, "strada_hv_fetch_owned_ph(");
+            emit($cg, "strada_hv_fetch_owned_ph_len(");
             gen_expression($cg, $hash_expr);
             emit($cg, ", ");
             gen_str_literal_c($cg, $key_val);
-            emit($cg, ", " . djb2_hash_32($key_val) . "u)");
+            emit($cg, ", " . bytes($key_val) . "u, " . djb2_hash_32($key_val) . "u)");
         } else {
             emit($cg, "strada_hv_fetch_owned(");
             gen_expression($cg, $hash_expr);
@@ -327,6 +327,21 @@ func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $n
             gen_str_literal_c($cg, $key_val);
             emit($cg, ")");
         }
+    }
+}
+
+func emit_hv_store_open(scalar $cg, str $key_val) void {
+    if (key_is_hashable_ascii($key_val) == 1) {
+        emit($cg, "strada_hv_store_ph_len(");
+    } else {
+        emit($cg, "strada_hv_store(");
+    }
+}
+
+func emit_hv_store_key(scalar $cg, str $key_val) void {
+    gen_str_literal_c($cg, $key_val);
+    if (key_is_hashable_ascii($key_val) == 1) {
+        emit($cg, ", " . bytes($key_val) . "u, " . djb2_hash_32($key_val) . "u");
     }
 }
 
@@ -487,6 +502,14 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"int_vars"} = \%int_vars;
     my hash %num_vars = ();
     $cg{"num_vars"} = \%num_vars;
+    my hash %unboxed_int_vars = ();
+    $cg{"unboxed_int_vars"} = \%unboxed_int_vars;
+    my hash %unboxed_num_vars = ();
+    $cg{"unboxed_num_vars"} = \%unboxed_num_vars;
+    my hash %safe_str_vars = ();
+    $cg{"safe_str_vars"} = \%safe_str_vars;
+    my hash %prog_global_names = ();
+    $cg{"prog_global_names"} = \%prog_global_names;
     # Track known blessed types for method devirtualization
     my hash %known_types = ();
     $cg{"known_types"} = \%known_types;
@@ -691,10 +714,11 @@ func emit_scope_break_cycles(scalar $cg, str $scope_str, str $skip_list) void {
             if (($in_anon == 0 || is_var_in_list($vn1, $capture_str) == 0)
                 && (length($skip_list) == 0 || is_var_in_list($vn1, $skip_list) == 0)
                 && (length($vn1) <= 6 || substr($vn1, 0, 6) ne "@cell:")) {
-                # int- and num-declared vars are coerced to canonical INT/NUM on
-                # every init and assignment, so they can never hold a container cycle.
+                # int-, num-, and proven non-container str-declared vars can never
+                # hold a container cycle, so skip strada_break_self_cycle().
                 if (length("" . $cg->{"int_vars"}->{$vn1}) == 0
-                    && length("" . $cg->{"num_vars"}->{$vn1}) == 0) {
+                    && length("" . $cg->{"num_vars"}->{$vn1}) == 0
+                    && length("" . $cg->{"safe_str_vars"}->{$vn1}) == 0) {
                     emit_indent($cg);
                     emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
                 }
@@ -1321,6 +1345,30 @@ func is_inline_accessor(scalar $cg, str $method) str {
         return $method;
     }
     return "";
+}
+
+func resolve_inline_call_attr(scalar $cg, scalar $expr) scalar {
+    if (!$expr || ($expr->{"arg_count"} + 0) != 0) {
+        return 0;
+    }
+    my str $method = "" . $expr->{"method"};
+    if (receiver_is_current_self($cg, $expr) == 1) {
+        return resolve_inline_self_attr($cg, "" . $cg->{"current_fn_package"}, $method);
+    }
+    my scalar $meth_target = $expr->{"base_object"};
+    if (!$meth_target) {
+        $meth_target = $expr->{"object"};
+    }
+    if ($meth_target && ($meth_target->{"type"} + 0) == NODE_VARIABLE()) {
+        my scalar $kt = $cg->{"known_types"};
+        if ($kt) {
+            my str $known_pkg = "" . $kt->{escape_c_keyword($meth_target->{"name"})};
+            if (length($known_pkg) > 0) {
+                return resolve_inline_self_attr($cg, $known_pkg, $method);
+            }
+        }
+    }
+    return 0;
 }
 
 # Check if a 1-arg method call on $self is an inline setter: $self->set_X(val) where X is has rw.
@@ -4042,6 +4090,34 @@ func our_shadow_restore(scalar $cg, int $mark) void {
 # Inside one it is the C name for a parameter or local, and the capture slot
 # `(*__captures[N])` for anything else -- registering the capture on first use.
 #
+func is_unboxed_int(scalar $cg, str $c_name) int {
+    if (!$cg) { return 0; }
+    my scalar $uv = $cg->{"unboxed_int_vars"};
+    if ($uv && ($uv->{$c_name} + 0) == 1) { return 1; }
+    return 0;
+}
+
+func is_unboxed_num(scalar $cg, str $c_name) int {
+    if (!$cg) { return 0; }
+    my scalar $uv = $cg->{"unboxed_num_vars"};
+    if ($uv && ($uv->{$c_name} + 0) == 1) { return 1; }
+    return 0;
+}
+
+func is_unboxed_var_node(scalar $cg, scalar $expr) int {
+    if (!$cg || !$expr) { return 0; }
+    if (($expr->{"type"} + 0) != NODE_VARIABLE()) { return 0; }
+    if (("" . $expr->{"sigil"}) ne "$") { return 0; }
+    my str $vname = "" . $expr->{"name"};
+    if ($vname eq "__program_name" || index($vname, "::") >= 0) { return 0; }
+    my str $cname = escape_c_keyword($vname);
+    if (length("" . $cg->{"our_vars"}->{$cname}) > 0) { return 0; }
+    if (is_unboxed_int($cg, $cname) == 1 || is_unboxed_num($cg, $cname) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
 # EVERY codegen path that emits a variable's C name by hand (rather than via
 # gen_expression on a NODE_VARIABLE) must go through this. A path that emits
 # the bare name compiles fine in ordinary functions and then fails inside a
@@ -4248,6 +4324,10 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
             my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
             if (length($our_k) > 0) {
                 emit($cg, "strada_global_get_cstr(" . c_str_lit($our_k) . ")");
+            } elsif (is_unboxed_int($cg, $cvn) == 1) {
+                emit($cg, "strada_new_int_il(" . $cvn . ")");
+            } elsif (is_unboxed_num($cg, $cvn) == 1) {
+                emit($cg, "strada_new_num(" . $cvn . ")");
             } else {
                 my str $cref = scalar_var_c_ref($cg, $vn, $cvn);
                 emit($cg, "({ StradaValue *__rv = " . $cref . "; strada_incref(__rv); __rv; })");
@@ -4273,6 +4353,12 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
             my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
             if (length($our_k) > 0) {
                 emit($cg, "strada_global_get_cstr(" . c_str_lit($our_k) . ")");
+                $p->{"owned"} = 1;
+            } elsif (is_unboxed_int($cg, $cvn) == 1) {
+                emit($cg, "strada_new_int_il(" . $cvn . ")");
+                $p->{"owned"} = 1;
+            } elsif (is_unboxed_num($cg, $cvn) == 1) {
+                emit($cg, "strada_new_num(" . $cvn . ")");
                 $p->{"owned"} = 1;
             } else {
                 emit($cg, scalar_var_c_ref($cg, $vn, $cvn));
@@ -4456,6 +4542,13 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
                 emit($cg, ")");
             }
         }
+    } elsif ($type == NODE_VARIABLE() && is_unboxed_var_node($cg, $expr) == 1) {
+        my str $unm = escape_c_keyword($expr->{"name"});
+        if (is_unboxed_num($cg, $unm) == 1) {
+            emit($cg, $unm);
+        } else {
+            emit($cg, "((double)" . $unm . ")");
+        }
     } else {
         # Check if expression creates a temp that needs cleanup
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
@@ -4631,7 +4724,7 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
     } elsif ($type == NODE_NUM_LITERAL()) {
         emit($cg, "(int64_t)" . $expr->{"value"});
     } elsif ($type == NODE_BINARY_OP() && $cg->{"has_overloads"} == 0) {
-        # Inline arithmetic sub-expressions: emit C arithmetic directly,
+        # Inline arithmetic & bitwise sub-expressions: emit C operations directly,
         # skipping intermediate StradaValue creation
         my str $op = $expr->{"op"};
         if ($op eq "+" || $op eq "-" || $op eq "*") {
@@ -4649,6 +4742,28 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
                 emit_int_operand($cg, $expr->{"right"});
                 emit($cg, ")))");
             }
+        } elsif ($op eq "&" || $op eq "|" || $op eq "^") {
+            emit($cg, "((int64_t)((uint64_t)(");
+            emit_int_operand($cg, $expr->{"left"});
+            emit($cg, ") " . $op . " (uint64_t)(");
+            emit_int_operand($cg, $expr->{"right"});
+            emit($cg, ")))");
+        } elsif ($op eq "<<") {
+            my int $uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $uid + 1;
+            emit($cg, "({ int64_t __shl_l" . $uid . " = ");
+            emit_int_operand($cg, $expr->{"left"});
+            emit($cg, "; int64_t __shl_r" . $uid . " = ");
+            emit_int_operand($cg, $expr->{"right"});
+            emit($cg, "; (__shl_r" . $uid . " < 0 || __shl_r" . $uid . " >= 64) ? (int64_t)0 : (int64_t)((uint64_t)__shl_l" . $uid . " << (int)__shl_r" . $uid . "); })");
+        } elsif ($op eq ">>") {
+            my int $uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $uid + 1;
+            emit($cg, "({ int64_t __shr_l" . $uid . " = ");
+            emit_int_operand($cg, $expr->{"left"});
+            emit($cg, "; int64_t __shr_r" . $uid . " = ");
+            emit_int_operand($cg, $expr->{"right"});
+            emit($cg, "; (__shr_r" . $uid . " < 0 || __shr_r" . $uid . " >= 64) ? (__shr_l" . $uid . " < 0 ? (int64_t)-1 : (int64_t)0) : (__shr_l" . $uid . " >> (int)__shr_r" . $uid . "); })");
         } else {
             # Non-inlineable op: fall through to generic handler
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
@@ -4661,26 +4776,48 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
                 emit($cg, ")");
             }
         }
+    } elsif ($type == NODE_UNARY_OP() && $expr->{"op"} eq "~" && $cg->{"has_overloads"} == 0) {
+        emit($cg, "((int64_t)(~(uint64_t)(");
+        emit_int_operand($cg, $expr->{"operand"});
+        emit($cg, ")))");
+    } elsif ($type == NODE_VARIABLE() && is_unboxed_var_node($cg, $expr) == 1) {
+        my str $unm = escape_c_keyword($expr->{"name"});
+        if (is_unboxed_int($cg, $unm) == 1) {
+            emit($cg, $unm);
+        } else {
+            emit($cg, "((int64_t)" . $unm . ")");
+        }
     } elsif ($type == NODE_VARIABLE() && needs_temp_cleanup($cg, $expr) == 0) {
         emit($cg, "strada_to_int(");
         gen_expression($cg, $expr);
         emit($cg, ")");
-    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && receiver_is_current_self($cg, $expr) == 1 && length(is_inline_accessor($cg, $expr->{"method"})) > 0 && expr_is_int_typed($cg, $expr) == 1) {
-        # Inline int accessor in int context: emit strada_hv_fetch_int_ph directly,
-        # returning int64_t with no StradaValue temp / incref / decref.
+    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && resolve_inline_call_attr($cg, $expr) && expr_is_int_typed($cg, $expr) == 1) {
+        # Inline int accessor in int context: emit strada_hv_fetch_int_ph_len directly,
+        # returning int64_t with no StradaValue temp / incref / decref / strlen.
         my str $imethod = $expr->{"method"};
         my int $ihash = djb2_hash_32($imethod);
+        my int $iascii = key_is_hashable_ascii($imethod);
         my scalar $itarget = $expr->{"base_object"};
         if (!$itarget) { $itarget = $expr->{"object"}; }
         my int $itarget_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $itarget) == 1;
         if ($itarget_cleanup == 1) {
             emit($cg, "({ StradaValue *__iao = ");
             gen_expression($cg, $itarget);
-            emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, " . c_str_lit($imethod) . ", " . $ihash . "u); strada_decref(__iao); __iar; })");
+            if ($iascii == 1) {
+                emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph_len(__iao, " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u); strada_decref(__iao); __iar; })");
+            } else {
+                emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, " . c_str_lit($imethod) . ", " . $ihash . "u); strada_decref(__iao); __iar; })");
+            }
         } else {
-            emit($cg, "strada_hv_fetch_int_ph(");
-            gen_expression($cg, $itarget);
-            emit($cg, ", " . c_str_lit($imethod) . ", " . $ihash . "u)");
+            if ($iascii == 1) {
+                emit($cg, "strada_hv_fetch_int_ph_len(");
+                gen_expression($cg, $itarget);
+                emit($cg, ", " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u)");
+            } else {
+                emit($cg, "strada_hv_fetch_int_ph(");
+                gen_expression($cg, $itarget);
+                emit($cg, ", " . c_str_lit($imethod) . ", " . $ihash . "u)");
+            }
         }
     } else {
         # Int-returning function calls whose bodies are int arithmetic / params /
@@ -4807,6 +4944,15 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
             if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
                 return 1;
             }
+        }
+        if ($op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_UNARY_OP()) {
+        if ($expr->{"op"} eq "~") {
+            return 1;
         }
         return 0;
     }
@@ -5017,11 +5163,33 @@ func expr_cannot_throw(scalar $cg, scalar $expr) int {
         }
         return 1;
     }
+    if ($t == NODE_UNARY_OP()) {
+        my str $uop = "" . $expr->{"op"};
+        if (($uop eq "-" || $uop eq "~" || $uop eq "!" || $uop eq "not") && $cg->{"has_overloads"} == 0 && $cg->{"uses_tie"} == 0) {
+            return expr_cannot_throw($cg, $expr->{"operand"});
+        }
+        return 0;
+    }
     if ($t == NODE_BINARY_OP()) {
         my str $op = "" . $expr->{"op"};
-        if ($op eq "." && $cg->{"has_overloads"} == 0 && $cg->{"uses_tie"} == 0) {
-            if (expr_cannot_throw($cg, $expr->{"left"}) == 1 && expr_cannot_throw($cg, $expr->{"right"}) == 1) {
-                return 1;
+        if ($cg->{"has_overloads"} == 0 && $cg->{"uses_tie"} == 0) {
+            if ($op eq "." || $op eq "+" || $op eq "-" || $op eq "*" ||
+                $op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>" ||
+                $op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" ||
+                $op eq "<=" || $op eq ">=" || $op eq "eq" || $op eq "ne" ||
+                $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge" ||
+                $op eq "<=>" || $op eq "cmp") {
+                if (expr_cannot_throw($cg, $expr->{"left"}) == 1 && expr_cannot_throw($cg, $expr->{"right"}) == 1) {
+                    return 1;
+                }
+            } elsif ($op eq "%" || $op eq "/") {
+                my scalar $rn = $expr->{"right"};
+                if ($rn && ($rn->{"type"} + 0) == NODE_INT_LITERAL()) {
+                    my int $rv = $rn->{"value"} + 0;
+                    if ($rv > 1 || $rv < -1) {
+                        return expr_cannot_throw($cg, $expr->{"left"});
+                    }
+                }
             }
         }
         return 0;
@@ -5110,7 +5278,8 @@ func raw_int_expr_ok(scalar $cg, scalar $expr, scalar $in_scope, scalar $global_
         return 0;
     }
     if ($t == NODE_UNARY_OP()) {
-        if ($expr->{"op"} eq "-") {
+        my str $uop = $expr->{"op"};
+        if ($uop eq "-" || $uop eq "~") {
             return raw_int_expr_ok($cg, $expr->{"operand"}, $in_scope, $global_names, $raw_map, $cur_pkg);
         }
         return 0;
@@ -5118,6 +5287,7 @@ func raw_int_expr_ok(scalar $cg, scalar $expr, scalar $in_scope, scalar $global_
     if ($t == NODE_BINARY_OP()) {
         my str $op = $expr->{"op"};
         if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%" ||
+            $op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>" ||
             $op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" ||
             $op eq "<=" || $op eq ">=") {
             if (raw_int_expr_ok($cg, $expr->{"left"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1 &&
@@ -5238,6 +5408,43 @@ func raw_int_block_ok(scalar $cg, scalar $block, scalar $in_scope, scalar $all_d
             if (raw_int_block_ok($cg, $st->{"body"}, $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
                 return 0;
             }
+        } elsif ($st_t == NODE_FOR_STMT()) {
+            if (length("" . $st->{"label"}) > 0) { return 0; }
+            my scalar $for_scope = raw_int_copy_scope($sub_scope);
+            if ($st->{"init"}) {
+                my scalar $fi = $st->{"init"};
+                if ($fi->{"type"} == NODE_VAR_DECL()) {
+                    if ($fi->{"var_type"} != TYPE_INT() || $fi->{"sigil"} ne "$") { return 0; }
+                    if (length("" . $fi->{"struct_name"}) > 0) { return 0; }
+                    if (!$fi->{"init"}) { return 0; }
+                    my str $fvn = escape_c_keyword($fi->{"name"});
+                    if (($all_declared->{$fvn} + 0) == 1) { return 0; }
+                    if (($global_names->{$fvn} + 0) == 1) { return 0; }
+                    if (length("" . $cg->{"our_vars"}->{$fvn}) > 0) { return 0; }
+                    if (raw_int_expr_ok($cg, $fi->{"init"}, $for_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                        return 0;
+                    }
+                    $for_scope->{$fvn} = 1;
+                    $all_declared->{$fvn} = 1;
+                } else {
+                    if (raw_int_expr_ok($cg, $fi, $for_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                        return 0;
+                    }
+                }
+            }
+            if ($st->{"condition"}) {
+                if (raw_int_cond_ok($cg, $st->{"condition"}, $for_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                    return 0;
+                }
+            }
+            if ($st->{"update"}) {
+                if (raw_int_expr_ok($cg, $st->{"update"}, $for_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                    return 0;
+                }
+            }
+            if (raw_int_block_ok($cg, $st->{"body"}, $for_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
         } elsif ($st_t == NODE_RETURN_STMT()) {
             if (!$st->{"value"}) { return 0; }
             if (raw_int_expr_ok($cg, $st->{"value"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
@@ -5347,7 +5554,7 @@ func raw_int_has_terminating_return(scalar $cg, scalar $block, scalar $raw_map, 
             if ($st->{"else_block"}) {
                 if (raw_int_has_terminating_return($cg, $st->{"else_block"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
             }
-        } elsif ($st_t == NODE_WHILE_STMT()) {
+        } elsif ($st_t == NODE_WHILE_STMT() || $st_t == NODE_FOR_STMT()) {
             if (raw_int_has_terminating_return($cg, $st->{"body"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
         }
         $i = $i + 1;
@@ -5398,19 +5605,45 @@ func gen_raw_int_expr(scalar $cg, scalar $expr, str $cur_pkg) void {
         return;
     }
     if ($t == NODE_UNARY_OP()) {
-        emit($cg, "((int64_t)(-(uint64_t)(");
-        gen_raw_int_expr($cg, $expr->{"operand"}, $cur_pkg);
-        emit($cg, ")))");
+        if ($expr->{"op"} eq "~") {
+            emit($cg, "((int64_t)(~(uint64_t)(");
+            gen_raw_int_expr($cg, $expr->{"operand"}, $cur_pkg);
+            emit($cg, ")))");
+        } else {
+            emit($cg, "((int64_t)(-(uint64_t)(");
+            gen_raw_int_expr($cg, $expr->{"operand"}, $cur_pkg);
+            emit($cg, ")))");
+        }
         return;
     }
     if ($t == NODE_BINARY_OP()) {
         my str $op = $expr->{"op"};
-        if ($op eq "+" || $op eq "-" || $op eq "*") {
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "&" || $op eq "|" || $op eq "^") {
             emit($cg, "((int64_t)((uint64_t)(");
             gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
             emit($cg, ") " . $op . " (uint64_t)(");
             gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
             emit($cg, ")))");
+            return;
+        }
+        if ($op eq "<<") {
+            my int $sid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $sid + 1;
+            emit($cg, "({ int64_t __rsl" . $sid . " = ");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, "; int64_t __rsr" . $sid . " = ");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, "; (__rsr" . $sid . " < 0 || __rsr" . $sid . " >= 64) ? (int64_t)0 : (int64_t)((uint64_t)__rsl" . $sid . " << (int)__rsr" . $sid . "); })");
+            return;
+        }
+        if ($op eq ">>") {
+            my int $sid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $sid + 1;
+            emit($cg, "({ int64_t __rrl" . $sid . " = ");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, "; int64_t __rrr" . $sid . " = ");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, "; (__rrr" . $sid . " < 0 || __rrr" . $sid . " >= 64) ? (__rrl" . $sid . " < 0 ? (int64_t)-1 : (int64_t)0) : (__rrl" . $sid . " >> (int)__rrr" . $sid . "); })");
             return;
         }
         if ($op eq "%") {
@@ -5550,6 +5783,39 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
         emit($cg, "\n");
         return;
     }
+    if ($st_t == NODE_FOR_STMT()) {
+        my int $has_vd = 0;
+        my scalar $fi = $st->{"init"};
+        if ($fi && $fi->{"type"} == NODE_VAR_DECL()) {
+            $has_vd = 1;
+            emit_indent($cg);
+            emit($cg, "{\n");
+            indent($cg);
+            gen_raw_int_stmt($cg, $fi, $cur_pkg);
+        }
+        emit_indent($cg);
+        emit($cg, "for (");
+        if ($fi && $has_vd == 0) {
+            gen_raw_int_expr($cg, $fi, $cur_pkg);
+        }
+        emit($cg, "; ");
+        if ($st->{"condition"}) {
+            gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+        }
+        emit($cg, "; ");
+        if ($st->{"update"}) {
+            gen_raw_int_expr($cg, $st->{"update"}, $cur_pkg);
+        }
+        emit($cg, ") ");
+        gen_raw_int_block($cg, $st->{"body"}, $cur_pkg);
+        emit($cg, "\n");
+        if ($has_vd == 1) {
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
+        return;
+    }
     if ($st_t == NODE_RETURN_STMT()) {
         emit_indent($cg);
         emit($cg, "return ");
@@ -5562,6 +5828,487 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
         gen_raw_int_expr($cg, $st->{"expr"}, $cur_pkg);
         emit($cg, ";\n");
         return;
+    }
+}
+
+# Conservative predicate: returns 1 only when $expr is guaranteed NEVER to evaluate
+# to a container (ARRAY/HASH/REF/blessed object), so my str variables assigned only
+# non-container values can skip strada_break_self_cycle() on scope exit.
+func expr_is_noncontainer(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 1; }
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_STR_LITERAL() || $t == NODE_INT_LITERAL() || $t == NODE_NUM_LITERAL() || $t == NODE_UNDEF()) {
+        return 1;
+    }
+    if ($t == NODE_DUNDER_PACKAGE() || $t == NODE_DUNDER_FILE() || $t == NODE_DUNDER_LINE() ||
+        $t == NODE_REGEX_MATCH() || $t == NODE_REGEX_SUBST() || $t == NODE_TR()) {
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        if ($cg->{"has_overloads"} != 0) { return 0; }
+        my str $op = "" . $expr->{"op"};
+        if ($op eq "." || $op eq "x" || $op eq "+" || $op eq "-" || $op eq "*" ||
+            $op eq "/" || $op eq "%" || $op eq "**" || $op eq "&" || $op eq "|" ||
+            $op eq "^" || $op eq "<<" || $op eq ">>" || $op eq "==" || $op eq "!=" ||
+            $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=" || $op eq "<=>" ||
+            $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" ||
+            $op eq "ge" || $op eq "cmp" || $op eq "=~" || $op eq "!~") {
+            return 1;
+        }
+        if ($op eq "&&" || $op eq "||" || $op eq "//") {
+            if (expr_is_noncontainer($cg, $expr->{"left"}) == 1 && expr_is_noncontainer($cg, $expr->{"right"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        if ($cg->{"has_overloads"} != 0) { return 0; }
+        my str $uop = "" . $expr->{"op"};
+        if ($uop eq "!" || $uop eq "not" || $uop eq "-" || $uop eq "~") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_TERNARY()) {
+        if (expr_is_noncontainer($cg, $expr->{"true_expr"}) == 1 && expr_is_noncontainer($cg, $expr->{"false_expr"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_CALL()) {
+        if (expr_is_int_typed($cg, $expr) == 1 || expr_is_numeric($cg, $expr) == 1) {
+            return 1;
+        }
+        my str $cn = "" . $expr->{"name"};
+        if (length($cn) > 6 && substr($cn, 0, 6) eq "core::") {
+            $cn = substr($cn, 6, length($cn) - 6);
+        } elsif (length($cn) > 5 && substr($cn, 0, 5) eq "sys::") {
+            $cn = substr($cn, 5, length($cn) - 5);
+        }
+        if ($cn eq "chr" || $cn eq "ord" || $cn eq "length" || $cn eq "bytes" ||
+            $cn eq "substr" || $cn eq "substr_bytes" || $cn eq "index" || $cn eq "rindex" ||
+            $cn eq "lc" || $cn eq "uc" || $cn eq "lcfirst" || $cn eq "ucfirst" ||
+            $cn eq "trim" || $cn eq "ltrim" || $cn eq "rtrim" || $cn eq "join" ||
+            $cn eq "sprintf" || $cn eq "hex" || $cn eq "oct" || $cn eq "defined" ||
+            $cn eq "chomp" || $cn eq "chop" || $cn eq "reftype" || $cn eq "ref") {
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+func pf_mark_bad(scalar $state, str $raw_name, int $bad_str) void {
+    if (length($raw_name) == 0 || index($raw_name, "::") >= 0) { return; }
+    my str $cn = escape_c_keyword($raw_name);
+    $state->{"bad"}->{$cn} = 1;
+    if ($bad_str == 1) {
+        $state->{"str_bad"}->{$cn} = 1;
+    }
+}
+
+func pf_mark_all_vars_bad(scalar $node, scalar $state) void {
+    if (!$node) { return; }
+    my str $rt = reftype($node);
+    if ($rt eq "ARRAY") {
+        my int $n = size($node);
+        my int $i = 0;
+        while ($i < $n) {
+            pf_mark_all_vars_bad($node->[$i], $state);
+            $i = $i + 1;
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    my int $nt = $node->{"type"} + 0;
+    if ($nt == NODE_VARIABLE() || $nt == NODE_VAR_DECL() || $nt == NODE_PARAM() ||
+        $nt == NODE_FOREACH_STMT() || $nt == NODE_LOCAL_DECL() || $nt == NODE_OUR_DECL() ||
+        $nt == NODE_CONST_DECL()) {
+        pf_mark_bad($state, "" . $node->{"name"}, 1);
+        pf_mark_bad($state, "" . $node->{"var_name"}, 1);
+    }
+    my scalar $ks = keys(%{$node});
+    my int $kn = size($ks);
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $node->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            pf_mark_all_vars_bad($v, $state);
+        }
+        $k = $k + 1;
+    }
+}
+
+func pf_is_mutating_builtin(str $fn_name, int $argc) int {
+    my str $cn = $fn_name;
+    if (length($cn) > 6 && substr($cn, 0, 6) eq "core::") {
+        $cn = substr($cn, 6, length($cn) - 6);
+    } elsif (length($cn) > 5 && substr($cn, 0, 5) eq "sys::") {
+        $cn = substr($cn, 5, length($cn) - 5);
+    }
+    if ($cn eq "chomp" || $cn eq "chop" || $cn eq "tie" || $cn eq "untie" ||
+        $cn eq "tied" || $cn eq "undef" || $cn eq "weaken" || $cn eq "free" ||
+        $cn eq "release" || $cn eq "read" || $cn eq "sysread" || $cn eq "recv" ||
+        $cn eq "accept" || $cn eq "open" || $cn eq "opendir" || $cn eq "pipe" ||
+        $cn eq "socketpair" || $cn eq "readline" || $cn eq "utf8::upgrade" ||
+        $cn eq "utf8::downgrade" || $cn eq "utf8::encode" || $cn eq "utf8::decode") {
+        return 1;
+    }
+    if (($cn eq "substr" || $cn eq "substr_bytes" || $cn eq "vec") && $argc >= 4) {
+        return 1;
+    }
+    return 0;
+}
+
+func pf_walk_node(scalar $cg, scalar $node, scalar $state) void {
+    if (!$node) { return; }
+    my str $rt = reftype($node);
+    if ($rt eq "ARRAY") {
+        my int $an = size($node);
+        my int $ai = 0;
+        while ($ai < $an) {
+            pf_walk_node($cg, $node->[$ai], $state);
+            $ai = $ai + 1;
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    my int $nt = $node->{"type"} + 0;
+
+    if ($nt == NODE_C_BLOCK()) {
+        $state->{"disable_unbox"} = 1;
+        return;
+    }
+    if ($nt == NODE_ANON_FUNC() || $nt == NODE_ASYNC_FUNC()) {
+        pf_mark_all_vars_bad($node, $state);
+        return;
+    }
+    if ($nt == NODE_BLOCK()) {
+        my scalar $saved_act = raw_int_copy_scope($state->{"active"});
+        my scalar $stmts = $node->{"statements"};
+        my int $sc = $node->{"statement_count"} + 0;
+        my int $si = 0;
+        while ($si < $sc) {
+            pf_walk_node($cg, $stmts->[$si], $state);
+            $si = $si + 1;
+        }
+        $state->{"active"} = $saved_act;
+        return;
+    }
+    if ($nt == NODE_FOR_STMT()) {
+        my scalar $saved_act2 = raw_int_copy_scope($state->{"active"});
+        if ($node->{"init"}) { pf_walk_node($cg, $node->{"init"}, $state); }
+        if ($node->{"condition"}) { pf_walk_node($cg, $node->{"condition"}, $state); }
+        if ($node->{"update"}) { pf_walk_node($cg, $node->{"update"}, $state); }
+        if ($node->{"body"}) { pf_walk_node($cg, $node->{"body"}, $state); }
+        $state->{"active"} = $saved_act2;
+        return;
+    }
+    if ($nt == NODE_VAR_DECL()) {
+        if ($node->{"init"}) {
+            pf_walk_node($cg, $node->{"init"}, $state);
+        }
+        my str $vname = "" . $node->{"name"};
+        my str $cn = escape_c_keyword($vname);
+        if (($state->{"active"}->{$cn} + 0) == 1) {
+            $state->{"bad"}->{$cn} = 1;
+            $state->{"str_bad"}->{$cn} = 1;
+        }
+        $state->{"active"}->{$cn} = 1;
+        my str $sig = "" . $node->{"sigil"};
+        my int $vt = $node->{"var_type"} + 0;
+        my str $st_nm = "" . $node->{"struct_name"};
+        if ($sig ne "$" || length($st_nm) > 0) {
+            $state->{"bad"}->{$cn} = 1;
+            $state->{"str_bad"}->{$cn} = 1;
+            return;
+        }
+        if ($vt == TYPE_INT()) {
+            $state->{"str_bad"}->{$cn} = 1;
+            if (!$node->{"init"}) {
+                $state->{"bad"}->{$cn} = 1;
+            } else {
+                my str $prev_k = "" . $state->{"kind"}->{$cn};
+                if (length($prev_k) > 0 && $prev_k ne "int") {
+                    $state->{"bad"}->{$cn} = 1;
+                } else {
+                    $state->{"kind"}->{$cn} = "int";
+                }
+            }
+        } elsif ($vt == TYPE_NUM()) {
+            $state->{"str_bad"}->{$cn} = 1;
+            if (!$node->{"init"}) {
+                $state->{"bad"}->{$cn} = 1;
+            } else {
+                my str $prev_k2 = "" . $state->{"kind"}->{$cn};
+                if (length($prev_k2) > 0 && $prev_k2 ne "num") {
+                    $state->{"bad"}->{$cn} = 1;
+                } else {
+                    $state->{"kind"}->{$cn} = "num";
+                }
+            }
+        } elsif ($vt == TYPE_STR()) {
+            $state->{"bad"}->{$cn} = 1;
+            if (length("" . $state->{"kind"}->{$cn}) > 0) {
+                $state->{"str_bad"}->{$cn} = 1;
+            }
+            if ($node->{"init"} && expr_is_noncontainer($cg, $node->{"init"}) == 0) {
+                $state->{"str_bad"}->{$cn} = 1;
+            }
+            $state->{"str_seen"}->{$cn} = 1;
+        } else {
+            $state->{"bad"}->{$cn} = 1;
+            $state->{"str_bad"}->{$cn} = 1;
+        }
+        return;
+    }
+    if ($nt == NODE_DESTRUCTURE()) {
+        if ($node->{"init"}) { pf_walk_node($cg, $node->{"init"}, $state); }
+        my scalar $dvars = $node->{"vars"};
+        my int $dvc = $node->{"var_count"} + 0;
+        my int $di = 0;
+        while ($di < $dvc) {
+            my scalar $dv = $dvars->[$di];
+            if ($dv) { pf_mark_bad($state, "" . $dv->{"name"}, 1); }
+            $di = $di + 1;
+        }
+        return;
+    }
+    if ($nt == NODE_FOREACH_STMT()) {
+        pf_mark_bad($state, "" . $node->{"var_name"}, 1);
+        if ($node->{"array"}) { pf_walk_node($cg, $node->{"array"}, $state); }
+        if ($node->{"body"}) { pf_walk_node($cg, $node->{"body"}, $state); }
+        return;
+    }
+    if ($nt == NODE_OUR_DECL() || $nt == NODE_CONST_DECL() || $nt == NODE_LOCAL_DECL()) {
+        pf_mark_bad($state, "" . $node->{"name"}, 1);
+    }
+    if ($nt == NODE_CATCH_CLAUSE()) {
+        pf_mark_bad($state, "" . $node->{"var_name"}, 1);
+        pf_mark_bad($state, "" . $node->{"name"}, 1);
+    }
+    if ($nt == NODE_READLINE()) {
+        pf_mark_bad($state, "" . $node->{"varname"}, 1);
+        return;
+    }
+    if ($nt == NODE_REF()) {
+        my scalar $rtgt = $node->{"target"};
+        if ($rtgt && ($rtgt->{"type"} + 0) == NODE_VARIABLE()) {
+            pf_mark_bad($state, "" . $rtgt->{"name"}, 1);
+        } else {
+            pf_walk_node($cg, $rtgt, $state);
+        }
+        return;
+    }
+    if ($nt == NODE_REGEX_SUBST() || $nt == NODE_TR()) {
+        my scalar $stgt = $node->{"target"};
+        if ($stgt && ($stgt->{"type"} + 0) == NODE_VARIABLE() && index("" . $node->{"flags"}, "r") < 0) {
+            pf_mark_bad($state, "" . $stgt->{"name"}, 1);
+        } else {
+            pf_walk_node($cg, $stgt, $state);
+        }
+        if ($node->{"replacement"}) { pf_walk_node($cg, $node->{"replacement"}, $state); }
+        return;
+    }
+    if ($nt == NODE_ASSIGN()) {
+        my scalar $rhs = $node->{"value"};
+        my scalar $tgt = $node->{"target"};
+        my str $aop = "" . $node->{"op"};
+        pf_walk_node($cg, $rhs, $state);
+        if ($tgt && ($tgt->{"type"} + 0) == NODE_VARIABLE()) {
+            my str $tnm = "" . $tgt->{"name"};
+            my str $tcn = escape_c_keyword($tnm);
+            if (("" . $tgt->{"sigil"}) ne "$" || index($tnm, "::") >= 0) {
+                pf_mark_bad($state, $tnm, 1);
+            } elsif ($aop eq "=") {
+                if (expr_is_noncontainer($cg, $rhs) == 0) {
+                    $state->{"str_bad"}->{$tcn} = 1;
+                }
+            } elsif ($aop eq "+=" || $aop eq "-=" || $aop eq "*=") {
+                if ($cg->{"has_overloads"} != 0) {
+                    $state->{"str_bad"}->{$tcn} = 1;
+                }
+            } elsif ($aop eq "&=" || $aop eq "|=" || $aop eq "^=" || $aop eq "<<=" || $aop eq ">>=") {
+                if (("" . $state->{"kind"}->{$tcn}) eq "num") {
+                    $state->{"bad"}->{$tcn} = 1;
+                }
+                if ($cg->{"has_overloads"} != 0) {
+                    $state->{"str_bad"}->{$tcn} = 1;
+                }
+            } elsif ($aop eq "/=") {
+                if (("" . $state->{"kind"}->{$tcn}) eq "int") {
+                    $state->{"bad"}->{$tcn} = 1;
+                }
+                if ($cg->{"has_overloads"} != 0) {
+                    $state->{"str_bad"}->{$tcn} = 1;
+                }
+            } elsif ($aop eq ".=" || $aop eq "x=") {
+                $state->{"bad"}->{$tcn} = 1;
+                if ($cg->{"has_overloads"} != 0) {
+                    $state->{"str_bad"}->{$tcn} = 1;
+                }
+            } else {
+                $state->{"bad"}->{$tcn} = 1;
+                $state->{"str_bad"}->{$tcn} = 1;
+            }
+        } else {
+            if ($tgt && ($tgt->{"type"} + 0) == NODE_CALL() && ("" . $tgt->{"name"}) eq "substr") {
+                my scalar $sa = $tgt->{"args"};
+                if ($sa && size($sa) > 0 && ($sa->[0]->{"type"} + 0) == NODE_VARIABLE()) {
+                    pf_mark_bad($state, "" . $sa->[0]->{"name"}, 1);
+                }
+            }
+            pf_walk_node($cg, $tgt, $state);
+        }
+        return;
+    }
+    if ($nt == NODE_INCREMENT()) {
+        my scalar $iop = $node->{"operand"};
+        if ($iop && ($iop->{"type"} + 0) == NODE_VARIABLE()) {
+            my str $icn = escape_c_keyword($iop->{"name"});
+            $state->{"str_bad"}->{$icn} = 1;
+            if (("" . $iop->{"sigil"}) ne "$" || index($iop->{"name"}, "::") >= 0) {
+                $state->{"bad"}->{$icn} = 1;
+            }
+        } else {
+            pf_walk_node($cg, $iop, $state);
+        }
+        return;
+    }
+    if ($nt == NODE_HASH_ACCESS()) {
+        if ($node->{"hash"} && ($node->{"hash"}->{"type"} + 0) == NODE_VARIABLE()) {
+            pf_mark_bad($state, "" . $node->{"hash"}->{"name"}, 1);
+        }
+    } elsif ($nt == NODE_SUBSCRIPT()) {
+        if ($node->{"array"} && ($node->{"array"}->{"type"} + 0) == NODE_VARIABLE()) {
+            pf_mark_bad($state, "" . $node->{"array"}->{"name"}, 1);
+        }
+    } elsif ($nt == NODE_DEREF_HASH() || $nt == NODE_DEREF_ARRAY() || $nt == NODE_DEREF_SCALAR()) {
+        if ($node->{"ref"} && ($node->{"ref"}->{"type"} + 0) == NODE_VARIABLE()) {
+            pf_mark_bad($state, "" . $node->{"ref"}->{"name"}, 1);
+        }
+    } elsif ($nt == NODE_METHOD_CALL() || $nt == NODE_DYN_METHOD_CALL()) {
+        my scalar $recv = $node->{"base_object"};
+        if (!$recv) { $recv = $node->{"object"}; }
+        if ($recv && ($recv->{"type"} + 0) == NODE_VARIABLE()) {
+            pf_mark_bad($state, "" . $recv->{"name"}, 1);
+        }
+    } elsif ($nt == NODE_CALL()) {
+        my int $cac = $node->{"arg_count"} + 0;
+        my scalar $cargs = $node->{"args"};
+        if (pf_is_mutating_builtin("" . $node->{"name"}, $cac) == 1 && $cargs) {
+            my int $cai = 0;
+            while ($cai < $cac) {
+                my scalar $ca = $cargs->[$cai];
+                if ($ca && ($ca->{"type"} + 0) == NODE_VARIABLE()) {
+                    pf_mark_bad($state, "" . $ca->{"name"}, 1);
+                }
+                $cai = $cai + 1;
+            }
+        }
+    }
+
+    if (ast_is_leaf_node_type($nt) == 1) { return; }
+    my scalar $ks = keys(%{$node});
+    my int $kn = size($ks);
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $node->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            pf_walk_node($cg, $v, $state);
+        }
+        $k = $k + 1;
+    }
+}
+
+func prescan_func_locals(scalar $cg, scalar $fn, scalar $cand_boxed_ref) void {
+    $cg->{"unboxed_int_vars"} = {};
+    $cg->{"unboxed_num_vars"} = {};
+    $cg->{"safe_str_vars"} = {};
+    if (!$fn || !$fn->{"body"}) { return; }
+    if ($cg->{"cleanup_enabled"} != 1 || $cg->{"uses_tie"} == 1) { return; }
+
+    my hash %bad = ();
+    my hash %str_bad = ();
+    my hash %kind = ();
+    my hash %str_seen = ();
+    my hash %active = ();
+    $bad{"_"} = 1; $str_bad{"_"} = 1;
+    $bad{"a"} = 1; $str_bad{"a"} = 1;
+    $bad{"b"} = 1; $str_bad{"b"} = 1;
+    $bad{"__program_name"} = 1; $str_bad{"__program_name"} = 1;
+
+    my scalar $params = $fn->{"params"};
+    my int $pc = $fn->{"param_count"} + 0;
+    my int $pi = 0;
+    while ($pi < $pc) {
+        my str $pcn = escape_c_keyword($params->[$pi]->{"name"});
+        $bad{$pcn} = 1;
+        $str_bad{$pcn} = 1;
+        $active{$pcn} = 1;
+        $pi = $pi + 1;
+    }
+    if ($cand_boxed_ref) {
+        foreach my str $bk (keys(%{$cand_boxed_ref})) {
+            if (($cand_boxed_ref->{$bk} + 0) == 1) {
+                $bad{$bk} = 1;
+                $str_bad{$bk} = 1;
+            }
+        }
+    }
+    if ($cg->{"our_vars"}) {
+        foreach my str $ok (keys(%{$cg->{"our_vars"}})) {
+            if (length("" . $cg->{"our_vars"}->{$ok}) > 0) {
+                $bad{$ok} = 1;
+                $str_bad{$ok} = 1;
+            }
+        }
+    }
+    if ($cg->{"prog_global_names"}) {
+        foreach my str $gk (keys(%{$cg->{"prog_global_names"}})) {
+            if (($cg->{"prog_global_names"}->{$gk} + 0) == 1) {
+                $bad{$gk} = 1;
+                $str_bad{$gk} = 1;
+            }
+        }
+    }
+
+    my hash %state = ();
+    $state{"bad"} = \%bad;
+    $state{"str_bad"} = \%str_bad;
+    $state{"kind"} = \%kind;
+    $state{"str_seen"} = \%str_seen;
+    $state{"active"} = \%active;
+    $state{"disable_unbox"} = 0;
+    if (($cg->{"func_has_try"} + 0) == 1 || ($cg->{"func_has_goto"} + 0) == 1) {
+        $state{"disable_unbox"} = 1;
+    }
+
+    pf_walk_node($cg, $fn->{"body"}, \%state);
+
+    if ($state{"disable_unbox"} == 0) {
+        my scalar $ui_map = $cg->{"unboxed_int_vars"};
+        my scalar $un_map = $cg->{"unboxed_num_vars"};
+        foreach my str $kn (keys(%kind)) {
+            if (($bad{$kn} + 0) == 0) {
+                if ($kind{$kn} eq "int") {
+                    $ui_map->{$kn} = 1;
+                } elsif ($kind{$kn} eq "num") {
+                    $un_map->{$kn} = 1;
+                }
+            }
+        }
+    }
+    if (($cg->{"func_has_goto"} + 0) == 0) {
+        my scalar $ss_map = $cg->{"safe_str_vars"};
+        foreach my str $sn (keys(%str_seen)) {
+            if (($str_seen{$sn} + 0) == 1 && ($str_bad{$sn} + 0) == 0) {
+                $ss_map->{$sn} = 1;
+            }
+        }
     }
 }
 
@@ -6620,6 +7367,9 @@ func assign_is_owned_expr(scalar $cg, scalar $expr) int {
         if ($ov && length("" . $ov->{$onm}) > 0) {
             return 1;
         }
+        if (is_unboxed_var_node($cg, $tgt) == 1) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -6796,8 +7546,15 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         return 1;
     }
 
-    # await, diamond readline <$fh>, SUPER::method(), and ++/-- all return owned SVs
-    if ($type == NODE_AWAIT() || $type == NODE_READLINE() || $type == NODE_SUPER_CALL() || $type == NODE_INCREMENT()) {
+    # await, diamond readline <$fh>, SUPER::method() always return owned SVs;
+    # ++/-- returns owned unless marked is_void_stmt for an unboxed local.
+    if ($type == NODE_AWAIT() || $type == NODE_READLINE() || $type == NODE_SUPER_CALL()) {
+        return 1;
+    }
+    if ($type == NODE_INCREMENT()) {
+        if (($expr->{"is_void_stmt"} + 0) == 1) {
+            return 0;
+        }
         return 1;
     }
 
@@ -6820,6 +7577,9 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         my scalar $our_vars = $cg->{"our_vars"};
         my str $our_check = "" . $our_vars->{$c_name};
         if (length($our_check) > 0) {
+            return 1;
+        }
+        if (is_unboxed_var_node($cg, $expr) == 1) {
             return 1;
         }
         return 0;
@@ -6955,6 +7715,9 @@ func return_needs_incref(scalar $cg, scalar $expr) int {
         my scalar $rn_our_vars = $cg->{"our_vars"};
         my str $rn_our_check = "" . $rn_our_vars->{$rn_c_name};
         if (length($rn_our_check) > 0) {
+            return 0;
+        }
+        if (is_unboxed_var_node($cg, $expr) == 1) {
             return 0;
         }
         return 1;
@@ -7238,6 +8001,10 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     if ($key_expr->{"type"} == NODE_STR_LITERAL() && str_has_nul($key_expr->{"value"}) == 0) {
         $key_is_lit = 1;
     }
+    my int $key_is_concat = 0;
+    if ($key_is_lit == 0 && is_concat_str_literal_left($key_expr) == 1) {
+        $key_is_concat = 1;
+    }
     my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1 && autoviv_link_type($hash_expr) == 0;
     my int $hash_retain = 0;
     if ($cg->{"cleanup_enabled"} == 1 && $hash_cleanup == 0 && autoviv_link_type($hash_expr) == 0) {
@@ -7257,6 +8024,16 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     }
     my int $hca_push = cleanup_push_useful($cg);
     if (length($hca_opch) > 0) {
+        my int $concat_r_clean = 0;
+        my scalar $concat_right = 0;
+        my str $prefix_val = "";
+        my int $prefix_len = 0;
+        if ($key_is_concat == 1) {
+            $concat_right = $key_expr->{"right"};
+            $concat_r_clean = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $concat_right) == 1;
+            $prefix_val = $key_expr->{"left"}->{"value"};
+            $prefix_len = bytes($prefix_val);
+        }
         emit($cg, "({ ");
         if ($hca_av_cl == 1) { emit($cg, "int __hca_av_mk = strada_cleanup_mark(); "); }
         emit($cg, "StradaValue *__hca_h = ");
@@ -7264,7 +8041,14 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         emit($cg, "; ");
         if ($hash_retain == 1) { emit($cg, "strada_incref(__hca_h); "); }
         if ($hca_push == 1 && $hash_cleanup == 1) { emit($cg, "strada_cleanup_push(__hca_h); "); }
-        if ($key_is_lit == 0) {
+        if ($key_is_concat == 1) {
+            if ($concat_r_clean == 1) {
+                emit($cg, "StradaValue *__hca_ckr = ");
+                gen_expression($cg, $concat_right);
+                emit($cg, "; ");
+                if ($hca_push == 1) { emit($cg, "strada_cleanup_push(__hca_ckr); "); }
+            }
+        } elsif ($key_is_lit == 0) {
             emit($cg, "StradaValue *__hca_k = ");
             gen_expression($cg, $key_expr);
             emit($cg, "; ");
@@ -7280,7 +8064,12 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
                 if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                 emit($cg, "strada_decref(__hca_rhs); ");
             }
-            if ($key_is_lit == 0 && $key_cleanup == 1) {
+            if ($key_is_concat == 1) {
+                if ($concat_r_clean == 1) {
+                    if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
+                    emit($cg, "strada_decref(__hca_ckr); ");
+                }
+            } elsif ($key_is_lit == 0 && $key_cleanup == 1) {
                 if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                 emit($cg, "strada_decref(__hca_k); ");
             }
@@ -7292,15 +8081,22 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
         }
         if ($key_is_lit == 1) {
-            if (key_is_hashable_ascii($key_expr->{"value"}) == 1) {
-                emit($cg, "strada_hv_compound_ph(__hca_h, ");
-                gen_str_literal_c($cg, $key_expr->{"value"});
-                emit($cg, ", " . djb2_hash_32($key_expr->{"value"}) . "u, __hca_rhs, " . $hca_opch . "); ");
+            my str $kval = $key_expr->{"value"};
+            if (key_is_hashable_ascii($kval) == 1) {
+                emit($cg, "strada_hv_compound_ph_len(__hca_h, ");
+                gen_str_literal_c($cg, $kval);
+                emit($cg, ", " . bytes($kval) . "u, " . djb2_hash_32($kval) . "u, __hca_rhs, " . $hca_opch . "); ");
             } else {
                 emit($cg, "strada_hv_compound(__hca_h, ");
-                gen_str_literal_c($cg, $key_expr->{"value"});
+                gen_str_literal_c($cg, $kval);
                 emit($cg, ", __hca_rhs, " . $hca_opch . "); ");
             }
+        } elsif ($key_is_concat == 1) {
+            emit($cg, "strada_hv_compound_concat(__hca_h, ");
+            gen_str_literal_c($cg, $prefix_val);
+            emit($cg, ", " . $prefix_len . ", ");
+            if ($concat_r_clean == 1) { emit($cg, "__hca_ckr"); } else { gen_expression($cg, $concat_right); }
+            emit($cg, ", __hca_rhs, " . $hca_opch . "); ");
         } else {
             emit($cg, "strada_hv_compound_sv(__hca_h, __hca_k, __hca_rhs, " . $hca_opch . "); ");
         }
@@ -7308,7 +8104,12 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_rhs); ");
         }
-        if ($key_is_lit == 0 && $key_cleanup == 1) {
+        if ($key_is_concat == 1) {
+            if ($concat_r_clean == 1) {
+                if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
+                emit($cg, "strada_decref(__hca_ckr); ");
+            }
+        } elsif ($key_is_lit == 0 && $key_cleanup == 1) {
             if ($hca_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
             emit($cg, "strada_decref(__hca_k); ");
         }
@@ -7336,9 +8137,16 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     }
     emit($cg, "StradaValue *__hca_old = ");
     if ($key_is_lit == 1) {
-        emit($cg, "strada_hv_fetch_owned(__hca_h, ");
-        gen_str_literal_c($cg, $key_expr->{"value"});
-        emit($cg, ")");
+        my str $kval = $key_expr->{"value"};
+        if (key_is_hashable_ascii($kval) == 1) {
+            emit($cg, "strada_hv_fetch_owned_ph_len(__hca_h, ");
+            gen_str_literal_c($cg, $kval);
+            emit($cg, ", " . bytes($kval) . "u, " . djb2_hash_32($kval) . "u)");
+        } else {
+            emit($cg, "strada_hv_fetch_owned(__hca_h, ");
+            gen_str_literal_c($cg, $kval);
+            emit($cg, ")");
+        }
     } else {
         emit($cg, "strada_hv_fetch_owned_sv(__hca_h, __hca_k)");
     }
@@ -7358,8 +8166,9 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
         }
         if ($hca_push == 1) { emit($cg, "strada_cleanup_push(__hca_rhs); "); }
         if ($key_is_lit == 1) {
-            emit($cg, "strada_hv_store(__hca_h, ");
-            gen_str_literal_c($cg, $key_expr->{"value"});
+            emit_hv_store_open($cg, $key_expr->{"value"});
+            emit($cg, "__hca_h, ");
+            emit_hv_store_key($cg, $key_expr->{"value"});
             emit($cg, ", __hca_rhs); ");
         } else {
             emit($cg, "strada_hv_store_sv(__hca_h, __hca_k, __hca_rhs); ");
@@ -7467,8 +8276,9 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     emit($cg, "} ");
     if ($hca_push == 1) { emit($cg, "strada_cleanup_push(__hca_new); "); }
     if ($key_is_lit == 1) {
-        emit($cg, "strada_hv_store(__hca_h, ");
-        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit_hv_store_open($cg, $key_expr->{"value"});
+        emit($cg, "__hca_h, ");
+        emit_hv_store_key($cg, $key_expr->{"value"});
         emit($cg, ", __hca_new); ");
     } else {
         emit($cg, "strada_hv_store_sv(__hca_h, __hca_k, __hca_new); ");

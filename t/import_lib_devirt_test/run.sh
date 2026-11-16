@@ -105,13 +105,13 @@ echo "$OUT" | grep -q "^n2=17$"   || fail "v1 n2: got: $OUT"
 echo "$OUT" | grep -q "^hooks=1$" || fail "v1 hooks (before hook must fire once): got: $OUT"
 
 # ---------- 2. generated C shape ----------
-# Call sites dispatch via strada_method_call_cs (per-site cache); the
+# Call sites dispatch via strada_method_call_cs[_il|0_il] (per-site cache); the
 # import wrapper's fallback uses _ph with __fb_args — don't match it.
 # bump/value devirtualize: no call-site dispatch-by-name for them...
-grep -Eq 'strada_method_call_cs\([^)]*"bump"' host.c \
+grep -Eq 'strada_method_call_cs(0?_il)?\([^)]*"bump"' host.c \
     && fail "bump was NOT devirtualized (call-site dispatch by name found in host.c)"
 # ...while the hooked method must stay on dynamic dispatch (mod: gating).
-grep -Eq 'strada_method_call_cs\([^)]*"logged_add"' host.c \
+grep -Eq 'strada_method_call_cs(0?_il)?\([^)]*"logged_add"' host.c \
     || fail "logged_add call-site dispatch missing — was it wrongly devirtualized?"
 # The fingerprint guard machinery must be present.
 grep -q "_devirt_ok" host.c || fail "devirt_ok guard missing from host.c"

@@ -511,6 +511,20 @@ func gen_block(scalar $cg, scalar $block) void {
 # the value was coerced — the result is then a fresh OWNED value and the
 # caller must skip its return_needs_incref logic.
 func gen_return_value(scalar $cg, scalar $value) int {
+    if ($cg->{"ret_is_num"} == 1 && is_unboxed_var_node($cg, $value) == 1) {
+        my str $rv_unm = escape_c_keyword($value->{"name"});
+        if (is_unboxed_int($cg, $rv_unm) == 1) {
+            emit($cg, "strada_new_num((double)" . $rv_unm . ")");
+            return 1;
+        }
+    }
+    if ($cg->{"ret_is_int"} == 1 && is_unboxed_var_node($cg, $value) == 1) {
+        my str $rv_unm2 = escape_c_keyword($value->{"name"});
+        if (is_unboxed_num($cg, $rv_unm2) == 1) {
+            emit($cg, "strada_new_int_il((int64_t)" . $rv_unm2 . ")");
+            return 1;
+        }
+    }
     if ($cg->{"ret_is_num"} == 1 && expr_is_numeric($cg, $value) == 0) {
         emit($cg, "({ StradaValue *__rcv = ");
         gen_expression($cg, $value);
@@ -613,10 +627,19 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $box_scalar = 1;
             $target_lval = "(*__cell_" . $c_name . ")";
         }
+        my int $is_ub_int = 0;
+        my int $is_ub_num = 0;
+        if ($sigil eq "$" && $box_scalar == 0 && $predecl == 0) {
+            if ($var_type == TYPE_INT() && is_unboxed_int($cg, $c_name) == 1) {
+                $is_ub_int = 1;
+            } elsif ($var_type == TYPE_NUM() && is_unboxed_num($cg, $c_name) == 1) {
+                $is_ub_num = 1;
+            }
+        }
         # Track the slot (and whether its cleanup push was elided) BEFORE
         # evaluating $init so any throw/return/goto/loop-control inside the
         # initializer sees the exact runtime cleanup stack state.
-        if ($predecl == 0) {
+        if ($predecl == 0 && $is_ub_int == 0 && $is_ub_num == 0) {
             my str $decl_track = $c_name;
             if ($box_scalar == 1) {
                 $decl_track = "@cell:" . $c_name;
@@ -788,6 +811,40 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_int_operand($cg, $stmt->{"initial_capacity"});
                 emit($cg, ")");
             }
+        } elsif ($is_ub_int == 1 && $stmt->{"init"}) {
+            my scalar $init = $stmt->{"init"};
+            my int $init_type = $init->{"type"};
+            emit($cg, "int64_t " . $c_name . " = ");
+            if ($init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
+                if (needs_temp_cleanup($cg, $init) == 1) {
+                    emit($cg, "({ StradaValue *__sz_tmp = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; int64_t __sz_n = (int64_t)strada_size(__sz_tmp); strada_decref(__sz_tmp); __sz_n; })");
+                } else {
+                    emit($cg, "(int64_t)strada_size(");
+                    gen_expression($cg, $init);
+                    emit($cg, ")");
+                }
+            } else {
+                emit_int_operand($cg, $init);
+            }
+        } elsif ($is_ub_num == 1 && $stmt->{"init"}) {
+            my scalar $init = $stmt->{"init"};
+            my int $init_type = $init->{"type"};
+            emit($cg, "double " . $c_name . " = ");
+            if ($init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
+                if (needs_temp_cleanup($cg, $init) == 1) {
+                    emit($cg, "({ StradaValue *__sz_tmp = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; double __sz_n = (double)strada_size(__sz_tmp); strada_decref(__sz_tmp); __sz_n; })");
+                } else {
+                    emit($cg, "(double)strada_size(");
+                    gen_expression($cg, $init);
+                    emit($cg, ")");
+                }
+            } else {
+                emit_num_operand($cg, $init);
+            }
         } else {
             emit_var_decl_target_slot($cg, $c_name, $target_lval, $box_scalar, $predecl);
             if ($stmt->{"init"}) {
@@ -844,7 +901,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my str $init_name_chk = escape_c_keyword($init->{"name"});
                     my scalar $our_vars_chk = $cg->{"our_vars"};
                     my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
-                    if ($init->{"name"} ne "__program_name" && length($init_our_chk) == 0) {
+                    if ($init->{"name"} ne "__program_name" && length($init_our_chk) == 0 && is_unboxed_var_node($cg, $init) == 0) {
                         emit($cg, "; " . $target_lval . " = strada_copy_scalar_il(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_SUBSCRIPT()) {
@@ -1122,8 +1179,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     gen_expression($cg, $stmt->{"init"});
                     emit($cg, "; ");
                     if ($lp == 1 && $lv_cl == 1) { emit($cg, "strada_cleanup_push(__lv); "); }
-                    emit($cg, "strada_hv_store(__lh, ");
-                    gen_str_literal_c($cg, $key_expr->{"value"});
+                    emit_hv_store_open($cg, $key_expr->{"value"});
+                    emit($cg, "__lh, ");
+                    emit_hv_store_key($cg, $key_expr->{"value"});
                     emit($cg, ", __lv);");
                     if ($lv_cl == 1) {
                         if ($lp == 1) { emit($cg, " strada_cleanup_pop_decref(__lv);"); }
@@ -1898,6 +1956,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($stmt->{"update"}) {
             my scalar $update = $stmt->{"update"};
             if ($update->{"type"} == NODE_ASSIGN()) {
+                $update->{"is_void_stmt"} = 1;
+                gen_expression($cg, $update);
+            } elsif ($update->{"type"} == NODE_INCREMENT() && is_unboxed_var_node($cg, $update->{"operand"}) == 1) {
                 $update->{"is_void_stmt"} = 1;
                 gen_expression($cg, $update);
             } elsif ($update->{"type"} == NODE_INCREMENT() || ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $update) == 1)) {
@@ -2879,6 +2940,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my scalar $expr = $stmt->{"expr"};
         if ($expr->{"type"} == NODE_ASSIGN()) {
             $expr->{"is_void_stmt"} = 1;
+        } elsif ($expr->{"type"} == NODE_INCREMENT() && is_unboxed_var_node($cg, $expr->{"operand"}) == 1) {
+            $expr->{"is_void_stmt"} = 1;
         }
 
         # `$x = EXPR;` in a program that uses tie: a tied scalar takes the
@@ -2915,7 +2978,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Check if expression produces owned value that must be freed
         # This includes increment/decrement, method calls, and other temp values
-        if ($expr->{"type"} == NODE_INCREMENT() ||
+        if (($expr->{"type"} == NODE_INCREMENT() && ($expr->{"is_void_stmt"} + 0) != 1) ||
             ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1)) {
             # Discard an owned result: decref it inline. No named temp is
             # needed — the value is produced and immediately consumed by
@@ -3843,6 +3906,7 @@ func gen_function(scalar $cg, scalar $fn) void {
     $cg->{"goto_label_depths"} = {};
     $cg->{"goto_label_try_depths"} = {};
     $cg->{"local_marks"} = [];
+    prescan_func_locals($cg, $fn, \%cand_boxed);
 
     my str $emit_fn_name = mangle_c_func_ident($name, "" . $fn->{"name"}, 0);
 
@@ -4195,6 +4259,9 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"func_tracks_depth"} = 0;
         $cg->{"fn_has_tmps_mark"} = 0;
         $cg->{"func_has_goto"} = 0;
+        $cg->{"unboxed_int_vars"} = {};
+        $cg->{"unboxed_num_vars"} = {};
+        $cg->{"safe_str_vars"} = {};
     } else {
         # Private functions get static prefix (file-scope only).
         # When this TU also defines `main`, the export_info table is
@@ -4254,7 +4321,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             }
             if ($rpc == 0) { emit($cg, "void"); }
             emit($cg, ") {\n");
-            emit($cg, "    return strada_new_int(__strada_raw_" . $name . "(");
+            emit($cg, "    return strada_new_int_il(__strada_raw_" . $name . "(");
             $rpi = 0;
             while ($rpi < $rpc) {
                 emit($cg, "strada_to_int(" . escape_c_keyword($rparams->[$rpi]->{"name"}) . "), ");
@@ -4262,6 +4329,9 @@ func gen_function(scalar $cg, scalar $fn) void {
             }
             emit($cg, "strada_current_depth_il()));\n");
             emit($cg, "}\n\n");
+            $cg->{"unboxed_int_vars"} = {};
+            $cg->{"unboxed_num_vars"} = {};
+            $cg->{"safe_str_vars"} = {};
             return;
         }
         emit($cg, $static_prefix . $ret_type . " " . $emit_fn_name . "(");
@@ -4560,6 +4630,9 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         # Clear func_params
         $cg->{"func_params"} = {};
+        $cg->{"unboxed_int_vars"} = {};
+        $cg->{"unboxed_num_vars"} = {};
+        $cg->{"safe_str_vars"} = {};
 
         emit($cg, "\n\n");
     }
@@ -4664,6 +4737,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     my int $saved_has_local = $cg->{"has_local"} + 0;
     my scalar $saved_int_vars = $cg->{"int_vars"};
     my scalar $saved_num_vars = $cg->{"num_vars"};
+    my scalar $saved_ub_int = $cg->{"unboxed_int_vars"};
+    my scalar $saved_ub_num = $cg->{"unboxed_num_vars"};
+    my scalar $saved_safe_str = $cg->{"safe_str_vars"};
     my int $saved_ret_is_int = $cg->{"ret_is_int"} + 0;
     my int $saved_ret_is_num = $cg->{"ret_is_num"} + 0;
     my str $saved_fn_pkg = "" . $cg->{"current_fn_package"};
@@ -4708,6 +4784,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"has_local"} = 0;
     $cg->{"int_vars"} = {};
     $cg->{"num_vars"} = {};
+    $cg->{"unboxed_int_vars"} = {};
+    $cg->{"unboxed_num_vars"} = {};
+    $cg->{"safe_str_vars"} = {};
     $cg->{"ret_is_int"} = 0;
     $cg->{"ret_is_num"} = 0;
     $cg->{"current_fn_package"} = $fn->{"package"};
@@ -4846,6 +4925,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"has_local"} = $saved_has_local;
     $cg->{"int_vars"} = $saved_int_vars;
     $cg->{"num_vars"} = $saved_num_vars;
+    $cg->{"unboxed_int_vars"} = $saved_ub_int;
+    $cg->{"unboxed_num_vars"} = $saved_ub_num;
+    $cg->{"safe_str_vars"} = $saved_safe_str;
     $cg->{"ret_is_int"} = $saved_ret_is_int;
     $cg->{"ret_is_num"} = $saved_ret_is_num;
     $cg->{"current_fn_package"} = $saved_fn_pkg;
@@ -5342,6 +5424,15 @@ func gen_program(scalar $cg, scalar $program) void {
             $og = $og + 1;
         }
     }
+
+    my hash %prog_globals = ();
+    my int $pgni = 0;
+    while ($pgni < $global_count) {
+        my scalar $pgvar_n = $program->{"globals"}->[$pgni];
+        $prog_globals{escape_c_keyword($pgvar_n->{"name"})} = 1;
+        $pgni = $pgni + 1;
+    }
+    $cg->{"prog_global_names"} = \%prog_globals;
 
     # Discover pure int64_t-specializable functions (closed fixed-point set).
     if ($cg->{"tu_has_main"} == 1 && $cg->{"module_only_mode"} == 0 &&
@@ -6387,6 +6478,9 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"known_types"} = {};
                 $cg->{"int_vars"} = {};
                 $cg->{"num_vars"} = {};
+                $cg->{"unboxed_int_vars"} = {};
+                $cg->{"unboxed_num_vars"} = {};
+                $cg->{"safe_str_vars"} = {};
                 $cg->{"struct_vars"} = {};
                 $cg->{"func_params"} = {};
                 $cg->{"func_param_names"} = [];
@@ -6451,6 +6545,9 @@ func gen_program(scalar $cg, scalar $program) void {
                 $cg->{"known_types"} = {};
                 $cg->{"int_vars"} = {};
                 $cg->{"num_vars"} = {};
+                $cg->{"unboxed_int_vars"} = {};
+                $cg->{"unboxed_num_vars"} = {};
+                $cg->{"safe_str_vars"} = {};
                 $cg->{"struct_vars"} = {};
                 $cg->{"func_params"} = {};
                 $cg->{"func_param_names"} = [];

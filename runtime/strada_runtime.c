@@ -4923,7 +4923,7 @@ void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
 /* strada_hash_set_take - set hash entry, taking ownership (no incref on new value) */
 /* Pre-hashed variant: caller provides the djb2 hash of the key.
  * Avoids re-hashing for known constant keys (e.g., has-attribute names). */
-void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
+void strada_hash_set_take_ph_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv) {
     if (!hv || !key) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
@@ -4932,7 +4932,6 @@ void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash,
 
     uint32_t pos = hash & (hv->num_buckets - 1);
     uint32_t first_tombstone = HASH_EMPTY;
-    uint32_t key_len = (uint32_t)strlen(key);
     int iters = 0;
     while (1) {
         uint32_t idx = hv->hash_index[pos];
@@ -4983,6 +4982,10 @@ void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash,
     if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
+}
+
+void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
+    strada_hash_set_take_ph_len(hv, key, key ? (uint32_t)strlen(key) : 0, hash, sv);
 }
 
 /* Single-probe lvalue lookup: returns a pointer to the value slot of the
@@ -5379,11 +5382,9 @@ StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx) {
     return autoviv_elem(arr_sv, idx, 1);
 }
 
-int strada_hash_exists(StradaHash *hv, const char *key) {
+int strada_hash_exists_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
     if (!hv || !key) return 0;
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
 
@@ -5407,6 +5408,11 @@ int strada_hash_exists(StradaHash *hv, const char *key) {
             return hash_linear_find(hv, key, key_len, hash) >= 0 ? 1 : 0;
         }
     }
+}
+
+int strada_hash_exists(StradaHash *hv, const char *key) {
+    if (!hv || !key) return 0;
+    return strada_hash_exists_with_hash_len(hv, key, (uint32_t)strlen(key), strada_hash_string(key));
 }
 
 void strada_hash_delete(StradaHash *hv, const char *key) {
@@ -5860,6 +5866,11 @@ int strada_hv_check_lock_sv(StradaValue *sv, StradaValue *key_sv) {
 static void strada_hash_set_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv);
 static void strada_hv_compound_len(StradaValue *sv, const char *key, size_t key_sz, unsigned int hash,
                                    StradaValue *rhs, int op);
+void strada_hv_compound_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash,
+                               StradaValue *rhs, int op) {
+    if (!key) return;
+    strada_hv_compound_len(sv, key, (size_t)key_len, hash, rhs, op);
+}
 void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash,
                            StradaValue *rhs, int op) {
     if (!key) return;
@@ -6137,7 +6148,9 @@ static const char* build_concat_key_buf(
     }
     if (!suffix_str) suffix_len = 0;
 
-    if (suffix_len > SIZE_MAX - prefix_len - 1) suffix_len = SIZE_MAX - prefix_len - 1;
+    size_t max_len = (size_t)UINT32_MAX - 1;
+    if (prefix_len > max_len) prefix_len = max_len;
+    if (suffix_len > max_len - prefix_len) suffix_len = max_len - prefix_len;
     size_t total = prefix_len + suffix_len;
     char *dst = stack_buf;
     if (total >= stack_buflen) {
@@ -6302,6 +6315,14 @@ static void strada_hash_set_with_hash_len(StradaHash *hv, const char *key, uint3
     hash_set_with_hash_len_core(hv, key, key_len, hash, sv, NULL);
 }
 
+void strada_hash_set_ph_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv) {
+    hash_set_with_hash_len_core(hv, key, key_len, hash, sv, NULL);
+}
+
+StradaValue* strada_hash_get_with_hash_len_ext(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    return strada_hash_get_with_hash_len(hv, key, key_len, hash);
+}
+
 static StradaValue* strada_hash_delete_take_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
     if (!hv || !key) return strada_undef_static();
 
@@ -6392,6 +6413,30 @@ void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_l
     }
 
     hash_set_with_hash_len_core(strada_deref_hash(msv), key, (uint32_t)key_len, hash, value, heap_key);
+}
+
+void strada_hv_compound_concat(StradaValue *sv, const char *prefix, size_t prefix_len,
+                               StradaValue *suffix, StradaValue *rhs, int op) {
+    StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
+    if (!msv) return;
+    char key_buf[256];
+    char *heap_key = NULL;
+    size_t key_len = 0;
+    unsigned int hash = 0;
+    const char *key = build_concat_key_buf(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &heap_key, &key_len, &hash);
+    if (!key) {
+        if (heap_key) free(heap_key);
+        return;
+    }
+    if (heap_key) {
+        StradaValue *ksv = strada_new_str_len(key, key_len);
+        free(heap_key);
+        strada_cleanup_push(ksv);
+        strada_hv_compound_len(msv, ksv->value.pv, key_len, hash, rhs, op);
+        strada_cleanup_pop_decref(ksv);
+        return;
+    }
+    strada_hv_compound_len(msv, key, key_len, hash, rhs, op);
 }
 
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix) {
@@ -25312,6 +25357,51 @@ StradaValue* strada_new_blessed_2attr_take(
     return ref;
 }
 
+/* Directly-blessed hash ctor for 1 attr — see _2attr_hv_take below. */
+StradaValue* strada_new_blessed_1attr_hv_take(
+        char *interned_pkg,
+        StradaString *k1, StradaValue *v1) {
+    {
+        StradaValue *pooled = strada_instance_pool_pop(interned_pkg);
+        if (pooled) {
+            StradaHash *phv = pooled->value.hv;
+            if (phv->num_entries == 1 && phv->entries[0].key == k1) {
+                strada_decref(phv->entries[0].value);
+                phv->entries[0].value = v1;
+                return pooled;
+            }
+            if (pooled->meta) {
+                if (!pooled->meta->blessed_immortal && pooled->meta->blessed_package)
+                    strada_intern_release(pooled->meta->blessed_package);
+                pooled->meta->blessed_package = NULL;
+                pooled->meta->blessed_immortal = 0;
+            }
+            strada_decref(pooled);
+        }
+    }
+    StradaHash *hv = strada_hash_new_presized(1);
+
+    uint32_t mask = hv->num_buckets - 1;
+    uint32_t pos1 = k1->hash & mask;
+    ss_incref(k1);
+    hv->entries[0].key = k1;
+    hv->entries[0].value = v1;
+    hv->hash_index[pos1] = 0;
+    hv->num_entries = 1;
+    hv->next_slot = 1;
+
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_HASH;
+    sv->refcount = 1;
+    sv->value.hv = hv;
+
+    StradaMetadata *meta = strada_ensure_meta(sv);
+    meta->blessed_package = interned_pkg;
+    meta->blessed_immortal = 1;
+
+    return sv;
+}
+
 /* Directly-blessed hash ctor — skips the REF wrapper SV (one fewer
  * strada_value_alloc + one fewer strada_free_value at drop time). Returns
  * a STRADA_HASH SV with blessed_package set directly on its meta. Method
@@ -29310,7 +29400,8 @@ static void method_cache_init(void) {
  * and modifier registration. Entries stamped with an older generation are
  * treated as empty, so a full flush is never needed. Starts at 1 so the
  * zero-initialized cache is stale by construction. */
-static uint32_t mc_cache_gen = 1;
+uint32_t strada_mc_cache_gen = 1;
+#define mc_cache_gen strada_mc_cache_gen
 
 /* Invalidate both method caches by bumping the generation: entries stamped
  * with an older generation are treated as empty. This used to memset the

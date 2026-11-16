@@ -1867,47 +1867,45 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             }
 
             # Check if single arg is a hash access node
+            my scalar $ex_key_e = $args->[1];
+            my scalar $ex_hash_e = $args->[0];
             if ($expr->{"arg_count"} == 1 && ($arg0->{"type"} == NODE_HASH_ACCESS() || $arg0->{"type"} == NODE_DEREF_HASH())) {
-                my scalar $key_expr = $arg0->{"key"};
-                my scalar $hash_expr = $arg0->{"hash"};
-                if ($arg0->{"type"} == NODE_DEREF_HASH()) { $hash_expr = $arg0->{"ref"}; }
-                my int $key_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
-                my int $hash_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
-                emit($cg, "({ StradaValue *__ex_key = ");
-                gen_expression($cg, $key_expr);
-                emit($cg, "; ");
-                if ($ex_sp == 1 && $key_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__ex_key); "); }
-                if ($hash_needs_cleanup == 1) {
-                    emit($cg, "StradaValue *__ex_h = ");
-                    gen_expression($cg, $hash_expr);
+                $ex_key_e = $arg0->{"key"};
+                $ex_hash_e = $arg0->{"hash"};
+                if ($arg0->{"type"} == NODE_DEREF_HASH()) {
+                    $ex_hash_e = $arg0->{"ref"};
+                }
+            }
+            my int $ex_hash_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ex_hash_e) == 1;
+            if ($ex_key_e->{"type"} == NODE_STR_LITERAL() && key_is_hashable_ascii($ex_key_e->{"value"}) == 1) {
+                my str $ex_kval = $ex_key_e->{"value"};
+                if ($ex_hash_cl == 1) {
+                    emit($cg, "({ StradaValue *__ex_h = ");
+                    gen_expression($cg, $ex_hash_e);
                     emit($cg, "; ");
                     if ($ex_sp == 1) { emit($cg, "strada_cleanup_push(__ex_h); "); }
-                    emit($cg, "int __ex_res = strada_hv_exists_sv(__ex_h, __ex_key); ");
+                    emit($cg, "int __ex_res = strada_hv_exists_ph_len(__ex_h, ");
+                    gen_str_literal_c($cg, $ex_kval);
+                    emit($cg, ", " . bytes($ex_kval) . "u, " . djb2_hash_32($ex_kval) . "u); ");
                     if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_h); "); }
                     else { emit($cg, "strada_decref(__ex_h); "); }
+                    emit($cg, "strada_new_int_il(__ex_res); })");
                 } else {
-                    emit($cg, "int __ex_res = strada_hv_exists_sv(");
-                    gen_expression($cg, $hash_expr);
-                    emit($cg, ", __ex_key); ");
+                    emit($cg, "strada_new_int_il(strada_hv_exists_ph_len(");
+                    gen_expression($cg, $ex_hash_e);
+                    emit($cg, ", ");
+                    gen_str_literal_c($cg, $ex_kval);
+                    emit($cg, ", " . bytes($ex_kval) . "u, " . djb2_hash_32($ex_kval) . "u))");
                 }
-                if ($key_needs_cleanup == 1) {
-                    if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_key); "); }
-                    else { emit($cg, "strada_decref(__ex_key); "); }
-                }
-                emit($cg, "strada_new_int(__ex_res); })");
             } else {
-                # Two arg form: exists(hash, key)
-                my scalar $key_expr = $args->[1];
-                my scalar $hash_expr = $args->[0];
-                my int $key_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
-                my int $hash_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
+                my int $key_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ex_key_e) == 1;
                 emit($cg, "({ StradaValue *__ex_key = ");
-                gen_expression($cg, $key_expr);
+                gen_expression($cg, $ex_key_e);
                 emit($cg, "; ");
                 if ($ex_sp == 1 && $key_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__ex_key); "); }
-                if ($hash_needs_cleanup == 1) {
+                if ($ex_hash_cl == 1) {
                     emit($cg, "StradaValue *__ex_h = ");
-                    gen_expression($cg, $hash_expr);
+                    gen_expression($cg, $ex_hash_e);
                     emit($cg, "; ");
                     if ($ex_sp == 1) { emit($cg, "strada_cleanup_push(__ex_h); "); }
                     emit($cg, "int __ex_res = strada_hv_exists_sv(__ex_h, __ex_key); ");
@@ -1915,14 +1913,14 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     else { emit($cg, "strada_decref(__ex_h); "); }
                 } else {
                     emit($cg, "int __ex_res = strada_hv_exists_sv(");
-                    gen_expression($cg, $hash_expr);
+                    gen_expression($cg, $ex_hash_e);
                     emit($cg, ", __ex_key); ");
                 }
                 if ($key_needs_cleanup == 1) {
                     if ($ex_sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ex_key); "); }
                     else { emit($cg, "strada_decref(__ex_key); "); }
                 }
-                emit($cg, "strada_new_int(__ex_res); })");
+                emit($cg, "strada_new_int_il(__ex_res); })");
             }
             return 1;
         }
@@ -9245,17 +9243,27 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     # OOP loops vs the 5 separate calls.
                     my int $no_defaults = 0;
                     if (size(@ctor_def_names) == 0) { $no_defaults = 1; }
-                    if (($arg_count == 4 || $arg_count == 6) && $no_defaults == 1 && cleanup_push_useful($cg) == 0) {
-                        my int $all_int_vals = 1;
-                        my int $fvi = 1;
+                    if (($arg_count == 2 || $arg_count == 4 || $arg_count == 6) && $no_defaults == 1 && cleanup_push_useful($cg) == 0) {
+                        my int $fused_ok = 1;
+                        my hash %fused_keys_seen = ();
+                        my int $fvi = 0;
                         while ($fvi < $arg_count) {
-                            if (expr_is_always_tagged_int($cg, $args->[$fvi]) != 1) {
-                                $all_int_vals = 0;
+                            my str $fk_chk = "" . $args->[$fvi]->{"value"};
+                            if (key_is_hashable_ascii($fk_chk) == 0 || ($fused_keys_seen{$fk_chk} + 0) != 0) {
+                                $fused_ok = 0;
                                 last;
+                            }
+                            $fused_keys_seen{$fk_chk} = 1;
+                            my scalar $fv_chk = $args->[$fvi + 1];
+                            if ($arg_count > 2) {
+                                if (expr_cannot_throw($cg, $fv_chk) == 0 || arg_is_trivially_pure($cg, $fv_chk) == 0) {
+                                    $fused_ok = 0;
+                                    last;
+                                }
                             }
                             $fvi = $fvi + 2;
                         }
-                        if ($all_int_vals == 1) {
+                        if ($fused_ok == 1) {
                             # Emit fused call.
                             my int $fbn = $cg->{"tmp_counter"} + 0;
                             $cg->{"tmp_counter"} = $fbn + 1;
@@ -9277,24 +9285,38 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                             # dispatch via strada_deref_hash handles both
                             # forms; ref() returns the package name for
                             # blessed values regardless of REF vs HASH
-                            # wrapper. Saves one SV alloc + one SV decref
-                            # per object construct/drop cycle, ~20-25ns
-                            # on bench_oop's hot loop.
-                            if ($nattr == 2) {
+                            # wrapper.
+                            if ($nattr == 1) {
+                                emit($cg, "strada_new_blessed_1attr_hv_take(__fpkg_p" . $fbn . ", __fss_p" . $fss_ids[0] . ", ");
+                            } elsif ($nattr == 2) {
                                 emit($cg, "strada_new_blessed_2attr_hv_take(__fpkg_p" . $fbn . ", __fss_p" . $fss_ids[0] . ", ");
-                                gen_expression($cg, $args->[1]);
-                                emit($cg, ", __fss_p" . $fss_ids[1] . ", ");
-                                gen_expression($cg, $args->[3]);
-                                emit($cg, "); })");
                             } else {
                                 emit($cg, "strada_new_blessed_3attr_hv_take(__fpkg_p" . $fbn . ", __fss_p" . $fss_ids[0] . ", ");
-                                gen_expression($cg, $args->[1]);
-                                emit($cg, ", __fss_p" . $fss_ids[1] . ", ");
-                                gen_expression($cg, $args->[3]);
-                                emit($cg, ", __fss_p" . $fss_ids[2] . ", ");
-                                gen_expression($cg, $args->[5]);
-                                emit($cg, "); })");
                             }
+                            my int $fval_i = 0;
+                            while ($fval_i < $nattr) {
+                                if ($fval_i > 0) {
+                                    emit($cg, ", __fss_p" . $fss_ids[$fval_i] . ", ");
+                                }
+                                my scalar $fv_node = $args->[$fval_i * 2 + 1];
+                                if (expr_is_always_tagged_int($cg, $fv_node) == 1) {
+                                    gen_expression($cg, $fv_node);
+                                } elsif (expr_is_int_typed($cg, $fv_node) == 1 && expr_cannot_throw($cg, $fv_node) == 1) {
+                                    emit($cg, "strada_new_int_il(");
+                                    emit_int_operand($cg, $fv_node);
+                                    emit($cg, ")");
+                                } elsif ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fv_node) == 1) {
+                                    gen_expression($cg, $fv_node);
+                                } else {
+                                    my int $fv_uid = $cg->{"tmp_counter"} + 0;
+                                    $cg->{"tmp_counter"} = $fv_uid + 1;
+                                    emit($cg, "({ StradaValue *__fv" . $fv_uid . " = ");
+                                    gen_expression($cg, $fv_node);
+                                    emit($cg, "; strada_incref(__fv" . $fv_uid . "); __fv" . $fv_uid . "; })");
+                                }
+                                $fval_i = $fval_i + 1;
+                            }
+                            emit($cg, "); })");
                             return;
                         }
                     }
@@ -9351,11 +9373,15 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         }
                         my int $d_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dnode) == 1;
                         if ($d_owned == 1 && key_is_hashable_ascii($attr_name) == 1) {
-                            emit($cg, "strada_hash_set_take_ph(__ct_h->value.hv, " . c_str_lit($attr_name) . ", " . djb2_hash_32($attr_name) . "u, ");
+                            emit($cg, "strada_hash_set_take_ph_len(__ct_h->value.hv, " . c_str_lit($attr_name) . ", " . bytes($attr_name) . "u, " . djb2_hash_32($attr_name) . "u, ");
                             gen_expression($cg, $dnode);
                             emit($cg, "); ");
                         } elsif ($d_owned == 1) {
                             emit($cg, "strada_hash_set_take(__ct_h->value.hv, " . c_str_lit($attr_name) . ", ");
+                            gen_expression($cg, $dnode);
+                            emit($cg, "); ");
+                        } elsif (key_is_hashable_ascii($attr_name) == 1) {
+                            emit($cg, "strada_hash_set_ph_len(__ct_h->value.hv, " . c_str_lit($attr_name) . ", " . bytes($attr_name) . "u, " . djb2_hash_32($attr_name) . "u, ");
                             gen_expression($cg, $dnode);
                             emit($cg, "); ");
                         } else {
