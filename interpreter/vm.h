@@ -246,6 +246,14 @@ typedef enum {
     OP_LT_LOCAL_I32_JMP_F,   /* u16 slot, i32 imm, u16 off — jump if !(locals[slot] < imm) */
     OP_LE_LOCAL_I32_JMP_F,   /* u16 slot, i32 imm, u16 off — jump if !(locals[slot] <= imm) */
     OP_LT_LOCAL_LOCAL_JMP_F, /* u16 slot_a, u16 slot_b, u16 off — jump if !(locals[a] < locals[b]) */
+    OP_ADD_TO_LOCAL_VAL,     /* u16 dst_slot, u8 coerce — pop rhs; locals[dst] += rhs */
+    OP_SUB_TO_LOCAL_VAL,     /* u16 dst_slot, u8 coerce — pop rhs; locals[dst] -= rhs */
+    OP_BIT_AND_LOCAL_I32,    /* u16 slot, i32 imm — push locals[slot] & imm */
+    OP_MOD_LOCAL_I32,        /* u16 slot, i32 imm (imm != 0) — push locals[slot] % imm (floored) */
+    OP_HASH_GET_CONST,       /* u16 kidx — pop hash, push hash[const_str[kidx]] */
+    OP_HASH_SET_CONST,       /* u16 kidx — pop val, pop hash, hash[const_str[kidx]] = val */
+    OP_SUB_LOCALS,           /* u16 sa, u16 sb — push locals[sa] - locals[sb] */
+    OP_MUL_LOCALS,           /* u16 sa, u16 sb — push locals[sa] * locals[sb] */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -606,13 +614,32 @@ enum VMObjType {
     VM_OBJ_UINT64 = 26,   /* boxed unsigned 64-bit integer (> INT64_MAX) */
 };
 typedef struct VMObjHeader {
-    enum VMObjType obj_type;
+    uint8_t obj_type;
     uint8_t gc_marked;
-    uint8_t gc_immortal;
+    uint8_t gc_immortal; /* 0 = normal GC, 1 = compile/orphan, 2 = static immortal singleton */
     uint8_t is_utf8;
     uint8_t gc_finalized;
+    uint8_t pool_class;  /* VM_POOL_* (>0 when slab-allocated/recyclable by root VM) */
     struct VMObjHeader *gc_next;
 } VMObjHeader;
+
+enum {
+    VM_POOL_NONE = 0,
+    VM_POOL_STR32 = 1,
+    VM_POOL_HASH = 2,
+    VM_POOL_ARRAY = 3,
+    VM_POOL_CELL = 4,
+    VM_POOL_SREF = 5,
+    VM_POOL_CLOSURE = 6,
+    VM_POOL_WEAKREF = 7,
+    VM_POOL_COUNT = 8
+};
+
+#define VM_STR_SLAB_MAX 32
+#define VM_POOL_MAX_PER_CLASS 4096
+#define VM_KEY_INTERN_MAX 4096
+#define VM_KEY_INTERN_SLOTS 8192
+#define VM_KEY_INTERN_MAXLEN 64
 void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type);
 
 /* Forward declarations */
@@ -742,23 +769,11 @@ typedef struct {
 } VMWeakRef;
 static inline VMWeakRef *VM_AS_WEAKREF(VMValue v) { return (VMWeakRef*)VM_TO_PTR(v); }
 
-/* Convenience: create a VM string */
+/* Convenience: create a VM string (returns 0/1-char ASCII singletons + uses slab pool) */
+VMValue vm_make_str_n(const char *s, size_t len);
+#define VM_MAKE_STR_N(s, len) vm_make_str_n((s), (len))
 static inline VMValue VM_MAKE_STR(const char *s) {
-    size_t len = strlen(s);
-    VMString *vs = (VMString*)malloc(sizeof(VMString) + len + 1);
-    vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
-    vs->len = (uint32_t)len;
-    memcpy(vs->data, s, len + 1);
-    return VM_MAKE_PTR(vs);
-}
-
-static inline VMValue VM_MAKE_STR_N(const char *s, size_t len) {
-    VMString *vs = (VMString*)malloc(sizeof(VMString) + len + 1);
-    vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
-    vs->len = (uint32_t)len;
-    memcpy(vs->data, s, len);
-    vs->data[len] = '\0';
-    return VM_MAKE_PTR(vs);
+    return vm_make_str_n((s), (s) ? strlen(s) : 0);
 }
 
 static inline VMValue VM_MAKE_FLOAT(double d) {
@@ -782,23 +797,29 @@ static inline double VM_FLOAT_VAL(VMValue v) {
 #define vm_str(s)  VM_MAKE_STR(s)
 
 /* Dynamic array */
+#define VM_ARRAY_INLINE_CAP 4
 struct VMArray {
     VMObjHeader hdr;
     VMValue *items;
     uint8_t *holes;     /* non-NULL only when sparse gaps / deleted holes exist (holes[i] == 1) */
     int size;
     int cap;
+    uint32_t class_id;
+    uint32_t class_prog_id;
     VMValue tied_obj;   /* TIEARRAY implementation object (0/undef = untied) */
     char *class_name;   /* blessed package name (NULL if unblessed) */
+    VMValue inline_items[VM_ARRAY_INLINE_CAP];
 };
 
 /* Hash table (open addressing) */
+#define VM_HASH_INLINE_CAP 4
 typedef struct {
     char *key;
     VMValue value;
     uint32_t hash;       /* cached hash value */
     uint32_t keylen;     /* cached key length */
     uint8_t occupied;
+    uint8_t key_interned; /* 1 if key is owned by root VM key_intern table (never free per-entry) */
 } VMHashEntry;
 
 struct VMHash {
@@ -806,10 +827,14 @@ struct VMHash {
     VMHashEntry *entries;
     int capacity;
     int size;
+    uint32_t class_id;
+    uint32_t class_prog_id;
+    uint32_t grow_gen;   /* bumped on grow/delete/reset to invalidate global_ic */
     char *class_name;
     int iter_pos;       /* iteration position for each() */
     VMValue tied_obj;   /* tie(): implementation object (0/undef = untied) */
     VMValue tied_last_key; /* tie(): last key returned by each() */
+    VMHashEntry inline_entries[VM_HASH_INLINE_CAP];
 };
 
 /* Closure */
@@ -975,6 +1000,11 @@ typedef struct {
     void **dl_handles;          /* all dlopen'd import_lib handles */
     int dl_handle_count;
     int dl_handle_cap;
+    char **class_names;         /* interned class names for integer class_id lookup (1-based) */
+    uint32_t class_count;
+    uint32_t class_cap;
+    uint32_t prog_id;           /* globally unique monotonic program ID */
+    pthread_mutex_t class_mutex;
     int refcount;
 } VMProgram;
 
@@ -1031,12 +1061,31 @@ typedef struct VM {
         char *method;            /* owned copy */
         int func_idx;
     } method_cache[32];
-    /* Per-PC monomorphic inline cache for static OP_METHOD_CALL / OP_FIELD_ACCESS */
+    /* Per-PC 2-way polymorphic inline cache for static OP_METHOD_CALL / OP_FIELD_ACCESS */
     struct {
         uint8_t *ip;
-        char *class_name;
+        uint32_t prog_id;
+        uint32_t class_id;
         int func_idx;
-    } method_ic[256];
+    } method_ic[256][2];
+    /* Per-PC inline cache for vm->globals dense slot lookup (when single-threaded) */
+    struct {
+        uint8_t *ip;
+        VMHash *globals;
+        uint32_t gen;
+        uint32_t slot;
+    } global_ic[64];
+    /* Per-root-VM object recycling freelists (bounded, drained on vm_free) */
+    VMObjHeader *obj_pools[VM_POOL_COUNT];
+    uint16_t obj_pool_len[VM_POOL_COUNT];
+    /* Interned short hash keys owned by root VM */
+    struct {
+        char *key;
+        uint32_t hash;
+        uint32_t len;
+    } *key_intern;
+    uint32_t key_intern_cap;
+    uint32_t key_intern_count;
     /* Mark-sweep GC state */
     VMObjHeader *gc_objects;
     size_t gc_count;

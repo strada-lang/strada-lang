@@ -1,0 +1,157 @@
+package T2A;
+func new(str $cls, int $v) scalar { return bless({"v" => $v, "tag" => "A"}, $cls); }
+func calc(scalar $self, int $k) int { return $self->{"v"} + $k; }
+
+package T2B;
+func new(str $cls, int $v) scalar { return bless({"v" => $v, "tag" => "B"}, $cls); }
+func calc(scalar $self, int $k) int { return $self->{"v"} * 2 + $k; }
+
+package T2C;
+func new(str $cls, int $v) scalar { return bless({"v" => $v, "tag" => "C"}, $cls); }
+func calc(scalar $self, int $k) int { return $self->{"v"} * 3 - $k; }
+
+package T2Base;
+func ping(scalar $self) int { return $self->{"v"} + 100; }
+
+package T2Child;
+inherit T2Base;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+
+package T2NumOv;
+use overload "+" => "add_ov", "-" => "sub_ov";
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func add_ov(scalar $self, scalar $other, int $rev) scalar {
+    my int $ov = defined($other) ? int($other) : 0;
+    return bless({"v" => $self->{"v"} + $ov}, "T2NumOv");
+}
+func sub_ov(scalar $self, scalar $other, int $rev) scalar {
+    my int $ov = defined($other) ? int($other) : 0;
+    my int $res = $rev ? ($ov - $self->{"v"}) : ($self->{"v"} - $ov);
+    return bless({"v" => $res}, "T2NumOv");
+}
+
+package main;
+our int $g_counter = 10;
+our str $g_label = "init";
+
+func local_helper() int {
+    local $g_counter = 99;
+    return $g_counter;
+}
+
+func main() int {
+    # 1. Bitwise VM_BOTH_INT + OP_BIT_AND_LOCAL_I32 + shift bounds
+    my int $b_acc = 0;
+    for (my int $i = -5; $i < 25; $i++) {
+        my int $x = $i & 7;
+        my int $y = 15 & $i;
+        my int $z = ($x | 8) ^ 3;
+        my int $s1 = $z << 2;
+        my int $s2 = $s1 >> 1;
+        $b_acc += $x + $y + $s2 + ((~$x) & 15);
+    }
+    if ((1 << 70) != 0) { say("FAIL shl overflow"); return 1; }
+    if (((-8) >> 1) != -4) { say("FAIL shr neg"); return 1; }
+    say("bit=" . $b_acc);
+
+    # 2. OP_MOD_LOCAL_I32 with negative dividend / divisor parity
+    my int $m_acc = 0;
+    for (my int $i = -10; $i <= 10; $i++) {
+        $m_acc += ($i % 5);
+    }
+    my int $m_neg = 0;
+    for (my int $i = -7; $i <= 7; $i++) {
+        $m_neg += ($i % (-3));
+    }
+    my int $neg_step = -2;
+    my int $k_var = 7;
+    my int $sub_mul = ($k_var - $neg_step) * $neg_step;
+    say("mod=" . $m_acc . "," . $m_neg . "," . $sub_mul);
+
+    # 3. OP_ADD_TO_LOCAL_VAL / OP_SUB_TO_LOCAL_VAL (int, num, untyped, overload)
+    my int $ti = 100;
+    my num $tf = 1.5;
+    my scalar $tu = "10.25";
+    for (my int $i = 1; $i <= 5; $i++) {
+        $ti += ($i * 2) + 1;
+        $ti -= $i;
+        $tf += ($i * 0.5);
+        $tf -= 0.25;
+        $tu += 1.25;
+    }
+    my scalar $ov = T2NumOv::new("T2NumOv", 50);
+    $ov += 7;
+    $ov -= 12;
+    say(sprintf("comp=%d,%.2f,%.2f,%d", $ti, $tf, $tu, $ov->{"v"}));
+
+    # 4. AST constant folding & edge cases (div0 runtime, strings, "0", from_sq_str)
+    my int $cf_i = (2 + 3) * (10 - 4) + ((1 << 5) >> 2) - (-7) + (17 % 5);
+    my int $cf_neg = -1;
+    my num $cf_f = (3.5 + 1.5) * 2.0 / 4.0;
+    my str $cf_s = "foo" . "bar" . "!";
+    my int $cf_b = (!"0") + (!"") + (!"abc") + (10 <=> 20) + ("abc" eq "abc") + ("a" lt "b");
+    my int $div0_caught = 0;
+    try { my num $z = 10.0 / (5 - 5); } catch ($e) { $div0_caught = 1; }
+    my int $mod0_caught = 0;
+    try { my int $z2 = 10 % (3 - 3); } catch ($e2) { $mod0_caught = 1; }
+    my int $sq_cmp = ("010" == 10 ? 1 : 0);
+    say(sprintf("cf=%d,%d,%.2f,%s,%d,%d,%d,%d", $cf_i, $cf_neg, $cf_f, $cf_s, $cf_b, $div0_caught, $mod0_caught, $sq_cmp));
+
+    # 5. Const-key hashes + inline capacity (0..4 -> 8 -> 24) + key interning + delete
+    my hash %small = ("x" => 1, "y" => 2, "z" => 3);
+    $small{"w"} = 4; # triggers 4 -> 8 growth
+    $small{"y"} = 20;
+    my int $delv = delete($small{"x"});
+    my int $sum_small = $small{"y"} + $small{"z"} + $small{"w"} + $delv + (exists($small{"x"}) ? 1 : 0);
+    my hash %big = ();
+    for (my int $i = 0; $i < 25; $i++) {
+        $big{"k_" . $i} = $i * 2;
+    }
+    my int $vret = ($big{"extra"} = 77);
+    $big{"extra"} = 88;
+    say("hash=" . $sum_small . "," . $big{"k_24"} . "," . $vret . "," . $big{"extra"} . "," . scalar(keys(%big)));
+
+    # 6. Inline arrays (0..4 -> >4), negative index, splice, unshift
+    my array @a = (10, 20);
+    push(@a, 30, 40);
+    push(@a, 50); # grows inline 4 -> 8
+    unshift(@a, 5);
+    my int $arr_chk = $a[0] + $a[-1] + $a[3] + size(@a);
+    splice(@a, 2, 2, 99, 100, 101);
+    say("arr=" . $arr_chk . "," . $a[2] . "," . $a[-1] . "," . size(@a));
+
+    # 7. 0-byte / 1-byte ASCII vs UTF-8 singletons
+    my str $empty1 = "" . "";
+    my str $c0 = chr(65);
+    my str $c1 = chr(233);
+    my str $sub_byte = substr("HelloWorld", 4, 1);
+    my str $u8_src = "éA";
+    my str $sub_u8 = substr($u8_src, 1, 1);
+    my str $u8_concat = "é" . "";
+    my str $u8_concat2 = "" . "é";
+    say("str=" . length($empty1) . "," . $c0 . "," . length($c1) . "," . $sub_byte . "," . $sub_u8 . "," . utf8::is_utf8($sub_u8) . "," . utf8::is_utf8($sub_byte) . "," . length($u8_concat) . "," . length($u8_concat2));
+
+    # 8. 2-way polymorphic PIC + 3-class megamorphic + inheritance + inherit()
+    my array @poly2 = (T2A::new("T2A", 10), T2B::new("T2B", 10));
+    my array @poly3 = (T2A::new("T2A", 1), T2B::new("T2B", 2), T2C::new("T2C", 3));
+    my int $p2_sum = 0;
+    my int $p3_sum = 0;
+    for (my int $i = 0; $i < 60; $i++) {
+        $p2_sum += $poly2[$i & 1]->calc(1);
+        $p3_sum += $poly3[$i % 3]->calc(2);
+    }
+    my scalar $ch = T2Child::new("T2Child", 7);
+    my int $inh1 = $ch->ping();
+    say("oop=" . $p2_sum . "," . $p3_sum . "," . $inh1);
+
+    # 9. Global IC + local() + globals hash growth invalidation
+    my int $g_sum = 0;
+    for (my int $i = 0; $i < 40; $i++) {
+        $g_counter += 2;
+        $g_sum += $g_counter;
+    }
+    my int $loc_val = local_helper();
+    say("glob=" . $g_sum . "," . $loc_val . "," . $g_counter . "," . $g_label);
+
+    return 0;
+}

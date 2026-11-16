@@ -1,0 +1,106 @@
+# Valgrind leak test for VM Tier 2 optimizations
+
+package LeakT2A;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func f(scalar $self) int { return $self->{"v"} + 1; }
+
+package LeakT2B;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func f(scalar $self) int { return $self->{"v"} * 2; }
+func DESTROY(scalar $self) void {
+    # exercise finalizer cleanup with pooled/interned hashes
+    my int $x = $self->{"v"};
+}
+
+package LeakT2C;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func f(scalar $self) int { return $self->{"v"} * 3; }
+
+package main;
+our int $g_t2 = 0;
+
+func make_closure(int $seed) scalar {
+    my int $acc = $seed;
+    return func (int $d) int {
+        $acc += $d;
+        return $acc;
+    };
+}
+
+func main() int {
+    # 1. Force >12,000 short strings, small inline hashes, inline arrays -> multiple GC sweeps & pool recycling
+    my int $chk = 0;
+    for (my int $i = 0; $i < 6000; $i++) {
+        my str $s1 = chr(65 + ($i % 26));
+        my str $s2 = substr("ABCDEFGH", $i % 6, 2);
+        my str $s3 = $s1 . $s2;
+        my hash %h = ("k1" => $s3, "k2" => $i);
+        my array @a = ($s3, $i, $i + 1);
+        if (($i & 7) == 0) {
+            # Grow past inline caps (4 -> 8) on some pooled instances
+            $h{"k3"} = 10; $h{"k4"} = 20; $h{"k5"} = 30;
+            push(@a, 4, 5, 6);
+        }
+        $chk += length($h{"k1"}) + $a[1] + ($i % 5);
+        $g_t2 += 1;
+    }
+
+    # 2. Exceed VM_KEY_INTERN_MAX (4096) with 4500 dynamic keys to test overflow free path
+    my hash %dyn = ();
+    for (my int $i = 0; $i < 4500; $i++) {
+        $dyn{"dynkey_" . $i} = $i;
+    }
+    if ($dyn{"dynkey_4499"} != 4499) { return 1; }
+
+    # 3. Closure cells + scalar refs + weakrefs into pooled containers + GC cycles
+    my int $cl_sum = 0;
+    for (my int $i = 0; $i < 200; $i++) {
+        my scalar $fn = make_closure($i);
+        my int $x = $i;
+        my scalar $sr = \$x;
+        my scalar $target = {"val" => $i};
+        my scalar $w = $target;
+        core::weaken($w);
+        $cl_sum += $fn->(3) + $$sr + $w->{"val"};
+    }
+    core::gc_collect();
+
+    # 4. 2-way & 3-way polymorphic OOP + DESTROY finalizers
+    my array @objs = (
+        LeakT2A::new("LeakT2A", 3),
+        LeakT2B::new("LeakT2B", 4),
+        LeakT2C::new("LeakT2C", 5)
+    );
+    my int $oop_chk = 0;
+    for (my int $i = 0; $i < 300; $i++) {
+        $oop_chk += $objs[$i % 3]->f();
+        if (($i % 50) == 0) {
+            my scalar $tmp_b = LeakT2B::new("LeakT2B", $i);
+            $oop_chk += $tmp_b->f();
+        }
+    }
+
+    # 5. Worker threads sharing globals & program + creating/merging pooled objects
+    my array @th = ();
+    for (my int $t = 0; $t < 2; $t++) {
+        my int $tid = $t;
+        push(@th, thread::create(func () int {
+            my int $acc = 0;
+            for (my int $i = 0; $i < 500; $i++) {
+                my hash %lh = ("tid" => $tid, "v" => $i);
+                my array @la = ($tid, $i, $i + 1, $i + 2, $i + 3);
+                $acc += $lh{"v"} + $la[4] + ($i % 3);
+                $g_t2 += 1;
+            }
+            return $acc;
+        }));
+    }
+    for (my int $t = 0; $t < 2; $t++) {
+        my int $tr = thread::join($th[$t]);
+        $oop_chk += $tr;
+    }
+
+    if ($g_t2 != 7000 || $chk <= 0 || $cl_sum <= 0 || $oop_chk <= 0) { return 2; }
+    say("LEAK_VM_PERF_TIER2_OK");
+    return 0;
+}
