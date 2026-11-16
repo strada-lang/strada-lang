@@ -254,6 +254,11 @@ typedef enum {
     OP_HASH_SET_CONST,       /* u16 kidx — pop val, pop hash, hash[const_str[kidx]] = val */
     OP_SUB_LOCALS,           /* u16 sa, u16 sb — push locals[sa] - locals[sb] */
     OP_MUL_LOCALS,           /* u16 sa, u16 sb — push locals[sa] * locals[sb] */
+    OP_INCR_LT_I32_JMP_T,    /* u16 slot, i32 imm, u16 off — ++locals[slot]; if (locals[slot] < imm) jmp */
+    OP_INCR_LE_I32_JMP_T,    /* u16 slot, i32 imm, u16 off — ++locals[slot]; if (locals[slot] <= imm) jmp */
+    OP_INCR_LT_LOCAL_JMP_T,  /* u16 sa, u16 sb, u16 off — ++locals[sa]; if (locals[sa] < locals[sb]) jmp */
+    OP_BIT_AND_ADD_I32,      /* u16 slot, i32 mask_imm, i32 add_imm — push (locals[slot] & mask_imm) + add_imm */
+    OP_TAIL_CALL,            /* u16 func_idx, u8 argc — reuse frame & tail-call callee */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -867,11 +872,40 @@ typedef struct {
     struct StradaValue *sv;  /* owned StradaValue* — passed directly to native calls */
 } VMNativeSV;
 
+/* Pre-decoded fixed-width instruction for direct-threaded dispatch */
+typedef struct VMInsn {
+    const void *handler; /* direct-threaded label pointer (NULL if non-GNU) */
+    uint8_t op;          /* StradaOpcode */
+    uint8_t flags;       /* 8-bit immediate / sub-op (argc, capture, coerce, kind, side) */
+    uint16_t a;          /* 16-bit operand 1 (slot, idx, fidx, target, sa) */
+    uint16_t b;          /* 16-bit operand 2 (sb, target, to_idx) */
+    uint16_t c;          /* 16-bit operand 3 (target for 2-local branches, flags_idx) */
+    union {
+        int64_t i64;
+        double f64;
+        struct {
+            int32_t i0;
+            int32_t i1;
+        } i32;
+        uint32_t u32;
+    } imm;
+} VMInsn;
+
 /* Bytecode chunk — compiled function */
 typedef struct {
     uint8_t *code;
     size_t code_len;
     size_t code_cap;
+    VMInsn *dt_code;
+    size_t dt_len;
+    size_t dt_code_len_src;
+    uint16_t *dt_aux;
+    size_t dt_aux_len;
+    void *jit_code;
+    size_t jit_size;
+    uint32_t *jit_offs;
+    uint32_t jit_hot;
+    uint8_t jit_state;    /* 0=cold, 1=compiling, 2=ready, 3=ineligible */
     int64_t *int_consts;
     size_t int_const_count;
     char **str_consts;
@@ -922,7 +956,7 @@ typedef struct {
 
 /* Exception handler */
 typedef struct {
-    uint8_t *catch_ip;
+    VMInsn *catch_ip;
     size_t stack_base;
     size_t frame_count;
     uint16_t local_slot; /* where to store caught exception */
@@ -1011,9 +1045,9 @@ typedef struct {
 /* Call frame */
 typedef struct {
     VMChunk *chunk;
-    uint8_t *ip;
-    VMValue *locals;
-    size_t stack_base;
+    VMInsn *ip;
+    size_t local_base;   /* index into vm->stack where frame locals live */
+    size_t stack_base;   /* index into vm->stack where caller expects return value */
     VMClosure *closure;  /* non-NULL if called as closure */
     int global_save_depth;
     int passed_argc;
@@ -1063,18 +1097,29 @@ typedef struct VM {
     } method_cache[32];
     /* Per-PC 2-way polymorphic inline cache for static OP_METHOD_CALL / OP_FIELD_ACCESS */
     struct {
-        uint8_t *ip;
+        const VMInsn *ip;
         uint32_t prog_id;
         uint32_t class_id;
         int func_idx;
     } method_ic[256][2];
     /* Per-PC inline cache for vm->globals dense slot lookup (when single-threaded) */
     struct {
-        uint8_t *ip;
+        const VMInsn *ip;
         VMHash *globals;
         uint32_t gen;
         uint32_t slot;
     } global_ic[64];
+    /* Per-PC inline cache for OP_HASH_GET_CONST / OP_HASH_SET_CONST collision probes */
+    struct {
+        const VMInsn *ip;
+        uint32_t slot;
+    } hash_ic[64];
+    /* Direct pointer cache for constant key interning in root VM */
+    struct {
+        const void *kstr;
+        uint32_t prog_id;
+        const char *ikey;
+    } str_intern_cache[128];
     /* Per-root-VM object recycling freelists (bounded, drained on vm_free) */
     VMObjHeader *obj_pools[VM_POOL_COUNT];
     uint16_t obj_pool_len[VM_POOL_COUNT];
@@ -1093,12 +1138,10 @@ typedef struct VM {
     int gc_pause;
     int has_weakrefs;
     /* Re-entrant VM save/restore + exception trapping */
-    size_t saved_locals_top;
     struct VM *saved_active_vm;
     int trap_uncaught;
     int end_ran;
     int refcount;
-    int locals_detached;
     uint8_t pending_call_context;
     /* Thread safety + per-VM caches */
     pthread_t owner_thread;
@@ -1109,12 +1152,13 @@ typedef struct VM {
     pthread_mutex_t gc_mutex;
     pthread_mutex_t globals_mutex;
     void *regex_cache;
-    VMValue *locals_pool;
-    size_t locals_top;
-    size_t locals_cap;
+    VMValue jit_ret_val;
+    uint32_t jit_sig_poll;
+    size_t jit_stop_base;
 } VM;
 
 /* Program API */
+void vm_chunk_free_jit(VMChunk *chunk);
 VMProgram *vm_program_new(void);
 void vm_program_retain(VMProgram *prog);
 void vm_program_free(VMProgram *prog);

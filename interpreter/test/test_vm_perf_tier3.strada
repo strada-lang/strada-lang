@@ -1,0 +1,202 @@
+package T3Counter;
+func new(str $cls, int $v) scalar { return bless({"val" => $v, "step" => 1}, $cls); }
+func inc(scalar $self, int $x) int {
+    $self->{"val"} = $self->{"val"} + $x;
+    return $self->{"val"};
+}
+
+package T3Alt;
+func new(str $cls, int $v) scalar { return bless({"val" => $v}, $cls); }
+func inc(scalar $self, int $x) int {
+    $self->{"val"} = $self->{"val"} + $x * 10;
+    return $self->{"val"};
+}
+
+package main;
+our int $g_t3 = 0;
+
+func jit_neg_cmp(int $n) int {
+    my int $hits = 0;
+    my int $a = -1;
+    my int $b = 0;
+    my int $c = 1;
+    for (my int $i = 0; $i < $n; $i++) {
+        if ($a < $b && $a <= $b && $b > $a && $b >= $a && $a != $b) {
+            $hits++;
+        }
+        if ($a > $b || $b < $a || $c < $a || $b >= $c) {
+            return -999;
+        }
+        my int $x = -5;
+        my int $lim = 1;
+        while ($x < $lim) {
+            $hits += ($x < 0) ? 1 : 0;
+            $x++;
+        }
+    }
+    return $hits;
+}
+
+func rec_grow(int $n) int {
+    my int $a = $n + 1;
+    my int $b = $n + 2;
+    if ($n <= 0) { return 1; }
+    return (($n & 1) ? 1 : 0) + rec_grow($n - 1) + ($a - $b + 1);
+}
+
+func tail_sum(int $n, int $acc) int {
+    if ($n <= 0) { return $acc; }
+    return tail_sum($n - 1, $acc + ($n & 7));
+}
+
+func partial_args(int $a, int $b, int $c) int {
+    return (defined($a) ? 10 : 0) + (defined($b) ? 20 : 0) + (defined($c) ? 40 : 0) + $a;
+}
+
+func throw_inner(int $k) int {
+    if ($k > 50) { throw "jit_err_" . $k; }
+    return $k;
+}
+
+func throw_mid(int $k) int {
+    return throw_inner($k) + 1;
+}
+
+func jit_buf_glob(int $n) int {
+    my str $buf = "";
+    for (my int $i = 0; $i < $n; $i++) {
+        $buf .= "a";
+        $buf .= ($i % 3);
+        $g_t3 += 1;
+    }
+    return length($buf);
+}
+
+func main() int {
+    # 1. Counted for-loop fusion + next/last/redo + 0-iter + float loop var + BIT_AND_ADD_I32
+    my int $s1 = 0;
+    for (my int $i = 0; $i < 100; $i++) { $s1 += $i; }
+
+    my int $s2 = 0;
+    my int $cnt2 = 0;
+    for (my int $i = -5; $i <= 5; $i++) {
+        $s2 += $i;
+        $cnt2++;
+    }
+
+    my int $lim = 50;
+    my int $s3 = 0;
+    for (my int $i = 0; $i < $lim; $i++) { $s3 += $i; }
+
+    my int $z0 = 0;
+    for (my int $i = 10; $i < 5; $i++) { $z0++; }
+
+    my int $ctrl = 0;
+    my int $did_redo = 0;
+    for (my int $i = 0; $i < 20; $i++) {
+        if ($i == 3) { next; }
+        if ($i == 4 && !$did_redo) {
+            $did_redo = 1;
+            $ctrl += 1000;
+            redo;
+        }
+        if ($i == 8) { last; }
+        $ctrl += $i;
+    }
+
+    my num $fs = 0.0;
+    for (my num $f = 0.0; $f < 5; $f++) { $fs += $f; }
+
+    my int $band = 0;
+    for (my int $i = -10; $i < 90; $i++) {
+        $band += (($i & 15) + 3);
+    }
+    say(sprintf("loop=%d,%d,%d,%d,%d,%d,%.1f,%d", $s1, $s2, $cnt2, $s3, $z0, $ctrl, $fs, $band));
+
+    # 2. Signed 50-bit JIT int comparisons across -1 / 0 / +1 boundary
+    my int $ncmp = jit_neg_cmp(80);
+    say("ncmp=" . $ncmp);
+
+    # 3. may_box_locals prescan: closures & srefs inside counted loops must keep distinct cells
+    my array @fns = ();
+    for (my int $i = 0; $i < 10; $i++) {
+        my int $v = $i * 2;
+        push(@fns, func () int { return $v; });
+    }
+    my int $fsum = 0;
+    for (my int $i = 0; $i < 10; $i++) { $fsum += $fns[$i]->(); }
+
+    my array @refs = ();
+    for (my int $i = 0; $i < 5; $i++) {
+        my int $r = $i + 100;
+        push(@refs, \$r);
+    }
+    my int $rsum = 0;
+    for (my int $i = 0; $i < 5; $i++) {
+        my scalar $rp = $refs[$i];
+        $rsum += $$rp;
+    }
+    say("box=" . $fsum . "," . $rsum);
+
+    # 4. Hash IC collisions + inline hash/array fast paths in JIT
+    my hash %col = ();
+    for (my int $i = 0; $i < 40; $i++) {
+        $col{"hk_" . $i} = $i + 1;
+    }
+    my int $hchk = 0;
+    for (my int $i = 0; $i < 120; $i++) {
+        $col{"hk_17"} = $col{"hk_17"} + 1;
+        $hchk += $col{"hk_0"} + $col{"hk_17"} + $col{"hk_39"};
+    }
+    my array @arr = (10, 20, 30, 40, 50);
+    my int $achk = 0;
+    for (my int $i = 0; $i < 100; $i++) {
+        $achk += $arr[$i % 5];
+    }
+    $achk += $arr[-1] + (defined($arr[99]) ? 1000 : 0);
+    say("hc=" . $hchk . "," . $achk);
+
+    # 5. Unified stack grow + deep tail recursion exceeding recursion limit + partial args
+    core::set_recursion_limit(200);
+    my int $rg = rec_grow(150);
+    core::set_recursion_limit(200);
+    my int $ts = tail_sum(20000, 0);
+    core::set_recursion_limit(0);
+    my int $pa = partial_args(7);
+    say("rec=" . $rg . "," . $ts . "," . $pa);
+
+    # 6. OOP JIT mono-IC + polymorphic IC + globals/append + exceptions out of JIT/OSR
+    my scalar $c1 = T3Counter::new("T3Counter", 0);
+    my int $oc = 0;
+    for (my int $i = 0; $i < 150; $i++) {
+        $oc += $c1->inc(2);
+    }
+    my array @poly = ($c1, T3Alt::new("T3Alt", 0));
+    my int $op = 0;
+    for (my int $i = 0; $i < 80; $i++) {
+        $op += $poly[$i & 1]->inc(1);
+    }
+    my int $blen = jit_buf_glob(100);
+    say("oop=" . $oc . "," . $op . "," . $blen . "," . $g_t3);
+
+    my str $exc1 = "";
+    for (my int $i = 1; $i <= 60; $i++) {
+        try {
+            my int $tv = throw_mid($i);
+        } catch ($e) {
+            $exc1 = $e;
+        }
+    }
+    my str $exc2 = "";
+    my int $pre = 0;
+    try {
+        for (my int $i = 0; $i < 100; $i++) {
+            $pre += 1;
+            if ($i == 75) { throw "osr_boom"; }
+        }
+    } catch ($e2) {
+        $exc2 = $e2;
+    }
+    say("exc=" . $exc1 . "," . $exc2 . "," . $pre);
+    return 0;
+}
