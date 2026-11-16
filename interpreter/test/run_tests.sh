@@ -1,8 +1,9 @@
 #!/bin/bash
 # Test runner for the Strada interpreter
-# Usage: ./run_tests.sh [-v] [pattern]
-#   -v        Verbose output
-#   pattern   Only run tests matching pattern
+# Usage: ./run_tests.sh [-v] [--default] [pattern]
+#   -v                        Verbose output
+#   --default, --default-opt  Build helper .so libs with compiler default params (instead of -O0)
+#   pattern                   Only run tests matching pattern
 
 INTERP="${INTERP:-$(dirname "$0")/../strada-interp}"
 TEST_DIR="$(dirname "$0")"
@@ -10,15 +11,24 @@ PASS=0
 FAIL=0
 SKIP=0
 VERBOSE=0
+DEFAULT_OPT=0
 PATTERN=""
 
 # Parse args
 while [ $# -gt 0 ]; do
     case "$1" in
         -v) VERBOSE=1; shift ;;
+        --default|--default-opt) DEFAULT_OPT=1; shift ;;
         *)  PATTERN="$1"; shift ;;
     esac
 done
+
+if [ -n "${STRADA_TEST_DEFAULT_OPT:-}" ] && [ "$STRADA_TEST_DEFAULT_OPT" != "0" ]; then
+    DEFAULT_OPT=1
+fi
+if [ "$DEFAULT_OPT" -eq 0 ]; then
+    export STRADA_DEFAULT_OPT="${STRADA_DEFAULT_OPT:-0}"
+fi
 
 # Colors
 RED='\033[0;31m'
