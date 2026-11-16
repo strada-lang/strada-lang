@@ -62,7 +62,7 @@ else
     aud_r9_record 1 "Cycle 9 Stdlib suite (-O0)" "$(cat "$aud_dir/r9_stdlib_tools.diag" 2>/dev/null)"
 fi
 
-# 4. 3-way compiled / --tree-walk / --vm parity (R9-VM1..5, R9-TW1)
+# 4. Compiled vs bytecode VM 2-way parity (R9-VM1..5, R9-TW1)
 parity_src="$PROJECT_DIR/interpreter/test/test_audit_r9_vm.strada"
 parity_exp="$PROJECT_DIR/interpreter/test/test_audit_r9_vm.expected"
 if (cd "$PROJECT_DIR" && "$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$parity_src" -lpthread -o "$aud_dir/r9_parity_comp" >"$aud_dir/r9_parity_comp.log" 2>&1); then
@@ -73,28 +73,18 @@ else
 fi
 
 if [ "$comp_rc" -eq 0 ] && diff -u "$parity_exp" "$aud_dir/parity_comp.out" > "$aud_dir/parity_exp.diff" 2>&1; then
-    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$parity_src" >"$aud_dir/parity_tw.out" 2>&1) && tw_rc=0 || tw_rc=$?
-    if [ "$tw_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_tw.out" > "$aud_dir/parity_tw.diff" 2>&1; then
-        aud_r9_record 0 "Cycle 9 compiled vs tree-walk parity (exact stdout diff)" ""
-    else
-        aud_r9_record 1 "Cycle 9 compiled vs tree-walk parity" "rc=$tw_rc diff=$(cat "$aud_dir/parity_tw.diff" 2>/dev/null)"
-    fi
-
-    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" --vm "$parity_src" >"$aud_dir/parity_vm.out" 2>&1) && vm_rc=0 || vm_rc=$?
+    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" "$parity_src" >"$aud_dir/parity_vm.out" 2>&1) && vm_rc=0 || vm_rc=$?
     if [ "$vm_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_vm.out" > "$aud_dir/parity_vm.diff" 2>&1; then
-        aud_r9_record 0 "Cycle 9 compiled vs bytecode --vm parity (exact stdout diff)" ""
+        aud_r9_record 0 "Cycle 9 compiled vs bytecode VM parity (exact stdout diff)" ""
     else
-        aud_r9_record 1 "Cycle 9 compiled vs bytecode --vm parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
+        aud_r9_record 1 "Cycle 9 compiled vs bytecode VM parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
     fi
 else
-    aud_r9_record 1 "Cycle 9 parity compiled vs expected (--tree-walk)" "rc=$comp_rc out=$(cat "$aud_dir/parity_comp.out" 2>/dev/null) diff=$(cat "$aud_dir/parity_exp.diff" 2>/dev/null)"
-    aud_r9_record 1 "Cycle 9 parity compiled vs bytecode --vm" "skipped due to compiled failure"
+    aud_r9_record 1 "Cycle 9 parity compiled vs expected" "rc=$comp_rc out=$(cat "$aud_dir/parity_comp.out" 2>/dev/null) diff=$(cat "$aud_dir/parity_exp.diff" 2>/dev/null)"
 fi
 
 # 5. Eval + Strada::JIT suite (R9-EVAL1, R9-JIT1, R9-JIT2)
-if aud_r9_compile_run "-O0" "$aud_src/eval_jit.strada" "r9_eval_jit" "R9_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r9_compile_run "-O0" "$aud_src/eval_jit.strada" "r9_eval_jit" "R9_EVAL_JIT_OK"; then
     aud_r9_record 0 "Cycle 9 Eval + Strada::JIT suite (R9-EVAL1, R9-JIT1..2)" ""
 else
     aud_r9_record 1 "Cycle 9 Eval + Strada::JIT suite (R9-EVAL1, R9-JIT1..2)" "$(cat "$aud_dir/r9_eval_jit.diag" 2>/dev/null)"
@@ -102,25 +92,21 @@ fi
 
 # 6. R9-CLI1 & R9-VM3: -e with @ARGV and runtime throw + LTR arg side effect on undefined call
 cli_prog='our str $log = ""; func bump() int { $log = $log . "side"; return 1; } my str $caught = ""; try { r9_no_such_fn(bump()); } catch ($e) { $caught = $e; } say($ARGV[0] . ":" . $ARGV[1] . ":" . $log . ":" . (index($caught, "Undefined") >= 0 ? "1" : "0"));'
-cli_tw_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e "$cli_prog" alpha beta 2>&1) && cli_tw_rc=0 || cli_tw_rc=$?
-cli_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --vm -e "$cli_prog" alpha beta 2>&1) && cli_vm_rc=0 || cli_vm_rc=$?
-if [ "$cli_tw_rc" -eq 0 ] && [ "$cli_vm_rc" -eq 0 ] \
-    && [ "$cli_tw_out" = "alpha:beta:side:1" ] && [ "$cli_vm_out" = "alpha:beta:side:1" ]; then
+cli_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" -e "$cli_prog" alpha beta 2>&1) && cli_vm_rc=0 || cli_vm_rc=$?
+if [ "$cli_vm_rc" -eq 0 ] && [ "$cli_vm_out" = "alpha:beta:side:1" ]; then
     aud_r9_record 0 "R9-CLI1 & R9-VM3 -e @ARGV + undefined call throws with LTR side effect" ""
 else
-    aud_r9_record 1 "R9-CLI1 & R9-VM3 -e @ARGV + undefined call throw" "tw=($cli_tw_rc:$cli_tw_out) vm=($cli_vm_rc:$cli_vm_out)"
+    aud_r9_record 1 "R9-CLI1 & R9-VM3 -e @ARGV + undefined call throw" "vm=($cli_vm_rc:$cli_vm_out)"
 fi
 
-# 6b. R9-TW1: --tree-walk vs --vm parity on bare hex(), oct(), and bare abs()
+# 6b. R9-TW1 & R9-RT3: bare hex(), oct(), and bare abs() in bytecode VM
 tw1_prog='say(hex(" 0x1_f ") . ":" . oct(" 0b101_0 ") . ":" . oct(" 0o7_1 ") . ":" . oct(" 0x10_1 ") . ":" . oct("07_7") . ":" . sprintf("%.1f", abs(" -42.5 ")) . ":" . abs(-9223372036854775807 - 1));'
-tw1_tw_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e "$tw1_prog" 2>&1) && tw1_tw_rc=0 || tw1_tw_rc=$?
-tw1_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --vm -e "$tw1_prog" 2>&1) && tw1_vm_rc=0 || tw1_vm_rc=$?
-if [ "$tw1_tw_rc" -eq 0 ] && [ "$tw1_vm_rc" -eq 0 ] \
-    && [ "$tw1_tw_out" = "31:10:57:257:63:42.5:9223372036854775808" ] \
+tw1_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" -e "$tw1_prog" 2>&1) && tw1_vm_rc=0 || tw1_vm_rc=$?
+if [ "$tw1_vm_rc" -eq 0 ] \
     && [ "$tw1_vm_out" = "31:10:57:257:63:42.5:9223372036854775808" ]; then
-    aud_r9_record 0 "R9-TW1 & R9-RT3 --tree-walk vs --vm parity for bare hex/oct/abs" ""
+    aud_r9_record 0 "R9-TW1 & R9-RT3 VM bare hex/oct/abs" ""
 else
-    aud_r9_record 1 "R9-TW1 & R9-RT3 --tree-walk vs --vm bare hex/oct/abs" "tw=($tw1_tw_rc:$tw1_tw_out) vm=($tw1_vm_rc:$tw1_vm_out)"
+    aud_r9_record 1 "R9-TW1 & R9-RT3 VM bare hex/oct/abs" "vm=($tw1_vm_rc:$tw1_vm_out)"
 fi
 
 # 7. R9-LIB3: lib/perl5 tied scalar + throwing "" overload inside try/catch
@@ -227,11 +213,10 @@ func main() int {
 }
 EOF
 if [ -x "$PROJECT_DIR/interpreter/strada-interp" ]; then
-    tw_suf=$("$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_dir/r9_suf_test.strada" 2>&1) || true
-    vm_suf=$("$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_dir/r9_suf_test.strada" 2>&1) || true
-    if [ "$tw_suf" = "12" ] && [ "$vm_suf" = "12" ]; then
-        aud_r9_record 0 "R9-TW2 --tree-walk vs --vm parity for unqualified suffix funcref" ""
+    vm_suf=$("$PROJECT_DIR/interpreter/strada-interp" "$aud_dir/r9_suf_test.strada" 2>&1) || true
+    if [ "$vm_suf" = "12" ]; then
+        aud_r9_record 0 "R9-TW2 VM unqualified suffix funcref" ""
     else
-        aud_r9_record 1 "R9-TW2 --tree-walk vs --vm parity for unqualified suffix funcref" "tw=$tw_suf vm=$vm_suf"
+        aud_r9_record 1 "R9-TW2 VM unqualified suffix funcref" "vm=$vm_suf"
     fi
 fi

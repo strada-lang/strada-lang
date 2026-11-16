@@ -1,7 +1,7 @@
 #!/bin/bash
 # t_remediation_2026_11.sh — End-to-end regression suite for Phases 1–5
 # Covers Pacco removal, floored modulo & PerlaCell captures, stdlib fixes,
-# Eval.o isolation/fixes, and tree-walk + bytecode VM parity.
+# Eval.o isolation/fixes, and bytecode VM parity.
 
 rem_dir="$BUILD_DIR/remediation_2026_11"
 mkdir -p "$rem_dir"
@@ -378,7 +378,7 @@ fi
 rem_record "$eval_ok" "Phase 5: use Eval; typeof, refcount, local unwind, short-circuit, compound, const/our" "$eval_diag"
 
 # ============================================================
-# Phase 5b: strada-interp --vm and --tree-walk shared parity
+# Phase 5b: strada-interp bytecode VM parity
 # ============================================================
 cat > "$rem_dir/interp_shared.strada" << 'EOF'
 func bar_ret() scalar {
@@ -445,20 +445,12 @@ RET=U:U
 EOF
 )
 
-vm_sh_out=$(timeout 10 "$PROJECT_DIR/interpreter/strada-interp" --vm "$rem_dir/interp_shared.strada" alpha beta 2>&1)
+vm_sh_out=$(timeout 10 "$PROJECT_DIR/interpreter/strada-interp" "$rem_dir/interp_shared.strada" alpha beta 2>&1)
 vm_sh_rc=$?
 if [ "$vm_sh_rc" -eq 0 ] && [ "$vm_sh_out" = "$expected_shared" ]; then
-    rem_record 0 "Phase 5: strada-interp --vm shared parity checks" ""
+    rem_record 0 "Phase 5: strada-interp bytecode VM parity checks" ""
 else
-    rem_record 1 "Phase 5: strada-interp --vm shared parity checks" "rc=$vm_sh_rc out=$vm_sh_out"
-fi
-
-tw_sh_out=$(timeout 10 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$rem_dir/interp_shared.strada" alpha beta 2>&1)
-tw_sh_rc=$?
-if [ "$tw_sh_rc" -eq 0 ] && [ "$tw_sh_out" = "$expected_shared" ]; then
-    rem_record 0 "Phase 5: strada-interp --tree-walk shared parity checks" ""
-else
-    rem_record 1 "Phase 5: strada-interp --tree-walk shared parity checks" "rc=$tw_sh_rc out=$tw_sh_out"
+    rem_record 1 "Phase 5: strada-interp bytecode VM parity checks" "rc=$vm_sh_rc out=$vm_sh_out"
 fi
 
 # VM-specific checks: zero-width s/b*/"X"/ge termination & same-scope sigil disambiguation

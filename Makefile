@@ -218,18 +218,19 @@ RUNTIME_SRC = $(RUNTIME_DIR)/strada_runtime.c
 RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
 RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
 RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
+VM_RT_OBJ = $(RUNTIME_DIR)/vm.o
+VM_COMP_RT_OBJ = $(RUNTIME_DIR)/vm_compiler.o
 
 .PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp update-bootstrap
 
 # Default: build the self-hosting compiler, tools, and libraries. The
-# tree-walking interpreter / bytecode VM is no longer built by default —
-# `make interpreter` still builds it explicitly. `libs` is included so
-# the test-suite's String-eval and Nesso ORM tests work out of the box
-# (they need lib-eval and lib-dbi respectively).
+# bytecode VM interpreter binary (`make interpreter`) is still opt-in;
+# `libs` + VM runtime objects are included so `use Eval;` and Nesso ORM
+# work out of the box.
 ifeq ($(DEV),1)
-all: stradac $(RUNTIME_OBJ) strada-driver tools
+all: stradac $(RUNTIME_OBJ) $(VM_RT_OBJ) $(VM_COMP_RT_OBJ) strada-driver tools
 else
-all: stradac $(RUNTIME_OBJ) strada-driver tools libs
+all: stradac $(RUNTIME_OBJ) $(VM_RT_OBJ) $(VM_COMP_RT_OBJ) strada-driver tools libs
 endif
 	@echo ""
 	@echo "✓ Build complete!"
@@ -260,6 +261,14 @@ $(VENDOR_PCRE2_LIB):
 $(RUNTIME_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(if $(filter 1,$(BUNDLED_PCRE2)),$(VENDOR_PCRE2_LIB))
 	@echo "=== Building pre-compiled runtime ==="
 	$(CC) $(CFLAGS) $(RUNTIME_LTO_FLAGS) $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) $(if $(filter 1,$(HAVE_LIBFFI)),-DHAVE_LIBFFI $(FFI_CFLAGS)) -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_OBJ)
+
+$(VM_RT_OBJ): interpreter/vm.c interpreter/vm.h interpreter/vm_generic_builtins.inc $(RUNTIME_HDR) $(if $(filter 1,$(BUNDLED_PCRE2)),$(VENDOR_PCRE2_LIB))
+	@echo "=== Building pre-compiled VM runtime ==="
+	$(CC) $(CFLAGS) -fPIC -Wno-unused-function $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) -I$(RUNTIME_DIR) -Iinterpreter -c interpreter/vm.c -o $(VM_RT_OBJ)
+
+$(VM_COMP_RT_OBJ): interpreter/vm_compiler.c interpreter/vm_compiler.h interpreter/vm.h $(RUNTIME_HDR)
+	@echo "=== Building pre-compiled VM compiler ==="
+	$(CC) $(CFLAGS) -fPIC $(MM_DEFINES) -I$(RUNTIME_DIR) -Iinterpreter -c interpreter/vm_compiler.c -o $(VM_COMP_RT_OBJ)
 
 # TCC-compatible runtime object (for REPL with TCC backend)
 # -Wa,-mrelax-relocations=no avoids R_X86_64_REX_GOTPCRELX relocations that TCC can't handle
@@ -461,7 +470,7 @@ test-all: test test-selfhost test-examples
 	@echo "✓ All tests passed!"
 	@echo "════════════════════════════════════"
 
-# Build the tree-walking interpreter
+# Build the bytecode VM interpreter
 interpreter: stradac
 	@cd interpreter && $(MAKE)
 
@@ -596,16 +605,16 @@ lib/crypt.o: lib/crypt.strada stradac tools/stradapp
 
 lib-crypt: lib/crypt.o
 
-# Eval library (string eval via tree-walking interpreter)
+# Eval library (string eval via bytecode VM)
 lib/Eval.strada: compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada
 	@echo "Generating Eval module (use Eval)..."
 	@{ printf 'package Strada::Interpreter;\n'; cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d'; } > lib/Eval.strada
 
-lib/Eval.o: lib/Eval.strada stradac
+lib/Eval.o: lib/Eval.strada stradac $(VM_RT_OBJ) $(VM_COMP_RT_OBJ)
 	@echo "Building Eval library (string eval)..."
 	./strada -M lib/Eval.strada
 
-lib-eval: lib/Eval.o
+lib-eval: lib/Eval.o $(VM_RT_OBJ) $(VM_COMP_RT_OBJ)
 
 # SSL library — only built when OpenSSL was detected by ./configure. lib/ssl.strada
 # #include <openssl/ssl.h> in a __C__ block, so without OpenSSL headers the
@@ -647,7 +656,7 @@ INSTALL_LIB = $(PREFIX_ABS)/lib/strada
 INSTALL_DOC = $(PREFIX_ABS)/share/doc/strada
 INSTALL_MAN = $(PREFIX_ABS)/share/man/man1
 
-install: stradac $(RUNTIME_OBJ) libs tools
+install: stradac $(RUNTIME_OBJ) $(VM_RT_OBJ) $(VM_COMP_RT_OBJ) libs tools
 	@echo "=== Installing Strada to $(PREFIX) ==="
 	@mkdir -p $(INSTALL_BIN)
 	@mkdir -p $(INSTALL_LIB)/runtime
@@ -672,6 +681,14 @@ install: stradac $(RUNTIME_OBJ) libs tools
 	install -m 644 runtime/strada_runtime.c $(INSTALL_LIB)/runtime/
 	install -m 644 runtime/strada_runtime.h $(INSTALL_LIB)/runtime/
 	install -m 644 runtime/strada_runtime.o $(INSTALL_LIB)/runtime/
+	install -m 644 runtime/vm.o $(INSTALL_LIB)/runtime/
+	install -m 644 runtime/vm_compiler.o $(INSTALL_LIB)/runtime/
+	mkdir -p $(INSTALL_LIB)/interpreter
+	install -m 644 interpreter/vm.h $(INSTALL_LIB)/interpreter/
+	install -m 644 interpreter/vm_compiler.h $(INSTALL_LIB)/interpreter/
+	install -m 644 interpreter/vm.c $(INSTALL_LIB)/interpreter/
+	install -m 644 interpreter/vm_compiler.c $(INSTALL_LIB)/interpreter/
+	install -m 644 interpreter/vm_generic_builtins.inc $(INSTALL_LIB)/interpreter/
 	@# Auxiliary headers #include'd by strada_runtime.c — required to compile
 	@# strada_runtime.c from the install (e.g. by perla's runtime archive / TCC path).
 	@for h in runtime/*.h; do install -m 644 "$$h" $(INSTALL_LIB)/runtime/; done
@@ -786,6 +803,7 @@ uninstall:
 clean:
 	rm -f $(RUNTIME_DIR)/test_runtime
 	rm -f $(RUNTIME_OBJ)
+	rm -f $(VM_RT_OBJ) $(VM_COMP_RT_OBJ)
 	rm -f $(RUNTIME_DIR)/_rt_base.o
 	rm -f $(RUNTIME_TCC_OBJ)
 	rm -f $(BOOTSTRAP_DIR)/*.o $(BOOTSTRAP_DIR)/stradac
@@ -851,7 +869,7 @@ help:
 	@echo "  test-interp   - Run interpreter compatibility tests against compiler test suite"
 	@echo ""
 	@echo "Interpreter:"
-	@echo "  interpreter   - Build the tree-walking interpreter (interpreter/strada-interp)"
+	@echo "  interpreter   - Build the bytecode VM interpreter (interpreter/strada-interp)"
 	@echo ""
 	@echo "Development Targets:"
 	@echo "  bootstrap     - Build C bootstrap compiler"

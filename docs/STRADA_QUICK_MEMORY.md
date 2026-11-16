@@ -545,4 +545,4 @@ Start: `./interpreter/strada-interp` (after `make interpreter`) | Commands: `.he
 
 Multi-line auto-detected (unbalanced braces). Functions/vars persist until `.clear`.
 
-REPL uses tree-walking backend; file execution uses bytecode VM (faster).
+File execution, `-e`, and REPL all use the bytecode VM.

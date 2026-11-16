@@ -64,7 +64,8 @@ static void perl5_set_sv_from_strada(SV *sv, StradaValue *v) {
     if (!sv) return;
     StradaValue *fetched = NULL;
     StradaValue *val = v;
-    if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied && v->meta->tied_obj) {
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied && v->meta->tied_obj
+        && v->type != STRADA_ARRAY && v->type != STRADA_HASH) {
         fetched = strada_tied_scalar_fetch(v);
         val = fetched;
     }
@@ -128,7 +129,8 @@ static void perl5_conv_one_arg(StradaValue *arg, Perl5ConvArg *dst) {
     if (!arg) return;
 
     StradaValue *fetched = NULL;
-    if (!STRADA_IS_TAGGED_INT(arg) && arg->meta && arg->meta->is_tied && arg->meta->tied_obj) {
+    if (!STRADA_IS_TAGGED_INT(arg) && arg->meta && arg->meta->is_tied && arg->meta->tied_obj
+        && arg->type != STRADA_ARRAY && arg->type != STRADA_HASH) {
         fetched = strada_tied_scalar_fetch(arg);
         arg = fetched;
         if (!arg) return;
@@ -356,7 +358,8 @@ static int perl5_prepare_call_args(StradaValue *sub_sv, StradaValue *args_sv, in
     volatile int oom = 0;
 
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-        if (sub_sv && !STRADA_IS_TAGGED_INT(sub_sv) && sub_sv->meta && sub_sv->meta->is_tied && sub_sv->meta->tied_obj) {
+        if (sub_sv && !STRADA_IS_TAGGED_INT(sub_sv) && sub_sv->meta && sub_sv->meta->is_tied
+            && sub_sv->meta->tied_obj && sub_sv->type != STRADA_ARRAY && sub_sv->type != STRADA_HASH) {
             StradaValue *fetched_sub = strada_tied_scalar_fetch(sub_sv);
             if (fetched_sub) strada_cleanup_push(fetched_sub);
             sub_name = strada_to_str(fetched_sub);

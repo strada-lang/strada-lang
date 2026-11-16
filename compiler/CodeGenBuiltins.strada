@@ -6334,8 +6334,8 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
                     emit($cg, "(strada_global_set_cstr(" . c_str_lit($fr_our) . ", strada_new_undef()), strada_undef_static())");
                 } else {
                     my str $fr_ref = scalar_var_c_ref($cg, $ref_arg->{"target"}->{"name"}, $fr_cname);
-                    # Generate: (strada_free(ref), ref = strada_new_undef())
-                    emit($cg, "(strada_free(" . $fr_ref . "), " . $fr_ref . " = strada_new_undef(), strada_undef_static())");
+                    # Clear the variable before decref so a throwing DESTROY does not leave a dangling pointer
+                    emit($cg, "({ StradaValue *__fr = " . $fr_ref . "; " . $fr_ref . " = strada_new_undef(); strada_free(__fr); strada_undef_static(); })");
                 }
             } else {
                 # Fallback: just call the runtime function with arg cleanup
@@ -9004,7 +9004,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             } elsif ($ret_type == TYPE_NUM() || $ret_type == TYPE_FLOAT32() || $ret_type == TYPE_FLOAT64() || $ret_type == TYPE_LONG_DOUBLE()) {
                 emit($cg, "strada_new_num(__ext_ret); })");
             } else {
-                emit($cg, "strada_new_undef(); })");
+                emit($cg, "strada_new_int((int64_t)(intptr_t)__ext_ret); })");
             }
             return;
         }
@@ -9465,11 +9465,11 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     if ($fl_cl == 1) {
                         emit($cg, "{ StradaValue *__flat = strada_mortal(");
                         gen_expression($cg, $arg);
-                        emit($cg, "); if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } } ");
+                        emit($cg, "); if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
                     } else {
                         emit($cg, "{ StradaValue *__flat = ");
                         gen_expression($cg, $arg);
-                        emit($cg, "; if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } } ");
+                        emit($cg, "; if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
                     }
                 } else {
                     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {

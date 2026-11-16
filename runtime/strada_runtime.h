@@ -473,8 +473,10 @@ typedef struct StradaMetadata {
                               * File::Temp->new stashes the temp filename
                               * in this slot. NULL until first assigned. */
     StradaValue *tied_cache; /* Cached FETCH result for tied scalar exprs */
-    char *tied_each_key;     /* Tied hash each() iterator state (last key) */
+    StradaValue *tied_each_key; /* Tied hash each() iterator state (last key) */
     uint8_t tied_each_started; /* 1 after tied FIRSTKEY called */
+    void (*ext_destroy)(StradaValue *obj, void *ud); /* External interpreter DESTROY hook */
+    void *ext_destroy_ud;    /* Userdata passed to ext_destroy */
 } StradaMetadata;
 
 /* Main value structure - like Perl's SV (32 bytes) */
@@ -1676,6 +1678,7 @@ char* strada_regex_replace(const char *str, const char *pattern, const char *rep
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
 int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement, const char *flags, int global, char **result_out);
 int strada_regex_replace_capture_len(const char *str, size_t subject_length, int is_utf8, const char *pattern, const char *replacement, const char *flags, int global, char **result_out, size_t *out_len);
+int strada_regex_replace_capture_len2(const char *str, size_t subject_length, int is_utf8, const char *pattern, size_t pat_len, const char *replacement, size_t repl_len, const char *flags, int global, char **result_out, size_t *out_len);
 StradaValue* strada_regex_replace_sv(StradaValue *str_sv, StradaValue *pat_sv, StradaValue *repl_sv, const char *flags, int global);
 StradaArray* strada_string_split(const char *str, const char *delim);
 StradaArray* strada_string_split_n(const char *str, const char *delim, size_t delim_len);
@@ -2263,6 +2266,7 @@ void strada_tied_hash_delete_sv(StradaValue *sv, StradaValue *key);
 StradaValue* strada_tied_hash_delete_take_sv(StradaValue *sv, StradaValue *key);
 StradaValue* strada_tied_hash_firstkey(StradaValue *sv);
 StradaValue* strada_tied_hash_nextkey(StradaValue *sv, const char *lastkey);
+StradaValue* strada_tied_hash_nextkey_sv(StradaValue *sv, StradaValue *lastkey);
 void strada_tied_hash_clear(StradaValue *sv);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
@@ -2307,7 +2311,9 @@ void         strada_av_unshift_sv(StradaValue *sv, StradaValue *val);
  * dispatch FETCH/STORE/PUSH/etc. when sv->meta->is_tied. */
 static inline StradaValue* strada_av_unwrap_tied(StradaValue *sv) {
     StradaValue *cur = sv;
+    int depth = 0;
     while (cur && !STRADA_IS_TAGGED_INT(cur) && cur->type == STRADA_REF) {
+        if (++depth > 1024) strada_die("Circular reference in deref");
         cur = strada_is_slot_ref(cur)
             ? (cur->value.ptr ? *(StradaValue**)cur->value.ptr : NULL)
             : cur->value.rv;
@@ -2431,7 +2437,9 @@ StradaValue* strada_tied_global_scalar(const char *global_name);
 /* Inline wrapper implementations */
 static inline StradaValue* strada_hv_unwrap_meta_sv(StradaValue *sv) {
     StradaValue *cur = sv;
+    int depth = 0;
     while (cur && !STRADA_IS_TAGGED_INT(cur) && cur->type == STRADA_REF) {
+        if (++depth > 1024) strada_die("Circular reference in deref");
         cur = strada_is_slot_ref(cur)
             ? (cur->value.ptr ? *(StradaValue**)cur->value.ptr : NULL)
             : cur->value.rv;

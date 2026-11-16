@@ -1994,12 +1994,18 @@ func lex_parse_sq_char_code(str $source, int $raw_start, int $raw_len) int {
 func lex_read_sq_string(scalar $lexer) str {
     my int $start_line = $lexer->{"line"};
     my int $start_col = $lexer->{"column"};
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     lex_advance($lexer); # Skip opening quote
     my scalar $sb = sb_new();
     my str $source = $lexer->{"source"};
 
     while (1) {
         if (lex_at_end($lexer) == 1) {
+            $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+            $lexer->{"heredoc_resume_line"} = $saved_hd_line;
             lex_error($lexer, "Unterminated string", $start_line, $start_col);
         }
         my int $code = lex_current_code($lexer);
@@ -2007,12 +2013,16 @@ func lex_read_sq_string(scalar $lexer) str {
 
         if ($code == '\'') {
             lex_advance($lexer); # Skip closing quote
+            $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+            $lexer->{"heredoc_resume_line"} = $saved_hd_line;
             return sb_to_string($sb);
         }
 
         if ($code == '\\') {
             lex_advance($lexer);
             if (lex_at_end($lexer) == 1) {
+                $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+                $lexer->{"heredoc_resume_line"} = $saved_hd_line;
                 lex_error($lexer, "Unterminated string", $start_line, $start_col);
             }
             my int $next_code = lex_current_code($lexer);
@@ -2172,6 +2182,10 @@ func lex_read_dq_string(scalar $lexer, int $token_line) scalar {
 # (parts/vars) when interpolation occurred, else a STR_LITERAL. Reused so bare
 # <<EOT and <<"EOT" heredocs interpolate/escape exactly like "..." / qq().
 func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     my scalar $sb = sb_new();  # StringBuilder for current part
     my str $source = $lexer->{"source"};
     my array @parts = ();
@@ -2186,6 +2200,8 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
 
         if ($term_code == 0) {
             if ($at_end == 1) {
+                $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+                $lexer->{"heredoc_resume_line"} = $saved_hd_line;
                 if ($has_interp) {
                     push(\@parts, sb_to_string($sb));
                     my hash %token = ();
@@ -2204,9 +2220,13 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                 }
             }
         } elsif ($at_end == 1) {
+            $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+            $lexer->{"heredoc_resume_line"} = $saved_hd_line;
             lex_error($lexer, "Unterminated string", $token_line, $lexer->{"tok_col"});
         } elsif ($code == $term_code) {
             lex_advance($lexer); # Skip closing quote (string case)
+            $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+            $lexer->{"heredoc_resume_line"} = $saved_hd_line;
             if ($has_interp) {
                 # Return interpolated string token
                 push(\@parts, sb_to_string($sb));
@@ -2234,6 +2254,8 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                     sb_append($sb, "\\");
                     next;
                 }
+                $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+                $lexer->{"heredoc_resume_line"} = $saved_hd_line;
                 lex_error($lexer, "Unterminated string", $token_line, $lexer->{"tok_col"});
             }
             my int $next_code = lex_current_code($lexer);
@@ -2491,6 +2513,10 @@ func lex_peek_char(scalar $lexer, int $offset) str {
 }
 
 func lex_read_regex_pattern(scalar $lexer, int $token_line, str $unterm_msg) str {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     my scalar $sb = sb_new();
     my str $source = $lexer->{"source"};
     my int $src_len = $lexer->{"length"};
@@ -2502,6 +2528,8 @@ func lex_read_regex_pattern(scalar $lexer, int $token_line, str $unterm_msg) str
         my int $code = lex_current_code($lexer);
         if ($code == '/' && $in_cc == 0) {
             lex_advance($lexer);
+            $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+            $lexer->{"heredoc_resume_line"} = $saved_hd_line;
             return sb_to_string($sb);
         }
         if ($code == '\\') {
@@ -2569,6 +2597,8 @@ func lex_read_regex_pattern(scalar $lexer, int $token_line, str $unterm_msg) str
         sb_append($sb, substr_bytes($source, $pos, 1));
         lex_advance($lexer);
     }
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     lex_error($lexer, $unterm_msg, $token_line, $lexer->{"tok_col"});
     return "";
 }
@@ -2623,6 +2653,10 @@ func lex_unescape_subst_repl(str $raw) str {
 }
 
 func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     lex_advance($lexer);  # Skip 's'
     lex_advance($lexer);  # Skip opening /
     my str $source = $lexer->{"source"};
@@ -2661,6 +2695,8 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
     }
 
     if ($found_repl_end == 0) {
+        $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+        $lexer->{"heredoc_resume_line"} = $saved_hd_line;
         lex_error($lexer, "Unterminated substitution literal", $token_line, $lexer->{"tok_col"});
     }
 
@@ -2682,6 +2718,8 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
         $repl_str = lex_unescape_subst_repl($repl_str);
     }
 
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     my hash %token = ();
     $token{"type"} = "SUBST_LITERAL";
     $token{"pattern"} = $pat_str;
@@ -2692,6 +2730,10 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
 }
 
 func lex_read_tr_literal(scalar $lexer, int $token_line, int $skip_count) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     # Skip 'tr' or 'y' (skip_count chars) then the opening /
     my int $sc = 0;
     while ($sc < $skip_count) {
@@ -2731,6 +2773,8 @@ func lex_read_tr_literal(scalar $lexer, int $token_line, int $skip_count) scalar
     }
 
     if ($found_search_end == 0) {
+        $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+        $lexer->{"heredoc_resume_line"} = $saved_hd_line;
         lex_error($lexer, "Unterminated transliteration literal", $token_line, $lexer->{"tok_col"});
     }
 
@@ -2764,6 +2808,8 @@ func lex_read_tr_literal(scalar $lexer, int $token_line, int $skip_count) scalar
     }
 
     if ($found_repl_end == 0) {
+        $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+        $lexer->{"heredoc_resume_line"} = $saved_hd_line;
         lex_error($lexer, "Unterminated transliteration literal", $token_line, $lexer->{"tok_col"});
     }
 
@@ -2779,6 +2825,8 @@ func lex_read_tr_literal(scalar $lexer, int $token_line, int $skip_count) scalar
         }
     }
 
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     my hash %token = ();
     $token{"type"} = "TR_LITERAL";
     $token{"search"} = sb_to_string($search_sb);
@@ -2800,6 +2848,10 @@ func lex_get_close_delim(str $open) str {
 
 # Read qw() - quote words, returns array of words
 func lex_read_qw(scalar $lexer, int $token_line) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     # Current position should be at the delimiter after 'qw'
     my str $open = lex_current_char($lexer);
     my str $close = lex_get_close_delim($open);
@@ -2824,6 +2876,8 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
                 }
                 lex_advance($lexer);  # Skip close delimiter
 
+                $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+                $lexer->{"heredoc_resume_line"} = $saved_hd_line;
                 my hash %token = ();
                 $token{"type"} = "QW_LITERAL";
                 $token{"words"} = \@words;
@@ -2879,12 +2933,18 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
         }
     }
 
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     lex_error($lexer, "Unterminated qw()", $token_line, $lexer->{"tok_col"});
 }
 
 # Read q() or qq() - single/double quoted string with custom delimiters
 # is_qq: 1 for qq() (supports escape sequences like \n, \t), 0 for q() (literal)
 func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     my str $open = lex_current_char($lexer);
     my str $close = lex_get_close_delim($open);
     lex_advance($lexer);  # Skip open delimiter
@@ -2908,6 +2968,8 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
             $depth = $depth - 1;
             if ($depth == 0) {
                 lex_advance($lexer);
+                $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+                $lexer->{"heredoc_resume_line"} = $saved_hd_line;
                 if ($is_qq && $has_interp) {
                     push(\@parts, sb_to_string($sb));
                     my hash %token = ();
@@ -3073,17 +3135,25 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
         }
     }
 
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     lex_error($lexer, "Unterminated q/qq string", $token_line, $lexer->{"tok_col"});
 }
 
 # Read a raw C code block __C__ { ... }
 # Handles nested braces, C strings, and C comments properly
 func lex_read_c_block(scalar $lexer, int $token_line) scalar {
+    my int $saved_hd_pos = $lexer->{"heredoc_resume_pos"};
+    my int $saved_hd_line = $lexer->{"heredoc_resume_line"};
+    $lexer->{"heredoc_resume_pos"} = 0;
+    $lexer->{"heredoc_resume_line"} = 0;
     lex_skip_whitespace($lexer);
 
     # Expect opening brace
     my int $code = lex_current_code($lexer);
     if ($code != '{') {
+        $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+        $lexer->{"heredoc_resume_line"} = $saved_hd_line;
         lex_error($lexer, "Expected '{' after __C__", $token_line, $lexer->{"tok_col"});
     }
     lex_advance($lexer);  # Skip opening {
@@ -3226,9 +3296,13 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
     }
 
     if ($depth > 0) {
+        $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+        $lexer->{"heredoc_resume_line"} = $saved_hd_line;
         lex_error($lexer, "Unterminated __C__ block", $token_line, $lexer->{"tok_col"});
     }
 
+    $lexer->{"heredoc_resume_pos"} = $saved_hd_pos;
+    $lexer->{"heredoc_resume_line"} = $saved_hd_line;
     my hash %token = ();
     $token{"type"} = "C_BLOCK";
     $token{"value"} = sb_to_string($sb);
@@ -3861,22 +3935,28 @@ func lex_next_token(scalar $lexer) scalar {
                         $scan_pos = $scan_pos + 1;
                         next;
                     }
-                    if ($sc == '\n') { last; }
                     if ($hd_dq == 1) {
-                        if ($sc == '\\' && $scan_pos + 1 < $src_len) {
+                        if ($sc == '\n') {
+                            $extra_lines = $extra_lines + 1;
+                        } elsif ($sc == '\\' && $scan_pos + 1 < $src_len) {
                             if (char_at($source, $scan_pos + 1) == '\n') { $extra_lines = $extra_lines + 1; }
                             $scan_pos = $scan_pos + 2;
                             next;
+                        } elsif ($sc == '"') {
+                            $hd_dq = 0;
                         }
-                        if ($sc == '"') { $hd_dq = 0; }
                     } elsif ($hd_sq == 1) {
-                        if ($sc == '\\' && $scan_pos + 1 < $src_len) {
+                        if ($sc == '\n') {
+                            $extra_lines = $extra_lines + 1;
+                        } elsif ($sc == '\\' && $scan_pos + 1 < $src_len) {
                             if (char_at($source, $scan_pos + 1) == '\n') { $extra_lines = $extra_lines + 1; }
                             $scan_pos = $scan_pos + 2;
                             next;
+                        } elsif ($sc == '\'') {
+                            $hd_sq = 0;
                         }
-                        if ($sc == '\'') { $hd_sq = 0; }
                     } else {
+                        if ($sc == '\n') { last; }
                         if ($sc == '"') {
                             $hd_dq = 1;
                         } elsif ($sc == '\'') {
@@ -3888,12 +3968,7 @@ func lex_next_token(scalar $lexer) scalar {
                             last;
                         } elsif ($sc == '/' && $scan_pos + 1 < $src_len) {
                             my int $sc2 = char_at($source, $scan_pos + 1);
-                            if ($sc2 == '/') {
-                                while ($scan_pos < $src_len && char_at($source, $scan_pos) != '\n') {
-                                    $scan_pos = $scan_pos + 1;
-                                }
-                                last;
-                            } elsif ($sc2 == '*') {
+                            if ($sc2 == '*') {
                                 $hd_in_cmt = 1;
                                 $scan_pos = $scan_pos + 2;
                                 next;

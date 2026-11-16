@@ -1,6 +1,6 @@
 # Strada Interpreter
 
-The Strada interpreter (`strada-interp`) executes Strada programs without generating C code. It defaults to a bytecode VM backend that compiles the AST to bytecode and executes it via a dispatch loop. A tree-walking backend is available as a fallback via the `--tree-walk` flag.
+The Strada interpreter (`strada-interp`) executes Strada programs without generating C code. It compiles the AST to bytecode and executes it via a dispatch loop on the bytecode VM across file execution, `-e`, the interactive REPL, and embedded `use Eval;`.
 
 ## Overview
 
@@ -48,14 +48,11 @@ Both paths share the same Lexer and Parser front-end. The compiler generates C c
 # interpreter/strada-interp
 make interpreter
 
-# Run a Strada program (uses VM by default)
+# Run a Strada program
 ./interpreter/strada-interp program.strada
 
-# Explicitly use the VM backend
-./interpreter/strada-interp --vm program.strada
-
-# Use the tree-walking backend (legacy fallback)
-./interpreter/strada-interp --tree-walk program.strada
+# Run an inline snippet
+./interpreter/strada-interp -e 'say("hello");'
 
 # With library search paths
 ./interpreter/strada-interp -L lib program.strada
@@ -71,7 +68,7 @@ make interpreter
 ./interpreter/strada-interp -L lib
 ```
 
-The REPL provides an interactive prompt with readline support (line editing, history). The REPL currently uses the tree-walking backend (persistent VM state between inputs is not yet supported).
+The REPL provides an interactive prompt with readline support (line editing, history) backed by a persistent bytecode VM session (functions and `our` / `my` globals persist until `.clear`).
 
 ```
 strada> my int $x = 42;
@@ -108,27 +105,15 @@ say(Strada::Interpreter::eval_string("twice(21)"));  # 42
 Strada::Interpreter::reset();
 ```
 
-### Eval Backend Selection
+### Eval Notes
 
-The embedded eval API supports selecting the execution backend:
-
-```strada
-# Set the default eval backend used by Strada::Interpreter::eval()
-Strada::Interpreter::set_eval_backend("tree-walk");   # Tree-walking interpreter (default)
-Strada::Interpreter::set_eval_backend("vm");          # Bytecode VM
-
-# Evaluate with a specific backend for one call
-my scalar $result = Strada::Interpreter::eval_with("1 + 2", "tree-walk");
-my scalar $result2 = Strada::Interpreter::eval_with("1 + 2", "vm");
-```
-
-The `"vm"` backend needs a runtime built with `-DHAVE_VM`, which is only the case for the `strada-interp` binary itself; in an ordinary compiled program use the tree-walk backend.
+When a compiled program uses `use Eval;` (`Strada::Interpreter::eval_string()`, `eval_string_vm()`, `eval()`), `strada` automatically detects the VM headers and links `runtime/vm.o` and `runtime/vm_compiler.o` with `-rdynamic`. `set_eval_backend()` and `eval_with()` remain as compatibility wrappers that always execute on the bytecode VM.
 
 ## Architecture
 
-### Bytecode VM (Default)
+### Bytecode VM
 
-The VM backend compiles the AST to bytecode instructions, then executes them via a computed goto dispatch loop. The compilation pipeline is:
+The interpreter compiles the AST to bytecode instructions, then executes them via a computed goto dispatch loop. The compilation pipeline is:
 
 ```
 Source → Lexer → Parser → AST → Bytecode Compiler → VM Execution
@@ -139,11 +124,7 @@ Key implementation details:
 - **VMValue**: Tagged pointer representation (8 bytes per value). Integers are encoded directly in the pointer with zero heap allocation, similar to the compiled runtime's tagged integers.
 - **Computed goto dispatch**: The VM dispatch loop uses GCC's computed goto extension for efficient opcode dispatch, avoiding the overhead of a switch statement.
 - **`__C__` block JIT**: `__C__` blocks are compiled to shared libraries by gcc at runtime. Compiled `.so` files are cached in `~/.cache/strada/cblocks/` with 7-day LRU eviction, so repeated execution of the same `__C__` block does not recompile.
-- **Variable declarations enforced**: The VM requires all variables to be declared with `my` (no implicit global creation).
-
-### Tree-Walking Backend (Legacy Fallback)
-
-The tree-walking backend evaluates AST nodes directly at runtime without a bytecode compilation step. It is available via `--tree-walk` and is used by the REPL.
+- **Variable declarations enforced**: The VM requires all variables to be declared with `my` or `our` (no implicit global creation).
 
 ### Components
 
@@ -153,22 +134,12 @@ The tree-walking backend evaluates AST nodes directly at runtime without a bytec
 | Parser | `compiler/Parser.strada` | Builds AST (shared with compiler) |
 | VM Compiler | `interpreter/vm_compiler.c` | Compiles AST to bytecode |
 | VM Runtime | `interpreter/vm.c` | Bytecode dispatch loop |
-| Interpreter | `lib/Strada/Interpreter.strada` | Tree-walking AST evaluator |
-| Driver | `interpreter/Main.strada` | File execution and REPL |
+| Session Manager | `lib/Strada/Interpreter.strada` | VM session wrapper & `eval_string` / `Eval` API |
+| Driver | `interpreter/Main.strada` | File execution, `-e`, and REPL |
 
-### Environment and Scoping
+### Scope and Semantics
 
-Both backends use a chain of environment hashes for lexical scoping:
-
-```
-Global Env  ←  Function Env  ←  Block Env  ←  Inner Block Env
-```
-
-Each environment has a `vars` hash and a `parent` pointer. Variable lookup walks the chain from innermost to outermost scope. Variable assignment (`my`) creates in the current scope; updates modify the nearest scope that contains the variable.
-
-### Control Flow Signals
-
-Loop control (`next`, `last`, `redo`) and `return` are implemented as exception-based signals. A `return` inside a function throws a signal that is caught by the function call handler. Loop signals are caught by the enclosing loop, with label matching for labeled loops.
+Lexical scoping (`my`), closures, dynamic global overrides (`local`), and `our` globals are compiled to VM slots and hash-backed global tables. Control flow (`next`, `last`, `redo`, `return`) and `try`/`catch`/`throw`/`finally` unwind frames and `local` stacks deterministically.
 
 ## Performance
 
@@ -178,11 +149,11 @@ The bytecode VM is 4-5x faster than Perl 5.38 on compute benchmarks. This is ach
 - Computed goto dispatch (avoids switch overhead)
 - Direct bytecode execution without AST traversal overhead
 
-The compiled path (`stradac` + gcc) remains faster than the VM for production workloads, but the VM provides a significant performance improvement over the tree-walking interpreter and competitive performance with mainstream interpreted languages.
+The compiled path (`stradac` + gcc) remains faster than the VM for production workloads, but the VM provides a fast startup, no-codegen execution path and competitive performance with mainstream interpreted languages.
 
 ## Supported Language Features
 
-Both backends support the full Strada language:
+The VM supports the full Strada language:
 
 - **Types**: int, num, str, scalar, array, hash, undef
 - **Variables**: `my`, `our`, `local`, `const`, `enum`
@@ -211,9 +182,7 @@ Both backends support the full Strada language:
 
 ### `__C__` Block Support
 
-The VM backend supports `__C__` blocks via JIT compilation. When the VM encounters a `__C__` block, it compiles the C code to a shared library using gcc, caches the result in `~/.cache/strada/cblocks/`, and loads it via dlopen. Cached `.so` files are reused on subsequent runs with 7-day LRU eviction.
-
-The tree-walking backend skips `__C__` blocks.
+The VM supports `__C__` blocks via JIT compilation. When the VM encounters a `__C__` block, it compiles the C code to a shared library using gcc, caches the result in `~/.cache/strada/cblocks/`, and loads it via dlopen. Cached `.so` files are reused on subsequent runs with 7-day LRU eviction.
 
 ## Perla VM Mode
 
@@ -229,7 +198,6 @@ All 53 Perla tests pass in VM mode, matching the compiled path. This enables run
 
 ## Limitations
 
-- **REPL uses tree-walker.** The REPL does not yet support persistent VM state between inputs, so it uses the tree-walking backend.
 - **Async/await is not supported.** The thread pool runtime is part of the compiled backend.
 - **Performance is slower** than compiled execution, though the VM is 4-5x faster than Perl 5.38.
 
@@ -238,7 +206,7 @@ All 53 Perla tests pass in VM mode, matching the compiled path. This enables run
 Two suites cover the interpreter:
 
 ```bash
-# Interpreter's own suite (33 tests, tree-walking backend)
+# Interpreter's own suite (47 tests, bytecode VM)
 cd interpreter/test && bash run_tests.sh
 
 # Compiler test suite executed through the VM (parity check):
@@ -251,16 +219,16 @@ cd interpreter/test && bash run_compiler_tests.sh
 
 Strada offers three execution modes:
 
-| Feature | Interpreter (VM) | Interpreter (tree-walk) | JIT (`Strada::JIT`) | Compiled |
-|---------|-------------------|------------------------|---------------------|----------|
-| Execution | Bytecode VM | AST tree-walk | Compile to .so at runtime | Compile to native binary |
-| Requires C compiler | No (except `__C__` blocks) | No | Yes (gcc or tcc) | Yes (gcc) |
-| Startup time | Fast | Fast | Moderate (per-eval compile) | Slow (one-time compile) |
-| Runtime speed | Fast (4-5x Perl) | Slowest | Fast (native code) | Fastest |
-| `__C__` blocks | JIT-compiled + cached | Skipped | Supported | Supported |
-| Async/await | No | No | Yes | Yes |
-| Interactive use | REPL (via tree-walk) | REPL | eval() | No |
-| Best for | Scripts, file execution | REPL, no-compiler envs | Plugin systems, runtime eval | Production, performance |
+| Feature | Interpreter (VM) | JIT (`Strada::JIT`) | Compiled |
+|---------|------------------|---------------------|----------|
+| Execution | Bytecode VM | Compile to .so at runtime | Compile to native binary |
+| Requires C compiler | No (except `__C__` blocks) | Yes (gcc or tcc) | Yes (gcc) |
+| Startup time | Fast | Moderate (per-eval compile) | Slow (one-time compile) |
+| Runtime speed | Fast (4-5x Perl) | Fast (native code) | Fastest |
+| `__C__` blocks | JIT-compiled + cached | Supported | Supported |
+| Async/await | No | Yes | Yes |
+| Interactive use | Persistent VM REPL | eval() | No |
+| Best for | Scripts, file execution, REPL, embedded `eval` | Plugin systems, runtime eval | Production, performance |
 
 ## Build
 
@@ -275,20 +243,15 @@ make && make interpreter
 ./interpreter/strada-interp --help
 ```
 
-The interpreter is built by combining `compiler/Lexer.strada`, `compiler/Parser.strada`, `compiler/AST.strada`, `lib/Strada/Interpreter.strada`, and `interpreter/Main.strada` into a single source, then compiling that with the Strada compiler.
+The interpreter is built by combining `compiler/AST.strada`, `compiler/Lexer.strada`, `interpreter/Stubs.strada`, `compiler/Parser.strada`, and `interpreter/Main.strada` into a single source, then compiling that with the Strada compiler and linking `vm.c` + `vm_compiler.c`.
 
 ## API Reference
 
 See the POD documentation in `lib/Strada/Interpreter.strada` for the full API, including:
 
-- `interp_new()` - Create interpreter state
-- `interp_load_program()` - Load a parsed AST
-- `interp_run_main()` - Execute main()
-- `interp_run_end_blocks()` - Run END blocks
-- `eval_string()` - Evaluate a code string
-- `set_eval_backend()` - Set default eval backend ("vm" or "tree-walk")
-- `eval_with()` - Evaluate with a specific backend
-- `init()` / `reset()` - Manage shared eval state
-- `env_new()` / `env_get()` / `env_set()` - Scope management
+- `eval_string()` / `eval_string_vm()` - Evaluate a code string in the persistent VM session
+- `eval()` - Simplified wrapper exported by `use Eval;`
+- `init()` / `reset()` - Manage shared VM eval session state
+- `set_eval_backend()` / `eval_with()` - Compatibility wrappers delegating to the bytecode VM
 
 See also `lib/Strada/JIT.strada` for the JIT eval API.

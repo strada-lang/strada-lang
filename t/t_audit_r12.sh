@@ -144,8 +144,8 @@ std_rc=$?
 r12_record $? "Cycle 12 Stdlib suite (Forma safe-mode dump/DUMP)" "rc=$std_rc out=$std_out"
 
 # 6. Eval & eval_string_vm (R12-VM1..17)
-ej_out=$("$PROJECT_DIR/strada" -O0 --no-use-artifacts -L "$PROJECT_DIR/lib" -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-    "$SCRIPT_DIR/audit_r12/eval_jit.strada" "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c" -o "$r12_dir/eval_jit" 2>&1 \
+ej_out=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" \
+    "$SCRIPT_DIR/audit_r12/eval_jit.strada" -o "$r12_dir/eval_jit" 2>&1 \
     && "$r12_dir/eval_jit" 2>&1)
 ej_rc=$?
 [ "$ej_rc" -eq 0 ] \
@@ -153,19 +153,16 @@ ej_rc=$?
     && printf '%s\n' "$ej_out" | grep -qx "AUDIT_R12_EVAL_JIT_OK"
 r12_record $? "Cycle 12 Eval / eval_string_vm suite (R12-VM1..17)" "rc=$ej_rc out=$ej_out"
 
-# 7. CLI -e R12-VM17 false-positive "func main" in strings/comments (--tree-walk & --vm)
-e_tw=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e 'my str $s = "func main()"; say($s);' 2>&1)
-e_tw_rc=$?
-e_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --vm -e 'my str $s = "func main()"; say($s);' 2>&1)
+# 7. CLI -e R12-VM17 false-positive "func main" in strings/comments (VM)
+e_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" -e 'my str $s = "func main()"; say($s);' 2>&1)
 e_vm_rc=$?
-[ "$e_tw_rc" -eq 0 ] && [ "$e_tw" = "func main()" ] && [ "$e_vm_rc" -eq 0 ] && [ "$e_vm" = "func main()" ]
-r12_record $? "R12-VM17 -e treats 'func main' inside string literal as expression (--tree-walk & --vm)" "tw=($e_tw_rc:$e_tw) vm=($e_vm_rc:$e_vm)"
+[ "$e_vm_rc" -eq 0 ] && [ "$e_vm" = "func main()" ]
+r12_record $? "R12-VM17 -e treats 'func main' inside string literal as expression (VM)" "vm=($e_vm_rc:$e_vm)"
 
-# 8. 3-way compiled / --tree-walk / --vm parity (test_audit_r12_vm)
+# 8. Compiled vs bytecode VM 2-way parity (test_audit_r12_vm)
 par_src="$PROJECT_DIR/interpreter/test/test_audit_r12_vm.strada"
 par_exp=$(cat "$PROJECT_DIR/interpreter/test/test_audit_r12_vm.expected")
 p_comp=$("$PROJECT_DIR/strada" -O0 "$par_src" -o "$r12_dir/par_comp" 2>&1 && "$r12_dir/par_comp" 2>&1)
-p_tw=$("$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$par_src" 2>&1)
-p_vm=$("$PROJECT_DIR/interpreter/strada-interp" --vm "$par_src" 2>&1)
-[ "$p_comp" = "$par_exp" ] && [ "$p_tw" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
-r12_record $? "Cycle 12 3-way parity (compiled / --tree-walk / --vm)" "comp='$p_comp' tw='$p_tw' vm='$p_vm'"
+p_vm=$("$PROJECT_DIR/interpreter/strada-interp" "$par_src" 2>&1)
+[ "$p_comp" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
+r12_record $? "Cycle 12 2-way parity (compiled / VM)" "comp='$p_comp' vm='$p_vm'"

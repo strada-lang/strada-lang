@@ -160,9 +160,46 @@ func resolve_var_decl_struct_name(scalar $cg, scalar $stmt) str {
     return $var_st_name;
 }
 
-# When func_has_goto == 1, hoist top-level my/const slot declarations and
-# cleanup registrations to the entry of their enclosing C block so any goto
-# within the block neither skips initialization/cleanup_push nor re-pushes
+func goto_hoist_one_var(scalar $cg, scalar $hoisted, str $c_name, int $box_scalar) void {
+    if (($hoisted->{$c_name} + 0) != 0) {
+        return;
+    }
+    if ($box_scalar == 1) {
+        emit_indent($cg);
+        if ($cg->{"func_has_try"} == 1) {
+            emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc();\n");
+        } else {
+            emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc();\n");
+        }
+        emit_indent($cg);
+        emit($cg, "(*__cell_" . $c_name . ") = NULL;\n");
+        my str $decl_track = "@cell:" . $c_name;
+        scope_track_var($cg, $decl_track);
+        if (cleanup_push_useful($cg) == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . ");\n");
+        } else {
+            scope_mark_no_push($cg, $decl_track);
+        }
+        $hoisted->{$c_name} = 2;
+    } else {
+        emit_indent($cg);
+        emit_sv_ptr_decl($cg, $c_name);
+        emit($cg, " = NULL;\n");
+        scope_track_var($cg, $c_name);
+        if (cleanup_push_useful($cg) == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+        } else {
+            scope_mark_no_push($cg, $c_name);
+        }
+        $hoisted->{$c_name} = 1;
+    }
+}
+
+# When func_has_goto == 1, hoist top-level my/const/our-container/destructure slot
+# declarations and cleanup registrations to the entry of their enclosing C block so
+# any goto within the block neither skips initialization/cleanup_push nor re-pushes
 # cleanup slots / leaks prior values on backward jumps.
 func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
     my scalar $saved = $cg->{"predeclared_goto_vars"};
@@ -181,49 +218,37 @@ func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
             my int $ht = $hs->{"type"} + 0;
             if ($ht == NODE_VAR_DECL() || $ht == NODE_CONST_DECL()) {
                 my str $c_name = escape_c_keyword($hs->{"name"});
-                if (($hoisted{$c_name} + 0) == 0) {
-                    my int $box_scalar = 0;
-                    if ($ht == NODE_VAR_DECL()) {
-                        my str $sigil = $hs->{"sigil"};
-                        my int $vt = $hs->{"var_type"};
-                        my str $vst = resolve_var_decl_struct_name($cg, $hs);
-                        if ($sigil ne "%" && $sigil ne "@" && $vt != TYPE_HASH() && $vt != TYPE_ARRAY()) {
-                            if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($vst) == 0) {
-                                $box_scalar = 1;
-                            }
+                my int $box_scalar = 0;
+                if ($ht == NODE_VAR_DECL()) {
+                    my str $sigil = $hs->{"sigil"};
+                    my int $vt = $hs->{"var_type"};
+                    my str $vst = resolve_var_decl_struct_name($cg, $hs);
+                    if ($sigil ne "%" && $sigil ne "@" && $vt != TYPE_HASH() && $vt != TYPE_ARRAY()) {
+                        if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($vst) == 0) {
+                            $box_scalar = 1;
                         }
                     }
-                    if ($box_scalar == 1) {
-                        emit_indent($cg);
-                        if ($cg->{"func_has_try"} == 1) {
-                            emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc();\n");
-                        } else {
-                            emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc();\n");
-                        }
-                        emit_indent($cg);
-                        emit($cg, "(*__cell_" . $c_name . ") = NULL;\n");
-                        my str $decl_track = "@cell:" . $c_name;
-                        scope_track_var($cg, $decl_track);
-                        if (cleanup_push_useful($cg) == 1) {
-                            emit_indent($cg);
-                            emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . ");\n");
-                        } else {
-                            scope_mark_no_push($cg, $decl_track);
-                        }
-                        $hoisted{$c_name} = 2;
-                    } else {
-                        emit_indent($cg);
-                        emit_sv_ptr_decl($cg, $c_name);
-                        emit($cg, " = NULL;\n");
-                        scope_track_var($cg, $c_name);
-                        if (cleanup_push_useful($cg) == 1) {
-                            emit_indent($cg);
-                            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-                        } else {
-                            scope_mark_no_push($cg, $c_name);
-                        }
-                        $hoisted{$c_name} = 1;
+                }
+                goto_hoist_one_var($cg, \%hoisted, $c_name, $box_scalar);
+            } elsif ($ht == NODE_OUR_DECL()) {
+                my str $osig = "" . $hs->{"sigil"};
+                if ($osig eq "@" || $osig eq "%") {
+                    goto_hoist_one_var($cg, \%hoisted, escape_c_keyword($hs->{"name"}), 0);
+                }
+            } elsif ($ht == NODE_DESTRUCTURE() && ($hs->{"is_decl"} + 0) == 1) {
+                my scalar $dvars = $hs->{"vars"};
+                my int $dvc = $hs->{"var_count"} + 0;
+                my int $di = 0;
+                while ($di < $dvc) {
+                    my scalar $dv = $dvars->[$di];
+                    my str $dc_name = escape_c_keyword($dv->{"name"});
+                    my str $dsig = "" . $dv->{"sigil"};
+                    my int $dbox = 0;
+                    if ($dsig ne "@" && $dsig ne "%" && ($cg->{"cand_boxed_vars"}->{$dc_name} + 0) == 1) {
+                        $dbox = 1;
                     }
+                    goto_hoist_one_var($cg, \%hoisted, $dc_name, $dbox);
+                    $di = $di + 1;
                 }
             }
         }
@@ -958,34 +983,51 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 $new_func = "strada_new_hash()";
             }
 
+            my int $our_predecl = $cg->{"predeclared_goto_vars"}->{$c_name} + 0;
             if ($stmt->{"init"}) {
                 my scalar $init = $stmt->{"init"};
-                emit_indent($cg);
-                emit_sv_ptr_decl($cg, $c_name);
-                emit($cg, " = ");
+                if ($our_predecl > 0) {
+                    emit_indent($cg);
+                    emit($cg, "strada_decref(" . $c_name . "); " . $c_name . " = NULL;\n");
+                    emit_indent($cg);
+                    emit($cg, $c_name . " = ");
+                } else {
+                    emit_indent($cg);
+                    emit_sv_ptr_decl($cg, $c_name);
+                    emit($cg, " = ");
+                }
                 emit_our_global_init($cg, $init, $sigil, $stmt->{"var_type"});
                 emit($cg, ";\n");
-                scope_track_var($cg, $c_name);
-                if (cleanup_push_useful($cg) == 1) {
-                    emit_indent($cg);
-                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-                } else {
-                    scope_mark_no_push($cg, $c_name);
+                if ($our_predecl == 0) {
+                    scope_track_var($cg, $c_name);
+                    if (cleanup_push_useful($cg) == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                    } else {
+                        scope_mark_no_push($cg, $c_name);
+                    }
                 }
                 emit_indent($cg);
                 emit($cg, "strada_incref(" . $c_name . ");\n");
                 emit_indent($cg);
                 emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . ");\n");
             } else {
-                emit_indent($cg);
-                emit_sv_ptr_decl($cg, $c_name);
-                emit($cg, " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
-                scope_track_var($cg, $c_name);
-                if (cleanup_push_useful($cg) == 1) {
+                if ($our_predecl > 0) {
                     emit_indent($cg);
-                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                    emit($cg, "strada_decref(" . $c_name . "); " . $c_name . " = NULL;\n");
+                    emit_indent($cg);
+                    emit($cg, $c_name . " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
                 } else {
-                    scope_mark_no_push($cg, $c_name);
+                    emit_indent($cg);
+                    emit_sv_ptr_decl($cg, $c_name);
+                    emit($cg, " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
+                    scope_track_var($cg, $c_name);
+                    if (cleanup_push_useful($cg) == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+                    } else {
+                        scope_mark_no_push($cg, $c_name);
+                    }
                 }
                 emit_indent($cg);
                 emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $c_name . ") && " . $c_name . "->type == STRADA_UNDEF) { strada_decref(" . $c_name . "); ");
@@ -1206,45 +1248,64 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     $cg->{"num_vars"}->{$name} = "";
                 }
                 $cg->{"func_locals_seen"}->{$name} = 1;
+                my int $ds_predecl = $cg->{"predeclared_goto_vars"}->{$name} + 0;
                 my int $ds_box = 0;
-                if ($vsigil ne "@" && $vsigil ne "%" && ($cg->{"cand_boxed_vars"}->{$name} + 0) == 1) {
+                if ($ds_predecl == 2) {
+                    $ds_box = 1;
+                } elsif ($ds_predecl == 0 && $vsigil ne "@" && $vsigil ne "%" && ($cg->{"cand_boxed_vars"}->{$name} + 0) == 1) {
                     $ds_box = 1;
                 }
                 if ($ds_box == 1) {
                     $cg->{"active_boxed_vars"}->{$name} = 1;
-                    emit_indent($cg);
-                    if ($cg->{"func_has_try"} == 1) {
-                        emit($cg, "StradaValue ** volatile __cell_" . $name . " = strada_cell_alloc();\n");
-                    } else {
-                        emit($cg, "StradaValue **__cell_" . $name . " = strada_cell_alloc();\n");
-                    }
-                    emit_indent($cg);
-                    emit($cg, "(*__cell_" . $name . ") = strada_new_undef();\n");
-                    my str $ds_track = "@cell:" . $name;
-                    scope_track_var($cg, $ds_track);
-                    if ($ds_push == 1) {
+                    if ($ds_predecl > 0) {
                         emit_indent($cg);
-                        emit($cg, "strada_cleanup_push_cell(__cell_" . $name . ");\n");
+                        emit($cg, "strada_decref((*__cell_" . $name . ")); (*__cell_" . $name . ") = strada_new_undef();\n");
                     } else {
-                        scope_mark_no_push($cg, $ds_track);
+                        emit_indent($cg);
+                        if ($cg->{"func_has_try"} == 1) {
+                            emit($cg, "StradaValue ** volatile __cell_" . $name . " = strada_cell_alloc();\n");
+                        } else {
+                            emit($cg, "StradaValue **__cell_" . $name . " = strada_cell_alloc();\n");
+                        }
+                        emit_indent($cg);
+                        emit($cg, "(*__cell_" . $name . ") = strada_new_undef();\n");
+                        my str $ds_track = "@cell:" . $name;
+                        scope_track_var($cg, $ds_track);
+                        if ($ds_push == 1) {
+                            emit_indent($cg);
+                            emit($cg, "strada_cleanup_push_cell(__cell_" . $name . ");\n");
+                        } else {
+                            scope_mark_no_push($cg, $ds_track);
+                        }
                     }
                 } else {
                     $cg->{"active_boxed_vars"}->{$name} = 0;
-                    emit_indent($cg);
-                    emit_sv_ptr_decl($cg, $name);
-                    if ($vsigil eq "%") {
-                        emit($cg, " = strada_new_hash();\n");
-                    } elsif ($vsigil eq "@") {
-                        emit($cg, " = strada_new_array();\n");
-                    } else {
-                        emit($cg, " = strada_new_undef();\n");
-                    }
-                    scope_track_var($cg, $name);
-                    if ($ds_push == 1) {
+                    if ($ds_predecl > 0) {
                         emit_indent($cg);
-                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $name . ");\n");
+                        if ($vsigil eq "%") {
+                            emit($cg, "strada_decref(" . $name . "); " . $name . " = strada_new_hash();\n");
+                        } elsif ($vsigil eq "@") {
+                            emit($cg, "strada_decref(" . $name . "); " . $name . " = strada_new_array();\n");
+                        } else {
+                            emit($cg, "strada_decref(" . $name . "); " . $name . " = strada_new_undef();\n");
+                        }
                     } else {
-                        scope_mark_no_push($cg, $name);
+                        emit_indent($cg);
+                        emit_sv_ptr_decl($cg, $name);
+                        if ($vsigil eq "%") {
+                            emit($cg, " = strada_new_hash();\n");
+                        } elsif ($vsigil eq "@") {
+                            emit($cg, " = strada_new_array();\n");
+                        } else {
+                            emit($cg, " = strada_new_undef();\n");
+                        }
+                        scope_track_var($cg, $name);
+                        if ($ds_push == 1) {
+                            emit_indent($cg);
+                            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $name . ");\n");
+                        } else {
+                            scope_mark_no_push($cg, $name);
+                        }
                     }
                 }
                 $i = $i + 1;
@@ -3045,6 +3106,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $i = $i + 1;
         }
         goto_hoist_restore($cg, $try_saved_goto);
+        scope_pop($cg);
         $cg->{"int_vars"} = $try_saved_iv;
         $cg->{"num_vars"} = $try_saved_nv;
         $cg->{"active_boxed_vars"} = $try_saved_bv;
@@ -3062,14 +3124,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         $cg->{"try_finally_blocks"}->[$try_depth] = 0;
         $cg->{"try_local_marks"}->[$try_depth] = "";
 
-        # No cleanup_restore here: emit_scope_decref emits
-        # `strada_cleanup_pop()` paired with each var's decref, so
-        # inner-try locals are removed from the cleanup stack
-        # one-by-one via scope_pop. Items pushed by helpers
-        # (method dispatch args, etc.) pop themselves before
-        # returning. The cleanup stack is back at __cleanup_mark
-        # by the time we get here on the normal exit path.
-
+        # Destroy try-scoped locals above (while STRADA_TRY is active so throwing
+        # destructors are caught by this try/catch), then pop the try handler
+        # before running finally.
         emit_indent($cg);
         emit($cg, "STRADA_TRY_POP();\n");
         if ($has_finally == 1) {
@@ -3081,7 +3138,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"finally_count"} = $fin_idx + 1;
         }
         my scalar $try_post_kt = copy_type_map($cg->{"known_types"});
-        scope_pop($cg);
         dedent($cg);
         emit_indent($cg);
         emit($cg, "} else {\n");

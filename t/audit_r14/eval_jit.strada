@@ -9,7 +9,7 @@ func check(int $ok, str $msg) void {
 }
 
 func main() int {
-    # 1. Tree-walk Eval: R14 fixes (push return, sort int64, replace meta/empty, closures, waitpid 1-arg)
+    # 1. eval_string (VM): R14 fixes (push return, sort int64, replace meta/empty, closures, waitpid 1-arg)
     my scalar $tw = Strada::Interpreter::eval('
         my array @a = (1);
         my scalar $pr = push(@a, 2);
@@ -30,10 +30,10 @@ func main() int {
             . "|" . $acc_ok;
     ');
     check($tw eq "undef|1,2,3|c[a]t|Xab|CODE,code,undef,8|EvR14Clos,ref,EvR14Clos,12|1",
-          "tree-walk eval r14: " . $tw);
+          "eval_string r14: " . $tw);
     Strada::Interpreter::reset();
 
-    # 2. HAVE_VM eval_string_vm: R14 fixes (push undef, sort 64-bit, replace meta/empty, signal loop dispatch, closures)
+    # 2. eval_string_vm: R14 fixes (push undef, sort 64-bit, replace meta/empty, signal loop dispatch, closures)
     my scalar $vm = Strada::Interpreter::eval_string_vm('
         my array @a = (1);
         my scalar $pr = push(@a, 2);

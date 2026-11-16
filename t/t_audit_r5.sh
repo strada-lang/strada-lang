@@ -47,33 +47,23 @@ else
     aud_r5_record 1 "Cycle 5 runtime + compiler + 'x' regression tests" "$(cat "$aud_dir/r5_runtime_compiler.diag" 2>/dev/null)"
 fi
 
-# 2. VM + Interpreter core suite (compiled, tree-walk, and bytecode --vm)
+# 2. VM + Interpreter core suite (compiled and bytecode VM)
 if aud_r5_compile_run "$aud_src/vm_interp_core.strada" "r5_vm_interp_core" "R5_VM_INTERP_CORE_OK"; then
     aud_r5_record 0 "Cycle 5 VM/interp core (compiled binary)" ""
 else
     aud_r5_record 1 "Cycle 5 VM/interp core (compiled binary)" "$(cat "$aud_dir/r5_vm_interp_core.diag" 2>/dev/null)"
 fi
 
-tw_rc=1
-tw_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_src/vm_interp_core.strada" 2>&1) && tw_rc=0 || tw_rc=$?
-if [ "$tw_rc" -eq 0 ] && echo "$tw_out" | grep -q "R5_VM_INTERP_CORE_OK"; then
-    aud_r5_record 0 "Cycle 5 VM/interp core (tree-walk interpreter)" ""
-else
-    aud_r5_record 1 "Cycle 5 VM/interp core (tree-walk interpreter)" "rc=$tw_rc out=$tw_out"
-fi
-
 vm_rc=1
-vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_src/vm_interp_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
+vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" "$aud_src/vm_interp_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
 if [ "$vm_rc" -eq 0 ] && echo "$vm_out" | grep -q "R5_VM_INTERP_CORE_OK"; then
-    aud_r5_record 0 "Cycle 5 VM/interp core (bytecode --vm)" ""
+    aud_r5_record 0 "Cycle 5 VM/interp core (bytecode VM)" ""
 else
-    aud_r5_record 1 "Cycle 5 VM/interp core (bytecode --vm)" "rc=$vm_rc out=$vm_out"
+    aud_r5_record 1 "Cycle 5 VM/interp core (bytecode VM)" "rc=$vm_rc out=$vm_out"
 fi
 
 # 3. Eval VM + Strada::JIT suite
-if aud_r5_compile_run "$aud_src/vm_interp_jit.strada" "r5_vm_interp_jit" "R5_VM_INTERP_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r5_compile_run "$aud_src/vm_interp_jit.strada" "r5_vm_interp_jit" "R5_VM_INTERP_JIT_OK"; then
     aud_r5_record 0 "Cycle 5 eval_string_vm + Eval::eval + Strada::JIT suite" ""
 else
     aud_r5_record 1 "Cycle 5 eval_string_vm + Eval::eval + Strada::JIT suite" "$(cat "$aud_dir/r5_vm_interp_jit.diag" 2>/dev/null)"

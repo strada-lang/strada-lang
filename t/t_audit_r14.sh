@@ -369,18 +369,17 @@ EOF
 fi
 
 # 7. Eval, eval_string_vm, and Strada::JIT
-ej_out=$("$PROJECT_DIR/strada" -O0 --no-use-artifacts -L "$PROJECT_DIR/lib" -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-    "$SCRIPT_DIR/audit_r14/eval_jit.strada" "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c" -o "$r14_dir/eval_jit" 2>&1 \
+ej_out=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" \
+    "$SCRIPT_DIR/audit_r14/eval_jit.strada" -o "$r14_dir/eval_jit" 2>&1 \
     && timeout 20 "$r14_dir/eval_jit" 2>&1)
 ej_rc=$?
 [ "$ej_rc" -eq 0 ] && printf '%s\n' "$ej_out" | grep -qx "AUDIT_R14_EVAL_JIT_OK"
 r14_record $? "Cycle 14 Eval / eval_string_vm / Strada::JIT suite" "rc=$ej_rc out=$ej_out"
 
-# 8. 3-way compiled / --tree-walk / --vm parity (test_audit_r14_vm)
+# 8. Compiled vs bytecode VM 2-way parity (test_audit_r14_vm)
 par_src="$PROJECT_DIR/interpreter/test/test_audit_r14_vm.strada"
 par_exp=$(cat "$PROJECT_DIR/interpreter/test/test_audit_r14_vm.expected")
 p_comp=$("$PROJECT_DIR/strada" -O0 "$par_src" -o "$r14_dir/par_comp" 2>&1 && "$r14_dir/par_comp" 2>&1)
-p_tw=$("$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$par_src" 2>&1)
-p_vm=$("$PROJECT_DIR/interpreter/strada-interp" --vm "$par_src" 2>&1)
-[ "$p_comp" = "$par_exp" ] && [ "$p_tw" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
-r14_record $? "Cycle 14 3-way parity (compiled / --tree-walk / --vm)" "comp='$p_comp' tw='$p_tw' vm='$p_vm'"
+p_vm=$("$PROJECT_DIR/interpreter/strada-interp" "$par_src" 2>&1)
+[ "$p_comp" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
+r14_record $? "Cycle 14 2-way parity (compiled / VM)" "comp='$p_comp' vm='$p_vm'"

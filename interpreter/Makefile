@@ -1,5 +1,5 @@
-# Makefile for the Strada tree-walking interpreter
-# Reuses the compiler's Lexer and Parser, with Strada::Interpreter library for eval
+# Makefile for the Strada bytecode VM interpreter
+# Reuses the compiler's Lexer and Parser, with vm.c / vm_compiler.c bytecode VM
 
 # Include project config if it exists (run ../configure to generate)
 -include ../config.mk
@@ -63,9 +63,9 @@ Combined.strada: $(COMPILER_SRCS) $(INTERP_SRCS) $(LIB_DIR)/Strada/Interpreter.s
 Combined.c: Combined.strada $(STRADAC)
 	$(STRADAC) Combined.strada Combined.c
 
-# Build the interpreter executable (with VM backend)
+# Build the interpreter executable (bytecode VM)
 strada-interp: Combined.c $(RUNTIME_DIR)/strada_runtime.c vm.c vm_compiler.c vm.h vm_compiler.h
-	$(CC) $(CFLAGS) -DHAVE_VM -I. -o strada-interp Combined.c vm.c vm_compiler.c $(RUNTIME_DIR)/strada_runtime.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -I. -o strada-interp Combined.c vm.c vm_compiler.c $(RUNTIME_DIR)/strada_runtime.c $(LDFLAGS)
 
 # Bytecode VM runner — compiles .strada source to bytecode and executes
 # Uses -O0 for Combined.c (35k lines) to avoid excessive memory during compilation
@@ -96,12 +96,11 @@ vm_test: vm_test.c vm.c vm.h
 # Fallback: use bootstrap compiler if self-hosting isn't built yet
 bootstrap: Combined.strada $(BOOTSTRAP_STRADAC)
 	$(BOOTSTRAP_STRADAC) Combined.strada Combined.c
-	$(CC) $(CFLAGS) -o strada-interp Combined.c $(RUNTIME_DIR)/strada_runtime.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -I. -o strada-interp Combined.c vm.c vm_compiler.c $(RUNTIME_DIR)/strada_runtime.c $(LDFLAGS)
 
 # Run interpreter's own test suite
 test: strada-interp
 	bash test/run_tests.sh
-	INTERP="test/../strada-interp --vm" bash test/run_tests.sh
 
 # Run compiler test suite through interpreter to find language gaps
 test-compiler-compat: strada-interp

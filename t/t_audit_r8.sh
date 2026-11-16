@@ -62,50 +62,36 @@ else
     aud_r8_record 1 "Cycle 8 stdlib + tools regressions (-O0)" "$(cat "$aud_dir/r8_stdlib_tools.diag" 2>/dev/null)"
 fi
 
-# 4 & 5. Core parity suite across compiled binary, tree-walk, and bytecode VM
+# 4 & 5. Core parity suite across compiled binary and bytecode VM
 if aud_r8_compile_run "-O0" "$aud_src/parity_core.strada" "r8_parity_core" "R8P08B:"; then
     "$aud_dir/r8_parity_core" > "$aud_dir/parity_comp.out" 2>&1
-    tw_rc=1
-    tw_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_src/parity_core.strada" 2>&1) && tw_rc=0 || tw_rc=$?
-    printf '%s\n' "$tw_out" > "$aud_dir/parity_tw.out"
     vm_rc=1
-    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
+    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
     printf '%s\n' "$vm_out" > "$aud_dir/parity_vm.out"
 
-    if [ "$tw_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_tw.out" > "$aud_dir/parity_tw.diff" 2>&1; then
-        aud_r8_record 0 "Cycle 8 compiled vs tree-walk parity (exact stdout diff)" ""
-    else
-        aud_r8_record 1 "Cycle 8 compiled vs tree-walk parity" "rc=$tw_rc diff=$(cat "$aud_dir/parity_tw.diff" 2>/dev/null)"
-    fi
-
     if [ "$vm_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_vm.out" > "$aud_dir/parity_vm.diff" 2>&1; then
-        aud_r8_record 0 "Cycle 8 compiled vs bytecode --vm parity (exact stdout diff)" ""
+        aud_r8_record 0 "Cycle 8 compiled vs bytecode VM parity (exact stdout diff)" ""
     else
-        aud_r8_record 1 "Cycle 8 compiled vs bytecode --vm parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
+        aud_r8_record 1 "Cycle 8 compiled vs bytecode VM parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
     fi
 else
-    aud_r8_record 1 "Cycle 8 parity_core compiled vs tree-walk" "$(cat "$aud_dir/r8_parity_core.diag" 2>/dev/null)"
-    aud_r8_record 1 "Cycle 8 parity_core compiled vs bytecode --vm" "skipped due to compiled failure"
+    aud_r8_record 1 "Cycle 8 parity_core compiled vs bytecode VM" "$(cat "$aud_dir/r8_parity_core.diag" 2>/dev/null)"
 fi
 
 # 6. Eval::eval_string / eval_string_vm + Strada::JIT suite (R8-VM9..R8-VM11)
-if aud_r8_compile_run "-O0" "$aud_src/eval_jit.strada" "r8_eval_jit" "R8_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r8_compile_run "-O0" "$aud_src/eval_jit.strada" "r8_eval_jit" "R8_EVAL_JIT_OK"; then
     aud_r8_record 0 "Cycle 8 Eval + Strada::JIT suite (R8-VM9..11)" ""
 else
     aud_r8_record 1 "Cycle 8 Eval + Strada::JIT suite (R8-VM9..11)" "$(cat "$aud_dir/r8_eval_jit.diag" 2>/dev/null)"
 fi
 
-# 7. R8-VM6: -e mixed our / func / use + top-level statements across --vm and --tree-walk
+# 7. R8-VM6: -e mixed our / func / use + top-level statements in VM
 e_prog='use lib "lib"; use List::Util; our int $e_mul = 3; func e_fn(int $x) int { return $x * $e_mul; } my int $s = List::Util::sum([3, 4]); say("E_OK:" . e_fn(14) . ":" . $s);'
-e_tw_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e "$e_prog" 2>&1) && e_tw_rc=0 || e_tw_rc=$?
-e_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --vm -e "$e_prog" 2>&1) && e_vm_rc=0 || e_vm_rc=$?
-if [ "$e_tw_rc" -eq 0 ] && [ "$e_vm_rc" -eq 0 ] \
-    && [ "$e_tw_out" = "E_OK:42:7" ] && [ "$e_vm_out" = "E_OK:42:7" ]; then
-    aud_r8_record 0 "R8-VM6 -e mixed our/func/use + statements (--tree-walk & --vm)" ""
+e_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" -e "$e_prog" 2>&1) && e_vm_rc=0 || e_vm_rc=$?
+if [ "$e_vm_rc" -eq 0 ] && [ "$e_vm_out" = "E_OK:42:7" ]; then
+    aud_r8_record 0 "R8-VM6 -e mixed our/func/use + statements (VM)" ""
 else
-    aud_r8_record 1 "R8-VM6 -e mixed our/func/use + statements" "tw=($e_tw_rc:$e_tw_out) vm=($e_vm_rc:$e_vm_out)"
+    aud_r8_record 1 "R8-VM6 -e mixed our/func/use + statements" "vm=($e_vm_rc:$e_vm_out)"
 fi
 
 # 8. R8-C11: tools/stradapp __C__ #ifdef unbalanced brace, trailing code after }, heredocs, #error/#warning

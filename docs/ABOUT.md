@@ -62,12 +62,12 @@ Strada includes a bytecode VM interpreter (`strada-interp`) that compiles the AS
 - **Bytecode compilation**: AST is compiled to bytecode instructions, then executed by the VM
 - **Tagged pointer VMValue**: 8-byte values with zero-allocation integer arithmetic
 - **`__C__` block JIT**: Inline C code is compiled to `.so` files by gcc and cached in `~/.cache/strada/cblocks/`
-- **Interactive REPL** for experimentation (uses tree-walking backend)
+- **Interactive REPL** for experimentation (persistent bytecode VM session)
 - **Quick scripting** without a compilation step
-- **Embedded eval** via `Strada::Interpreter::eval_string()`
+- **Embedded eval** via `use Eval;` (`Strada::Interpreter::eval_string()`)
 - **No C compiler required** at runtime (except for `__C__` blocks)
 
-A tree-walking backend is available as a fallback via the `--tree-walk` flag. See the [Interpreter Guide](INTERPRETER.md) for details.
+See the [Interpreter Guide](INTERPRETER.md) for details.
 
 ### Object-Oriented Programming
 

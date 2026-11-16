@@ -23,7 +23,7 @@ func main() int {
         my int $m = ("/" =~ /[/]+/) ? 1 : 0;
         $s . ":" . $m;
     ');
-    check(("" . $ev1) eq "a_b:1", "R9-EVAL1 tree-walk /* */ and [/] char class: " . $ev1);
+    check(("" . $ev1) eq "a_b:1", "R9-EVAL1 eval_string /* */ and [/] char class: " . $ev1);
 
     my scalar $ev2 = Strada::Interpreter::eval_string('
         our int $r9_ev_bumps = 0;

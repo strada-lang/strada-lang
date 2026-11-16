@@ -62,7 +62,7 @@ else
     aud_r10_record 1 "Cycle 10 Stdlib suite (-O0)" "$(cat "$aud_dir/r10_stdlib_tools.diag" 2>/dev/null)"
 fi
 
-# 4. 3-way compiled / --tree-walk / --vm parity (R10-VM1..R10-VM9, R10-C5)
+# 4. Compiled vs bytecode VM 2-way parity (R10-VM1..R10-VM9, R10-C5)
 parity_src="$PROJECT_DIR/interpreter/test/test_audit_r10_vm.strada"
 parity_exp="$PROJECT_DIR/interpreter/test/test_audit_r10_vm.expected"
 if (cd "$PROJECT_DIR" && "$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$parity_src" -lpthread -o "$aud_dir/r10_parity_comp" >"$aud_dir/r10_parity_comp.log" 2>&1); then
@@ -73,31 +73,21 @@ else
 fi
 
 if [ "$comp_rc" -eq 0 ] && diff -u "$parity_exp" "$aud_dir/parity_comp.out" > "$aud_dir/parity_exp.diff" 2>&1; then
-    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$parity_src" >"$aud_dir/parity_tw.out" 2>&1) && tw_rc=0 || tw_rc=$?
-    if [ "$tw_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_tw.out" > "$aud_dir/parity_tw.diff" 2>&1; then
-        aud_r10_record 0 "Cycle 10 compiled vs tree-walk parity (exact stdout diff)" ""
-    else
-        aud_r10_record 1 "Cycle 10 compiled vs tree-walk parity" "rc=$tw_rc diff=$(cat "$aud_dir/parity_tw.diff" 2>/dev/null)"
-    fi
-
-    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" --vm "$parity_src" >"$aud_dir/parity_vm.out" 2>&1) && vm_rc=0 || vm_rc=$?
+    (cd "$PROJECT_DIR" && timeout 20 "$PROJECT_DIR/interpreter/strada-interp" "$parity_src" >"$aud_dir/parity_vm.out" 2>&1) && vm_rc=0 || vm_rc=$?
     if [ "$vm_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_vm.out" > "$aud_dir/parity_vm.diff" 2>&1; then
-        aud_r10_record 0 "Cycle 10 compiled vs bytecode --vm parity (exact stdout diff)" ""
+        aud_r10_record 0 "Cycle 10 compiled vs bytecode VM parity (exact stdout diff)" ""
     else
-        aud_r10_record 1 "Cycle 10 compiled vs bytecode --vm parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
+        aud_r10_record 1 "Cycle 10 compiled vs bytecode VM parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
     fi
 else
-    aud_r10_record 1 "Cycle 10 parity compiled vs expected (--tree-walk)" "rc=$comp_rc out=$(cat "$aud_dir/parity_comp.out" 2>/dev/null) diff=$(cat "$aud_dir/parity_exp.diff" 2>/dev/null)"
-    aud_r10_record 1 "Cycle 10 parity compiled vs bytecode --vm" "skipped due to compiled failure"
+    aud_r10_record 1 "Cycle 10 parity compiled vs expected" "rc=$comp_rc out=$(cat "$aud_dir/parity_comp.out" 2>/dev/null) diff=$(cat "$aud_dir/parity_exp.diff" 2>/dev/null)"
 fi
 
-# 5. Eval 2-way parity suite (R10-VM5, R10-VM6, R10-VM10)
-if aud_r10_compile_run "-O0" "$aud_src/eval_jit.strada" "r10_eval_jit" "R10_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
-    aud_r10_record 0 "Cycle 10 Eval 2-way parity suite (R10-VM5, R10-VM6, R10-VM10)" ""
+# 5. Eval VM suite (R10-VM5, R10-VM6, R10-VM10)
+if aud_r10_compile_run "-O0" "$aud_src/eval_jit.strada" "r10_eval_jit" "R10_EVAL_JIT_OK"; then
+    aud_r10_record 0 "Cycle 10 Eval VM suite (R10-VM5, R10-VM6, R10-VM10)" ""
 else
-    aud_r10_record 1 "Cycle 10 Eval 2-way parity suite" "$(cat "$aud_dir/r10_eval_jit.diag" 2>/dev/null)"
+    aud_r10_record 1 "Cycle 10 Eval VM suite" "$(cat "$aud_dir/r10_eval_jit.diag" 2>/dev/null)"
 fi
 
 # 6. R10-TOOL1: strada-md2html self-referential sentinel DoS & attribute breakout
@@ -143,13 +133,12 @@ else
     aud_r10_record 1 "R10-C6 stradapp build failed" "$(cat "$aud_dir/r10_pp.log" 2>/dev/null)"
 fi
 
-# 8. R10-VM4 stdout NUL check (--vm vs --tree-walk byte count)
-nul_vm_len=$(cd "$PROJECT_DIR" && timeout 10 "$PROJECT_DIR/interpreter/strada-interp" --vm -e 'say("P" . chr(0) . "Q");' </dev/null 2>/dev/null | wc -c)
-nul_tw_len=$(cd "$PROJECT_DIR" && timeout 10 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e 'say("P" . chr(0) . "Q");' </dev/null 2>/dev/null | wc -c)
-if [ "$nul_vm_len" -eq 4 ] && [ "$nul_tw_len" -eq 4 ]; then
-    aud_r10_record 0 "R10-VM4 say() preserves embedded NUL bytes on stdout (--vm & --tree-walk)" ""
+# 8. R10-VM4 stdout NUL check (bytecode VM byte count)
+nul_vm_len=$(cd "$PROJECT_DIR" && timeout 10 "$PROJECT_DIR/interpreter/strada-interp" -e 'say("P" . chr(0) . "Q");' </dev/null 2>/dev/null | wc -c)
+if [ "$nul_vm_len" -eq 4 ]; then
+    aud_r10_record 0 "R10-VM4 say() preserves embedded NUL bytes on stdout (VM)" ""
 else
-    aud_r10_record 1 "R10-VM4 stdout NUL check" "vm_len=$nul_vm_len tw_len=$nul_tw_len"
+    aud_r10_record 1 "R10-VM4 stdout NUL check" "vm_len=$nul_vm_len"
 fi
 
 # 9. R10-VM11 Strada::JIT out-of-tree $PATH resolution (gcc backend)
@@ -175,12 +164,10 @@ else
 fi
 
 # 10. R10-VM12 strada-interp -e "" exits 0 cleanly without launching REPL
-timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e "" </dev/null >"$aud_dir/empty_tw.out" 2>&1
-e_tw_rc=$?
-timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --vm -e "" </dev/null >"$aud_dir/empty_vm.out" 2>&1
+timeout 5 "$PROJECT_DIR/interpreter/strada-interp" -e "" </dev/null >"$aud_dir/empty_vm.out" 2>&1
 e_vm_rc=$?
-if [ "$e_tw_rc" -eq 0 ] && [ "$e_vm_rc" -eq 0 ] && [ ! -s "$aud_dir/empty_tw.out" ] && [ ! -s "$aud_dir/empty_vm.out" ]; then
-    aud_r10_record 0 "R10-VM12 strada-interp -e \"\" exits 0 cleanly (--tree-walk & --vm)" ""
+if [ "$e_vm_rc" -eq 0 ] && [ ! -s "$aud_dir/empty_vm.out" ]; then
+    aud_r10_record 0 "R10-VM12 strada-interp -e \"\" exits 0 cleanly (VM)" ""
 else
-    aud_r10_record 1 "R10-VM12 -e empty string" "tw_rc=$e_tw_rc vm_rc=$e_vm_rc tw=$(cat "$aud_dir/empty_tw.out" 2>/dev/null) vm=$(cat "$aud_dir/empty_vm.out" 2>/dev/null)"
+    aud_r10_record 1 "R10-VM12 -e empty string" "vm_rc=$e_vm_rc vm=$(cat "$aud_dir/empty_vm.out" 2>/dev/null)"
 fi

@@ -572,6 +572,8 @@ enum {
     BUILTIN_CORE_FWRITE,
     BUILTIN_CORE_FREAD,
     BUILTIN_STACKTRACE,
+    BUILTIN_CORE_GC_COLLECT,
+    BUILTIN_CAPTURE,
 };
 
 /* Heap object type tag */
@@ -596,6 +598,7 @@ typedef struct VMObjHeader {
     uint8_t gc_marked;
     uint8_t gc_immortal;
     uint8_t is_utf8;
+    uint8_t gc_finalized;
     struct VMObjHeader *gc_next;
 } VMObjHeader;
 void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type);
@@ -706,6 +709,7 @@ static inline VMTiedScalar *VM_AS_TIED_SCALAR(VMValue v) { return (VMTiedScalar*
 typedef struct {
     VMObjHeader hdr;
     VMValue target;
+    uint8_t is_sref;
 } VMWeakRef;
 static inline VMWeakRef *VM_AS_WEAKREF(VMValue v) { return (VMWeakRef*)VM_TO_PTR(v); }
 

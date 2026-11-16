@@ -1,5 +1,5 @@
 #!/usr/bin/env strada
-# Cycle 2 Audit regression tests: Eval::eval_string_vm (compiled with -DHAVE_VM)
+# Cycle 2 Audit regression tests: Eval::eval_string_vm (bytecode VM)
 
 use lib "lib";
 use Eval;

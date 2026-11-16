@@ -398,7 +398,7 @@ static int ssl_read_retry(SSLConnection *c, char *buf, int max_len) {
     }
 }
 
-static int ssl_write_all_retry(SSLConnection *c, const char *data, size_t len) {
+static int64_t ssl_write_all_retry(SSLConnection *c, const char *data, size_t len) {
     size_t total = 0;
     while (total < len) {
         size_t chunk = len - total;
@@ -410,13 +410,13 @@ static int ssl_write_all_retry(SSLConnection *c, const char *data, size_t len) {
         }
         int err = SSL_get_error(c->ssl, n);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-            if (!ssl_wait_want(c, err)) return total > 0 ? (int)total : -1;
+            if (!ssl_wait_want(c, err)) return total > 0 ? (int64_t)total : -1;
             continue;
         }
         if (err == SSL_ERROR_SYSCALL && errno == EINTR) continue;
-        return total > 0 ? (int)total : -1;
+        return total > 0 ? (int64_t)total : -1;
     }
-    return (int)total;
+    return (int64_t)total;
 }
 }
 
@@ -598,11 +598,11 @@ func server(int $port, str $cert_file, str $key_file) int {
             ssl_initialized = 1;
         }
 
-        int port_val = (int)strada_to_int(port);
+        int64_t port_num = strada_to_int(port);
         char *cert_str = strada_to_str(cert_s);
         char *key_str = strada_to_str(key_s);
 
-        SSLConnection *conn = malloc(sizeof(SSLConnection));
+        SSLConnection *conn = (port_num >= 0 && port_num <= 65535) ? malloc(sizeof(SSLConnection)) : NULL;
         if (conn) {
             memset(conn, 0, sizeof(SSLConnection));
             conn->is_server = 1;
@@ -633,7 +633,7 @@ func server(int $port, str $cert_file, str $key_file) int {
                     memset(&addr, 0, sizeof(addr));
                     addr.sin_family = AF_INET;
                     addr.sin_addr.s_addr = INADDR_ANY;
-                    addr.sin_port = htons(port_val);
+                    addr.sin_port = htons((uint16_t)port_num);
 
                     if (bind(conn->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
                         close(conn->socket_fd);
@@ -702,9 +702,14 @@ func read(int $conn, int $max_len) str {
     my str $result = "";
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        int max = (int)strada_to_int(max_len);
-        if (c && c->ssl && max > 0) {
+        int64_t max64 = strada_to_int(max_len);
+        if (c && c->ssl && max64 > 0) {
+            int max = (max64 > 0x40000000LL) ? 0x40000000 : (int)max64;
             char *buffer = malloc((size_t)max + 1);
+            if (!buffer && max > 65536) {
+                max = 65536;
+                buffer = malloc((size_t)max + 1);
+            }
             if (buffer) {
                 int n = ssl_read_retry(c, buffer, max);
                 if (n > 0) {
@@ -724,15 +729,23 @@ func readline(int $conn, int $max_len) str {
     my str $result = "";
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        int max = (int)strada_to_int(max_len);
-        if (c && c->ssl && max > 0) {
-            char *buffer = malloc((size_t)max + 1);
+        int64_t max64 = strada_to_int(max_len);
+        if (c && c->ssl && max64 > 0) {
+            size_t cap = (max64 < 4096) ? (size_t)max64 + 1 : 4096;
+            char *buffer = malloc(cap);
             if (buffer) {
-                int pos = 0;
+                int64_t pos = 0;
                 char ch;
-                while (pos < max) {
+                while (pos < max64) {
                     int n = ssl_read_retry(c, &ch, 1);
                     if (n <= 0) break;
+                    if ((size_t)(pos + 2) > cap) {
+                        size_t ncap = cap * 2;
+                        char *nb = realloc(buffer, ncap);
+                        if (!nb) break;
+                        buffer = nb;
+                        cap = ncap;
+                    }
                     buffer[pos++] = ch;
                     if (ch == '\n') break;
                 }
@@ -758,7 +771,7 @@ func write(int $conn, str $data) int {
             size_t len = 0;
             StradaValue *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
-            int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
+            int64_t written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
             if (owned) strada_decref(owned);
             strada_decref(result);
             result = strada_new_int(written);
@@ -773,9 +786,14 @@ func read_binary(int $conn, int $max_len) str {
     my str $result = "";
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        int max = (int)strada_to_int(max_len);
-        if (c && c->ssl && max > 0) {
+        int64_t max64 = strada_to_int(max_len);
+        if (c && c->ssl && max64 > 0) {
+            int max = (max64 > 0x40000000LL) ? 0x40000000 : (int)max64;
             char *buffer = malloc((size_t)max + 1);
+            if (!buffer && max > 65536) {
+                max = 65536;
+                buffer = malloc((size_t)max + 1);
+            }
             if (buffer) {
                 int n = ssl_read_retry(c, buffer, max);
                 if (n > 0) {
@@ -802,7 +820,7 @@ func write_binary(int $conn, str $data) int {
             size_t len = 0;
             StradaValue *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
-            int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
+            int64_t written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
             if (owned) strada_decref(owned);
             strada_decref(result);
             result = strada_new_int(written);
@@ -1147,12 +1165,17 @@ func try_read(int $conn, int $max_len) str {
     my scalar $result = undef;
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        int max = (int)strada_to_int(max_len);
-        if (!c || !c->ssl || max <= 0) {
+        int64_t max64 = strada_to_int(max_len);
+        if (!c || !c->ssl || max64 <= 0) {
             strada_decref(result);
             result = strada_new_str("");
         } else {
+            int max = (max64 > 0x40000000LL) ? 0x40000000 : (int)max64;
             char *buffer = malloc((size_t)max);
+            if (!buffer && max > 65536) {
+                max = 65536;
+                buffer = malloc((size_t)max);
+            }
             if (!buffer) {
                 strada_decref(result);
                 result = strada_new_str("");

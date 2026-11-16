@@ -1,7 +1,7 @@
 #!/bin/bash
 # t_audit_r2.sh — Cycle 2 Audit regression suite
 # Covers runtime/concurrency, compiler/codegen, stdlib & CLI tools,
-# Eval (tree-walk & VM), and Strada::JIT fixes.
+# Eval (VM), and Strada::JIT fixes.
 
 aud_dir="$BUILD_DIR/audit_r2"
 aud_src="$SCRIPT_DIR/audit_r2"
@@ -66,8 +66,8 @@ pid_ej=$!
 
 (
     rc=0
-    "$PROJECT_DIR/strada" -O0 --no-use-artifacts -L "$PROJECT_DIR/lib" -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$aud_src/vm_eval_checks.strada" "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c" \
+    "$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" \
+        "$aud_src/vm_eval_checks.strada" \
         -o "$aud_dir/r2_vm_eval" > "$aud_dir/vm_eval.build.log" 2>&1 &&
     timeout 30 "$aud_dir/r2_vm_eval" > "$aud_dir/vm_eval.out" 2>&1 || rc=1
     echo $rc > "$aud_dir/vm_eval.rc"
@@ -103,7 +103,7 @@ else
     aud_r2_record 1 "audit_r2 stdlib fixes" "rc=$std_rc out=$std_out build=$(tail -n 10 "$aud_dir/stdlib.build.log" 2>/dev/null)"
 fi
 
-# Check 4: Eval (TW) & Strada::JIT
+# Check 4: Eval & Strada::JIT
 ej_rc=$(cat "$aud_dir/eval_jit.rc" 2>/dev/null || echo 1)
 ej_out=$(cat "$aud_dir/eval_jit.out" 2>/dev/null || true)
 if [ "$ej_rc" -eq 0 ] && echo "$ej_out" | grep -q "ALL_R2_EVAL_JIT_OK"; then
@@ -112,7 +112,7 @@ else
     aud_r2_record 1 "audit_r2 Eval & Strada::JIT fixes" "rc=$ej_rc out=$ej_out build=$(tail -n 10 "$aud_dir/eval_jit.build.log" 2>/dev/null)"
 fi
 
-# Check 5: Eval::eval_string_vm (HAVE_VM)
+# Check 5: Eval::eval_string_vm
 vme_rc=$(cat "$aud_dir/vm_eval.rc" 2>/dev/null || echo 1)
 vme_out=$(cat "$aud_dir/vm_eval.out" 2>/dev/null || true)
 if [ "$vme_rc" -eq 0 ] && echo "$vme_out" | grep -q "ALL_R2_VM_EVAL_OK"; then

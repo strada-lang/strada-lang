@@ -195,34 +195,30 @@ EOF
 fi
 
 # 4. Eval + VM + Strada::JIT suite (R11-VM1..VM7, R11-VM11)
-if aud_r11_compile_run "$aud_src/eval_jit.strada" "r11_eval_jit" "R11_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r11_compile_run "$aud_src/eval_jit.strada" "r11_eval_jit" "R11_EVAL_JIT_OK"; then
     aud_r11_record 0 "Cycle 11 Eval / VM / Strada::JIT suite" ""
 else
     aud_r11_record 1 "Cycle 11 Eval / VM / Strada::JIT suite" "$(cat "$aud_dir/r11_eval_jit.diag" 2>/dev/null)"
 fi
 
-# 5. Compiled vs --tree-walk vs --vm 3-way parity (R11-VM1..VM6, R11-VM8..VM10)
+# 5. Compiled vs bytecode VM 2-way parity (R11-VM1..VM6, R11-VM8..VM10)
 parity_src="$PROJECT_DIR/interpreter/test/test_audit_r11_vm.strada"
 parity_exp="$PROJECT_DIR/interpreter/test/test_audit_r11_vm.expected"
 interp_bin="$PROJECT_DIR/interpreter/strada-interp"
 if "$PROJECT_DIR/strada" -O0 "$parity_src" -o "$aud_dir/r11_parity" > "$aud_dir/r11_parity.build.log" 2>&1; then
     c_out=$(timeout 20 "$aud_dir/r11_parity" 2>&1)
     c_rc=$?
-    tw_out=$(timeout 20 "$interp_bin" --tree-walk "$parity_src" 2>&1)
-    tw_rc=$?
-    vm_out=$(timeout 20 "$interp_bin" --vm "$parity_src" 2>&1)
+    vm_out=$(timeout 20 "$interp_bin" "$parity_src" 2>&1)
     vm_rc=$?
     exp_out=$(cat "$parity_exp")
-    if [ "$c_rc" -eq 0 ] && [ "$tw_rc" -eq 0 ] && [ "$vm_rc" -eq 0 ] \
-       && [ "$c_out" = "$exp_out" ] && [ "$tw_out" = "$exp_out" ] && [ "$vm_out" = "$exp_out" ]; then
-        aud_r11_record 0 "Cycle 11 3-way parity (compiled / --tree-walk / --vm)" ""
+    if [ "$c_rc" -eq 0 ] && [ "$vm_rc" -eq 0 ] \
+       && [ "$c_out" = "$exp_out" ] && [ "$vm_out" = "$exp_out" ]; then
+        aud_r11_record 0 "Cycle 11 2-way parity (compiled / VM)" ""
     else
-        aud_r11_record 1 "Cycle 11 3-way parity" "c=$c_rc tw=$tw_rc vm=$vm_rc c_diff=[$(diff <(echo "$exp_out") <(echo "$c_out") | head -n 6)] tw_diff=[$(diff <(echo "$exp_out") <(echo "$tw_out") | head -n 6)] vm_diff=[$(diff <(echo "$exp_out") <(echo "$vm_out") | head -n 6)]"
+        aud_r11_record 1 "Cycle 11 2-way parity" "c=$c_rc vm=$vm_rc c_diff=[$(diff <(echo "$exp_out") <(echo "$c_out") | head -n 6)] vm_diff=[$(diff <(echo "$exp_out") <(echo "$vm_out") | head -n 6)]"
     fi
 else
-    aud_r11_record 1 "Cycle 11 3-way parity compile" "$(tail -n 15 "$aud_dir/r11_parity.build.log" 2>/dev/null)"
+    aud_r11_record 1 "Cycle 11 2-way parity compile" "$(tail -n 15 "$aud_dir/r11_parity.build.log" 2>/dev/null)"
 fi
 
 # 6. CLI checks: R11-VM7 (VM rejects undeclared vars), R11-C14 (C-keyword params in main), R11-C8 (stradapp s/// tr///)

@@ -1,0 +1,79 @@
+package LkR15Parent;
+func p(scalar $s) int { return 1; }
+
+package LkR15Child;
+inherit LkR15Parent;
+
+package LkR15Box;
+use overload '""' => "to_s", "0+" => "to_n", "<=>" => "cmp_n", "cmp" => "cmp_s";
+func new(num $v) scalar { return bless({"v" => $v}, "LkR15Box"); }
+func to_s(scalar $s) str { return sprintf("%05.1f", $s->{"v"}); }
+func to_n(scalar $s) num { return $s->{"v"}; }
+func cmp_n(scalar $a, scalar $b, int $rev) num {
+    my num $d = $a->{"v"} - $b->{"v"};
+    return $rev ? -$d : $d;
+}
+func cmp_s(scalar $a, scalar $b, int $rev) num { return cmp_n($a, $b, $rev); }
+
+package LkR15Dtor;
+func new(int $t) scalar { return bless({"t" => $t}, "LkR15Dtor"); }
+func DESTROY(scalar $self) void {
+    if ($self->{"t"}) { die("lk_dtor_boom"); }
+}
+
+package main;
+
+func make_dtor(int $t) void {
+    my scalar $d = LkR15Dtor::new($t);
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 4) {
+        my scalar $co = bless({}, "LkR15Child");
+        my int $ci = $co->can("isa") + ("LkR15Child"->isa("LkR15Parent")) + ("LkR15Child"->can("p"));
+
+        my array @wa = (LkR15Box::new(1.0), LkR15Box::new(2.0));
+        core::weaken($wa[0]);
+        core::weaken($wa[1]);
+        my scalar $p = pop(@wa);
+        my scalar $s = shift(@wa);
+
+        my array @wd = (bless({"v" => 3}, "LkR15Box"));
+        core::weaken($wd[0]);
+        core::gc_collect();
+        my scalar $dp = pop(@wd);
+
+        my scalar $wsr = undef;
+        {
+            my int $x = 10 + $i;
+            $wsr = bless(\$x, "LkR15Ws");
+            core::weaken($wsr);
+            my str $k = $$wsr . ref($wsr);
+        }
+        core::gc_collect();
+
+        my scalar $b1 = LkR15Box::new(1.0);
+        my scalar $b2 = LkR15Box::new(1.5);
+        my int $cmp = ($b1 < $b2) + ($b1 lt $b2) + ($b1 == $b2);
+
+        my array @ss = sort((LkR15Box::new(10.0), LkR15Box::new(1.5)));
+        my array @ns = nsort((LkR15Box::new(10.0), LkR15Box::new(1.5)));
+        my hash %sh = ("k" => "v", "a" => 1);
+        my array @shs = sort(%sh);
+        my array @sref = sort([3, 1, 2]);
+        my array @nref = nsort([3, 1, 2]);
+
+        make_dtor(0);
+        my scalar $sole = LkR15Dtor::new(0);
+        core::weaken($sole);
+        try {
+            make_dtor(1);
+            core::gc_collect();
+        } catch ($e) {}
+
+        $i = $i + 1;
+    }
+    say("LEAK_AUDIT_R15_VM_OK");
+    return 0;
+}

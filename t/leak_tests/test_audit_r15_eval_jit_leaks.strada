@@ -1,0 +1,88 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $i = 0;
+    while ($i < 4) {
+        my scalar $tw = Strada::Interpreter::eval('
+            package Lk15TwBox;
+            use overload \'""\' => "to_s", "0+" => "to_n", "<=>" => "cmp_n";
+            func new(num $v) scalar { return bless({"v" => $v}, "Lk15TwBox"); }
+            func to_s(scalar $s) str { return sprintf("%04d", int($s->{"v"})); }
+            func to_n(scalar $s) num { return $s->{"v"}; }
+            func cmp_n(scalar $a, scalar $b, int $rev) num { my num $d = $a->{"v"} - $b->{"v"}; return $rev ? -$d : $d; }
+
+            package Lk15TwDtor;
+            func DESTROY(scalar $self) void {
+                if ($self->{"t"}) { die("lk_tw_boom"); }
+            }
+
+            package main;
+            my scalar $wsr = undef;
+            { my int $x = 12; $wsr = bless(\$x, "Lk15Ws"); core::weaken($wsr); }
+            my array @arr = (Lk15TwBox::new(5.0), Lk15TwBox::new(1.5));
+            my array @sa = sort(@arr);
+            my array @na = nsort(@arr);
+            my int $lt = ($arr[1] < $arr[0]);
+            my scalar $sole = bless({"t" => 0}, "Lk15TwDtor");
+            core::weaken($sole);
+            try { my scalar $d = bless({"t" => 1}, "Lk15TwDtor"); } catch ($e) {}
+            $sa[0]->{"v"} . "," . $na[0]->{"v"} . "," . $lt . "," . (!defined($wsr));
+        ');
+        Strada::Interpreter::reset();
+
+        my scalar $vm = Strada::Interpreter::eval_string_vm('
+            package Lk15VmBox;
+            use overload \'""\' => "to_s", "0+" => "to_n", "<=>" => "cmp_n";
+            func new(num $v) scalar { return bless({"v" => $v}, "Lk15VmBox"); }
+            func to_s(scalar $s) str { return sprintf("%04d", int($s->{"v"})); }
+            func to_n(scalar $s) num { return $s->{"v"}; }
+            func cmp_n(scalar $a, scalar $b, int $rev) num { my num $d = $a->{"v"} - $b->{"v"}; return $rev ? -$d : $d; }
+
+            package Lk15VmDtor;
+            func DESTROY(scalar $self) void {
+                if ($self->{"t"}) { die("lk_vm_boom"); }
+            }
+
+            package main;
+            our scalar $vm_our_b = bless({"k" => 1}, "Lk15VmBox");
+            my array @wa = (Lk15VmBox::new(9.0));
+            core::weaken($wa[0]);
+            core::gc_collect();
+            my int $dp = defined(pop(@wa));
+            my scalar $wsr = undef;
+            { my int $x = 5; $wsr = bless(\$x, "Lk15VmWs"); core::weaken($wsr); }
+            core::gc_collect();
+            my array @ss = sort((Lk15VmBox::new(5.0), Lk15VmBox::new(1.5)));
+            my array @ns = nsort((Lk15VmBox::new(5.0), Lk15VmBox::new(1.5)));
+            my scalar $sole = bless({"t" => 0}, "Lk15VmDtor");
+            core::weaken($sole);
+            try { my scalar $b = bless({"t" => 1}, "Lk15VmDtor"); core::gc_collect(); } catch ($e) {}
+            return $dp . "," . (!defined($wsr)) . "," . $ss[0]->{"v"} . "," . $ns[0]->{"v"};
+        ');
+        my scalar $t_try = Strada::Interpreter::eval_string_vm('try { 42; } catch ($e) { 0; }');
+        my scalar $t_sw = Strada::Interpreter::eval_string_vm('switch (2) { case 1 { 10; } case 2 { 20; } default { 30; } }');
+        my scalar $vfn = Strada::Interpreter::eval_string_vm('
+            return func(int $n) int {
+                my int $s = 0; my int $j = 0;
+                while ($j < $n) { my str $tmp = "k" . $j; $s = $s + length($tmp); $j = $j + 1; }
+                return $s;
+            };
+        ');
+        my int $vr = $vfn->(4000);
+        Strada::Interpreter::reset();
+
+        Strada::JIT::init();
+        my scalar $jr = Strada::JIT::eval('
+            my hash %h = ();
+            $h{"a"}{"b"}++;
+            $h{"a"}{"b"};
+        ');
+        Strada::JIT::reset();
+
+        $i = $i + 1;
+    }
+    say("AUDIT_R15_EVAL_JIT_LEAKS_OK");
+    return 0;
+}

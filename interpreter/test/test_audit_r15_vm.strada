@@ -1,0 +1,167 @@
+package R15VmParent;
+func p(scalar $self) int { return 1; }
+
+package R15VmChild;
+inherit R15VmParent;
+func m(scalar $self) int { return 2; }
+
+package R15VmBox;
+use overload '""' => "to_s", "0+" => "to_n", "<=>" => "cmp_num", "cmp" => "cmp_str";
+func new(num $v) scalar { return bless({"v" => $v}, "R15VmBox"); }
+func to_s(scalar $self) str { return sprintf("%05.1f", $self->{"v"}); }
+func to_n(scalar $self) num { return $self->{"v"}; }
+func cmp_num(scalar $a, scalar $b, int $rev) num {
+    my num $d = $a->{"v"} - $b->{"v"};
+    if ($rev) { return -$d; }
+    return $d;
+}
+func cmp_str(scalar $a, scalar $b, int $rev) num {
+    return cmp_num($a, $b, $rev);
+}
+
+package R15VmGuard;
+our int $destroyed = 0;
+func new(int $throw_flag) scalar { return bless({"t" => $throw_flag}, "R15VmGuard"); }
+func DESTROY(scalar $self) void {
+    $destroyed = $destroyed + 1;
+    if ($self->{"t"}) {
+        die("r15_vm_destroy_boom");
+    }
+}
+func count() int { return $destroyed; }
+
+package main;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func make_guard(int $throw_flag) void {
+    my scalar $g = R15VmGuard::new($throw_flag);
+}
+
+func main() int {
+    # VM1: can() and isa() parity
+    my scalar $co = bless({}, "R15VmChild");
+    check($co->can("isa") == 1 && can($co, "can") == 1
+          && ("R15VmChild"->isa("R15VmParent")) == 1 && ("R15VmChild"->can("p")) == 1
+          && ("R15VmParent"->isa("R15VmChild")) == 0 && (""->can("isa")) == 0,
+          "VM1 can/isa parity");
+    say("VM1=1,1,1,1");
+
+    # VM2: weakref unwrapping across pop/shift/reverse/deref/values/each/splice/defined/sort
+    my array @wa_keep = (R15VmBox::new(11), R15VmBox::new(22));
+    my array @wa = ($wa_keep[0], $wa_keep[1]);
+    core::weaken($wa[0]);
+    core::weaken($wa[1]);
+    my scalar $popv = pop(@wa);
+    my scalar $shfv = shift(@wa);
+    check(defined($popv) && ref($popv) eq "R15VmBox" && $popv->{"v"} == 22, "VM2 live pop unwrap");
+    check(defined($shfv) && ref($shfv) eq "R15VmBox" && $shfv->{"v"} == 11, "VM2 live shift unwrap");
+
+    my array @wd = (bless({"v" => 33}, "R15VmBox"), bless({"v" => 44}, "R15VmBox"));
+    core::weaken($wd[0]);
+    core::weaken($wd[1]);
+    core::gc_collect();
+    my scalar $dpop = pop(@wd);
+    my scalar $dshf = shift(@wd);
+    check(!defined($dpop) && !defined($dshf), "VM2 dead pop/shift undef");
+
+    my array @wkeep = (R15VmBox::new(5));
+    my array @wrev = ($wkeep[0]);
+    core::weaken($wrev[0]);
+    my array @rev = reverse(@wrev);
+    check(defined($rev[0]) && $rev[0]->{"v"} == 5, "VM2 reverse live weakref");
+
+    my scalar $ws_holder = $wkeep[0];
+    my scalar $wsref = \$ws_holder;
+    my array @warr2 = ($ws_holder);
+    core::weaken($warr2[0]);
+    my hash %wh = ("live" => $ws_holder);
+    core::weaken($wh{"live"});
+    my array @wvals = values(%wh);
+    check(size(@wvals) == 1 && ref($wvals[0]) eq "R15VmBox" && $wvals[0]->{"v"} == 5, "VM2 values() unwrap");
+    my array @wp = each(%wh);
+    check(size(@wp) == 2 && ref($wp[1]) eq "R15VmBox" && $wp[1]->{"v"} == 5, "VM2 each() unwrap");
+    say("VM2=ok");
+
+    # VM3: weak scalar reference \$x stays alive while $x in scope, undef when exited, copy stays strong
+    my scalar $wsr = undef;
+    my int $live_ok = 0;
+    my scalar $strong_copy = undef;
+    {
+        my int $x = 7;
+        $wsr = bless(\$x, "R15WsPkg");
+        $strong_copy = $wsr;
+        core::weaken($wsr);
+        core::gc_collect();
+        $live_ok = (ref($wsr) eq "R15WsPkg" && $$wsr == 7 && core::isweak($wsr) == 1) ? 1 : 0;
+        core::weaken($strong_copy);
+        core::gc_collect();
+        check(ref($wsr) eq "R15WsPkg" && $$wsr == 7, "VM3 weak sref still alive while x in scope");
+        $strong_copy = $wsr; # copy from weak is strong, though x's env keeps target valid
+    }
+    core::gc_collect();
+    check($live_ok == 1, "VM3 live weak sref");
+    my scalar $out_sref = undef;
+    {
+        my int $z = 9;
+        $out_sref = \$z;
+        core::weaken($out_sref);
+        core::gc_collect();
+        check(defined($$out_sref) && $$out_sref == 9, "VM3 unblessed weak sref live in scope");
+    }
+    core::gc_collect();
+    check(!defined($out_sref) && core::isweak($out_sref) == 0, "VM3 weak sref cleared on scope exit");
+    say("VM3=ok");
+
+    # VM4: fractional <=> and cmp overload fallback
+    my scalar $f1 = R15VmBox::new(1.0);
+    my scalar $f2 = R15VmBox::new(1.5);
+    check(($f1 < $f2) == 1 && ($f1 <= $f2) == 1 && ($f1 > $f2) == 0 && ($f1 >= $f2) == 0 && ($f1 == $f2) == 0 && ($f1 != $f2) == 1,
+          "VM4 <=>");
+    check(($f1 lt $f2) == 1 && ($f1 le $f2) == 1 && ($f1 gt $f2) == 0 && ($f1 ge $f2) == 0 && ($f1 eq $f2) == 0 && ($f1 ne $f2) == 1,
+          "VM4 cmp");
+    say("VM4=1,1");
+
+    # VM5: default sort & nsort overloads, hash, arrayref, scalar, NULs
+    my array @boxes = (R15VmBox::new(10.0), R15VmBox::new(2.0), R15VmBox::new(1.0));
+    my array @sb = sort(@boxes);
+    my array @nb = nsort(@boxes);
+    my array @nuls = ("a\x00z", "a\x00a", "a");
+    my array @snul = sort(@nuls);
+    my hash %hm = ("k2" => 20, "k1" => 10);
+    my array @shm = sort(%hm);
+    my array @sref = sort([3, 1, 2]);
+    my array @nref = nsort([10, 2, 1]);
+    my array @ssca = sort("solo");
+    check($sb[0]->{"v"} == 1 && $sb[1]->{"v"} == 2 && $sb[2]->{"v"} == 10, "VM5 sort overload");
+    check($nb[0]->{"v"} == 1 && $nb[1]->{"v"} == 2 && $nb[2]->{"v"} == 10, "VM5 nsort overload");
+    check($snul[0] eq "a" && $snul[1] eq "a\x00a" && $snul[2] eq "a\x00z", "VM5 sort NUL");
+    check(size(@shm) == 4 && size(@sref) == 3 && $sref[0] == 1 && size(@nref) == 3 && $nref[0] == 1 && size(@ssca) == 1 && $ssca[0] eq "solo",
+          "VM5 sort/nsort container parity");
+    say("VM5=1,1,3,3");
+
+    # VM6: DESTROY on scope exit + gc_collect, core::weaken($sole), throwing DESTROY
+    make_guard(0);
+    core::gc_collect();
+    my scalar $sole = R15VmGuard::new(0);
+    core::weaken($sole);
+    check(!defined($sole), "VM6 core::weaken(sole) cleared");
+    my int $tcaught = 0;
+    try {
+        make_guard(1);
+        core::gc_collect();
+    } catch ($e) {
+        $tcaught = ($e =~ /r15_vm_destroy_boom/) ? 1 : 0;
+    }
+    make_guard(0);
+    core::gc_collect();
+    check($tcaught == 1 && R15VmGuard::count() == 4, "VM6 destroyed=" . R15VmGuard::count() . " tcaught=" . $tcaught);
+    say("VM6=" . R15VmGuard::count());
+
+    say("ALL_R15_VM_OK");
+    return 0;
+}

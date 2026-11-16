@@ -110,16 +110,16 @@ Strada Source (.strada)
         ▼
    AST (in memory)
         │
-   ┌────┴─────────────────┐
-   │         │             │
-   ▼         ▼             ▼
-CodeGen   Bytecode VM   Tree-Walk
- (C out)  (default)     (--tree-walk)
+   ┌────┴─────────┐
+   │              │
+   ▼              ▼
+CodeGen      Bytecode VM
+(C out)     (strada-interp)
 ```
 
-### Bytecode VM (Default)
+### Bytecode VM
 
-The default interpreter backend compiles the AST to bytecode, then executes it via a computed goto dispatch loop:
+The interpreter compiles the AST to bytecode, then executes it via a computed goto dispatch loop:
 
 ```
 AST → Bytecode Compiler → Bytecode Instructions → VM Dispatch Loop
@@ -134,15 +134,12 @@ Key characteristics:
 Source files:
 - `interpreter/vm_compiler.c` - AST to bytecode compiler
 - `interpreter/vm.c` - Bytecode dispatch loop
-
-### Tree-Walking Backend (Legacy)
-
-The tree-walking backend (`lib/Strada/Interpreter.strada`) walks AST nodes directly to evaluate the program. It is available via `--tree-walk` and is used by the REPL (persistent VM state between inputs is not yet supported).
+- `lib/Strada/Interpreter.strada` - Persistent VM session manager (shared with `use Eval;` and REPL)
 
 ### Powered by the interpreter:
 
-- **`strada-interp`** - Standalone interpreter with REPL (`interpreter/Main.strada`)
-- **`Strada::Interpreter::eval_string()`** - Embedded eval from compiled programs
+- **`strada-interp`** - Standalone bytecode VM interpreter with REPL and `-e` (`interpreter/Main.strada`)
+- **`Strada::Interpreter::eval_string()`** - Embedded VM eval from compiled programs (`use Eval;`)
 - **`Strada::JIT::eval()`** - JIT eval (compiles to .so at runtime; uses the compile path, not the interpreter)
 
 The interpreter supports the full language including closures, OOP, try/catch, regex, foreach, map/grep/sort, import_lib, and operator overloading. Async/await is not supported. See `docs/INTERPRETER.md` for details.
@@ -666,7 +663,7 @@ strada/
 │   ├── Combined.strada # Combined source (generated)
 │   └── Combined.c      # Compiled to C (generated)
 │
-├── interpreter/        # Interpreter (bytecode VM + tree-walk)
+├── interpreter/        # Bytecode VM interpreter
 │   ├── Main.strada    # Driver (REPL + file execution)
 │   ├── vm_compiler.c  # AST to bytecode compiler
 │   ├── vm.c       # Bytecode VM dispatch loop

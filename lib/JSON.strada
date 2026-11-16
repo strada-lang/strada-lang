@@ -92,17 +92,37 @@ __C__ {
  * ============================================================ */
 
 typedef struct {
+    StradaValue *key_sv;
+    StradaValue *val_sv;
+} JsonSnapEntry;
+
+typedef struct {
+    JsonSnapEntry *items;
+    size_t count;
+} JsonOrder;
+
+typedef struct {
     char *buf;
     size_t len, cap;
     int oom;
-    StradaHashEntry ***orders;
+    JsonOrder **orders;
     size_t orders_len, orders_cap;
 } JsonB;
 
-static int jb_push_order(JsonB *b, StradaHashEntry **o) {
+static void jb_free_order(JsonOrder *o) {
+    if (!o) return;
+    for (size_t i = 0; i < o->count; i++) {
+        if (o->items[i].key_sv) strada_decref(o->items[i].key_sv);
+        if (o->items[i].val_sv) strada_decref(o->items[i].val_sv);
+    }
+    free(o->items);
+    free(o);
+}
+
+static int jb_push_order(JsonB *b, JsonOrder *o) {
     if (b->orders_len >= b->orders_cap) {
         size_t ncap = b->orders_cap ? b->orders_cap * 2 : 8;
-        StradaHashEntry ***np = realloc(b->orders, ncap * sizeof(StradaHashEntry**));
+        JsonOrder **np = realloc(b->orders, ncap * sizeof(JsonOrder*));
         if (!np) return 0;
         b->orders = np;
         b->orders_cap = ncap;
@@ -111,11 +131,11 @@ static int jb_push_order(JsonB *b, StradaHashEntry **o) {
     return 1;
 }
 
-static void jb_pop_free_order(JsonB *b, StradaHashEntry **o) {
+static void jb_pop_free_order(JsonB *b, JsonOrder *o) {
     if (b->orders_len > 0 && b->orders[b->orders_len - 1] == o) {
         b->orders_len--;
     }
-    free(o);
+    jb_free_order(o);
 }
 
 static int jb_grow(JsonB *b, size_t need) {
@@ -176,13 +196,15 @@ static void jb_put_escaped(JsonB *b, const char *s, size_t n) {
     jb_putc(b, '"');
 }
 
-static int json_keycmp(const void *a, const void *b) {
-    const StradaHashEntry *ea = *(const StradaHashEntry* const*)a;
-    const StradaHashEntry *eb = *(const StradaHashEntry* const*)b;
-    size_t la = ea->key->len;
-    size_t lb = eb->key->len;
+static int json_snap_keycmp(const void *a, const void *b) {
+    const JsonSnapEntry *ea = (const JsonSnapEntry*)a;
+    const JsonSnapEntry *eb = (const JsonSnapEntry*)b;
+    const char *pa = (ea->key_sv && !STRADA_IS_TAGGED_INT(ea->key_sv) && ea->key_sv->value.pv) ? ea->key_sv->value.pv : "";
+    const char *pb = (eb->key_sv && !STRADA_IS_TAGGED_INT(eb->key_sv) && eb->key_sv->value.pv) ? eb->key_sv->value.pv : "";
+    size_t la = (ea->key_sv && !STRADA_IS_TAGGED_INT(ea->key_sv)) ? STRADA_STR_BYTELEN(ea->key_sv) : 0;
+    size_t lb = (eb->key_sv && !STRADA_IS_TAGGED_INT(eb->key_sv)) ? STRADA_STR_BYTELEN(eb->key_sv) : 0;
     size_t minlen = la < lb ? la : lb;
-    int cmp = minlen ? memcmp(ea->key->data, eb->key->data, minlen) : 0;
+    int cmp = minlen ? memcmp(pa, pb, minlen) : 0;
     if (cmp != 0) return cmp;
     if (la < lb) return -1;
     if (la > lb) return 1;
@@ -270,22 +292,42 @@ static void json_enc_hash(JsonB *b, StradaHash *hv, int canonical, int depth) {
     int first = 1;
     if (!hv) { jb_putc(b, '}'); return; }
     if (canonical && hv->num_entries > 0) {
-        size_t n = 0;
-        StradaHashEntry **order = malloc(hv->next_slot * sizeof(StradaHashEntry*));
+        size_t cap = hv->num_entries;
+        JsonOrder *order = calloc(1, sizeof(JsonOrder));
+        if (order) {
+            order->items = malloc(cap * sizeof(JsonSnapEntry));
+            if (!order->items) {
+                free(order);
+                order = NULL;
+            }
+        }
         if (order && !jb_push_order(b, order)) {
+            free(order->items);
             free(order);
             order = NULL;
         }
         if (order) {
-            for (size_t i = 0; i < hv->next_slot; i++)
-                if (hv->entries[i].key) order[n++] = &hv->entries[i];
-            qsort(order, n, sizeof(StradaHashEntry*), json_keycmp);
-            for (size_t i = 0; i < n; i++) {
+            for (size_t i = 0; i < hv->next_slot && order->count < cap; i++) {
+                if (!hv->entries[i].key) continue;
+                StradaValue *ksv = strada_new_str_len(hv->entries[i].key->data, hv->entries[i].key->len);
+                StradaValue *vsv = hv->entries[i].value;
+                if (vsv) strada_incref(vsv);
+                order->items[order->count].key_sv = ksv;
+                order->items[order->count].val_sv = vsv;
+                order->count++;
+            }
+            if (order->count > 1) {
+                qsort(order->items, order->count, sizeof(JsonSnapEntry), json_snap_keycmp);
+            }
+            for (size_t i = 0; i < order->count; i++) {
                 if (!first) jb_putc(b, ',');
                 first = 0;
-                jb_put_escaped(b, order[i]->key->data, order[i]->key->len);
+                StradaValue *ksv = order->items[i].key_sv;
+                const char *ks = (ksv && !STRADA_IS_TAGGED_INT(ksv) && ksv->value.pv) ? ksv->value.pv : "";
+                size_t kl = (ksv && !STRADA_IS_TAGGED_INT(ksv)) ? STRADA_STR_BYTELEN(ksv) : 0;
+                jb_put_escaped(b, ks, kl);
                 jb_putc(b, ':');
-                json_enc(b, order[i]->value, canonical, depth + 1);
+                json_enc(b, order->items[i].val_sv, canonical, depth + 1);
             }
             jb_pop_free_order(b, order);
             jb_putc(b, '}');
@@ -299,7 +341,10 @@ static void json_enc_hash(JsonB *b, StradaHash *hv, int canonical, int depth) {
         first = 0;
         jb_put_escaped(b, hv->entries[i].key->data, hv->entries[i].key->len);
         jb_putc(b, ':');
-        json_enc(b, hv->entries[i].value, canonical, depth + 1);
+        StradaValue *ev = hv->entries[i].value;
+        if (ev) { strada_incref(ev); strada_cleanup_push(ev); }
+        json_enc(b, ev, canonical, depth + 1);
+        if (ev) strada_cleanup_pop_decref(ev);
     }
     jb_putc(b, '}');
 }
@@ -399,6 +444,14 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
                     : v->value.rv;
                 if (t) {
                     if (!STRADA_IS_TAGGED_INT(t)) {
+                        if (t->meta && t->meta->blessed_package) {
+                            const char *ts = "";
+                            size_t tn = 0;
+                            StradaValue *owned = json_str_bytes(t, &ts, &tn);
+                            jb_put_escaped(b, ts, tn);
+                            if (owned) strada_decref(owned);
+                            return;
+                        }
                         if (t->meta && t->meta->is_tied) {
                             if (t->type == STRADA_HASH) { json_enc_tied_hash(b, t, canonical, depth); return; }
                             if (t->type == STRADA_ARRAY) { json_enc_tied_array(b, t, canonical, depth); return; }
@@ -410,7 +463,10 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
                                 size_t n = av ? strada_array_length(av) : 0;
                                 for (size_t i = 0; i < n; i++) {
                                     if (i) jb_putc(b, ',');
-                                    json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+                                    StradaValue *el = strada_array_get(av, i);
+                                    if (el) { strada_incref(el); strada_cleanup_push(el); }
+                                    json_enc(b, el, canonical, depth + 1);
+                                    if (el) strada_cleanup_pop_decref(el);
                                 }
                                 jb_putc(b, ']');
                                 return;
@@ -426,15 +482,20 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
             break;
         }
         case STRADA_HASH:
+            if (v->meta && v->meta->blessed_package) break;
             json_enc_hash(b, v->value.hv, canonical, depth);
             return;
         case STRADA_ARRAY: {
+            if (v->meta && v->meta->blessed_package) break;
             jb_putc(b, '[');
             StradaArray *av = v->value.av;
             size_t n = av ? strada_array_length(av) : 0;
             for (size_t i = 0; i < n; i++) {
                 if (i) jb_putc(b, ',');
-                json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+                StradaValue *el = strada_array_get(av, i);
+                if (el) { strada_incref(el); strada_cleanup_push(el); }
+                json_enc(b, el, canonical, depth + 1);
+                if (el) strada_cleanup_pop_decref(el);
             }
             jb_putc(b, ']');
             return;
@@ -810,7 +871,7 @@ static StradaValue* strada_json_decode_c(StradaValue *json_sv) {
 }
 
 static void jb_free_all(JsonB *b) {
-    for (size_t i = 0; i < b->orders_len; i++) free(b->orders[i]);
+    for (size_t i = 0; i < b->orders_len; i++) jb_free_order(b->orders[i]);
     free(b->orders);
     b->orders = NULL;
     b->orders_len = b->orders_cap = 0;

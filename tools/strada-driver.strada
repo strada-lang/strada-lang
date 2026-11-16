@@ -82,6 +82,11 @@ our str $STRADAC = "";
 our str $RUNTIME_SRC = "";
 our str $RUNTIME_OBJ = "";
 our str $RUNTIME_DIR = "";
+our str $INTERP_DIR = "";
+our str $VM_SRC = "";
+our str $VM_OBJ = "";
+our str $VM_COMP_SRC = "";
+our str $VM_COMP_OBJ = "";
 our array @CC = ();          # tokenized C compiler (e.g. ["ccache","cc"])
 our array @DLOPEN_LIBS = ();
 our str $GC_SECTIONS_FLAG = "";
@@ -305,6 +310,11 @@ func setup() void {
     $RUNTIME_SRC = $HOME_DIR . "/runtime/strada_runtime.c";
     $RUNTIME_OBJ = $HOME_DIR . "/runtime/strada_runtime.o";
     $RUNTIME_DIR = $HOME_DIR . "/runtime";
+    $INTERP_DIR = $HOME_DIR . "/interpreter";
+    $VM_SRC = $INTERP_DIR . "/vm.c";
+    $VM_OBJ = $RUNTIME_DIR . "/vm.o";
+    $VM_COMP_SRC = $INTERP_DIR . "/vm_compiler.c";
+    $VM_COMP_OBJ = $RUNTIME_DIR . "/vm_compiler.o";
 
     # CC: env override, default cc; auto-prepend ccache unless disabled.
     my str $cc = env("CC");
@@ -659,15 +669,16 @@ func runtime_feature_flags() array {
     return @rf;
 }
 
-func build_runtime() void {
-    info("Building pre-compiled runtime...");
-    my str $tmp_obj = $RUNTIME_OBJ . ".tmp." . core::getpid();
+func compile_c_obj_atomic(str $src, str $obj, str $label, int $use_lto, array @extra_cflags) void {
+    if (!(-f $src)) { error($label . " source not found at " . $src); }
+    info("Building pre-compiled " . $label . "...");
+    my str $tmp_obj = $obj . ".tmp." . core::getpid();
     my array @cmd = ();
     @cmd = (@cmd, @CC);
     @cmd = (@cmd, "-O2");
     # GCC-only fat-LTO flags; clang has no equivalent and rejects them. On
     # clang the runtime is native-only (links at every opt level, no cross-inline).
-    if (cc_is_clang() == 0) {
+    if ($use_lto == 1 && cc_is_clang() == 0) {
         @cmd = (@cmd, "-flto=auto");
         @cmd = (@cmd, "-ffat-lto-objects");
     }
@@ -676,18 +687,54 @@ func build_runtime() void {
     @cmd = (@cmd, "-fdata-sections");
     my array @__rf = runtime_feature_flags();
     @cmd = (@cmd, @__rf);
+    my int $ei = 0;
+    while ($ei < size(@extra_cflags)) {
+        @cmd = (@cmd, $extra_cflags[$ei]);
+        $ei = $ei + 1;
+    }
     @cmd = (@cmd, "-c");
-    @cmd = (@cmd, $RUNTIME_SRC);
+    @cmd = (@cmd, $src);
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
     @cmd = (@cmd, "-o");
     @cmd = (@cmd, $tmp_obj);
     if (run_argv(@cmd) != 0) {
         core::unlink($tmp_obj);
-        error("Failed to compile runtime");
+        error("Failed to compile " . $label);
     }
-    if (core::rename($tmp_obj, $RUNTIME_OBJ) != 0) {
+    if (core::rename($tmp_obj, $obj) != 0) {
         core::unlink($tmp_obj);
-        error("Failed to install compiled runtime");
+        error("Failed to install compiled " . $label);
+    }
+}
+
+func build_runtime() void {
+    my array @empty = ();
+    compile_c_obj_atomic($RUNTIME_SRC, $RUNTIME_OBJ, "runtime", 1, @empty);
+}
+
+func obj_needs_rebuild(str $obj, array @deps) int {
+    if (!(-f $obj)) { return 1; }
+    my int $omtime = core::file_mtime($obj);
+    my int $i = 0;
+    while ($i < size(@deps)) {
+        my str $dep = $deps[$i];
+        if (length($dep) > 0 && (-f $dep) && core::file_mtime($dep) > $omtime) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func ensure_vm_objects() void {
+    my array @vm_flags = ("-fPIC", "-Wno-unused-function", "-I" . $INTERP_DIR);
+    my array @vm_deps = ($VM_SRC, $INTERP_DIR . "/vm.h", $INTERP_DIR . "/vm_generic_builtins.inc", $RUNTIME_DIR . "/strada_runtime.h");
+    if (obj_needs_rebuild($VM_OBJ, @vm_deps) == 1) {
+        compile_c_obj_atomic($VM_SRC, $VM_OBJ, "VM runtime", 0, @vm_flags);
+    }
+    my array @vmc_deps = ($VM_COMP_SRC, $INTERP_DIR . "/vm_compiler.h", $INTERP_DIR . "/vm.h", $RUNTIME_DIR . "/strada_runtime.h");
+    if (obj_needs_rebuild($VM_COMP_OBJ, @vmc_deps) == 1) {
+        compile_c_obj_atomic($VM_COMP_SRC, $VM_COMP_OBJ, "VM compiler", 0, @vm_flags);
     }
 }
 
@@ -1244,6 +1291,46 @@ func main() int {
         }
     }
 
+    # ---- Auto-detect VM runtime dependencies (use Eval / interpreter VM) ----
+    # Construct header/symbol probes dynamically so strada-driver's own generated
+    # C does not trigger false positives when compiled via ./strada.
+    my str $Q = "\"";
+    my str $vm_hdr_inc = "#include " . $Q . "vm.h" . $Q;
+    my str $vmc_hdr_inc = "#include " . $Q . "vm_compiler.h" . $Q;
+    my str $vm_comp_sym = "vm_compile" . $US . "program(";
+    my int $needs_vm_inc = 0;
+    if (index($gen, $vm_hdr_inc) >= 0 || index($gen, $vmc_hdr_inc) >= 0 || index($gen, $vm_comp_sym) >= 0) {
+        $needs_vm_inc = 1;
+    }
+    my int $needs_vm_link = $needs_vm_inc;
+    my int $has_user_vm = 0;
+    my int $ei = 0;
+    while ($ei < size(@extra_files)) {
+        my str $eb = basename_of($extra_files[$ei]);
+        if ($eb eq "Eval.o" || $eb eq "Eval.a") { $needs_vm_link = 1; }
+        if ($eb eq "vm.c" || $eb eq "vm.o" || $eb eq "vm_compiler.c" || $eb eq "vm_compiler.o") {
+            $has_user_vm = 1;
+        }
+        $ei = $ei + 1;
+    }
+    if ($needs_vm_inc == 1 && -d $INTERP_DIR) {
+        my str $interp_inc = "-I" . $INTERP_DIR;
+        my int $has_inc = 0;
+        my int $ifi = 0;
+        while ($ifi < size(@include_flags)) {
+            if ($include_flags[$ifi] eq $interp_inc) { $has_inc = 1; last; }
+            $ifi = $ifi + 1;
+        }
+        if ($has_inc == 0) { @include_flags = (@include_flags, $interp_inc); }
+    }
+    if ($needs_vm_link == 1 && $OBJECT_ONLY == 0 && $has_user_vm == 0) {
+        ensure_vm_objects();
+        @extra_files = (@extra_files, $VM_OBJ, $VM_COMP_OBJ);
+        if ($STATIC_LIB == 1) {
+            @EXTRA_O_FILES = (@EXTRA_O_FILES, $VM_OBJ, $VM_COMP_OBJ);
+        }
+    }
+
     # ---- Step 2: link / archive ----
     do_link($cfile, $output, @gcc_flags, @include_flags, @link_flags, @extra_files, $skip_runtime);
 
@@ -1563,7 +1650,14 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         # Executable
         my str $rdynamic = "";
         my str $gcsec = $GC_SECTIONS_FLAG;
-        if (file_contains($cfile, "dlopen") == 1 || file_contains($cfile, "strada_dl_open") == 1
+        my int $has_vm_obj = 0;
+        my int $efi = 0;
+        while ($efi < size(@extra_files)) {
+            my str $efb = basename_of($extra_files[$efi]);
+            if ($efb eq "vm.o" || $efb eq "vm.c" || $efb eq "Eval.o") { $has_vm_obj = 1; last; }
+            $efi = $efi + 1;
+        }
+        if ($has_vm_obj == 1 || file_contains($cfile, "dlopen") == 1 || file_contains($cfile, "strada_dl_open") == 1
             || file_contains($cfile, "strada_tie_hash") == 1) {
             $rdynamic = "-rdynamic";
             info("FFI/import_lib detected, using -rdynamic");

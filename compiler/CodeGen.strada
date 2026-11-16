@@ -3533,6 +3533,31 @@ func ast_collect_anon_var_refs(scalar $n, scalar $out_hash, int $inside_anon) vo
         ast_collect_anon_var_refs($n->{"body"}, $out_hash, 1);
         return;
     }
+    if ($inside_anon == 0 && $type == NODE_CALL()) {
+        my str $cname = "" . $n->{"name"};
+        if ($cname eq "free" || $cname eq "sys::free" || $cname eq "core::free"
+            || $cname eq "sys::release" || $cname eq "core::release") {
+            my int $cac = $n->{"arg_count"} + 0;
+            if ($cac == 1) {
+                my scalar $ca0 = $n->{"args"}->[0];
+                if ($ca0 && ($ca0->{"type"} + 0) == NODE_REF()) {
+                    my scalar $cat = $ca0->{"target"};
+                    if ($cat && ($cat->{"type"} + 0) == NODE_VARIABLE()) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if ($type == NODE_REF() && ("" . $n->{"ref_type"}) eq "$") {
+        my scalar $rtgt = $n->{"target"};
+        if ($rtgt && ($rtgt->{"type"} + 0) == NODE_VARIABLE() && ("" . $rtgt->{"sigil"}) eq "$") {
+            my str $rvn = "" . $rtgt->{"name"};
+            if (length($rvn) > 0 && index($rvn, "::") < 0) {
+                $out_hash->{escape_c_keyword($rvn)} = 1;
+            }
+        }
+    }
     if ($inside_anon == 1) {
         if ($type == NODE_VARIABLE() && ("" . $n->{"sigil"}) ne "@" && ("" . $n->{"sigil"}) ne "%") {
             my str $vn = "" . $n->{"name"};
@@ -4113,6 +4138,8 @@ func gen_subst_pattern_prelude(scalar $cg, str $pattern) void {
         emit($cg, "strada_decref(__subst_psv); ");
     }
     emit($cg, "const char *__subst_pat = (__subst_pstr && !STRADA_IS_TAGGED_INT(__subst_pstr) && __subst_pstr->value.pv) ? __subst_pstr->value.pv : \"\"; ");
+    emit($cg, "size_t __subst_plen = (__subst_pstr && !STRADA_IS_TAGGED_INT(__subst_pstr) && __subst_pstr->type == STRADA_STR && __subst_pstr->value.pv) ? STRADA_STR_BYTELEN(__subst_pstr) : strlen(__subst_pat); ");
+    emit($cg, "if (__subst_plen == 0 && __subst_pat[0] != '\\0') { __subst_plen = strlen(__subst_pat); } ");
 }
 
 # Generate code for regex pattern / replacement with variable interpolation.
@@ -4614,13 +4641,13 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
                 $cg->{"tmp_counter"} = $cseid + 1;
                 emit($cg, "({ int64_t __cse" . $cseid . " = ");
                 emit_int_operand($cg, $expr->{"left"});
-                emit($cg, "; __cse" . $cseid . " " . $op . " __cse" . $cseid . "; })");
+                emit($cg, "; (int64_t)((uint64_t)__cse" . $cseid . " " . $op . " (uint64_t)__cse" . $cseid . "); })");
             } else {
-                emit($cg, "(");
+                emit($cg, "((int64_t)((uint64_t)(");
                 emit_int_operand($cg, $expr->{"left"});
-                emit($cg, " " . $op . " ");
+                emit($cg, ") " . $op . " (uint64_t)(");
                 emit_int_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                emit($cg, ")))");
             }
         } else {
             # Non-inlineable op: fall through to generic handler
@@ -5695,6 +5722,8 @@ func cond_cse_pure(scalar $expr) int {
         return 1;
     }
     if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "/" || $op eq "%") { return 0; }
         if (cond_cse_pure($expr->{"left"}) == 0) { return 0; }
         return cond_cse_pure($expr->{"right"});
     }
@@ -5752,7 +5781,7 @@ func cond_cse_collect(scalar $cg, scalar $expr) void {
 # Applies the hash-fetch CSE when safe, else delegates to emit_condition.
 # Expression-position conditions (ternaries) keep plain emit_condition.
 func emit_condition_cse(scalar $cg, scalar $expr) void {
-    if ($cg->{"uses_tie"} == 1 || $cg->{"cleanup_enabled"} != 1) {
+    if ($cg->{"uses_tie"} == 1 || $cg->{"has_overloads"} == 1 || $cg->{"cleanup_enabled"} != 1) {
         emit_condition($cg, $expr);
         return;
     }
@@ -5780,6 +5809,7 @@ func emit_condition_cse(scalar $cg, scalar $expr) void {
     # Tag nodes of duplicated ids with a shared temp; emit each temp's
     # init (the real fetch) once, from the first — still untagged — node.
     my hash %temp_for = ();
+    my int $use_cleanup_stack = cleanup_push_useful($cg);
     my array @temps = ();
     my int $temp_count = 0;
     my int $opened = 0;
@@ -5799,6 +5829,9 @@ func emit_condition_cse(scalar $cg, scalar $expr) void {
                 emit($cg, "StradaValue *" . $tmp . " = ");
                 gen_expression($cg, $nodes->[$i]);
                 emit($cg, "; ");
+                if ($use_cleanup_stack == 1) {
+                    emit($cg, "strada_cleanup_push(" . $tmp . "); ");
+                }
                 $temp_for{$cid} = $tmp;
                 $temps[$temp_count] = $tmp;
                 $temp_count = $temp_count + 1;
@@ -5815,10 +5848,14 @@ func emit_condition_cse(scalar $cg, scalar $expr) void {
     emit($cg, "int __cse_c = ");
     emit_condition($cg, $expr);
     emit($cg, "; ");
-    $i = 0;
-    while ($i < $temp_count) {
-        emit($cg, "strada_decref(" . $temps[$i] . "); ");
-        $i = $i + 1;
+    $i = $temp_count - 1;
+    while ($i >= 0) {
+        if ($use_cleanup_stack == 1) {
+            emit($cg, "strada_cleanup_pop_decref(" . $temps[$i] . "); ");
+        } else {
+            emit($cg, "strada_decref(" . $temps[$i] . "); ");
+        }
+        $i = $i - 1;
     }
     emit($cg, "__cse_c; }))");
     # Clear tags: the same AST may be consulted again (e.g. needs_temp_cleanup

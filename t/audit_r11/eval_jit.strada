@@ -37,7 +37,7 @@ func main() int {
     my scalar $vm_res = Strada::Interpreter::eval_string_vm($vm_code);
     my str $exp = "4:1:4:0:1:0:|   7|3.14|abc|   éé|aé|:Éab:éab:3:3:65:0:3:6";
     check(("" . $tw_res) eq $exp && ("" . $vm_res) eq $exp,
-          "R11-VM1..VM6 Eval tree-walk & vm parity: tw=[" . $tw_res . "] vm=[" . $vm_res . "]");
+          "R11-VM1..VM6 Eval eval_string & eval_string_vm parity: ev=[" . $tw_res . "] vm=[" . $vm_res . "]");
 
     # R11-VM7: eval_string_vm must reject undeclared variables
     my int $bad_read_threw = 0;

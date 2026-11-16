@@ -29,7 +29,7 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
 | [Understanding the Compiler](UNDERSTANDING_THE_COMPILER.md) | Beginner-friendly, step-by-step tour of the compiler |
-| [Interpreter](INTERPRETER.md) | `strada-interp`: bytecode VM and tree-walking backends |
+| [Interpreter](INTERPRETER.md) | `strada-interp`: bytecode VM interpreter and REPL |
 | [Event Loop](EVENT_LOOP.md) | `Async::Loop` event loop and green tasks (experimental) |
 | [Template Toolkit](TEMPLATE_TOOLKIT.md) | `lib/Template`: port of Perl's Template::Toolkit |
 | [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
@@ -99,7 +99,7 @@ Compile and run:
 ### REPL and Scripting
 - `strada --repl` routes through `strada-jit` (real native compilation via tcc/gcc + dlopen), so the REPL supports the full language — closures, try/catch, OOP, the lot. tcc is auto-detected for snappier per-line latency; falls back to gcc.
 - `strada --script FILE` runs in **whole-file mode** by default (`gcc` slurps the whole file once and exec's the binary). Pass `--chunked` for line-by-line REPL semantics.
-- Bytecode VM and tree-walking interpreter still exist under `interpreter/strada-interp` (opt-in via `make interpreter`). Embedded `Strada::Interpreter::eval_string()` defaults to the tree-walking backend so it works out of the box without `-DHAVE_VM` in the runtime.
+- Bytecode VM interpreter lives under `interpreter/strada-interp` (opt-in via `make interpreter`) for file execution, `-e`, and interactive REPL. Embedded `use Eval;` (`Strada::Interpreter::eval_string()`) runs on the bytecode VM and `strada` automatically links the VM runtime objects.
 
 ### Performance
 - Compiles to C, then native code

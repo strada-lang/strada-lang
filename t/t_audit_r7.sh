@@ -62,36 +62,24 @@ else
     aud_r7_record 1 "Cycle 7 stdlib + tools regressions (-O0)" "$(cat "$aud_dir/r7_stdlib_tools.diag" 2>/dev/null)"
 fi
 
-# 4 & 5. Core parity suite across compiled binary, tree-walk, and bytecode VM
+# 4 & 5. Core parity suite across compiled binary and bytecode VM
 if aud_r7_compile_run "-O0" "$aud_src/parity_core.strada" "r7_parity_core" "R7_PARITY_OK"; then
     "$aud_dir/r7_parity_core" > "$aud_dir/parity_comp.out" 2>&1
-    tw_rc=1
-    tw_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_src/parity_core.strada" 2>&1) && tw_rc=0 || tw_rc=$?
-    printf '%s\n' "$tw_out" > "$aud_dir/parity_tw.out"
     vm_rc=1
-    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
+    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
     printf '%s\n' "$vm_out" > "$aud_dir/parity_vm.out"
 
-    if [ "$tw_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_tw.out" > "$aud_dir/parity_tw.diff" 2>&1; then
-        aud_r7_record 0 "Cycle 7 compiled vs tree-walk parity (exact stdout diff)" ""
-    else
-        aud_r7_record 1 "Cycle 7 compiled vs tree-walk parity" "rc=$tw_rc diff=$(cat "$aud_dir/parity_tw.diff" 2>/dev/null)"
-    fi
-
     if [ "$vm_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_vm.out" > "$aud_dir/parity_vm.diff" 2>&1; then
-        aud_r7_record 0 "Cycle 7 compiled vs bytecode --vm parity (exact stdout diff)" ""
+        aud_r7_record 0 "Cycle 7 compiled vs bytecode VM parity (exact stdout diff)" ""
     else
-        aud_r7_record 1 "Cycle 7 compiled vs bytecode --vm parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
+        aud_r7_record 1 "Cycle 7 compiled vs bytecode VM parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
     fi
 else
-    aud_r7_record 1 "Cycle 7 parity_core compiled vs tree-walk" "$(cat "$aud_dir/r7_parity_core.diag" 2>/dev/null)"
-    aud_r7_record 1 "Cycle 7 parity_core compiled vs bytecode --vm" "skipped due to compiled failure"
+    aud_r7_record 1 "Cycle 7 parity_core compiled vs bytecode VM" "$(cat "$aud_dir/r7_parity_core.diag" 2>/dev/null)"
 fi
 
 # 6. Eval::eval_string / eval_string_vm + Strada::JIT suite
-if aud_r7_compile_run "-O0" "$aud_src/eval_jit.strada" "r7_eval_jit" "R7_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r7_compile_run "-O0" "$aud_src/eval_jit.strada" "r7_eval_jit" "R7_EVAL_JIT_OK"; then
     aud_r7_record 0 "Cycle 7 Eval + eval_string_vm + Strada::JIT suite" ""
 else
     aud_r7_record 1 "Cycle 7 Eval + eval_string_vm + Strada::JIT suite" "$(cat "$aud_dir/r7_eval_jit.diag" 2>/dev/null)"

@@ -9,7 +9,7 @@ func check(int $ok, str $msg) void {
 }
 
 func main() int {
-    # 1. Tree-walk Eval: R13-VM1..6
+    # 1. eval_string (VM): R13-VM1..6
     my scalar $tw_res = Strada::Interpreter::eval('
         package EvCycA; extends EvCycB;
         package EvCycB; extends EvCycA;
@@ -50,10 +50,10 @@ func main() int {
             . "|" . $pj0 . "," . $pj1 . "," . $pj3
             . "|" . $rep . "|" . length($rep) . "|" . $qm;
     ');
-    check($tw_res eq "10|[b]|EvArr|EvArr|EA(9)|10|10|EvArr|EvArr|9|,solo,a/b/c|xZé|3|a\\.b\\[é\\]", "tree-walk eval: " . $tw_res);
+    check($tw_res eq "10|[b]|EvArr|EvArr|EA(9)|10|10|EvArr|EvArr|9|,solo,a/b/c|xZé|3|a\\.b\\[é\\]", "eval_string r13: " . $tw_res);
     Strada::Interpreter::reset();
 
-    # 2. HAVE_VM eval_string_vm: R13-VM8 (our redeclaration preserves prior value & later global init sees prior globals)
+    # 2. eval_string_vm: R13-VM8 (our redeclaration preserves prior value & later global init sees prior globals)
     my scalar $r8a = Strada::Interpreter::eval_string_vm('our int $g_r13 = 42; 1;');
     check(($r8a + 0) == 1, "r13_vm eval 1");
     my scalar $r8b = Strada::Interpreter::eval_string_vm('our int $g_r13; $g_r13;');

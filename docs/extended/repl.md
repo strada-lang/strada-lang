@@ -3,7 +3,7 @@
 The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experimenting with Strada code without creating files. There are two of them:
 
 - **The JIT REPL** — `./strada --repl`, the `tools/strada-jit` program (built by `make tools`). Each input is compiled and run natively. This is the REPL most of this page describes.
-- **The interpreter REPL** — `interpreter/strada-interp` (built by `make interpreter`). `strada-interp` defaults to the bytecode VM backend for file execution but uses the tree-walking backend for its REPL (persistent VM state between inputs is not yet supported). It understands only `.help`, `.vars`, `.funcs`, `.load FILE`, `.clear` and `.quit`.
+- **The interpreter REPL** — `interpreter/strada-interp` (built by `make interpreter`). Uses a persistent bytecode VM session across inputs (`use Eval;` / `Strada::Interpreter`). It understands `.help`, `.vars`, `.funcs`, `.load FILE`, `.clear` and `.quit`.
 
 ## Starting the REPL
 
@@ -12,14 +12,12 @@ The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experim
 ./strada --repl
 ./strada --script script.st
 
-# Interpreter REPL (uses tree-walking backend)
+# Interpreter REPL (bytecode VM)
 ./interpreter/strada-interp
 
-# Run a script file with the interpreter (uses VM backend by default)
+# Run a script file or inline snippet with the interpreter (bytecode VM)
 ./interpreter/strada-interp script.strada
-
-# Run a script with the tree-walking backend
-./interpreter/strada-interp --tree-walk script.strada
+./interpreter/strada-interp -e 'say("hello");'
 ```
 
 ## Basic Usage
@@ -79,17 +77,11 @@ strada> $person{"name"}
 => Alice
 ```
 
-## Execution Backends
+## Execution Backend
 
-`strada-interp` supports two execution backends:
-
-1. **VM** (default for file execution) - Compiles AST to bytecode, executes via dispatch loop. 4-5x faster than Perl 5.38 on compute benchmarks.
-2. **Tree-walk** (default for REPL) - Walks the AST directly. Used for the REPL since persistent VM state between inputs is not yet supported.
-
-For file execution, the VM is used by default. Use `--tree-walk` to switch:
+`strada-interp` executes all modes — files, `-e`, and the interactive REPL — on the bytecode VM (compiles AST to bytecode and executes via a dispatch loop; 4-5x faster than Perl 5.38 on compute benchmarks):
 ```bash
-./interpreter/strada-interp program.strada            # VM (default)
-./interpreter/strada-interp --tree-walk program.strada # tree-walk
+./interpreter/strada-interp program.strada            # bytecode VM
 ```
 
 ## Profiling
@@ -158,8 +150,7 @@ The file name and line number refer to the temporary source the REPL generates, 
 
 ## Limitations
 
-- The interpreter REPL uses the tree-walking backend (no persistent VM state between inputs yet)
 - Package declarations are ignored (all code is in the default namespace)
-- `use` and `import_lib` statements work in the JIT REPL (see `.help` / `.imports`) but are not supported in the interpreter REPL
+- `use` and `import_lib` statements work in the JIT REPL (see `.help` / `.imports`); in the interpreter REPL, `.load FILE` is provided for loading files into the session
 - Some complex language features may not work in the dynamic REPL context
-- `__C__` blocks are skipped in the REPL (they are JIT-compiled and cached in the VM backend for file execution)
+- `__C__` blocks in standalone files or embedded eval scripts are JIT-compiled and cached (requires `gcc` and runtime headers at runtime)

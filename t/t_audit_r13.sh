@@ -241,41 +241,36 @@ EOF
 fi
 
 # 7. Eval, eval_string_vm (R13-VM8), and Strada::JIT (R13-VM9)
-ej_out=$("$PROJECT_DIR/strada" -O0 --no-use-artifacts -L "$PROJECT_DIR/lib" -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-    "$SCRIPT_DIR/audit_r13/eval_jit.strada" "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c" -o "$r13_dir/eval_jit" 2>&1 \
+ej_out=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" \
+    "$SCRIPT_DIR/audit_r13/eval_jit.strada" -o "$r13_dir/eval_jit" 2>&1 \
     && "$r13_dir/eval_jit" 2>&1)
 ej_rc=$?
 [ "$ej_rc" -eq 0 ] && printf '%s\n' "$ej_out" | grep -qx "AUDIT_R13_EVAL_JIT_OK"
 r13_record $? "Cycle 13 Eval / eval_string_vm / Strada::JIT suite (R13-VM1..9)" "rc=$ej_rc out=$ej_out"
 
-# 8. R13-VM7: func run() entry point without func main (--tree-walk & --vm)
+# 8. R13-VM7: func run() entry point without func main
 cat > "$r13_dir/run_entry.strada" << 'EOF'
 func run() int {
     say("R13_RUN_ENTRY_OK");
     return 0;
 }
 EOF
-run_tw=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$r13_dir/run_entry.strada" 2>&1)
-run_tw_rc=$?
-run_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --vm "$r13_dir/run_entry.strada" 2>&1)
+run_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" "$r13_dir/run_entry.strada" 2>&1)
 run_vm_rc=$?
-[ "$run_tw_rc" -eq 0 ] && [ "$run_tw" = "R13_RUN_ENTRY_OK" ] && [ "$run_vm_rc" -eq 0 ] && [ "$run_vm" = "R13_RUN_ENTRY_OK" ]
-r13_record $? "R13-VM7 func run() entry fallback (--tree-walk & --vm)" "tw=($run_tw_rc:$run_tw) vm=($run_vm_rc:$run_vm)"
+[ "$run_vm_rc" -eq 0 ] && [ "$run_vm" = "R13_RUN_ENTRY_OK" ]
+r13_record $? "R13-VM7 func run() entry fallback (VM)" "vm=($run_vm_rc:$run_vm)"
 
-# 9. R13-VM6: 0/1/multi-arg core::path_join in --tree-walk & --vm
+# 9. R13-VM6: 0/1/multi-arg core::path_join in VM
 pj_code='say(core::path_join() . "|" . core::path_join("solo") . "|" . core::path_join("a/", "b/", "c"));'
-pj_tw=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk -e "$pj_code" 2>&1)
-pj_tw_rc=$?
-pj_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" --vm -e "$pj_code" 2>&1)
+pj_vm=$(timeout 5 "$PROJECT_DIR/interpreter/strada-interp" -e "$pj_code" 2>&1)
 pj_vm_rc=$?
-[ "$pj_tw_rc" -eq 0 ] && [ "$pj_tw" = "|solo|a/b/c" ] && [ "$pj_vm_rc" -eq 0 ] && [ "$pj_vm" = "|solo|a/b/c" ]
-r13_record $? "R13-VM6 core::path_join 0/1/multi-arg (--tree-walk & --vm)" "tw=($pj_tw_rc:$pj_tw) vm=($pj_vm_rc:$pj_vm)"
+[ "$pj_vm_rc" -eq 0 ] && [ "$pj_vm" = "|solo|a/b/c" ]
+r13_record $? "R13-VM6 core::path_join 0/1/multi-arg (VM)" "vm=($pj_vm_rc:$pj_vm)"
 
-# 10. 3-way compiled / --tree-walk / --vm parity (test_audit_r13_vm)
+# 10. Compiled vs bytecode VM 2-way parity (test_audit_r13_vm)
 par_src="$PROJECT_DIR/interpreter/test/test_audit_r13_vm.strada"
 par_exp=$(cat "$PROJECT_DIR/interpreter/test/test_audit_r13_vm.expected")
 p_comp=$("$PROJECT_DIR/strada" -O0 "$par_src" -o "$r13_dir/par_comp" 2>&1 && "$r13_dir/par_comp" 2>&1)
-p_tw=$("$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$par_src" 2>&1)
-p_vm=$("$PROJECT_DIR/interpreter/strada-interp" --vm "$par_src" 2>&1)
-[ "$p_comp" = "$par_exp" ] && [ "$p_tw" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
-r13_record $? "Cycle 13 3-way parity (compiled / --tree-walk / --vm)" "comp='$p_comp' tw='$p_tw' vm='$p_vm'"
+p_vm=$("$PROJECT_DIR/interpreter/strada-interp" "$par_src" 2>&1)
+[ "$p_comp" = "$par_exp" ] && [ "$p_vm" = "$par_exp" ]
+r13_record $? "Cycle 13 2-way parity (compiled / VM)" "comp='$p_comp' vm='$p_vm'"

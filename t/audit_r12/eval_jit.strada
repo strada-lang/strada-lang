@@ -51,7 +51,7 @@ func main() int {
         return 1;
     }
 
-    # HAVE_VM eval_string_vm coverage for R12-VM16, R12-VM1, R12-VM9
+    # eval_string_vm coverage for R12-VM16, R12-VM1, R12-VM9
     my scalar $vm_r = Strada::Interpreter::eval_string_vm('
         our int $boot = late_fn(20);
         func late_fn(int $x) int { return $x * 2; }

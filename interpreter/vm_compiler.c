@@ -245,6 +245,7 @@ typedef struct {
     char *name;
     char sigil;
     int outer_slot;   /* slot in enclosing function */
+    uint8_t var_type; /* 0 = untyped, 1 = TYPE_INT, 2 = TYPE_NUM */
 } CaptureInfo;
 
 /* Global name tracking for our variables */
@@ -327,6 +328,49 @@ static int find_enum_val(const char *name, int64_t *out_val) {
     return 0;
 }
 
+typedef struct {
+    char *bare_name;
+    int func_idx;
+} VMPkgFuncAlias;
+
+static VMPkgFuncAlias *g_pkg_aliases = NULL;
+static int g_pkg_alias_count = 0;
+static int g_pkg_alias_cap = 0;
+
+static void reset_pkg_func_aliases(void) {
+    for (int i = 0; i < g_pkg_alias_count; i++) {
+        free(g_pkg_aliases[i].bare_name);
+    }
+    free(g_pkg_aliases);
+    g_pkg_aliases = NULL;
+    g_pkg_alias_count = 0;
+    g_pkg_alias_cap = 0;
+}
+
+static void register_pkg_func_alias(const char *bare_name, int func_idx) {
+    if (!bare_name || !bare_name[0] || func_idx < 0) return;
+    for (int i = 0; i < g_pkg_alias_count; i++) {
+        if (strcmp(g_pkg_aliases[i].bare_name, bare_name) == 0) return;
+    }
+    if (g_pkg_alias_count >= g_pkg_alias_cap) {
+        g_pkg_alias_cap = g_pkg_alias_cap ? g_pkg_alias_cap * 2 : 32;
+        g_pkg_aliases = realloc(g_pkg_aliases, (size_t)g_pkg_alias_cap * sizeof(VMPkgFuncAlias));
+    }
+    g_pkg_aliases[g_pkg_alias_count].bare_name = strdup(bare_name);
+    g_pkg_aliases[g_pkg_alias_count].func_idx = func_idx;
+    g_pkg_alias_count++;
+}
+
+static int find_pkg_func_alias(const char *name) {
+    if (!name || !name[0]) return -1;
+    for (int i = 0; i < g_pkg_alias_count; i++) {
+        if (strcmp(g_pkg_aliases[i].bare_name, name) == 0) {
+            return g_pkg_aliases[i].func_idx;
+        }
+    }
+    return -1;
+}
+
 static void reset_compiler_globals(void) {
     for (int i = 0; i < g_our_count; i++) {
         free(g_our_vars[i]);
@@ -347,6 +391,7 @@ static void reset_compiler_globals(void) {
     g_enum_cap = 0;
     free(g_source_file);
     g_source_file = NULL;
+    reset_pkg_func_aliases();
 }
 
 typedef struct TryCtx {
@@ -375,6 +420,7 @@ typedef struct {
     VMProgram *prog;
     char *local_names[256];
     char local_sigils[256];
+    uint8_t local_types[256]; /* 0 = untyped, 1 = TYPE_INT, 2 = TYPE_NUM */
     int local_count;
     int max_local_count;
     int has_non_scalar;
@@ -458,33 +504,45 @@ static int lookup_enum_for_ctx(CompCtx *ctx, const char *name, int64_t *out_val)
     return 0;
 }
 
+static void collect_vm_mro_rec(VMProgram *prog, const char *cls, const char **out, int max, int *n);
+
+static int resolve_func_in_pkg(VMProgram *prog, const char *pkg, const char *name) {
+    char pkgname[512];
+    snprintf(pkgname, sizeof(pkgname), "%s_%s", pkg, name);
+    int fidx = vm_program_find_func(prog, pkgname);
+    if (fidx < 0 && strchr(pkg, ':')) {
+        char spkg[256];
+        size_t pj = 0;
+        for (size_t k = 0; pkg[k] && pj < sizeof(spkg) - 1; k++) {
+            if (pkg[k] == ':' && pkg[k + 1] == ':') {
+                spkg[pj++] = '_';
+                k++;
+            } else {
+                spkg[pj++] = pkg[k];
+            }
+        }
+        spkg[pj] = '\0';
+        snprintf(pkgname, sizeof(pkgname), "%s_%s", spkg, name);
+        fidx = vm_program_find_func(prog, pkgname);
+    }
+    if (fidx < 0) {
+        snprintf(pkgname, sizeof(pkgname), "%s::%s", pkg, name);
+        fidx = vm_program_find_func(prog, pkgname);
+    }
+    return fidx;
+}
+
 static int resolve_func_idx_for_ctx(CompCtx *ctx, const char *name, char *norm_buf, size_t norm_sz) {
     if (norm_buf && norm_sz > 0) norm_buf[0] = '\0';
     if (!ctx || !ctx->prog || !name || !name[0]) return -1;
     int fidx = vm_program_find_func(ctx->prog, name);
     if (fidx < 0 && !strchr(name, ':') && ctx->cur_package && ctx->cur_package[0] &&
         strcmp(ctx->cur_package, "main") != 0) {
-        char pkgname[512];
-        snprintf(pkgname, sizeof(pkgname), "%s_%s", ctx->cur_package, name);
-        fidx = vm_program_find_func(ctx->prog, pkgname);
-        if (fidx < 0 && strchr(ctx->cur_package, ':')) {
-            char spkg[256];
-            size_t pj = 0;
-            for (size_t k = 0; ctx->cur_package[k] && pj < sizeof(spkg) - 1; k++) {
-                if (ctx->cur_package[k] == ':' && ctx->cur_package[k + 1] == ':') {
-                    spkg[pj++] = '_';
-                    k++;
-                } else {
-                    spkg[pj++] = ctx->cur_package[k];
-                }
-            }
-            spkg[pj] = '\0';
-            snprintf(pkgname, sizeof(pkgname), "%s_%s", spkg, name);
-            fidx = vm_program_find_func(ctx->prog, pkgname);
-        }
-        if (fidx < 0) {
-            snprintf(pkgname, sizeof(pkgname), "%s::%s", ctx->cur_package, name);
-            fidx = vm_program_find_func(ctx->prog, pkgname);
+        const char *mro[64];
+        int mro_n = 0;
+        collect_vm_mro_rec(ctx->prog, ctx->cur_package, mro, 64, &mro_n);
+        for (int mi = 0; mi < mro_n && fidx < 0; mi++) {
+            fidx = resolve_func_in_pkg(ctx->prog, mro[mi], name);
         }
     }
     if (strchr(name, ':')) {
@@ -509,17 +567,7 @@ static int resolve_func_idx_for_ctx(CompCtx *ctx, const char *name, char *norm_b
         fidx = vm_program_find_func(ctx->prog, name + 6);
     }
     if (fidx < 0 && !strchr(name, ':')) {
-        size_t nlen = strlen(name);
-        for (size_t fi = 0; fi < ctx->prog->func_count; fi++) {
-            const char *fn = ctx->prog->funcs[fi].name;
-            if (!fn) continue;
-            size_t flen = strlen(fn);
-            if (flen > nlen + 1 && fn[flen - nlen - 1] == '_' &&
-                strcmp(fn + flen - nlen, name) == 0) {
-                fidx = (int)fi;
-                break;
-            }
-        }
+        fidx = find_pkg_func_alias(name);
     }
     return fidx;
 }
@@ -577,6 +625,7 @@ static int ctx_add_local(CompCtx *ctx, const char *name, char sigil) {
     if (ctx->local_names[slot]) free(ctx->local_names[slot]);
     ctx->local_names[slot] = strdup(name);
     ctx->local_sigils[slot] = sigil;
+    ctx->local_types[slot] = 0;
     ctx->local_count++;
     if (ctx->local_count > ctx->max_local_count) ctx->max_local_count = ctx->local_count;
     return slot;
@@ -617,7 +666,7 @@ static int ctx_find_capture(CompCtx *ctx, const char *name, char sigil) {
     return -1;
 }
 
-static int ctx_add_capture(CompCtx *ctx, const char *name, char sigil, int outer_slot) {
+static int ctx_add_capture(CompCtx *ctx, const char *name, char sigil, int outer_slot, uint8_t var_type) {
     /* captures[] is a fixed 64-entry array (and the parallel outer_slots[64]
      * at the call site is indexed by the same count). Without this bound, a
      * closure capturing >=64 distinct enclosing variables overflowed them. */
@@ -631,6 +680,7 @@ static int ctx_add_capture(CompCtx *ctx, const char *name, char sigil, int outer
     ctx->captures[idx].name = strdup(name);
     ctx->captures[idx].sigil = sigil;
     ctx->captures[idx].outer_slot = outer_slot;
+    ctx->captures[idx].var_type = var_type;
     ctx->capture_count++;
     return idx;
 }
@@ -641,10 +691,23 @@ static int ctx_resolve_capture(CompCtx *ctx, const char *name, char sigil) {
     if (!ctx->is_closure || !ctx->parent_ctx) return -1;
     CompCtx *parent = (CompCtx*)ctx->parent_ctx;
     int parent_slot = ctx_find_local_sigil(parent, name, sigil);
-    if (parent_slot >= 0) return ctx_add_capture(ctx, name, sigil, parent_slot);
+    if (parent_slot >= 0) return ctx_add_capture(ctx, name, sigil, parent_slot, parent->local_types[parent_slot]);
     int pcap = ctx_resolve_capture(parent, name, sigil);
-    if (pcap >= 0) return ctx_add_capture(ctx, name, sigil, -1);
+    if (pcap >= 0) return ctx_add_capture(ctx, name, sigil, -1, parent->captures[pcap].var_type);
     return -1;
+}
+
+/* Coerce top-of-stack value to the declared scalar storage/return type (int or num). */
+static void emit_scalar_type_coerce(CompCtx *ctx, int var_type) {
+    if (var_type == 1) {
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT);
+        vm_chunk_emit(ctx->chunk, 1);
+    } else if (var_type == 2) {
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_NUM);
+        vm_chunk_emit(ctx->chunk, 1);
+    }
 }
 
 static void emit_local_restore(VMChunk *chunk, const char *lr_name) {
@@ -1744,35 +1807,7 @@ static size_t add_pattern_const(CompCtx *ctx, const char *pattern, size_t pat_le
 #define AST_TYPE_ARRAY 4
 
 static int resolve_vm_func_idx(CompCtx *ctx, const char *name) {
-    int fidx = vm_program_find_func(ctx->prog, name);
-    if (fidx < 0 && !strchr(name, ':') && ctx->cur_package && ctx->cur_package[0] &&
-        strcmp(ctx->cur_package, "main") != 0) {
-        char pkgname[512];
-        snprintf(pkgname, sizeof(pkgname), "%s_%s", ctx->cur_package, name);
-        fidx = vm_program_find_func(ctx->prog, pkgname);
-        if (fidx < 0) {
-            snprintf(pkgname, sizeof(pkgname), "%s::%s", ctx->cur_package, name);
-            fidx = vm_program_find_func(ctx->prog, pkgname);
-        }
-    }
-    if (fidx < 0 && strchr(name, ':')) {
-        char normalized[256];
-        size_t j = 0;
-        for (size_t k = 0; name[k] && j < sizeof(normalized) - 1; k++) {
-            if (name[k] == ':' && name[k+1] == ':') {
-                normalized[j++] = '_';
-                k++;
-            } else {
-                normalized[j++] = name[k];
-            }
-        }
-        normalized[j] = '\0';
-        fidx = vm_program_find_func(ctx->prog, normalized);
-    }
-    if (fidx < 0 && strncmp(name, "main::", 6) == 0) {
-        fidx = vm_program_find_func(ctx->prog, name + 6);
-    }
-    return fidx;
+    return resolve_func_idx_for_ctx(ctx, name, NULL, 0);
 }
 
 static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
@@ -2333,6 +2368,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         inner.cur_package = ctx->cur_package;
         inner.is_closure = 1;
         inner.parent_ctx = ctx;
+        inner.chunk->return_type = (int)ast_int(node, "return_type");
 
         /* Add parameters */
         int fixed_params = 0;
@@ -2341,7 +2377,11 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             const char *pname = ast_str(param, "name");
             const char *psigil = ast_str(param, "sigil");
             int is_variadic = (int)ast_int(param, "is_variadic");
-            ctx_add_local(&inner, pname, psigil[0] ? psigil[0] : '$');
+            int pslot = ctx_add_local(&inner, pname, psigil[0] ? psigil[0] : '$');
+            if (pslot >= 0 && (!psigil[0] || psigil[0] == '$')) {
+                int pt = (int)ast_int(param, "param_type");
+                if (pt == 1 || pt == 2) inner.local_types[pslot] = (uint8_t)pt;
+            }
             if (is_variadic || strcmp(psigil, "...@") == 0) {
                 inner.chunk->has_variadic = 1;
             } else {
@@ -3107,6 +3147,13 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 break;
             }
 
+            if (strcmp(fn, "gc_collect") == 0 && argc == 0) {
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_GC_COLLECT);
+                vm_chunk_emit(ctx->chunk, 0);
+                break;
+            }
+
             if (strcmp(fn, "vec_set") == 0 && argc == 4) {
                 VMLValueTarget lv = compile_lvalue_prepare(ctx, ast_arr_get(args, 0));
                 if (lv.kind != LV_NONE) {
@@ -3562,6 +3609,11 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "warn") == 0) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_WARN); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "named_captures") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_NAMED_CAPTURES); vm_chunk_emit(ctx->chunk, 0); break; }
         if (strcmp(name, "captures") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAPTURES); vm_chunk_emit(ctx->chunk, 0); break; }
+        if (strcmp(name, "capture") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAPTURE); vm_chunk_emit(ctx->chunk, 2); break; }
+        if (strcmp(name, "repeat") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_STR_REPEAT); break; }
+        if (strcmp(name, "slurp") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_SLURP); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "spew") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_SPEW); vm_chunk_emit(ctx->chunk, 2); break; }
+        if (strcmp(name, "hash_new") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_NEW_HASH); vm_chunk_emit_u32(ctx->chunk, 8); break; }
         if (strcmp(name, "inherit") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_INHERIT); vm_chunk_emit(ctx->chunk, 2); break; }
         if (strcmp(name, "blessed") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_BLESSED); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "refcount") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REFCOUNT); vm_chunk_emit(ctx->chunk, 1); break; }
@@ -4040,6 +4092,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         size_t skip_sc = emit_patch_u16(ctx);
                         vm_chunk_emit(ctx->chunk, OP_POP);
                         compile_expr(ctx, value);
+                        emit_scalar_type_coerce(ctx, ctx->captures[cap].var_type);
                         vm_chunk_emit(ctx->chunk, OP_DUP);
                         vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
@@ -4055,6 +4108,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     } else {
                         compile_expr(ctx, value);
                     }
+                    emit_scalar_type_coerce(ctx, ctx->captures[cap].var_type);
                     vm_chunk_emit(ctx->chunk, OP_DUP);
                     vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
@@ -4120,6 +4174,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 size_t skip_sc = emit_patch_u16(ctx);
                 vm_chunk_emit(ctx->chunk, OP_POP);
                 compile_expr(ctx, value);
+                emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
                 vm_chunk_emit(ctx->chunk, OP_DUP);
                 vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
@@ -4158,6 +4213,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 }
             }
 
+            emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
@@ -5165,6 +5221,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *name = ast_str(node, "name");
         const char *sigil = ast_str(node, "sigil");
         int slot = ctx_add_local(ctx, name, sigil[0]);
+        int vt = (sigil[0] == '$') ? (int)ast_int(node, "var_type") : 0;
+        if (slot >= 0) ctx->local_types[slot] = (vt == 1 || vt == 2) ? (uint8_t)vt : 0;
         StradaValue *init = ast_get(node, "init");
 
         if (sigil[0] == '@') {
@@ -5173,8 +5231,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             compile_hash_init_expr(ctx, node, init, 1);
         } else if (init && !STRADA_IS_TAGGED_INT(init)) {
             compile_expr(ctx, init);
+            emit_scalar_type_coerce(ctx, (slot >= 0) ? ctx->local_types[slot] : 0);
         } else {
-            emit_default_scalar_init(ctx, ast_int(node, "var_type"));
+            emit_default_scalar_init(ctx, vt);
         }
         vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
@@ -5324,8 +5383,10 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
     case NI_RETURN_STMT: {
         StradaValue *val = ast_get(node, "value");
+        int ret_type = ctx->chunk ? ctx->chunk->return_type : 0;
         if (val && !STRADA_IS_TAGGED_INT(val) && (val->type == STRADA_HASH || val->type == STRADA_REF)) {
             compile_expr(ctx, val);
+            emit_scalar_type_coerce(ctx, ret_type);
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
@@ -6314,7 +6375,11 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         const char *pname = ast_str(param, "name");
         const char *psigil = ast_str(param, "sigil");
         int is_variadic = (int)ast_int(param, "is_variadic");
-        ctx_add_local(&ctx, pname, psigil[0] ? psigil[0] : '$');
+        int pslot = ctx_add_local(&ctx, pname, psigil[0] ? psigil[0] : '$');
+        if (pslot >= 0 && (!psigil[0] || psigil[0] == '$')) {
+            int pt = (int)ast_int(param, "param_type");
+            if (pt == 1 || pt == 2) ctx.local_types[pslot] = (uint8_t)pt;
+        }
         if (is_variadic || (is_synth && psigil[0] == '@')) {
             chunk->has_variadic = 1;
         } else {
@@ -6880,6 +6945,20 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         const char *fname = ast_str(func, "name");
         int existing = vm_program_find_func(prog, fname);
         VMChunk *fc = (existing < 0) ? vm_program_add_func(prog, fname) : &prog->funcs[existing];
+        int fidx_pass1 = (existing < 0) ? (int)(prog->func_count - 1) : existing;
+        const char *fpkg = ast_str(func, "package");
+        if (fpkg && fpkg[0] && strcmp(fpkg, "main") != 0) {
+            const char *fbare = ast_str(func, "bare_name");
+            if (fbare && fbare[0] && strcmp(fbare, fname) != 0) {
+                register_pkg_func_alias(fbare, fidx_pass1);
+            } else {
+                size_t plen = strlen(fpkg);
+                if (fname && strlen(fname) > plen + 1 && strncmp(fname, fpkg, plen) == 0 &&
+                    fname[plen] == '_') {
+                    register_pkg_func_alias(fname + plen + 1, fidx_pass1);
+                }
+            }
+        }
         fc->return_type = (int)ast_int(func, "return_type");
         int is_synth = (int)ast_int(func, "is_synthesized");
         StradaValue *fparams = ast_get(func, "params");

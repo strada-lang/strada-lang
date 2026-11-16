@@ -1056,8 +1056,7 @@ func pp_detect_heredoc_tags(str $line) scalar {
         if ($ch eq "\"") { $in_dq = 1; $i = $i + 1; next; }
         if ($ch eq "'") { $in_sq = 1; $i = $i + 1; next; }
         if ($ch eq "#") { return \@tags; }
-        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            if ($can_regex == 1) { return \@tags; }
+        if ($can_regex == 0 && $ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
             $i = $i + 2;
             $can_regex = 1;
             $can_subst = 0;
@@ -1248,8 +1247,7 @@ func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt
             $can_subst = 1;
             next;
         }
-        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
-            if ($can_regex == 1) { last; }
+        if ($can_regex == 0 && $ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
             $i = $i + 2;
             $can_regex = 1;
             $can_subst = 0;

@@ -1,0 +1,198 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main() int {
+    # 1. eval_string (VM): R15 fixes (can/isa, weak sref, <=>/cmp fallback, sort/nsort overloads/containers, DESTROY)
+    my scalar $tw = Strada::Interpreter::eval('
+        package TwR15Parent;
+        func p(scalar $s) int { return 1; }
+        package TwR15Child;
+        inherit TwR15Parent;
+        func m(scalar $s) int { return 2; }
+
+        package TwR15Box;
+        use overload \'""\' => "to_s", "0+" => "to_n", "<=>" => "cmp_n", "cmp" => "cmp_s";
+        func new(num $v) scalar { return bless({"v" => $v}, "TwR15Box"); }
+        func to_s(scalar $s) str { return sprintf("%05.1f", $s->{"v"}); }
+        func to_n(scalar $s) num { return $s->{"v"}; }
+        func cmp_n(scalar $a, scalar $b, int $rev) num {
+            my num $d = $a->{"v"} - $b->{"v"};
+            return $rev ? -$d : $d;
+        }
+        func cmp_s(scalar $a, scalar $b, int $rev) num { return cmp_n($a, $b, $rev); }
+
+        package TwR15Guard;
+        our int $destroyed = 0;
+        func DESTROY(scalar $self) void { $destroyed = $destroyed + 1; }
+        func count() int { return $destroyed; }
+
+        package main;
+        func make_guard() void { my scalar $g = bless({}, "TwR15Guard"); }
+
+        my scalar $co = bless({}, "TwR15Child");
+        my str $ci = $co->can("isa") . can($co, "can") . ("TwR15Child"->isa("TwR15Parent")) . ("TwR15Child"->can("p"));
+
+        my scalar $wsr = undef;
+        my int $ws_live = 0;
+        my int $ws_dead = 0;
+        {
+            my int $x = 77;
+            $wsr = bless(\$x, "TwR15Ws");
+            core::weaken($wsr);
+            $ws_live = (ref($wsr) eq "TwR15Ws" && $$wsr == 77) ? 1 : 0;
+        }
+        $ws_dead = (!defined($wsr) && core::isweak($wsr) == 0) ? 1 : 0;
+
+        my scalar $b1 = TwR15Box::new(1.0);
+        my scalar $b2 = TwR15Box::new(1.5);
+        my str $cmp_res = ($b1 < $b2) . ($b1 == $b2) . ($b1 lt $b2) . ($b1 ne $b2);
+
+        my array @arr = (TwR15Box::new(10.0), TwR15Box::new(2.0), TwR15Box::new(1.0));
+        my array @ss = sort(@arr);
+        my array @ns = nsort(@arr);
+        my hash %sh = ("b" => 2, "a" => 1);
+        my array @shs = sort(%sh);
+
+        make_guard();
+        my scalar $sole = bless({}, "TwR15Guard");
+        core::weaken($sole);
+
+        $ci . "|" . $ws_live . ":" . $ws_dead . "|" . $cmp_res . "|"
+            . $ss[0]->{"v"} . "," . $ns[0]->{"v"} . "," . join(",", @shs)
+            . "|" . TwR15Guard::count() . ":" . (!defined($sole));
+    ');
+    check($tw eq "1111|1:1|1011|1,1,1,2,a,b|2:1", "eval_string r15: " . $tw);
+    Strada::Interpreter::reset();
+
+    # 2. eval_string_vm: R15 fixes (VM1..9)
+    my scalar $vm = Strada::Interpreter::eval_string_vm('
+        package VmR15Parent;
+        func p(scalar $s) int { return 1; }
+        package VmR15Child;
+        inherit VmR15Parent;
+
+        package VmR15Box;
+        use overload \'""\' => "to_s", "0+" => "to_n", "<=>" => "cmp_n", "cmp" => "cmp_s";
+        func new(num $v) scalar { return bless({"v" => $v}, "VmR15Box"); }
+        func to_s(scalar $s) str { return sprintf("%05.1f", $s->{"v"}); }
+        func to_n(scalar $s) num { return $s->{"v"}; }
+        func cmp_n(scalar $a, scalar $b, int $rev) num {
+            my num $d = $a->{"v"} - $b->{"v"};
+            return $rev ? -$d : $d;
+        }
+        func cmp_s(scalar $a, scalar $b, int $rev) num { return cmp_n($a, $b, $rev); }
+
+        package VmR15Guard;
+        our int $destroyed = 0;
+        func DESTROY(scalar $self) void { $destroyed = $destroyed + 1; }
+        func count() int { return $destroyed; }
+
+        package main;
+        func make_guard() void { my scalar $g = bless({}, "VmR15Guard"); }
+
+        my scalar $co = bless({}, "VmR15Child");
+        my str $ci = $co->can("isa") . can($co, "can") . ("VmR15Child"->isa("VmR15Parent")) . ("VmR15Child"->can("p"));
+
+        my array @wa = (bless({"v" => 9}, "VmR15Box"));
+        core::weaken($wa[0]);
+        core::gc_collect();
+        my int $wdead = defined(pop(@wa));
+
+        my scalar $wsr = undef;
+        my int $ws_live = 0;
+        my int $ws_dead = 0;
+        {
+            my int $x = 88;
+            $wsr = bless(\$x, "VmR15Ws");
+            core::weaken($wsr);
+            core::gc_collect();
+            $ws_live = (ref($wsr) eq "VmR15Ws" && $$wsr == 88) ? 1 : 0;
+        }
+        core::gc_collect();
+        $ws_dead = (!defined($wsr) && core::isweak($wsr) == 0) ? 1 : 0;
+
+        my array @arr = (VmR15Box::new(10.0), VmR15Box::new(2.0), VmR15Box::new(1.0));
+        my array @ss = sort(@arr);
+        my array @ns = nsort(@arr);
+        my hash %sh = ("b" => 2, "a" => 1);
+        my array @shs = sort(%sh);
+
+        make_guard();
+        core::gc_collect();
+        my scalar $sole = bless({}, "VmR15Guard");
+        core::weaken($sole);
+
+        return $ci . "|" . $wdead . "|" . $ws_live . ":" . $ws_dead . "|"
+            . $ss[0]->{"v"} . "," . $ns[0]->{"v"} . "," . join(",", @shs)
+            . "|" . VmR15Guard::count() . ":" . (!defined($sole));
+    ');
+    check($vm eq "1111|0|1:1|1,1,1,2,a,b|2:1", "eval_string_vm r15: " . $vm);
+    Strada::Interpreter::reset();
+
+    # R15-VM7: no synthetic __class__ key in vm_to_sv_depth / our export+reseed
+    my scalar $o7 = Strada::Interpreter::eval_string_vm('our scalar $r15_vm7_obj = bless({"a" => 1}, "Vm7Foo"); return $r15_vm7_obj;');
+    check(scalar(keys(%{$o7})) == 1 && exists($o7->{"a"}) && !exists($o7->{"__class__"}), "R15-VM7 exported hash clean");
+    my scalar $n7 = Strada::Interpreter::eval_string_vm('our scalar $r15_vm7_obj; return scalar(keys(%{$r15_vm7_obj})) . ":" . (dumper_str($r15_vm7_obj) =~ /__class__/);');
+    check($n7 eq "1:0", "R15-VM7 reseed & dumper_str no __class__, got: " . $n7);
+    Strada::Interpreter::reset();
+
+    # R15-VM8: try/catch/finally & switch tail return rewriting matches eval_string
+    my scalar $t1_tw = Strada::Interpreter::eval_string('try { 42; } catch ($e) { 0; }');
+    my scalar $t1_vm = Strada::Interpreter::eval_string_vm('try { 42; } catch ($e) { 0; }');
+    my scalar $t2_tw = Strada::Interpreter::eval_string('try { die("boom"); } catch ($e) { 99; } finally { 777; }');
+    my scalar $t2_vm = Strada::Interpreter::eval_string_vm('try { die("boom"); } catch ($e) { 99; } finally { 777; }');
+    my scalar $t3_tw = Strada::Interpreter::eval_string('switch (2) { case 1 { 10; } case 2 { 20; } default { 30; } }');
+    my scalar $t3_vm = Strada::Interpreter::eval_string_vm('switch (2) { case 1 { 10; } case 2 { 20; } default { 30; } }');
+    check($t1_tw == 42 && $t1_vm == 42 && $t2_tw == 99 && $t2_vm == 99 && $t3_tw == 20 && $t3_vm == 20,
+          "R15-VM8 tail return parity");
+    Strada::Interpreter::reset();
+
+    # R15-VM9: vm_exported_closure_call triggers GC across allocations inside loop
+    my scalar $vm9_fn = Strada::Interpreter::eval_string_vm('
+        return func(int $n) int {
+            my int $s = 0;
+            my int $i = 0;
+            while ($i < $n) {
+                my str $t = "x" . $i;
+                $s = $s + length($t);
+                $i = $i + 1;
+            }
+            return $s;
+        };
+    ');
+    my int $vm9_res = $vm9_fn->(20000);
+    check($vm9_res > 90000, "R15-VM9 exported closure GC loop: " . $vm9_res);
+    Strada::Interpreter::reset();
+
+    # 3. Strada::JIT: R15 compiled-compatible checks
+    Strada::JIT::init();
+    my scalar $jres = Strada::JIT::eval('
+        package JitR15Ov;
+        use overload "0+" => "to_n", "<=>" => "cmp_n", \'""\' => "to_s";
+        func new(num $v) scalar { return bless({"v" => $v}, "JitR15Ov"); }
+        func to_n(scalar $s) num { return $s->{"v"}; }
+        func to_s(scalar $s) str { return "v=" . $s->{"v"}; }
+        func cmp_n(scalar $a, scalar $b, int $rev) num {
+            my num $d = $a->{"v"} - $b->{"v"};
+            return $rev ? -$d : $d;
+        }
+        package main;
+        my scalar $a = JitR15Ov::new(1.0);
+        my scalar $b = JitR15Ov::new(1.5);
+        my hash %nh = ();
+        $nh{"x"}{"y"}++;
+        (($a < $b) && ($a != $b) && (0 + $b) == 1.5 && $nh{"x"}{"y"} == 1) ? "JIT_R15_OK" : "BAD";
+    ');
+    Strada::JIT::reset();
+    check($jres eq "JIT_R15_OK", "JIT r15 got: " . $jres);
+
+    say("AUDIT_R15_EVAL_JIT_OK");
+    return 0;
+}

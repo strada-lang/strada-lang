@@ -234,6 +234,19 @@ compile_strada() {
             extra_link="$extra_link -l$lib"
         done
     fi
+    # If Eval.o/Eval.a is linked or generated C uses VM APIs, also link the
+    # pre-compiled VM objects (mirrors strada-driver.strada).
+    if [[ " $extra_link " == *"/Eval.o "* || " $extra_link " == *" Eval.o "* || \
+          " $extra_link " == *"/Eval.a "* || " $extra_link " == *" Eval.a "* ]] || \
+       grep -qE '(#include[[:space:]]*"vm(_compiler)?\.h"|vm_compile_program|vm_execute|vm_new\()' "$c_file" 2>/dev/null; then
+        if [ -f "$PROJECT_DIR/runtime/vm.o" ] && [ -f "$PROJECT_DIR/runtime/vm_compiler.o" ]; then
+            extra_link="$extra_link $PROJECT_DIR/runtime/vm.o $PROJECT_DIR/runtime/vm_compiler.o"
+            case " ${EXTRA_LDFLAGS:-} $extra_link " in
+                *" -lpthread "*) ;;
+                *) extra_link="$extra_link -lpthread" ;;
+            esac
+        fi
+    fi
 
     # Fast path: compile with tcc (≈100x faster than gcc), link with gcc.
     # Mirrors the `strada --tcc` driver path: swap the runtime header for the

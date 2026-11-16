@@ -1,5 +1,5 @@
 #!/usr/bin/env strada
-# Cycle 2 Audit regression tests: Eval (tree-walk) & Strada::JIT fixes
+# Cycle 2 Audit regression tests: Eval (VM) & Strada::JIT fixes
 
 use lib "lib";
 use Eval;

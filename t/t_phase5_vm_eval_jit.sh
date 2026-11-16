@@ -1,5 +1,5 @@
 #!/bin/bash
-# t_phase5_vm_eval_jit.sh - Phase 5A+5B regression tests for VM, tree-walk, Eval, and Strada::JIT
+# t_phase5_vm_eval_jit.sh - Phase 5A+5B regression tests for VM, Eval, and Strada::JIT
 
 p5_dir="$BUILD_DIR/phase5_vm_eval_jit"
 mkdir -p "$p5_dir"
@@ -22,7 +22,7 @@ else
     log_fail "phase5 in-process Eval/JIT" "rc=$p5_rc dir='$p5_jit_dir' out=$p5_out"
 fi
 
-# 2. Parity test script run under BOTH --vm and --tree-walk
+# 2. Parity test script run under bytecode VM
 cat > "$p5_dir/parity.strada" << 'STRADA_END'
 BEGIN {
     our int $boot_v = 40;
@@ -107,45 +107,48 @@ STRADA_END
 
 p5_parity_line="parity:15,15,3,10,10,10,10|one,two|aGk=,hi,3|len=11"
 
-for mode in --vm --tree-walk; do
+for mode in "" --vm; do
     TOTAL=$((TOTAL + 1))
-    mode_out=$("$INTERP" "$mode" "$p5_dir/parity.strada" 2>&1)
-    mode_rc=$?
+    if [ -n "$mode" ]; then
+        mode_label="$mode"
+        mode_out=$("$INTERP" "$mode" "$p5_dir/parity.strada" 2>&1)
+        mode_rc=$?
+    else
+        mode_label="default"
+        mode_out=$("$INTERP" "$p5_dir/parity.strada" 2>&1)
+        mode_rc=$?
+    fi
     if [ "$mode_rc" -eq 7 ] \
         && printf '%s\n' "$mode_out" | grep -qx "$p5_parity_line" \
         && printf '%s\n' "$mode_out" | grep -qx "end_second" \
         && printf '%s\n' "$mode_out" | grep -qx "end_first:40"; then
         PASSED=$((PASSED + 1))
-        log_pass "phase5 interpreter $mode parity (closures, local, END exit code/LIFO/isolation, open_str, sys::*)"
+        log_pass "phase5 interpreter ($mode_label) parity (closures, local, END exit code/LIFO/isolation, open_str, sys::*)"
     else
         FAILED=$((FAILED + 1))
-        log_fail "phase5 interpreter $mode parity" "rc=$mode_rc out=$mode_out"
+        log_fail "phase5 interpreter ($mode_label) parity" "rc=$mode_rc out=$mode_out"
     fi
 done
 
-# 3. Out-of-tree /tmp cwd import_lib & import_lib_oop under both --vm and --tree-walk
-for mode in --vm --tree-walk; do
-    for tst in test_import_lib test_import_lib_oop; do
-        TOTAL=$((TOTAL + 1))
-        oot_out=$(cd /tmp && "$INTERP" "$mode" "$PROJECT_DIR/interpreter/test/${tst}.strada" 2>&1)
-        oot_rc=$?
-        oot_exp=$(cat "$PROJECT_DIR/interpreter/test/${tst}.expected")
-        if [ "$oot_rc" -eq 0 ] && [ "$oot_out" = "$oot_exp" ]; then
-            PASSED=$((PASSED + 1))
-            log_pass "phase5 /tmp cwd $mode $tst"
-        else
-            FAILED=$((FAILED + 1))
-            log_fail "phase5 /tmp cwd $mode $tst" "rc=$oot_rc out=$oot_out"
-        fi
-    done
+# 3. Out-of-tree /tmp cwd import_lib & import_lib_oop under bytecode VM
+for tst in test_import_lib test_import_lib_oop; do
+    TOTAL=$((TOTAL + 1))
+    oot_out=$(cd /tmp && "$INTERP" "$PROJECT_DIR/interpreter/test/${tst}.strada" 2>&1)
+    oot_rc=$?
+    oot_exp=$(cat "$PROJECT_DIR/interpreter/test/${tst}.expected")
+    if [ "$oot_rc" -eq 0 ] && [ "$oot_out" = "$oot_exp" ]; then
+        PASSED=$((PASSED + 1))
+        log_pass "phase5 /tmp cwd $tst"
+    else
+        FAILED=$((FAILED + 1))
+        log_fail "phase5 /tmp cwd $tst" "rc=$oot_rc out=$oot_out"
+    fi
 done
 
-# 4. -e mode and eval_string_vm (HAVE_VM path)
+# 4. -e mode and eval_string_vm (auto-linked VM path)
 TOTAL=$((TOTAL + 1))
-e_vm_out=$("$INTERP" --vm -e 'BEGIN { our int $x = 40; } our int $x = 0; END { say($x + 2); }' 2>&1)
+e_vm_out=$("$INTERP" -e 'BEGIN { our int $x = 40; } our int $x = 0; END { say($x + 2); }' 2>&1)
 e_vm_rc=$?
-e_tw_out=$("$INTERP" --tree-walk -e 'BEGIN { our int $x = 40; } our int $x = 0; END { say($x + 2); }' 2>&1)
-e_tw_rc=$?
 cat > "$p5_dir/esvm.strada" << 'ESVM_END'
 use lib "lib";
 use Eval;
@@ -155,7 +158,7 @@ func main() int {
     return 0;
 }
 ESVM_END
-e_esvm_build=$("$PROJECT_DIR/strada" -O0 --no-use-artifacts -L "$PROJECT_DIR/lib" -D HAVE_VM -I "$PROJECT_DIR/interpreter" "$p5_dir/esvm.strada" "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c" -o "$p5_dir/esvm_bin" 2>&1)
+e_esvm_build=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$p5_dir/esvm.strada" -o "$p5_dir/esvm_bin" 2>&1)
 e_esvm_brc=$?
 if [ "$e_esvm_brc" -eq 0 ]; then
     e_esvm_out=$("$p5_dir/esvm_bin" 2>&1)
@@ -165,29 +168,26 @@ else
     e_esvm_rc=$e_esvm_brc
 fi
 if [ "$e_vm_rc" -eq 0 ] && [ "$e_vm_out" = "42" ] \
-    && [ "$e_tw_rc" -eq 0 ] && [ "$e_tw_out" = "42" ] \
     && [ "$e_esvm_rc" -eq 0 ] && [ "$e_esvm_out" = "$(printf 'vm_end\nres=42')" ]; then
     PASSED=$((PASSED + 1))
-    log_pass "phase5 -e mode (--vm, --tree-walk) and eval_string_vm"
+    log_pass "phase5 -e mode and eval_string_vm"
 else
     FAILED=$((FAILED + 1))
-    log_fail "phase5 -e / eval_string_vm" "vm=($e_vm_rc:$e_vm_out) tw=($e_tw_rc:$e_tw_out) esvm=($e_esvm_rc:$e_esvm_out)"
+    log_fail "phase5 -e / eval_string_vm" "vm=($e_vm_rc:$e_vm_out) esvm=($e_esvm_rc:$e_esvm_out)"
 fi
 
 # 5. Valgrind 0-leak check on transitive + cyclic closures + local + open_str
 if command -v valgrind >/dev/null 2>&1; then
-    for mode in --vm --tree-walk; do
-        TOTAL=$((TOTAL + 1))
-        vg_out=$(valgrind --leak-check=full --errors-for-leak-kinds=definite,indirect --error-exitcode=99 "$INTERP" "$mode" "$p5_dir/parity.strada" 2>&1)
-        vg_rc=$?
-        def_lost=$(printf '%s\n' "$vg_out" | awk '/definitely lost:/ { gsub(/,/, "", $4); print $4 }')
-        ind_lost=$(printf '%s\n' "$vg_out" | awk '/indirectly lost:/ { gsub(/,/, "", $4); print $4 }')
-        if [ "$vg_rc" -eq 7 ] && [ "${def_lost:-0}" = "0" ] && [ "${ind_lost:-0}" = "0" ]; then
-            PASSED=$((PASSED + 1))
-            log_pass "phase5 valgrind 0-leak check ($mode parity script)"
-        else
-            FAILED=$((FAILED + 1))
-            log_fail "phase5 valgrind check ($mode)" "rc=$vg_rc def=$def_lost ind=$ind_lost"
-        fi
-    done
+    TOTAL=$((TOTAL + 1))
+    vg_out=$(valgrind --leak-check=full --errors-for-leak-kinds=definite,indirect --error-exitcode=99 "$INTERP" "$p5_dir/parity.strada" 2>&1)
+    vg_rc=$?
+    def_lost=$(printf '%s\n' "$vg_out" | awk '/definitely lost:/ { gsub(/,/, "", $4); print $4 }')
+    ind_lost=$(printf '%s\n' "$vg_out" | awk '/indirectly lost:/ { gsub(/,/, "", $4); print $4 }')
+    if [ "$vg_rc" -eq 7 ] && [ "${def_lost:-0}" = "0" ] && [ "${ind_lost:-0}" = "0" ]; then
+        PASSED=$((PASSED + 1))
+        log_pass "phase5 valgrind 0-leak check (VM parity script)"
+    else
+        FAILED=$((FAILED + 1))
+        log_fail "phase5 valgrind check" "rc=$vg_rc def=$def_lost ind=$ind_lost"
+    fi
 fi

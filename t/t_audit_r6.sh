@@ -90,36 +90,24 @@ else
     aud_r6_record 1 "Cycle 6 bootstrap compiler: <=>, 'x', single-quote escapes, try/catch" "rc=$bs_rc out=$bs_out"
 fi
 
-# 3. Core parity suite across compiled binary, tree-walk, and bytecode VM
+# 3. Core parity suite across compiled binary and bytecode VM
 if aud_r6_compile_run "-O0" "$aud_src/parity_core.strada" "r6_parity_core" "R6_PARITY_OK"; then
     "$aud_dir/r6_parity_core" > "$aud_dir/parity_comp.out" 2>&1
-    tw_rc=1
-    tw_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_src/parity_core.strada" 2>&1) && tw_rc=0 || tw_rc=$?
-    printf '%s\n' "$tw_out" > "$aud_dir/parity_tw.out"
     vm_rc=1
-    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
+    vm_out=$(cd "$PROJECT_DIR" && timeout 45 "$PROJECT_DIR/interpreter/strada-interp" "$aud_src/parity_core.strada" 2>&1) && vm_rc=0 || vm_rc=$?
     printf '%s\n' "$vm_out" > "$aud_dir/parity_vm.out"
 
-    if [ "$tw_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_tw.out" > "$aud_dir/parity_tw.diff" 2>&1; then
-        aud_r6_record 0 "Cycle 6 compiled vs tree-walk parity (exact stdout diff)" ""
-    else
-        aud_r6_record 1 "Cycle 6 compiled vs tree-walk parity" "rc=$tw_rc diff=$(cat "$aud_dir/parity_tw.diff" 2>/dev/null)"
-    fi
-
     if [ "$vm_rc" -eq 0 ] && diff -u "$aud_dir/parity_comp.out" "$aud_dir/parity_vm.out" > "$aud_dir/parity_vm.diff" 2>&1; then
-        aud_r6_record 0 "Cycle 6 compiled vs bytecode --vm parity (exact stdout diff)" ""
+        aud_r6_record 0 "Cycle 6 compiled vs bytecode VM parity (exact stdout diff)" ""
     else
-        aud_r6_record 1 "Cycle 6 compiled vs bytecode --vm parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
+        aud_r6_record 1 "Cycle 6 compiled vs bytecode VM parity" "rc=$vm_rc diff=$(cat "$aud_dir/parity_vm.diff" 2>/dev/null)"
     fi
 else
     aud_r6_record 1 "Cycle 6 parity_core compiled run" "$(cat "$aud_dir/r6_parity_core.diag" 2>/dev/null)"
-    aud_r6_record 1 "Cycle 6 compiled vs tree-walk parity (skipped due to compiled failure)" ""
 fi
 
 # 4. Eval::eval_string_vm + Strada::JIT suite
-if aud_r6_compile_run "-O0" "$aud_src/eval_jit.strada" "r6_eval_jit" "R6_EVAL_JIT_OK" \
-        --no-use-artifacts -D HAVE_VM -I "$PROJECT_DIR/interpreter" \
-        "$PROJECT_DIR/interpreter/vm.c" "$PROJECT_DIR/interpreter/vm_compiler.c"; then
+if aud_r6_compile_run "-O0" "$aud_src/eval_jit.strada" "r6_eval_jit" "R6_EVAL_JIT_OK"; then
     aud_r6_record 0 "Cycle 6 eval_string_vm + Strada::JIT suite" ""
 else
     aud_r6_record 1 "Cycle 6 eval_string_vm + Strada::JIT suite" "$(cat "$aud_dir/r6_eval_jit.diag" 2>/dev/null)"
@@ -171,18 +159,10 @@ func main() int {
     return 0;
 }
 EOF
-end_tw_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --tree-walk "$aud_dir/end_throw_r6.strada" 2>&1)
-end_tw_rc=$?
-if [ "$end_tw_rc" -ne 0 ] && echo "$end_tw_out" | grep -q "END_RAN_R6"; then
-    aud_r6_record 0 "interpreter --tree-walk runs END block when main() throws" ""
-else
-    aud_r6_record 1 "interpreter --tree-walk runs END block when main() throws" "rc=$end_tw_rc out=$end_tw_out"
-fi
-
-end_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" --vm "$aud_dir/end_throw_r6.strada" 2>&1)
+end_vm_out=$(cd "$PROJECT_DIR" && timeout 15 "$PROJECT_DIR/interpreter/strada-interp" "$aud_dir/end_throw_r6.strada" 2>&1)
 end_vm_rc=$?
 if [ "$end_vm_rc" -ne 0 ] && echo "$end_vm_out" | grep -q "END_RAN_R6"; then
-    aud_r6_record 0 "interpreter --vm runs END block when main() throws" ""
+    aud_r6_record 0 "interpreter VM runs END block when main() throws" ""
 else
-    aud_r6_record 1 "interpreter --vm runs END block when main() throws" "rc=$end_vm_rc out=$end_vm_out"
+    aud_r6_record 1 "interpreter VM runs END block when main() throws" "rc=$end_vm_rc out=$end_vm_out"
 fi

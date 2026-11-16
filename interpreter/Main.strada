@@ -1,5 +1,5 @@
-# Main.strada - Entry point for the Strada tree-walking interpreter
-# Supports file execution and interactive REPL modes.
+# Main.strada - Entry point for the Strada bytecode VM interpreter
+# Supports file execution, -e inline evaluation, and interactive REPL modes.
 
 use lib "../lib";
 use lib "lib";
@@ -12,10 +12,8 @@ __C__ {
 #endif
 
 /* VM bytecode backend (linked from vm.c + vm_compiler.c) */
-#ifdef HAVE_VM
 #include "vm.h"
 #include "vm_compiler.h"
-#endif
 }
 
 # -L library search paths from command line
@@ -131,7 +129,7 @@ func print_help() void {
     say("  .help       Show this help message");
     say("  .vars       List variables in scope");
     say("  .funcs      List registered functions");
-    say("  .load FILE  Load and execute code from file");
+    say("  .load FILE  Load file definitions into REPL");
     say("  .clear      Reset interpreter state");
     say("  .quit       Exit the REPL");
     say("");
@@ -227,7 +225,7 @@ func is_balanced(str $input) int {
             elsif ($c == 91) { $brackets = $brackets + 1; $can_regex = 1; } # '['
             elsif ($c == 93) { $brackets = $brackets - 1; $can_regex = 0; } # ']'
             elsif ($c == 32 || $c == 9 || $c == 10 || $c == 13) { # whitespace keeps $can_regex
-            } elsif (($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c == 95 || $c == 36 || $c == 64 || $c == 37) { # 0-9, A-Z, a-z, _, $, @, %
+            } elsif (($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c == 95 || $c == 36 || $c == 64 || $c == 37) {
                 $can_regex = 0;
             } else {
                 $can_regex = 1;
@@ -241,106 +239,85 @@ func is_balanced(str $input) int {
     return ($braces == 0 && $parens == 0 && $brackets == 0 && $in_string == 0) ? 1 : 0;
 }
 
-# Detect if input is a top-level construct (not wrappable in a function)
-func is_top_level_input(str $input) int {
-    if (starts_with($input, "func ") || starts_with($input, "fn ")) { return 1; }
-    if (starts_with($input, "async func") || starts_with($input, "async fn")) { return 1; }
-    if (starts_with($input, "private func") || starts_with($input, "private fn")) { return 1; }
-    if (starts_with($input, "package ")) { return 1; }
-    if (starts_with($input, "enum ")) { return 1; }
-    if (starts_with($input, "has ")) { return 1; }
-    if (starts_with($input, "extends ")) { return 1; }
-    if (starts_with($input, "use overload")) { return 1; }
-    if (starts_with($input, "before ") || starts_with($input, "after ") || starts_with($input, "around ")) { return 1; }
-    if (starts_with($input, "const ") || starts_with($input, "our ") || starts_with($input, "with ")) { return 1; }
-    if (starts_with($input, "use ") || starts_with($input, "import_lib ") ||
-        starts_with($input, "import_object ") || starts_with($input, "import_archive ")) { return 1; }
-    if (starts_with($input, "BEGIN ") || starts_with($input, "END ") ||
-        starts_with($input, "BEGIN{") || starts_with($input, "END{")) { return 1; }
-    return 0;
-}
-
-my str $g_repl_pkg = "main";
-
-# Shared AST registration helper for repl_eval and load_file (enums, consts, OOP, import_lib, globals, BEGIN/END)
-func register_program_extras(scalar $interp, scalar $program) void {
-    # 1. Register enums
-    my scalar $enums = $program->{"enums"};
-    my int $enum_count = $program->{"enum_count"};
+# Get directory of a file path
+func get_dirname(str $path) str {
+    my int $last_slash = -1;
     my int $i = 0;
-    while ($i < $enum_count) {
-        my scalar $en = $enums->[$i];
-        my str $enum_name = $en->{"name"};
-        my scalar $members = $en->{"members"};
-        my int $member_count = $en->{"member_count"};
-        my int $j = 0;
-        while ($j < $member_count) {
-            my scalar $member = $members->[$j];
-            my str $key = $enum_name . "::" . $member->{"name"};
-            $interp->{"enums"}->{$key} = $member->{"value"};
-            $j = $j + 1;
+    while ($i < length($path)) {
+        if (substr($path, $i, 1) eq "/") {
+            $last_slash = $i;
         }
         $i = $i + 1;
     }
-
-    # 2. Evaluate const declarations before BEGIN blocks
-    my scalar $globals = $program->{"globals"};
-    my int $global_count = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
-    $i = 0;
-    while ($i < $global_count) {
-        my scalar $g = $globals->[$i];
-        if ($g->{"type"} == NODE_CONST_DECL()) {
-            my str $cname = $g->{"name"};
-            my scalar $init_val = Strada::Interpreter::eval_node($interp, $g->{"init"}, $interp->{"global_env"});
-            $interp->{"constants"}->{$cname} = $init_val;
-            Strada::Interpreter::env_set($interp->{"global_env"}, $cname, $init_val);
-        }
-        $i = $i + 1;
-    }
-
-    # 3. Load OOP features and import_lib native functions
-    Strada::Interpreter::interp_load_oop($interp, $program);
-    Strada::Interpreter::interp_load_import_libs($interp, $program);
-
-    # 4. Evaluate non-const globals (our, top-level my)
-    $i = 0;
-    while ($i < $global_count) {
-        my scalar $g = $globals->[$i];
-        my int $gtype = $g->{"type"};
-        if ($gtype == NODE_VAR_DECL() || $gtype == NODE_OUR_DECL()) {
-            Strada::Interpreter::eval_node($interp, $g, $interp->{"global_env"});
-        }
-        $i = $i + 1;
-    }
-
-    # 5. Run BEGIN blocks (clearing any leaked signals)
-    my scalar $begin_blocks = $program->{"begin_blocks"};
-    my int $begin_count = defined($program->{"begin_block_count"}) ? $program->{"begin_block_count"} : 0;
-    my int $bi = 0;
-    while ($bi < $begin_count) {
-        try {
-            Strada::Interpreter::eval_block($interp, $begin_blocks->[$bi], $interp->{"global_env"});
-        } catch ($be) {
-            if (!Strada::Interpreter::is_signal($be, "return")) { throw($be); }
-        }
-        $interp->{"signal"} = 0; # SIG::NONE
-        $interp->{"signal_value"} = undef;
-        $interp->{"signal_label"} = "";
-        $bi = $bi + 1;
-    }
-
-    # 6. Store END blocks
-    my scalar $end_blocks = $program->{"end_blocks"};
-    my int $end_count = defined($program->{"end_block_count"}) ? $program->{"end_block_count"} : 0;
-    my int $ei = 0;
-    while ($ei < $end_count) {
-        push($interp->{"end_blocks"}, $end_blocks->[$ei]);
-        $ei = $ei + 1;
-    }
+    if ($last_slash < 0) { return "."; }
+    if ($last_slash == 0) { return "/"; }
+    return substr($path, 0, $last_slash);
 }
 
-# Parse and evaluate REPL input
-func repl_eval(scalar $interp, str $input) scalar {
+# Find project root by walking up from a directory looking for lib/Strada/Interpreter.strada
+func find_project_root(str $dir) str {
+    my str $resolved = core::realpath($dir);
+    my str $check = (length($resolved) > 0) ? $resolved : $dir;
+    my int $depth = 0;
+    while ($depth < 10) {
+        my str $lib_dir = $check . "/lib";
+        my str $test_file = $lib_dir . "/Strada/Interpreter.strada";
+        if (core::is_file($test_file) == 1) {
+            return $check;
+        }
+        my str $parent = get_dirname($check);
+        if ($parent eq $check) { last; }
+        $check = $parent;
+        $depth = $depth + 1;
+    }
+    return "";
+}
+
+# Find exe root directory
+func get_exe_root() str {
+    my str $exe_dir = "";
+    __C__ {
+        char __exe[1024];
+        ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
+        if (__n > 0) {
+            __exe[__n] = 0;
+            char *__sl = strrchr(__exe, '/');
+            if (__sl) {
+                *__sl = 0;
+                strada_decref(exe_dir);
+                exe_dir = strada_new_str(__exe);
+            }
+        }
+    }
+    if (length($exe_dir) == 0) { return ""; }
+    return find_project_root($exe_dir);
+}
+
+# Build module search path list (-L paths, project root + lib/, optional extra dir).
+func build_lib_paths(str $extra_dir) array {
+    my array @lib_paths = ();
+    my int $li = 0;
+    while ($li < size(@g_lib_paths)) {
+        push(@lib_paths, $g_lib_paths[$li]);
+        $li = $li + 1;
+    }
+    my str $project_root = (length($extra_dir) > 0) ? find_project_root($extra_dir) : "";
+    my str $exe_root = get_exe_root();
+    if (length($project_root) > 0) {
+        push(@lib_paths, $project_root);
+        push(@lib_paths, $project_root . "/lib");
+    } elsif (length($exe_root) > 0) {
+        push(@lib_paths, $exe_root);
+        push(@lib_paths, $exe_root . "/lib");
+    }
+    if (length($extra_dir) > 0) {
+        push(@lib_paths, $extra_dir);
+    }
+    return @lib_paths;
+}
+
+# Parse and evaluate REPL input using the persistent VM session
+func repl_eval(str $input) scalar {
     my str $trimmed = str_trim($input);
     if (length($trimmed) == 0) { return undef; }
 
@@ -351,103 +328,7 @@ func repl_eval(scalar $interp, str $input) scalar {
         $trimmed = $trimmed . ";";
     }
 
-    # Build source for parser in active REPL package using split_eval_units
-    my str $prev_pkg = $g_repl_pkg;
-    my scalar $units = Strada::Interpreter::split_eval_units($trimmed, $prev_pkg);
-    my str $next_pkg = $units->{"last_pkg"};
-    my str $body_pkg = $units->{"body_pkg"};
-    my str $body_src = $units->{"body"};
-    my str $top_src = $units->{"top"};
-    my str $source = "";
-
-    if (length($body_src) > 0) {
-        $source = "package " . $prev_pkg . ";\n" . $top_src . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
-    } else {
-        $source = "package " . $prev_pkg . ";\n" . $top_src . "\npackage " . $next_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
-    }
-
-    # Tokenize and parse
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, "<repl>");
-    my scalar $ckeys = keys($interp->{"constants"});
-    my int $cki = 0;
-    while ($cki < size($ckeys)) {
-        $parser->{"const_names"}->{$ckeys->[$cki]} = 1;
-        $cki = $cki + 1;
-    }
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
-
-    # Register any non-__eval__ functions
-    my scalar $funcs = $program->{"functions"};
-    my int $func_count = $program->{"function_count"};
-    my scalar $eval_func = undef;
-    my int $i = 0;
-    while ($i < $func_count) {
-        my scalar $fn = $funcs->[$i];
-        if ($fn->{"name"} eq "__eval__" || (defined($fn->{"bare_name"}) && $fn->{"bare_name"} eq "__eval__")) {
-            $eval_func = $fn;
-        } else {
-            Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
-            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
-                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
-            }
-        }
-        $i = $i + 1;
-    }
-
-    register_program_extras($interp, $program);
-    $g_repl_pkg = $next_pkg;
-    $interp->{"package"} = $body_pkg;
-
-    # If we have __eval__, execute its body in REPL env
-    if (defined($eval_func)) {
-        my scalar $body = $eval_func->{"body"};
-        my scalar $stmts = $body->{"statements"};
-        my int $stmt_count = $body->{"statement_count"};
-        # Catch return signals from the __eval__ body
-        my scalar $result = undef;
-        my int $returned = 0;
-        try {
-            $result = Strada::Interpreter::eval_stmts_in_env($interp, $stmts, $stmt_count, $interp->{"global_env"});
-            if ($interp->{"signal"} == 1) { # SIG::RETURN
-                $result = $interp->{"signal_value"};
-                $returned = 1;
-            }
-            $interp->{"signal"} = 0; # SIG::NONE
-            $interp->{"signal_value"} = undef;
-            $interp->{"signal_label"} = "";
-        } catch ($e) {
-            $interp->{"package"} = $next_pkg;
-            $interp->{"signal"} = 0; # SIG::NONE
-            $interp->{"signal_value"} = undef;
-            $interp->{"signal_label"} = "";
-            if (Strada::Interpreter::is_signal($e, "return")) {
-                return $e->{"value"};
-            }
-            throw($e);
-        }
-        $interp->{"package"} = $next_pkg;
-        if ($returned == 1) {
-            return $result;
-        }
-        # Only return displayable result if the last statement is an expression
-        if ($stmt_count > 0) {
-            my scalar $last_stmt = $stmts->[$stmt_count - 1];
-            my int $lst_type = $last_stmt->{"type"};
-            if ($lst_type == NODE_EXPR_STMT() || $lst_type == NODE_BINARY_OP() ||
-                $lst_type == NODE_CALL() || $lst_type == NODE_TERNARY() ||
-                $lst_type == NODE_VARIABLE() || $lst_type == NODE_INT_LITERAL() ||
-                $lst_type == NODE_STR_LITERAL() || $lst_type == NODE_NUM_LITERAL()) {
-                return $result;
-            }
-        }
-        return undef;
-    }
-
-    $interp->{"package"} = $next_pkg;
-    return undef;
+    return Strada::Interpreter::eval_string_vm_ex($trimmed, "<repl>", undef, 0);
 }
 
 # Display a result value
@@ -460,8 +341,8 @@ func display_result(scalar $val) void {
     }
 }
 
-# Load a file into the REPL environment (registers functions/packages, does not run main)
-func load_file(scalar $interp, str $filename) void {
+# Load a file into the REPL VM session (registers functions/packages, skips main)
+func load_file(str $filename) void {
     my str $source = slurp($filename);
     if (length($source) == 0) {
         say("Error: Could not read file: " . $filename);
@@ -469,49 +350,22 @@ func load_file(scalar $interp, str $filename) void {
     }
 
     my str $source_dir = get_dirname($filename);
-    my array @lib_paths = ();
-    my int $li = 0;
-    while ($li < size(@g_lib_paths)) {
-        push(@lib_paths, $g_lib_paths[$li]);
-        $li = $li + 1;
-    }
-    push(@lib_paths, $source_dir);
-
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, $filename);
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
-    if (defined($program)) {
-        $program->{"source_file"} = $filename;
-    }
-
-    # Register functions (skip main)
-    my scalar $funcs = $program->{"functions"};
-    my int $func_count = $program->{"function_count"};
-    my int $i = 0;
-    while ($i < $func_count) {
-        my scalar $fn = $funcs->[$i];
-        if ($fn->{"name"} ne "main") {
-            Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
-            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
-                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
-            }
-        }
-        $i = $i + 1;
-    }
-
-    # Load enums, constants, OOP, import_lib, globals, BEGIN/END
-    register_program_extras($interp, $program);
+    my array @load_libs = ($source_dir);
+    Strada::Interpreter::eval_string_vm_ex($source, $filename, \@load_libs, 1);
 
     say("Loaded " . $filename);
 }
 
 # Interactive REPL
-func run_repl(scalar $interp) void {
+func run_repl() void {
+    my array @repl_libs = build_lib_paths(".");
+    Strada::Interpreter::set_eval_lib_paths(\@repl_libs);
+    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
+        core::setenv("STRADA_USE_ARTIFACTS", "0");
+    }
+
     print_banner();
 
-    # Initialize readline history
     history_init();
     my str $histfile = get_history_path();
     if (length($histfile) > 0) {
@@ -546,18 +400,15 @@ func run_repl(scalar $interp) void {
         $continuation = 0;
 
         my str $input = str_trim($buffer);
-
-        # Skip empty lines
         if (length($input) == 0) { next; }
 
-        # Add completed input to history
         history_add($input);
 
         # Handle REPL commands
         if ($input eq ".quit" || $input eq ".exit" || $input eq ".q") { last; }
         if ($input eq ".help" || $input eq ".h") { print_help(); next; }
         if ($input eq ".vars") {
-            my scalar $vars = $interp->{"global_env"}->{"vars"};
+            my scalar $vars = Strada::Interpreter::vm_eval_globals();
             my scalar $var_keys = keys($vars);
             my int $vk_len = size($var_keys);
             if ($vk_len == 0) {
@@ -570,7 +421,7 @@ func run_repl(scalar $interp) void {
                     if (ref($vval) eq "HASH" || ref($vval) eq "ARRAY") {
                         say("  " . $vname . " = " . ref($vval));
                     } else {
-                        say("  " . $vname . " = " . $vval);
+                        say("  " . $vname . " = " . (defined($vval) ? $vval : "undef"));
                     }
                     $vi = $vi + 1;
                 }
@@ -578,7 +429,7 @@ func run_repl(scalar $interp) void {
             next;
         }
         if ($input eq ".funcs") {
-            my scalar $func_hash = $interp->{"functions"};
+            my scalar $func_hash = Strada::Interpreter::vm_eval_funcs();
             my scalar $func_keys = keys($func_hash);
             my int $fk_len = size($func_keys);
             if ($fk_len == 0) {
@@ -587,17 +438,15 @@ func run_repl(scalar $interp) void {
                 my int $fi = 0;
                 while ($fi < $fk_len) {
                     my str $fname = $func_keys->[$fi];
-                    my scalar $finfo = $func_hash->{$fname};
-                    say("  " . $fname . "(" . $finfo->{"param_count"} . " params)");
+                    my int $pcnt = $func_hash->{$fname};
+                    say("  " . $fname . "(" . $pcnt . " params)");
                     $fi = $fi + 1;
                 }
             }
             next;
         }
         if ($input eq ".clear") {
-            Strada::Interpreter::interp_cleanup($interp);
-            $interp = Strada::Interpreter::interp_new();
-            $g_repl_pkg = "main";
+            Strada::Interpreter::reset();
             say("State cleared.");
             next;
         }
@@ -610,7 +459,7 @@ func run_repl(scalar $interp) void {
                 next;
             }
             try {
-                load_file($interp, $filename);
+                load_file($filename);
             } catch ($e) {
                 say("Error loading " . $filename . ": " . $e);
             }
@@ -619,203 +468,26 @@ func run_repl(scalar $interp) void {
 
         # Evaluate
         try {
-            my scalar $result = repl_eval($interp, $input);
+            my scalar $result = repl_eval($input);
             display_result($result);
         } catch ($e) {
-            if (ref($e) eq "HASH" && exists($e, "__interp_sig__")) {
-                say("Error: unhandled control flow signal: " . $e->{"sig_type"});
-            } else {
-                say("Error: " . $e);
-            }
+            say("Error: " . $e);
         }
     }
 
-    # Save history on exit
     if (length($histfile) > 0) {
         history_save($histfile);
     }
-    Strada::Interpreter::interp_cleanup($interp);
+    Strada::Interpreter::reset();
 }
 
-# Get directory of a file path
-func get_dirname(str $path) str {
-    my int $last_slash = -1;
-    my int $i = 0;
-    while ($i < length($path)) {
-        if (substr($path, $i, 1) eq "/") {
-            $last_slash = $i;
-        }
-        $i = $i + 1;
-    }
-    if ($last_slash < 0) { return "."; }
-    if ($last_slash == 0) { return "/"; }
-    return substr($path, 0, $last_slash);
-}
-
-# Find exe root directory (parent of bin dir or current dir containing lib/Strada/Interpreter.strada)
-func get_exe_root() str {
-    my str $exe_dir = "";
-    __C__ {
-        char __exe[1024];
-        ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
-        if (__n > 0) {
-            __exe[__n] = 0;
-            char *__sl = strrchr(__exe, '/');
-            if (__sl) {
-                *__sl = 0;
-                strada_decref(exe_dir);
-                exe_dir = strada_new_str(__exe);
-            }
-        }
-    }
-    if (length($exe_dir) == 0) { return ""; }
-    return find_project_root($exe_dir);
-}
-
-# Find project root by walking up from a directory looking for lib/ dir
-func find_project_root(str $dir) str {
-    my str $resolved = core::realpath($dir);
-    my str $check = (length($resolved) > 0) ? $resolved : $dir;
-    my int $depth = 0;
-    while ($depth < 10) {
-        # Check if this directory has a lib/ subdirectory
-        my str $lib_dir = $check . "/lib";
-        my str $test_file = $lib_dir . "/Strada/Interpreter.strada";
-        if (core::is_file($test_file) == 1) {
-            return $check;
-        }
-        # Go up one level
-        my str $parent = get_dirname($check);
-        if ($parent eq $check) { last; }
-        $check = $parent;
-        $depth = $depth + 1;
-    }
-    return "";
-}
-
-# Execute a file
-func run_file(scalar $interp, str $filename, scalar $argv) int {
-    $interp->{"filename"} = $filename;
-    my str $source = slurp($filename);
-
-    # Compute lib paths based on source file location
-    my str $source_dir = get_dirname($filename);
-    my str $project_root = find_project_root($source_dir);
-    my str $exe_root = get_exe_root();
-
-    my array @lib_paths = ();
-    # Add -L paths first (highest priority)
-    my int $li = 0;
-    while ($li < size(@g_lib_paths)) {
-        push(@lib_paths, $g_lib_paths[$li]);
-        $li = $li + 1;
-    }
-    if (length($project_root) > 0) {
-        # Add project root itself (for "t/..." style lib paths)
-        push(@lib_paths, $project_root);
-        # Add project root's lib/ directory
-        push(@lib_paths, $project_root . "/lib");
-    } elsif (length($exe_root) > 0) {
-        push(@lib_paths, $exe_root);
-        push(@lib_paths, $exe_root . "/lib");
-    }
-    # Add source file's directory
-    push(@lib_paths, $source_dir);
-
-    # Change to project root so relative use-lib and import_lib paths resolve correctly;
-    # disable precompiled sibling artifact loading so `use` parses AST bodies
-    my str $saved_cwd = core::getcwd();
-    if (length($project_root) > 0) {
-        core::chdir($project_root);
-    }
-    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
-        core::setenv("STRADA_USE_ARTIFACTS", "0");
-    }
-
-    # Tokenize and parse
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, $filename);
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
-    if (defined($program)) {
-        $program->{"source_file"} = $filename;
-    }
-
-    # Load program into interpreter while still in project root so relative import_lib .so paths load
-    try {
-        Strada::Interpreter::interp_load_program($interp, $program);
-    } catch ($__load_err) {
-        core::chdir($saved_cwd);
-        throw($__load_err);
-    }
-
-    # Restore original working directory
-    core::chdir($saved_cwd);
-
-    # Run main (guarantee END blocks run even if main throws)
-    my int $result = 0;
-    try {
-        $result = Strada::Interpreter::interp_run_main($interp, $argv);
-    } catch ($__main_err) {
-        Strada::Interpreter::interp_run_end_blocks($interp);
-        throw($__main_err);
-    }
-
-    # Execute END blocks (LIFO order)
-    Strada::Interpreter::interp_run_end_blocks($interp);
-
-    return $result;
-}
-
-# Execute a file using the bytecode VM backend
-func run_file_vm(str $filename, scalar $argv) int {
-    my str $source = slurp($filename);
-
-    my str $source_dir = get_dirname($filename);
-    my str $project_root = find_project_root($source_dir);
-    my str $exe_root = get_exe_root();
-
-    my array @lib_paths = ();
-    my int $li = 0;
-    while ($li < size(@g_lib_paths)) {
-        push(@lib_paths, $g_lib_paths[$li]);
-        $li = $li + 1;
-    }
-    if (length($project_root) > 0) {
-        push(@lib_paths, $project_root);
-        push(@lib_paths, $project_root . "/lib");
-    } elsif (length($exe_root) > 0) {
-        push(@lib_paths, $exe_root);
-        push(@lib_paths, $exe_root . "/lib");
-    }
-    push(@lib_paths, $source_dir);
-
-    my str $saved_cwd = core::getcwd();
-    if (length($project_root) > 0) {
-        core::chdir($project_root);
-    }
-    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
-        core::setenv("STRADA_USE_ARTIFACTS", "0");
-    }
-
-    # Tokenize and parse (reuses the same parser as tree-walker)
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, $filename);
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
-    if (defined($program)) {
-        $program->{"source_file"} = $filename;
-    }
-
-    # Compile to bytecode (and dlopen relative import_libs) before restoring cwd
+# Compile an AST program and execute it on the bytecode VM.
+func run_vm_program(scalar $program, str $script_name, scalar $argv, str $restore_cwd) int {
     my int $result = 0;
     __C__ {
-#ifdef HAVE_VM
         VMProgram *vprog = vm_compile_program(program);
         {
-            char *__scwd = strada_to_str(saved_cwd);
+            char *__scwd = strada_to_str(restore_cwd);
             if (__scwd && __scwd[0]) { int __rc = chdir(__scwd); (void)__rc; }
             free(__scwd);
         }
@@ -826,8 +498,7 @@ func run_file_vm(str $filename, scalar $argv) int {
         } else {
             /* Locate the runtime headers for __C__ block JIT compilation:
              * try <bindir>/../runtime then <bindir>/runtime relative to the
-             * strada-interp binary (vm_run.c's compile-time RUNTIME_DIR is
-             * not linked into this driver). */
+             * strada-interp binary. */
             {
                 char __exe[1024];
                 ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
@@ -857,7 +528,7 @@ func run_file_vm(str $filename, scalar $argv) int {
             if (entry) {
                 VM *vvm = vm_new(vprog);
                 {
-                    char *fn_c = strada_to_str(filename);
+                    char *fn_c = strada_to_str(script_name);
                     vvm->script_name = fn_c;
                     VMArray *vargv = vm_array_new(8);
                     if (argv && !STRADA_IS_TAGGED_INT(argv)) {
@@ -883,17 +554,39 @@ func run_file_vm(str $filename, scalar $argv) int {
             }
             vm_program_free(vprog);
         }
-#else
-        fprintf(stderr, "Error: VM backend not compiled in (rebuild with HAVE_VM=1)\n");
-        strada_decref(result);
-        result = STRADA_MAKE_TAGGED_INT(1);
-#endif
     }
     return $result;
 }
 
+# Execute a file using the bytecode VM
+func run_file_vm(str $filename, scalar $argv) int {
+    my str $source = slurp($filename);
+    my str $source_dir = get_dirname($filename);
+    my str $project_root = find_project_root($source_dir);
+    my array @lib_paths = build_lib_paths($source_dir);
+
+    my str $saved_cwd = core::getcwd();
+    if (length($project_root) > 0) {
+        core::chdir($project_root);
+    }
+    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
+        core::setenv("STRADA_USE_ARTIFACTS", "0");
+    }
+
+    my scalar $tokens = lex_tokenize($source);
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, $filename);
+    my array @empty = ();
+    my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+    if (defined($program)) {
+        $program->{"source_file"} = $filename;
+    }
+
+    return run_vm_program($program, $filename, $argv, $saved_cwd);
+}
+
 func print_usage() void {
-    say("Strada Interpreter v0.3");
+    say("Strada Interpreter v0.3 (Bytecode VM)");
     say("Usage:");
     say("  strada-interp                          Interactive REPL");
     say("  strada-interp [OPTIONS] <file.strada>  Execute file");
@@ -902,7 +595,6 @@ func print_usage() void {
     say("Options:");
     say("  -e CODE       Execute code (wraps in main() if needed)");
     say("  --vm          Use bytecode VM backend (default)");
-    say("  --tree-walk   Use tree-walking interpreter backend");
     say("  -L PATH       Add library search path");
     say("  -h, --help    Show this help message");
 }
@@ -979,17 +671,7 @@ func parse_eval_program(str $code) scalar {
         $source = $pfx . "func main() int {\n" . $body_src . "\nreturn 0;\n}\n";
     }
 
-    my str $exe_root = get_exe_root();
-    my array @lib_paths = ();
-    my int $li = 0;
-    while ($li < size(@g_lib_paths)) {
-        push(@lib_paths, $g_lib_paths[$li]);
-        $li = $li + 1;
-    }
-    if (length($exe_root) > 0) {
-        push(@lib_paths, $exe_root);
-        push(@lib_paths, $exe_root . "/lib");
-    }
+    my array @lib_paths = build_lib_paths("");
     if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
         core::setenv("STRADA_USE_ARTIFACTS", "0");
     }
@@ -1001,105 +683,11 @@ func parse_eval_program(str $code) scalar {
     return parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
 }
 
-# Execute a top-level/full-program -e snippet using the tree-walking backend
-func run_eval_program_tw(scalar $interp, str $code, scalar $argv) int {
-    my scalar $program = parse_eval_program($code);
-    if (!defined($program)) { return 0; }
-    my int $exit_code = 0;
-    try {
-        Strada::Interpreter::interp_load_program($interp, $program);
-        $exit_code = Strada::Interpreter::interp_run_main($interp, $argv);
-    } catch ($e) {
-        if (Strada::Interpreter::is_signal($e, "return")) {
-            if (defined($e->{"value"})) {
-                $exit_code = $e->{"value"};
-            }
-        } else {
-            say("Unhandled exception: " . $e);
-            $exit_code = 1;
-        }
-    }
-    Strada::Interpreter::interp_run_end_blocks($interp);
-    return $exit_code;
-}
-
-# Execute a code string (tree-walk -e mode runs with full program semantics)
-func run_eval(scalar $interp, str $code, scalar $argv) int {
-    my str $trimmed = str_trim($code);
-    if (length($trimmed) == 0) { return 0; }
-    return run_eval_program_tw($interp, $code, $argv);
-}
-
-# Execute a code string using the bytecode VM backend (-e)
+# Execute a code string using the bytecode VM (-e)
 func run_eval_vm(str $code, scalar $argv) int {
     my scalar $program = parse_eval_program($code);
     if (!defined($program)) { return 0; }
-
-    my int $result = 0;
-    __C__ {
-#ifdef HAVE_VM
-        VMProgram *vprog = vm_compile_program(program);
-        if (!vprog) {
-            fprintf(stderr, "VM compile failed\n");
-            strada_decref(result);
-            result = STRADA_MAKE_TAGGED_INT(1);
-        } else {
-            char __exe[1024];
-            ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
-            if (__n > 0) {
-                __exe[__n] = 0;
-                char *__sl = strrchr(__exe, '/');
-                if (__sl) {
-                    *__sl = 0;
-                    char __rt[1200];
-                    snprintf(__rt, sizeof(__rt), "%s/../runtime", __exe);
-                    char __hdr[1400];
-                    snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
-                    if (access(__hdr, R_OK) != 0) {
-                        snprintf(__rt, sizeof(__rt), "%s/runtime", __exe);
-                        snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
-                    }
-                    if (access(__hdr, R_OK) == 0)
-                        vprog->runtime_include_path = strdup(__rt);
-                }
-            }
-            const char *entry = "main";
-            if (vm_program_find_func(vprog, "main") < 0) {
-                if (vm_program_find_func(vprog, "run") >= 0) entry = "run";
-                else { fprintf(stderr, "Error: no 'main' or 'run' function\n"); entry = NULL; }
-            }
-            if (entry) {
-                VM *vvm = vm_new(vprog);
-                vvm->script_name = strdup("-e");
-                VMArray *vargv = vm_array_new(8);
-                if (argv && !STRADA_IS_TAGGED_INT(argv)) {
-                    StradaArray *av = strada_deref_array(argv);
-                    if (av) {
-                        for (size_t ai = 0; ai < av->size; ai++) {
-                            StradaValue *item = strada_array_get(av, (int64_t)ai);
-                            char *s = strada_to_str(item);
-                            vm_array_push(vargv, VM_MAKE_STR(s ? s : ""));
-                            free(s);
-                        }
-                    }
-                }
-                vvm->argv = vargv;
-                VMValue vresult = vm_execute(vvm, entry);
-                vm_run_end_blocks(vvm);
-                int64_t rc = VM_IS_ANY_INT(vresult) ? VM_ANY_INT_VAL(vresult) : 0;
-                strada_decref(result);
-                result = STRADA_MAKE_TAGGED_INT(rc);
-                vm_free(vvm);
-            }
-            vm_program_free(vprog);
-        }
-#else
-        fprintf(stderr, "Error: VM backend not compiled in (rebuild with HAVE_VM=1)\n");
-        strada_decref(result);
-        result = STRADA_MAKE_TAGGED_INT(1);
-#endif
-    }
-    return $result;
+    return run_vm_program($program, "-e", $argv, "");
 }
 
 func main() int {
@@ -1110,7 +698,6 @@ func main() int {
     my str $eval_code = "";
     my int $has_eval = 0;
     my array @script_args = ();
-    my int $use_vm = 1;
     my int $i = 0;
     my int $parsing_opts = 1;
 
@@ -1121,9 +708,7 @@ func main() int {
             print_usage();
             return 0;
         } elsif ($parsing_opts == 1 && $arg eq "--vm") {
-            $use_vm = 1;
-        } elsif ($parsing_opts == 1 && ($arg eq "--tree-walk" || $arg eq "--tw")) {
-            $use_vm = 0;
+            # Bytecode VM is the only backend; accepted for compatibility.
         } elsif ($parsing_opts == 1 && $arg eq "-e") {
             $has_eval = 1;
             $i = $i + 1;
@@ -1144,7 +729,6 @@ func main() int {
             }
             push(@g_lib_paths, $ARGV[$i]);
         } elsif ($parsing_opts == 1 && starts_with($arg, "-L")) {
-            # -L/path/to/lib (attached form)
             push(@g_lib_paths, substr($arg, 2, length($arg) - 2));
         } elsif ($parsing_opts == 1 && $arg eq "--") {
             $parsing_opts = 0;
@@ -1166,57 +750,26 @@ func main() int {
 
     # Eval mode (-e)
     if ($has_eval == 1) {
-        if ($use_vm == 1) {
-            try {
-                return run_eval_vm($eval_code, \@script_args);
-            } catch ($e) {
-                say("VM error: " . $e);
-                return 1;
-            }
+        try {
+            return run_eval_vm($eval_code, \@script_args);
+        } catch ($e) {
+            say("VM error: " . $e);
+            return 1;
         }
-        my scalar $interp = Strada::Interpreter::interp_new();
-        my int $rc = run_eval($interp, $eval_code, \@script_args);
-        Strada::Interpreter::interp_cleanup($interp);
-        core::gc_collect();
-        return $rc;
     }
 
     if (length($script) == 0) {
-        # REPL mode
-        my scalar $interp = Strada::Interpreter::interp_new();
-        run_repl($interp);
-        Strada::Interpreter::interp_cleanup($interp);
-        core::gc_collect();
+        run_repl();
         return 0;
     }
 
     # File mode
     my int $exit_code = 0;
-    if ($use_vm == 1) {
-        try {
-            $exit_code = run_file_vm($script, \@script_args);
-        } catch ($e) {
-            say("VM error: " . $e);
-            $exit_code = 1;
-        }
-        return $exit_code;
-    }
-    my scalar $interp = Strada::Interpreter::interp_new();
     try {
-        $exit_code = run_file($interp, $script, \@script_args);
+        $exit_code = run_file_vm($script, \@script_args);
     } catch ($e) {
-        if (Strada::Interpreter::is_signal($e, "return")) {
-            # main() returned via signal
-            if (defined($e->{"value"})) {
-                $exit_code = $e->{"value"};
-            }
-        } else {
-            say("Unhandled exception: " . $e);
-            $exit_code = 1;
-        }
+        say("VM error: " . $e);
+        $exit_code = 1;
     }
-    Strada::Interpreter::interp_cleanup($interp);
-    core::gc_collect();
-
     return $exit_code;
 }

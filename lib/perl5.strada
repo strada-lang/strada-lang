@@ -385,7 +385,8 @@ func call(str $sub_name, str $arg) str {
         } else {
             StradaValue *use_arg = arg;
             StradaValue *fetched = NULL;
-            if (!STRADA_IS_TAGGED_INT(arg) && arg->meta && arg->meta->is_tied && arg->meta->tied_obj) {
+            if (!STRADA_IS_TAGGED_INT(arg) && arg->meta && arg->meta->is_tied && arg->meta->tied_obj
+                && arg->type != STRADA_ARRAY && arg->type != STRADA_HASH) {
                 fetched = strada_tied_scalar_fetch(arg);
                 use_arg = fetched;
             }

@@ -69,6 +69,7 @@ void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type) {
     hdr->obj_type = type;
     hdr->gc_marked = 0;
     hdr->is_utf8 = 0;
+    hdr->gc_finalized = 0;
     if (g_active_vm) {
         hdr->gc_immortal = 0;
         hdr->gc_next = g_active_vm->gc_objects;
@@ -314,6 +315,7 @@ static inline const char *vm_obj_class_name(VMValue v) {
     case VM_OBJ_ARRAY: return VM_AS_ARRAY(v)->class_name;
     case VM_OBJ_CLOSURE: return VM_AS_CLOSURE(v)->class_name;
     case VM_OBJ_SREF: return VM_AS_SREF(v)->class_name;
+    case VM_OBJ_WEAKREF: return vm_obj_class_name(VM_AS_WEAKREF(v)->target);
     case VM_OBJ_NATIVE_SV: {
         StradaValue *sv = ((VMNativeSV*)VM_TO_PTR(v))->sv;
         return (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta) ? sv->meta->blessed_package : NULL;
@@ -342,6 +344,7 @@ static inline int vm_to_bool(VMValue v) {
             VMHash *h = VM_AS_HASH(v);
             return h->class_name != NULL || h->size > 0;
         }
+        case VM_OBJ_WEAKREF: return vm_to_bool(VM_AS_WEAKREF(v)->target);
         default: return 1;
         }
     }
@@ -421,6 +424,9 @@ static const char *vm_to_cstr(VMValue v, char *buf, size_t bufsz) {
 
 /* Deep copy a VMValue (for strings/strbuf/float, returns a new copy; ints/undef pass through; containers are shared) */
 static inline VMValue vm_val_copy(VMValue v) {
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) {
+        v = VM_AS_WEAKREF(v)->target;
+    }
     if (VM_IS_PTR(v)) {
         enum VMObjType t = VM_PTR_TYPE(v);
         if (t == VM_OBJ_STR) {
@@ -518,7 +524,9 @@ static VMValue vm_array_pop(VMArray *a) {
     if (a->size == 0) return VM_UNDEF_VAL;
     a->size--;
     if (a->holes) a->holes[a->size] = 0;
-    return a->items[a->size];
+    VMValue v = a->items[a->size];
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) return VM_AS_WEAKREF(v)->target;
+    return v;
 }
 
 static VMValue vm_array_shift(VMArray *a) {
@@ -530,6 +538,7 @@ static VMValue vm_array_shift(VMArray *a) {
         a->holes[a->size - 1] = 0;
     }
     a->size--;
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) return VM_AS_WEAKREF(v)->target;
     return v;
 }
 
@@ -961,9 +970,14 @@ static inline void vm_gc_mark_val(VMValue v, VMObjHeader ***work, size_t *wlen, 
     (*work)[(*wlen)++] = hdr;
 }
 
-void vm_gc_collect(VM *vm) {
-    if (!vm || vm->gc_pause > 0 || vm->exec_base > 0) return;
+static int vm_find_method(VMProgram *prog, const char *class_name, const char *method);
 
+typedef struct {
+    VMObjHeader *obj;
+    int dfidx;
+} VMFinalizerItem;
+
+static void vm_gc_mark_all(VM *vm) {
     VMObjHeader **work = NULL;
     size_t wlen = 0, wcap = 0;
 
@@ -1064,18 +1078,147 @@ void vm_gc_collect(VM *vm) {
     }
     free(work);
 
+    /* Scalar references (VMScalarRef) are proxy objects for a backing cell or global slot.
+     * Keep any VMScalarRef alive while its backing variable is live so weak scalar refs
+     * do not clear prematurely while the referent variable remains in scope. */
     if (vm->has_weakrefs) {
-        for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
-            if (o->obj_type == VM_OBJ_WEAKREF) {
-                VMWeakRef *wr = (VMWeakRef*)o;
-                if (VM_IS_PTR(wr->target)) {
-                    VMObjHeader *th = (VMObjHeader*)VM_TO_PTR(wr->target);
-                    if (!th->gc_marked && !th->gc_immortal) {
-                        wr->target = VM_UNDEF_VAL;
+        int changed = 1;
+        while (changed) {
+            changed = 0;
+            for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
+                if (o->obj_type == VM_OBJ_SREF && !o->gc_marked && !o->gc_immortal) {
+                    VMScalarRef *sr = (VMScalarRef*)o;
+                    int backing_live = 0;
+                    if (sr->global_name) {
+                        backing_live = 1;
+                    } else if (VM_IS_PTR(sr->cell)) {
+                        VMObjHeader *ch = (VMObjHeader*)VM_TO_PTR(sr->cell);
+                        if (ch->gc_marked || ch->gc_immortal) backing_live = 1;
+                    }
+                    if (backing_live) {
+                        o->gc_marked = 1;
+                        changed = 1;
                     }
                 }
             }
         }
+    }
+}
+
+static void vm_gc_clear_weakrefs(VM *vm) {
+    if (!vm->has_weakrefs) return;
+    for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
+        if (o->obj_type == VM_OBJ_WEAKREF) {
+            VMWeakRef *wr = (VMWeakRef*)o;
+            if (VM_IS_PTR(wr->target)) {
+                VMObjHeader *th = (VMObjHeader*)VM_TO_PTR(wr->target);
+                if (!th->gc_marked && !th->gc_immortal) {
+                    wr->target = VM_UNDEF_VAL;
+                }
+            }
+        }
+    }
+}
+
+static void vm_run_destroy_batch_ex(VM *vm, VMFinalizerItem *items, size_t count, int propagate_try) {
+    if (!vm || !items || count == 0) return;
+    vm->gc_pause++;
+    int saved_trap = vm->trap_uncaught;
+    int saved_has_exc = vm->has_exception;
+    VMValue saved_exc = vm->current_exception;
+    int saved_has_p = vm->has_pending_exc;
+    VMValue saved_p = vm->pending_exc;
+    uint8_t saved_ctx = vm->pending_call_context;
+    size_t saved_sp = vm->stack_top;
+    int saved_exc_top = vm->exc_top;
+    int has_first_p = 0;
+    VMValue first_p = VM_UNDEF_VAL;
+
+    vm->trap_uncaught = 1;
+    for (size_t i = 0; i < count; i++) {
+        vm->has_exception = 0;
+        vm->current_exception = VM_UNDEF_VAL;
+        vm->has_pending_exc = 0;
+        vm->pending_exc = VM_UNDEF_VAL;
+        vm->pending_call_context = 0;
+        vm->stack_top = saved_sp;
+        VMValue self_val = VM_MAKE_PTR(items[i].obj);
+        vm_execute_call(vm, items[i].dfidx, &self_val, 1);
+        if (propagate_try && !has_first_p && vm->has_pending_exc) {
+            has_first_p = 1;
+            first_p = vm->pending_exc;
+        }
+        /* Discard any exception thrown by async GC destructor and restore state */
+        vm->has_exception = 0;
+        vm->current_exception = VM_UNDEF_VAL;
+        vm->has_pending_exc = 0;
+        vm->pending_exc = VM_UNDEF_VAL;
+        vm->pending_call_context = 0;
+        vm->stack_top = saved_sp;
+        vm->exc_top = saved_exc_top;
+    }
+
+    vm->trap_uncaught = saved_trap;
+    vm->has_exception = saved_has_exc;
+    vm->current_exception = saved_exc;
+    if (propagate_try && has_first_p && !saved_has_p) {
+        vm->has_pending_exc = 1;
+        vm->pending_exc = first_p;
+    } else {
+        vm->has_pending_exc = saved_has_p;
+        vm->pending_exc = saved_p;
+    }
+    vm->pending_call_context = saved_ctx;
+    vm->gc_pause--;
+}
+
+static void vm_run_destroy_batch(VM *vm, VMFinalizerItem *items, size_t count) {
+    vm_run_destroy_batch_ex(vm, items, count, 0);
+}
+
+static size_t vm_collect_finalizer_items(VM *vm, VMFinalizerItem **out_items, int only_unmarked) {
+    *out_items = NULL;
+    if (!vm || !vm->program) return 0;
+    VMFinalizerItem *items = NULL;
+    size_t count = 0, cap = 0;
+    for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
+        if (only_unmarked && (o->gc_marked || o->gc_immortal)) continue;
+        if (o->gc_finalized) continue;
+        enum VMObjType ot = o->obj_type;
+        if (ot != VM_OBJ_HASH && ot != VM_OBJ_ARRAY && ot != VM_OBJ_CLOSURE && ot != VM_OBJ_SREF) continue;
+        const char *cname = vm_obj_class_name(VM_MAKE_PTR(o));
+        if (!cname) continue;
+        int dfidx = vm_find_method(vm->program, cname, "DESTROY");
+        if (dfidx < 0) continue;
+        o->gc_finalized = 1;
+        if (count >= cap) {
+            cap = (cap == 0) ? 16 : (cap * 2);
+            items = realloc(items, cap * sizeof(VMFinalizerItem));
+        }
+        items[count].obj = o;
+        items[count].dfidx = dfidx;
+        count++;
+    }
+    *out_items = items;
+    return count;
+}
+
+static void vm_gc_collect_ex(VM *vm, int propagate_try) {
+    if (!vm || vm->gc_pause > 0 || vm->exec_base > 0) return;
+
+    vm_gc_mark_all(vm);
+    vm_gc_clear_weakrefs(vm);
+
+    VMFinalizerItem *fin = NULL;
+    size_t fin_count = vm_collect_finalizer_items(vm, &fin, 1);
+    if (fin_count > 0) {
+        vm_run_destroy_batch_ex(vm, fin, fin_count, propagate_try);
+        free(fin);
+        for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
+            o->gc_marked = 0;
+        }
+        vm_gc_mark_all(vm);
+        vm_gc_clear_weakrefs(vm);
     }
 
     VMObjHeader **pp = &vm->gc_objects;
@@ -1091,6 +1234,10 @@ void vm_gc_collect(VM *vm) {
         }
     }
     vm->gc_threshold = (vm->gc_count < 2048) ? 4096 : (vm->gc_count * 2);
+}
+
+void vm_gc_collect(VM *vm) {
+    vm_gc_collect_ex(vm, 0);
 }
 
 /* ===== Locals pool cleanup needed by vm_free ===== */
@@ -1124,6 +1271,16 @@ static void vm_method_cache_clear(VM *vm) {
 void vm_free(VM *vm) {
     if (!vm) return;
     if (__sync_sub_and_fetch(&vm->refcount, 1) > 0) return;
+    if (vm->program && vm->gc_objects && vm->frame_count == 0 && vm->exec_base == 0 &&
+        vm->global_save_count == 0 && vm->gc_pause == 0) {
+        for (int pass = 0; pass < 4; pass++) {
+            VMFinalizerItem *fin = NULL;
+            size_t fin_count = vm_collect_finalizer_items(vm, &fin, 0);
+            if (fin_count == 0) break;
+            vm_run_destroy_batch(vm, fin, fin_count);
+            free(fin);
+        }
+    }
     vm_suspend(vm);
     VMObjHeader *obj = vm->gc_objects;
     while (obj) {
@@ -2359,7 +2516,6 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
                     strada_decref(vsv);
                 }
             if (vh->class_name) {
-                strada_hash_set_take(sh->value.hv, "__class__", strada_new_str(vh->class_name));
                 strada_bless(sh, vh->class_name);
             }
             return sh;
@@ -3765,6 +3921,7 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
     for (int i = 0; i < argc; i++) {
         vargs[i] = argv[i] ? sv_to_vm(argv[i]) : VM_UNDEF_VAL;
     }
+    ctx->vm->gc_pause--;
     VMValue vres = vm_invoke_closure(ctx->vm, ctx->vcl, vargs, argc);
     if (vargs != vargs_buf) free(vargs);
     if (ctx->vm->has_exception || ctx->vm->has_pending_exc) {
@@ -3773,14 +3930,24 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
         ctx->vm->current_exception = VM_UNDEF_VAL;
         ctx->vm->has_pending_exc = 0;
         ctx->vm->pending_exc = VM_UNDEF_VAL;
+        ctx->vm->gc_pause++;
         StradaValue *esv = vm_to_sv(vexc);
         ctx->vm->gc_pause--;
+        if (ctx->vm->gc_count >= ctx->vm->gc_threshold &&
+            ctx->vm->exec_base == 0 && ctx->vm->gc_pause == 0) {
+            vm_gc_collect(ctx->vm);
+        }
         ctx->vm->trap_uncaught = prev_trap;
         g_active_vm = prev_active;
         strada_throw_value(esv);
     }
+    ctx->vm->gc_pause++;
     StradaValue *rsv = vm_to_sv(vres);
     ctx->vm->gc_pause--;
+    if (ctx->vm->gc_count >= ctx->vm->gc_threshold &&
+        ctx->vm->exec_base == 0 && ctx->vm->gc_pause == 0) {
+        vm_gc_collect(ctx->vm);
+    }
     ctx->vm->trap_uncaught = prev_trap;
     g_active_vm = prev_active;
     return rsv;
@@ -3846,22 +4013,24 @@ static int vm_try_bin_overload(VM *vm, const char *op, VMValue a, VMValue b, VMV
 
     VMValue res = vm_invoke_func(vm, fidx, args, 3);
     if (vm->has_pending_exc) { *out = VM_UNDEF_VAL; return 1; }
-    int64_t r = vm_to_int(res);
+    double r = vm_to_num(res);
     int bool_val = 0;
-    if (is_num_cmp) {
-        if (strcmp(op, "<") == 0) bool_val = (r < 0);
-        else if (strcmp(op, "<=") == 0) bool_val = (r <= 0);
-        else if (strcmp(op, ">") == 0) bool_val = (r > 0);
-        else if (strcmp(op, ">=") == 0) bool_val = (r >= 0);
-        else if (strcmp(op, "==") == 0) bool_val = (r == 0);
-        else bool_val = (r != 0);
+    if (isnan(r)) {
+        bool_val = (strcmp(op, "!=") == 0 || strcmp(op, "ne") == 0) ? 1 : 0;
+    } else if (is_num_cmp) {
+        if (strcmp(op, "<") == 0) bool_val = (r < 0.0);
+        else if (strcmp(op, "<=") == 0) bool_val = (r <= 0.0);
+        else if (strcmp(op, ">") == 0) bool_val = (r > 0.0);
+        else if (strcmp(op, ">=") == 0) bool_val = (r >= 0.0);
+        else if (strcmp(op, "==") == 0) bool_val = (r == 0.0);
+        else bool_val = (r != 0.0);
     } else {
-        if (strcmp(op, "lt") == 0) bool_val = (r < 0);
-        else if (strcmp(op, "le") == 0) bool_val = (r <= 0);
-        else if (strcmp(op, "gt") == 0) bool_val = (r > 0);
-        else if (strcmp(op, "ge") == 0) bool_val = (r >= 0);
-        else if (strcmp(op, "eq") == 0) bool_val = (r == 0);
-        else bool_val = (r != 0);
+        if (strcmp(op, "lt") == 0) bool_val = (r < 0.0);
+        else if (strcmp(op, "le") == 0) bool_val = (r <= 0.0);
+        else if (strcmp(op, "gt") == 0) bool_val = (r > 0.0);
+        else if (strcmp(op, "ge") == 0) bool_val = (r >= 0.0);
+        else if (strcmp(op, "eq") == 0) bool_val = (r == 0.0);
+        else bool_val = (r != 0.0);
     }
     *out = VM_MAKE_INT(bool_val);
     return 1;
@@ -4050,6 +4219,252 @@ static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_fir
     vm->gc_pause--;
     if (vm->has_pending_exc) return NULL;
     return keys;
+}
+
+static void vm_unwrap_container_weak_gc(VM *vm, VMValue cont, const VMValue *roots, int nroots) {
+    if (!vm || !vm->has_weakrefs || vm->exec_base > 0 || vm->gc_pause > 0 || !VM_IS_PTR(cont)) return;
+    int has_live_wr = 0;
+    enum VMObjType ct = VM_PTR_TYPE(cont);
+    if (ct == VM_OBJ_ARRAY) {
+        VMArray *a = VM_AS_ARRAY(cont);
+        for (int i = 0; i < a->size; i++) {
+            VMValue el = a->items[i];
+            if (VM_IS_PTR(el) && VM_PTR_TYPE(el) == VM_OBJ_WEAKREF && !VM_IS_UNDEF(VM_AS_WEAKREF(el)->target)) {
+                has_live_wr = 1;
+                break;
+            }
+        }
+    } else if (ct == VM_OBJ_HASH) {
+        VMHash *h = VM_AS_HASH(cont);
+        for (int i = 0; i < h->capacity; i++) {
+            if (h->entries[i].occupied == 1) {
+                VMValue el = h->entries[i].value;
+                if (VM_IS_PTR(el) && VM_PTR_TYPE(el) == VM_OBJ_WEAKREF && !VM_IS_UNDEF(VM_AS_WEAKREF(el)->target)) {
+                    has_live_wr = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (!has_live_wr) return;
+    size_t saved_sp = vm->stack_top;
+    if (vm->stack_top + 1 + (size_t)nroots > vm->stack_cap) {
+        vm_stack_grow(vm, vm->stack_top + 1 + (size_t)nroots);
+    }
+    vm->stack[vm->stack_top++] = cont;
+    for (int i = 0; i < nroots; i++) {
+        if (roots && !VM_IS_UNDEF(roots[i])) {
+            vm->stack[vm->stack_top++] = roots[i];
+        }
+    }
+    vm_gc_collect(vm);
+    vm->stack_top = saved_sp;
+}
+
+static VMArray *vm_hash_to_flat_kv(VM *vm, VMHash *h) {
+    if (!h) return vm_array_new(0);
+    if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+        int has_fk = 0;
+        VMArray *keys = vm_tied_hash_collect_keys(vm, h->tied_obj, &has_fk);
+        if (vm->has_pending_exc) return NULL;
+        if (has_fk) {
+            int n = keys ? keys->size : 0;
+            VMArray *flat = vm_array_new(n > 0 ? n * 2 : 8);
+            int ffidx = vm_tied_array_find_method(vm, h->tied_obj, "FETCH");
+            vm->gc_pause++;
+            for (int i = 0; i < n; i++) {
+                VMValue kv = keys->items[i];
+                VMValue vv = (ffidx >= 0) ? vm_tied_array_call(vm, h->tied_obj, ffidx, &kv, 1) : VM_UNDEF_VAL;
+                if (vm->has_pending_exc) { vm->gc_pause--; return NULL; }
+                vm_array_push(flat, vm_val_copy(kv));
+                vm_array_push(flat, vv);
+            }
+            vm->gc_pause--;
+            return flat;
+        }
+    }
+    if (vm->has_weakrefs) {
+        vm_unwrap_container_weak_gc(vm, VM_MAKE_PTR(h), NULL, 0);
+    }
+    VMArray *flat = vm_array_new(h->size > 0 ? h->size * 2 : 8);
+    for (int i = 0; i < h->capacity; i++) {
+        if (h->entries[i].occupied == 1) {
+            int nonascii = 0;
+            int u8 = (vm_utf8_is_valid_str(h->entries[i].key, h->entries[i].keylen, &nonascii) && nonascii);
+            vm_array_push(flat, vm_make_str_flag(h->entries[i].key, h->entries[i].keylen, u8));
+            vm_array_push(flat, vm_val_copy(h->entries[i].value));
+        }
+    }
+    return flat;
+}
+
+static VMArray *vm_sort_materialize_input(VM *vm, VMValue input, int allow_scalar) {
+    if (vm && vm->has_weakrefs && VM_IS_PTR(input) && VM_PTR_TYPE(input) == VM_OBJ_WEAKREF) {
+        input = vm_unwrap_weak_gc(vm, input, NULL, 0);
+    }
+    if (VM_IS_PTR(input)) {
+        enum VMObjType t = VM_PTR_TYPE(input);
+        if (t == VM_OBJ_ARRAY) {
+            if (vm && vm->has_weakrefs) vm_unwrap_container_weak_gc(vm, input, NULL, 0);
+            return vm_materialize_array(vm, VM_AS_ARRAY(input));
+        }
+        if (t == VM_OBJ_HASH) {
+            return vm_hash_to_flat_kv(vm, VM_AS_HASH(input));
+        }
+        if (t == VM_OBJ_NATIVE_SV) {
+            StradaValue *sv = ((VMNativeSV*)VM_TO_PTR(input))->sv;
+            StradaValue *msv = sv ? strada_hv_unwrap_meta_sv(sv) : NULL;
+            if (msv && (msv->type == STRADA_ARRAY || msv->type == STRADA_HASH)) {
+                StradaValue *cp = strada_sort_copy_input(sv);
+                VMArray *out = vm_array_new(cp && cp->value.av ? (int)cp->value.av->size : 0);
+                if (cp && cp->value.av) {
+                    for (size_t i = 0; i < cp->value.av->size; i++) {
+                        vm_array_push(out, sv_to_vm(strada_array_get(cp->value.av, (int64_t)i)));
+                    }
+                }
+                if (cp) strada_decref(cp);
+                return out;
+            }
+            if (!allow_scalar) return vm_array_new(0);
+            VMArray *one = vm_array_new(1);
+            vm_array_push(one, vm_val_copy(input));
+            return one;
+        }
+    }
+    if (allow_scalar) {
+        VMArray *one = vm_array_new(1);
+        vm_array_push(one, vm_val_copy(input));
+        return one;
+    }
+    return vm_array_new(0);
+}
+
+typedef struct {
+    VMValue val;
+    const char *p;
+    size_t len;
+    char *owned;
+    size_t orig_idx;
+} VMSortStrDecor;
+
+static int vm_sort_str_decor_cmp(const void *a, const void *b) {
+    const VMSortStrDecor *da = (const VMSortStrDecor *)a;
+    const VMSortStrDecor *db = (const VMSortStrDecor *)b;
+    int c = vm_memcmp_bytes(da->p, da->len, db->p, db->len);
+    if (c != 0) return c;
+    if (da->orig_idx < db->orig_idx) return -1;
+    if (da->orig_idx > db->orig_idx) return 1;
+    return 0;
+}
+
+typedef struct {
+    VMValue val;
+    double num;
+    size_t orig_idx;
+} VMSortNumDecor;
+
+static int vm_sort_num_decor_cmp(const void *a, const void *b) {
+    const VMSortNumDecor *da = (const VMSortNumDecor *)a;
+    const VMSortNumDecor *db = (const VMSortNumDecor *)b;
+    if (da->num < db->num) return -1;
+    if (da->num > db->num) return 1;
+    int na = isnan(da->num);
+    int nb = isnan(db->num);
+    if (na != nb) return na ? 1 : -1;
+    if (da->orig_idx < db->orig_idx) return -1;
+    if (da->orig_idx > db->orig_idx) return 1;
+    return 0;
+}
+
+static double vm_to_num_ov(VM *vm, VMValue v, int depth) {
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) {
+        v = VM_AS_WEAKREF(v)->target;
+    }
+    if (depth < 8 && vm && vm->program && vm_obj_class_name(v) != NULL) {
+        VMValue ov = VM_UNDEF_VAL;
+        if (vm_try_un_overload(vm, "0+", v, &ov)) {
+            if (vm->has_pending_exc) return 0.0;
+            return vm_to_num_ov(vm, ov, depth + 1);
+        }
+    }
+    return vm_to_num(v);
+}
+
+static VMArray *vm_sort_default_impl(VM *vm, VMValue input) {
+    VMArray *sorted = vm_sort_materialize_input(vm, input, 1);
+    if (vm->has_pending_exc) return NULL;
+    if (!sorted || sorted->size <= 1) return sorted ? sorted : vm_array_new(0);
+    int n = sorted->size;
+    VMSortStrDecor *d = calloc((size_t)n, sizeof(VMSortStrDecor));
+    if (!d) return sorted;
+    vm->gc_pause++;
+    for (int i = 0; i < n; i++) {
+        VMValue key = sorted->items[i];
+        d[i].val = key;
+        d[i].orig_idx = (size_t)i;
+        if (vm_has_stringify(vm->program, key)) {
+            VMValue sk = vm_stringify_ov(vm, key);
+            if (vm->has_pending_exc) {
+                vm->gc_pause--;
+                for (int j = 0; j < i; j++) free(d[j].owned);
+                free(d);
+                return NULL;
+            }
+            char sbuf[256];
+            size_t slen = 0;
+            const char *ss = vm_bytes_view(sk, sbuf, sizeof(sbuf), &slen);
+            d[i].owned = malloc(slen > 0 ? slen : 1);
+            if (slen > 0 && d[i].owned) memcpy(d[i].owned, ss, slen);
+            d[i].p = d[i].owned ? d[i].owned : "";
+            d[i].len = slen;
+        } else if (VM_IS_PTR(key) && VM_PTR_TYPE(key) == VM_OBJ_STR) {
+            d[i].p = VM_AS_STR(key)->data;
+            d[i].len = VM_AS_STR(key)->len;
+        } else {
+            char kbuf[256];
+            size_t klen = 0;
+            const char *ks = vm_bytes_view(key, kbuf, sizeof(kbuf), &klen);
+            d[i].owned = malloc(klen > 0 ? klen : 1);
+            if (klen > 0 && d[i].owned) memcpy(d[i].owned, ks, klen);
+            d[i].p = d[i].owned ? d[i].owned : "";
+            d[i].len = klen;
+        }
+    }
+    qsort(d, (size_t)n, sizeof(VMSortStrDecor), vm_sort_str_decor_cmp);
+    for (int i = 0; i < n; i++) {
+        sorted->items[i] = d[i].val;
+        free(d[i].owned);
+    }
+    free(d);
+    vm->gc_pause--;
+    return sorted;
+}
+
+static VMArray *vm_nsort_impl(VM *vm, VMValue input) {
+    VMArray *sorted = vm_sort_materialize_input(vm, input, 0);
+    if (vm->has_pending_exc) return NULL;
+    if (!sorted || sorted->size <= 1) return sorted ? sorted : vm_array_new(0);
+    int n = sorted->size;
+    VMSortNumDecor *d = malloc((size_t)n * sizeof(VMSortNumDecor));
+    if (!d) return sorted;
+    vm->gc_pause++;
+    for (int i = 0; i < n; i++) {
+        d[i].val = sorted->items[i];
+        d[i].orig_idx = (size_t)i;
+        d[i].num = vm_to_num_ov(vm, sorted->items[i], 0);
+        if (vm->has_pending_exc) {
+            vm->gc_pause--;
+            free(d);
+            return NULL;
+        }
+    }
+    qsort(d, (size_t)n, sizeof(VMSortNumDecor), vm_sort_num_decor_cmp);
+    for (int i = 0; i < n; i++) {
+        sorted->items[i] = d[i].val;
+    }
+    free(d);
+    vm->gc_pause--;
+    return sorted;
 }
 
 static VMArray *vm_tied_array_splice(VM *vm, VMArray *arr, int argc, VMValue *args) {
@@ -4758,6 +5173,12 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         VMValue old = locals[slot];
         VMValue newv = SP_POP();
+        if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(newv) && VM_PTR_TYPE(newv) == VM_OBJ_WEAKREF, 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            newv = vm_unwrap_weak_gc(vm, newv, &old, 1);
+            stack = vm->stack; RELOAD();
+            old = locals[slot];
+        }
         /* If the slot holds a cell, store through it (preserving any tied scalar wrapper) */
         if (__builtin_expect(VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_CELL, 0)) {
             VMValue old_cell_val = VM_AS_CELL(old)->val;
@@ -5012,6 +5433,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->stack_top = sp;
                 vm_gc_collect(vm);
                 stack = vm->stack;
+                RELOAD();
             }
             if (__builtin_expect(strada_has_pending_signals(), 0)) {
                 frame->ip = target;
@@ -5191,6 +5613,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             vm->stack_top = sp;
             vm_gc_collect(vm);
             stack = vm->stack;
+            RELOAD();
         }
         DISPATCH();
     }
@@ -5785,7 +6208,19 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     SP_PUSH(VM_UNDEF_VAL);
                 }
             } else {
-                SP_PUSH(vm_array_pop(arr));
+                if (__builtin_expect(vm->has_weakrefs && arr->size > 0 &&
+                    VM_IS_PTR(arr->items[arr->size - 1]) &&
+                    VM_PTR_TYPE(arr->items[arr->size - 1]) == VM_OBJ_WEAKREF, 0)) {
+                    arr->size--;
+                    if (arr->holes) arr->holes[arr->size] = 0;
+                    VMValue raw = arr->items[arr->size];
+                    frame->ip = ip; vm->stack_top = sp;
+                    VMValue uw = vm_unwrap_weak_gc(vm, raw, &a, 1);
+                    stack = vm->stack; RELOAD();
+                    SP_PUSH(vm_val_copy(uw));
+                } else {
+                    SP_PUSH(vm_val_copy(vm_array_pop(arr)));
+                }
             }
         } else SP_PUSH(VM_UNDEF_VAL);
         DISPATCH();
@@ -5806,7 +6241,23 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     SP_PUSH(VM_UNDEF_VAL);
                 }
             } else {
-                SP_PUSH(vm_array_shift(arr));
+                if (__builtin_expect(vm->has_weakrefs && arr->size > 0 &&
+                    VM_IS_PTR(arr->items[0]) &&
+                    VM_PTR_TYPE(arr->items[0]) == VM_OBJ_WEAKREF, 0)) {
+                    VMValue raw = arr->items[0];
+                    memmove(arr->items, arr->items + 1, (size_t)(arr->size - 1) * sizeof(VMValue));
+                    if (arr->holes) {
+                        memmove(arr->holes, arr->holes + 1, (size_t)(arr->size - 1));
+                        arr->holes[arr->size - 1] = 0;
+                    }
+                    arr->size--;
+                    frame->ip = ip; vm->stack_top = sp;
+                    VMValue uw = vm_unwrap_weak_gc(vm, raw, &a, 1);
+                    stack = vm->stack; RELOAD();
+                    SP_PUSH(vm_val_copy(uw));
+                } else {
+                    SP_PUSH(vm_val_copy(vm_array_shift(arr)));
+                }
             }
         } else SP_PUSH(VM_UNDEF_VAL);
         DISPATCH();
@@ -5857,6 +6308,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 stack = vm->stack; RELOAD();
                 SP_PUSH(VM_MAKE_PTR(rev));
             } else {
+                if (__builtin_expect(vm->has_weakrefs, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm_unwrap_container_weak_gc(vm, a, NULL, 0);
+                    stack = vm->stack; RELOAD();
+                }
                 VMArray *rev = vm_array_new(arr->size);
                 for (int i = arr->size - 1; i >= 0; i--) vm_array_push(rev, vm_val_copy(arr->items[i]));
                 SP_PUSH(VM_MAKE_PTR(rev));
@@ -5887,6 +6343,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 stack = vm->stack; RELOAD();
                 SP_PUSH(VM_MAKE_PTR(rev));
             } else {
+                if (__builtin_expect(vm->has_weakrefs, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm_unwrap_container_weak_gc(vm, a, NULL, 0);
+                    stack = vm->stack; RELOAD();
+                }
                 VMArray *rev = vm_array_new(h->size > 0 ? h->size * 2 : 8);
                 for (int i = h->capacity - 1; i >= 0; i--) {
                     if (h->entries[i].occupied == 1) {
@@ -5980,18 +6441,24 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t func_idx = read_u16(ip); ip += 2;
         VMValue arr = SP_POP();
         VMClosure *cl = NULL;
+        VMValue cl_val = VM_UNDEF_VAL;
         if (func_idx == 0xFFFF) {
-            VMValue cl_val = SP_POP();
+            cl_val = SP_POP();
             if (VM_IS_PTR(cl_val) && VM_PTR_TYPE(cl_val) == VM_OBJ_CLOSURE) {
                 cl = VM_AS_CLOSURE(cl_val);
                 func_idx = (uint16_t)cl->func_idx;
             }
         }
-        if (VM_IS_PTR(arr) && VM_PTR_TYPE(arr) == VM_OBJ_ARRAY) {
+        {
             /* Save current VM state around tied materialization / nested comparator calls */
             frame->ip = ip;
             vm->stack_top = sp;
-            VMArray *sorted = vm_materialize_array(vm, VM_AS_ARRAY(arr));
+            if (!VM_IS_UNDEF(cl_val)) {
+                if (vm->stack_top >= vm->stack_cap) vm_stack_grow(vm, vm->stack_top);
+                vm->stack[vm->stack_top++] = cl_val;
+            }
+            VMArray *sorted = vm_sort_materialize_input(vm, arr, 1);
+            if (!VM_IS_UNDEF(cl_val)) vm->stack_top = sp;
             stack = vm->stack;
             RELOAD();
             VM_CHECK_EXC();
@@ -6032,7 +6499,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             stack = vm->stack;
             RELOAD();
             SP_PUSH(VM_MAKE_PTR(sorted));
-        } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+        }
         DISPATCH();
     }
 
@@ -6628,6 +7095,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     CASE(OP_DEREF_SCALAR): {
         VMValue r = SP_POP();
+        if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_WEAKREF, 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            r = vm_unwrap_weak_gc(vm, r, NULL, 0);
+            stack = vm->stack; RELOAD();
+        }
         if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_SREF) {
             VMScalarRef *sr = VM_AS_SREF(r);
             VMValue tv = VM_UNDEF_VAL;
@@ -6643,6 +7115,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VM_CHECK_EXC();
                 SP_PUSH(fv);
             } else {
+                if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(tv) && VM_PTR_TYPE(tv) == VM_OBJ_WEAKREF, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    tv = vm_unwrap_weak_gc(vm, tv, &r, 1);
+                    stack = vm->stack; RELOAD();
+                }
                 SP_PUSH(vm_val_copy(tv));
             }
         } else if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_CELL) {
@@ -6654,6 +7131,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VM_CHECK_EXC();
                 SP_PUSH(fv);
             } else {
+                if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(tv) && VM_PTR_TYPE(tv) == VM_OBJ_WEAKREF, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    tv = vm_unwrap_weak_gc(vm, tv, &r, 1);
+                    stack = vm->stack; RELOAD();
+                }
                 SP_PUSH(vm_val_copy(tv));
             }
         } else if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_TIED_SCALAR) {
@@ -6682,6 +7164,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_STORE_SREF): {
         VMValue newv = SP_POP();
         VMValue r = SP_POP();
+        if (__builtin_expect(vm->has_weakrefs, 0)) {
+            if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_WEAKREF) {
+                frame->ip = ip; vm->stack_top = sp;
+                r = vm_unwrap_weak_gc(vm, r, &newv, 1);
+                stack = vm->stack; RELOAD();
+            }
+            if (VM_IS_PTR(newv) && VM_PTR_TYPE(newv) == VM_OBJ_WEAKREF) {
+                frame->ip = ip; vm->stack_top = sp;
+                newv = vm_unwrap_weak_gc(vm, newv, &r, 1);
+                stack = vm->stack; RELOAD();
+            }
+        }
         if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_SREF) {
             VMScalarRef *sr = VM_AS_SREF(r);
             if (sr->global_name) {
@@ -7164,6 +7658,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm->gc_pause--;
                 stack = vm->stack; RELOAD();
             } else {
+                if (__builtin_expect(vm->has_weakrefs && sa != NULL, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm_unwrap_container_weak_gc(vm, spread_val, &self, 1);
+                    stack = vm->stack; RELOAD();
+                }
                 int arr_sz = sa ? sa->size : 0;
                 total_args = 1 + arr_sz;
                 if (total_args > 18) call_args = malloc((size_t)total_args * sizeof(VMValue));
@@ -8296,7 +8795,17 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         vm_temp_free(&v);
         DISPATCH();
     }
-    CASE(OP_DEFINED): { VMValue v = SP_POP(); SP_PUSH(VM_MAKE_INT(!VM_IS_UNDEF(v))); vm_temp_free(&v); DISPATCH(); }
+    CASE(OP_DEFINED): {
+        VMValue v = SP_POP();
+        if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF, 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            v = vm_unwrap_weak_gc(vm, v, NULL, 0);
+            stack = vm->stack; RELOAD();
+        }
+        SP_PUSH(VM_MAKE_INT(!VM_IS_UNDEF(v)));
+        vm_temp_free(&v);
+        DISPATCH();
+    }
     CASE(OP_ABS): {
         VMValue v = SP_POP();
         if (!VM_IS_PTR(v)) {
@@ -8452,6 +8961,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 VMWeakRef *wr = calloc(1, sizeof(VMWeakRef));
                 vm_gc_init_hdr(&wr->hdr, VM_OBJ_WEAKREF);
                 wr->target = *sp_slot;
+                wr->is_sref = (wt == VM_OBJ_SREF) ? 1 : 0;
                 *sp_slot = VM_MAKE_PTR(wr);
                 vm->has_weakrefs = 1;
                 did_weaken = 1;
@@ -8466,9 +8976,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 if (vm->stack_top >= vm->stack_cap) vm_stack_grow(vm, vm->stack_top);
                 vm->stack[vm->stack_top++] = cont;
             }
-            vm_gc_collect(vm);
+            vm_gc_collect_ex(vm, (vm->exc_top > 0) ? 1 : 0);
             vm->stack_top = saved_top;
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc;
+                vm->pending_exc = VM_UNDEF_VAL;
+                vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
         }
         SP_PUSH(VM_UNDEF_VAL);
         DISPATCH();
@@ -8517,7 +9033,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             has_tmp = 1;
         }
         if (has_tmp) vm_temp_free(&key_tmp);
-        int is_w = (sp_slot && VM_IS_PTR(*sp_slot) && VM_PTR_TYPE(*sp_slot) == VM_OBJ_WEAKREF) ? 1 : 0;
+        int is_w = (sp_slot && VM_IS_PTR(*sp_slot) && VM_PTR_TYPE(*sp_slot) == VM_OBJ_WEAKREF
+                    && (!VM_AS_WEAKREF(*sp_slot)->is_sref || !VM_IS_UNDEF(VM_AS_WEAKREF(*sp_slot)->target))) ? 1 : 0;
         SP_PUSH(VM_MAKE_INT(is_w));
         DISPATCH();
     }
@@ -9359,38 +9876,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             break;
         }
         case BUILTIN_SORT_DEFAULT: {
-            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
-                VMArray *src = VM_AS_ARRAY(args[0]);
-                VMArray *sorted;
-                if (__builtin_expect(!VM_IS_UNDEF(src->tied_obj), 0)) {
-                    frame->ip = ip; vm->stack_top = sp;
-                    sorted = vm_materialize_array(vm, src);
-                    stack = vm->stack; RELOAD();
-                    if (__builtin_expect(vm->has_pending_exc, 0)) {
-                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
-                        goto L_builtin_throw_exc;
-                    }
-                    if (!sorted) sorted = vm_array_new(8);
-                } else {
-                    sorted = vm_array_new(src->size > 0 ? src->size : 8);
-                    for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+            if (argc >= 1) {
+                frame->ip = ip; vm->stack_top = sp;
+                VMArray *sorted = vm_sort_default_impl(vm, args[0]);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
                 }
-                /* Simple insertion sort by byte-exact string comparison */
-                for (int i = 1; i < sorted->size; i++) {
-                    VMValue key = sorted->items[i];
-                    char kbuf[256]; size_t klen = 0;
-                    const char *ks = vm_bytes_view(key, kbuf, sizeof(kbuf), &klen);
-                    int j = i - 1;
-                    while (j >= 0) {
-                        char jbuf[256]; size_t jlen = 0;
-                        const char *js = vm_bytes_view(sorted->items[j], jbuf, sizeof(jbuf), &jlen);
-                        if (vm_memcmp_bytes(js, jlen, ks, klen) <= 0) break;
-                        sorted->items[j+1] = sorted->items[j];
-                        j--;
-                    }
-                    sorted->items[j+1] = key;
-                }
-                SP_PUSH(VM_MAKE_PTR(sorted));
+                SP_PUSH(VM_MAKE_PTR(sorted ? sorted : vm_array_new(0)));
             } else SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
             break;
         }
@@ -9568,6 +10062,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         break;
                     }
                 }
+                if (__builtin_expect(vm->has_weakrefs, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm_unwrap_container_weak_gc(vm, args[0], args, argc);
+                    stack = vm->stack; RELOAD();
+                }
                 VMArray *vals = vm_array_new(h->size > 0 ? h->size : 8);
                 for (int i = 0; i < h->capacity; i++) {
                     if (h->entries[i].occupied == 1) {
@@ -9602,6 +10101,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     if (length < 0) length = 0;
                 }
                 if (length > (int64_t)arr->size - offset) length = (int64_t)arr->size - offset;
+                if (__builtin_expect(vm->has_weakrefs, 0)) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm_unwrap_container_weak_gc(vm, args[0], args, argc);
+                    for (int ai = 3; ai < argc; ai++) {
+                        if (VM_IS_PTR(args[ai]) && VM_PTR_TYPE(args[ai]) == VM_OBJ_ARRAY) {
+                            vm_unwrap_container_weak_gc(vm, args[ai], args, argc);
+                        } else if (VM_IS_PTR(args[ai]) && VM_PTR_TYPE(args[ai]) == VM_OBJ_WEAKREF) {
+                            args[ai] = vm_unwrap_weak_gc(vm, args[ai], args, argc);
+                        }
+                    }
+                    stack = vm->stack; RELOAD();
+                }
                 /* Collect removed elements */
                 VMArray *removed = vm_array_new(length > 0 ? (int)length : 8);
                 for (int64_t i = 0; i < length; i++) {
@@ -9610,7 +10121,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         if (!removed->holes) removed->holes = calloc((size_t)removed->cap, sizeof(uint8_t));
                         removed->holes[removed->size - 1] = 1;
                     } else {
-                        vm_array_push(removed, arr->items[offset + i]);
+                        vm_array_push(removed, vm_val_copy(arr->items[offset + i]));
                     }
                 }
                 /* Collect replacement elements: argc==4 carries undef, packed/target VMArray, or scalar */
@@ -9738,9 +10249,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 while (h->iter_pos < h->capacity && h->entries[h->iter_pos].occupied != 1)
                     h->iter_pos++;
                 if (h->iter_pos < h->capacity) {
+                    VMValue ev = h->entries[h->iter_pos].value;
+                    if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(ev) && VM_PTR_TYPE(ev) == VM_OBJ_WEAKREF, 0)) {
+                        frame->ip = ip; vm->stack_top = sp;
+                        ev = vm_unwrap_weak_gc(vm, ev, args, argc);
+                        stack = vm->stack; RELOAD();
+                    }
                     VMArray *pair = vm_array_new(2);
                     vm_array_push(pair, VM_MAKE_STR_N(h->entries[h->iter_pos].key, h->entries[h->iter_pos].keylen));
-                    vm_array_push(pair, vm_val_copy(h->entries[h->iter_pos].value));
+                    vm_array_push(pair, vm_val_copy(ev));
                     h->iter_pos++;
                     SP_PUSH(VM_MAKE_PTR(pair));
                 } else {
@@ -11499,33 +12016,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         case BUILTIN_NSORT: {
             /* Numeric sort */
-            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
-                VMArray *src = VM_AS_ARRAY(args[0]);
-                VMArray *sorted;
-                if (__builtin_expect(!VM_IS_UNDEF(src->tied_obj), 0)) {
-                    frame->ip = ip; vm->stack_top = sp;
-                    sorted = vm_materialize_array(vm, src);
-                    stack = vm->stack; RELOAD();
-                    if (__builtin_expect(vm->has_pending_exc, 0)) {
-                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
-                        goto L_builtin_throw_exc;
-                    }
-                    if (!sorted) sorted = vm_array_new(8);
-                } else {
-                    sorted = vm_array_new(src->size > 0 ? src->size : 8);
-                    for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+            if (argc >= 1) {
+                frame->ip = ip; vm->stack_top = sp;
+                VMArray *sorted = vm_nsort_impl(vm, args[0]);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
                 }
-                /* Insertion sort by numeric value */
-                for (int i = 1; i < sorted->size; i++) {
-                    VMValue key = sorted->items[i];
-                    double kv = vm_to_num(key);
-                    int j = i - 1;
-                    while (j >= 0 && vm_to_num(sorted->items[j]) > kv) {
-                        sorted->items[j+1] = sorted->items[j]; j--;
-                    }
-                    sorted->items[j+1] = key;
-                }
-                SP_PUSH(VM_MAKE_PTR(sorted));
+                SP_PUSH(VM_MAKE_PTR(sorted ? sorted : vm_array_new(0)));
             } else SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
             break;
         }
@@ -12071,6 +12570,42 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 fprintf(stderr, "  %s\n", fname);
             }
             SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+
+        case BUILTIN_CORE_GC_COLLECT: {
+            frame->ip = ip; vm->stack_top = sp;
+            vm_gc_collect_ex(vm, (vm->exc_top > 0) ? 1 : 0);
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc;
+                vm->pending_exc = VM_UNDEF_VAL;
+                vm->has_pending_exc = 0;
+                goto L_builtin_throw_exc;
+            }
+            SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+        case BUILTIN_CAPTURE: {
+            VMArray *ca = vm_array_new(10);
+            if (argc >= 2) {
+                char sbuf[256], pbuf[256];
+                size_t slen = 0;
+                const char *s = vm_bytes_view(args[0], sbuf, sizeof(sbuf), &slen);
+                const char *pat = vm_to_cstr(args[1], pbuf, sizeof(pbuf));
+                if (vm_regex_match_len_u8(vm, s, slen, vm_is_utf8(args[0]), pat)) {
+                    int last = -1;
+                    for (int i = 0; i < 10; i++) {
+                        if (vm->regex_captures[i]) last = i;
+                    }
+                    for (int i = 0; i <= last; i++) {
+                        vm_array_push(ca, vm->regex_captures[i]
+                            ? vm_make_str_flag(vm->regex_captures[i], vm->regex_capture_len[i], vm->regex_capture_utf8[i])
+                            : VM_UNDEF_VAL);
+                    }
+                }
+            }
+            SP_PUSH(VM_MAKE_PTR(ca));
             break;
         }
 

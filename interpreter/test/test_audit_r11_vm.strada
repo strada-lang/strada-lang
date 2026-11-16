@@ -73,7 +73,7 @@ func main() int {
     }
     say("VM_EACH=" . join(",", @pairs));
 
-    # R11-VM10: m//g and m//gi regex flags in tree-walk
+    # R11-VM10: m//g and m//gi regex flags in bytecode VM
     my int $m1 = ("Hello hello" =~ m/hello/g) ? 1 : 0;
     my int $m2 = ("Hello hello" =~ m/hello/gi) ? 1 : 0;
     my int $m3 = ("Hello world" =~ m/hello/g) ? 1 : 0;

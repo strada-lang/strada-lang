@@ -1,0 +1,212 @@
+use lib "lib";
+use JSON;
+use DBI;
+
+package R15LkOv;
+use overload '""' => "to_s", "0+" => "to_n", "<=>" => "cmp_n", "cmp" => "cmp_s";
+func new(num $v, str $s) scalar { return bless({"v" => $v, "s" => $s}, "R15LkOv"); }
+func to_s(scalar $self) str { return $self->{"s"}; }
+func to_n(scalar $self) num { return $self->{"v"}; }
+func cmp_n(scalar $a, scalar $b, int $rev) num {
+    my num $d = $a->{"v"} - $b->{"v"};
+    return $rev ? -$d : $d;
+}
+func cmp_s(scalar $a, scalar $b, int $rev) num { return cmp_n($a, $b, $rev); }
+
+package R15LkFused2;
+has ro int $x = 0;
+has ro int $y = 0;
+use overload '""' => "to_s";
+func to_s(scalar $self) str { return "F2(" . $self->x() . "," . $self->y() . ")"; }
+
+package R15LkJsonMut;
+use overload '""' => "to_s";
+func new(scalar $h, int $mode) scalar { return bless({"h" => $h, "mode" => $mode}, "R15LkJsonMut"); }
+func to_s(scalar $self) str {
+    my scalar $h = $self->{"h"};
+    if ($self->{"mode"} == 1) {
+        delete($h->{"z"});
+    } elsif ($self->{"mode"} == 2) {
+        my int $k = 0;
+        while ($k < 24) {
+            $h->{"k_" . $k} = $k;
+            $k = $k + 1;
+        }
+    } else {
+        die("r15_lk_json_throw");
+    }
+    return "ok";
+}
+
+package R15LkCseMut;
+use overload "==" => "eq_op";
+func new(scalar $h, str $v) scalar { return bless({"h" => $h, "v" => $v}, "R15LkCseMut"); }
+func eq_op(scalar $self, scalar $o, int $rev) int {
+    $self->{"h"}->{"k"} = $self->{"v"};
+    return ($o == 1) ? 1 : 0;
+}
+
+package R15LkFreeDtor;
+func new(int $do_throw) scalar { return bless({"t" => $do_throw}, "R15LkFreeDtor"); }
+func DESTROY(scalar $self) void {
+    if ($self->{"t"}) { die("r15_lk_free_boom"); }
+}
+
+package R15LkTieScalar;
+func TIESCALAR(str $cls, scalar $v) scalar { return bless({"v" => $v}, $cls); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package R15LkTieHash;
+func TIEHASH(str $cls) scalar { return bless({"d" => {}}, $cls); }
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}, $k); }
+func DELETE(scalar $self, str $k) scalar { return delete($self->{"d"}->{$k}); }
+func FIRSTKEY(scalar $self) scalar {
+    my scalar $d = $self->{"d"};
+    my array @k = keys(%{$d});
+    $self->{"iter"} = \@k;
+    $self->{"idx"} = 0;
+    if (size(@k) == 0) { return undef; }
+    $self->{"idx"} = 1;
+    return $k[0];
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my scalar $it = $self->{"iter"};
+    my int $idx = $self->{"idx"};
+    if ($idx >= size($it)) { return undef; }
+    $self->{"idx"} = $idx + 1;
+    return $it->[$idx];
+}
+
+package R15LkTieArray;
+func TIEARRAY(str $cls, scalar $init) scalar { return bless({"a" => $init}, $cls); }
+func FETCHSIZE(scalar $self) int { return size($self->{"a"}); }
+func FETCH(scalar $self, int $i) scalar { return $self->{"a"}->[$i]; }
+
+package main;
+
+our array @g_lk_arr = ();
+our hash %g_lk_hash = ();
+
+func r15_lk_variadic(str $tag, scalar ...@rest) int { return size(@rest); }
+
+func r15_lk_goto(int $skip) int {
+    my int $n = 0;
+    try {
+        if ($skip) { goto LK_SKIP; }
+    LK_LOOP:
+        my ($a, $b) = ("s" . $n, "t" . $n);
+        our array @g_lk_arr = ($a, $b);
+        our hash %g_lk_hash = ("x" => $a . $b);
+        $n = $n + 1;
+        if ($n < 2) { goto LK_LOOP; }
+    LK_SKIP:
+        return $n;
+    } catch ($e) {
+        return -1;
+    }
+}
+
+func main() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($dbh, "CREATE TABLE lkt (a, b)");
+
+    my int $i = 0;
+    while ($i < 6) {
+        # RT1..RT7, RT10
+        my str $trs = core::pack("CC", 255, 255) . "_" . $i;
+        $trs =~ tr/a//cs;
+
+        my str $u8 = "café";
+        utf8::decode($u8);
+        my scalar $ov = R15LkOv::new(1.5 + $i, "p\x00q_" . $i);
+        my scalar $ov_u8 = R15LkOv::new(2.0, $u8);
+        my str $cat = "" . $ov . $ov_u8;
+        my int $ov_sum = (0 + $ov) + ($ov < $ov_u8);
+
+        my str $rx = "hello world " . $i;
+        $rx =~ s/w.*/a\x00b/g;
+        my str $rx2 = regex_replace_all("a\x00b", "a\x00b", "x\x00y");
+
+        my scalar $ts = undef;
+        tie($ts, "R15LkTieScalar", $u8);
+        my int $ln = length($ts);
+        my str $sb = substr($ts, 2, 2);
+        my int $ix = index($ts, "é");
+        untie($ts);
+
+        my hash %th = ();
+        tie(%th, "R15LkTieHash");
+        $th{"a\x00b"} = "val_" . $i;
+        my array @sh = sort(%th);
+        my scalar $dv = delete($th{"a\x00b"});
+        untie(%th);
+
+        my array @ta = ();
+        tie(@ta, "R15LkTieArray", ["u_" . $i, "v_" . $i]);
+        my str $sp = sprintf("%s:%s", @ta);
+        untie(@ta);
+
+        my str $pk = core::pack("n/Z2", "ab") . core::pack("n/Z0", "");
+
+        # RT8 circular STRADA_REF caught cleanly
+        my scalar $c1 = undef;
+        my scalar $c2 = \$c1;
+        $c1 = \$c2;
+        try { my scalar $x = $c1->{"k"}; } catch ($ce) {}
+        $c1 = undef;
+        $c2 = undef;
+
+        # C3, C5, C6, C7, C8
+        r15_lk_goto(0);
+        r15_lk_goto(1);
+        my hash %nh = ();
+        $nh{"a"}{"b"}++;
+        my array @na = ();
+        $na[0][1]--;
+        my int $vc = r15_lk_variadic("k", reverse("abc"));
+
+        try {
+            my scalar $fo = R15LkFreeDtor::new(1);
+            core::free(\$fo);
+        } catch ($fe) {}
+
+        my hash %hc = ("k" => ("v_" . $i));
+        my scalar $cm = R15LkCseMut::new(\%hc, "m_" . $i);
+        try {
+            if ($hc{"k"} && (1 / 0) && $hc{"k"}) { say("never"); }
+        } catch ($e8) {}
+        if ($hc{"k"} && $cm == 1 && $hc{"k"} eq ("m_" . $i)) { }
+
+        # L1, L2 JSON overload + canonical/non-canonical mutation & throw
+        my scalar $f2 = R15LkFused2::new("x", $i, "y", $i + 1);
+        my scalar $ao = bless(["z_" . $i], "R15LkOv");
+        my str $j1 = JSON::encode({"f" => $f2, "a" => $ao});
+
+        my hash %jm1 = ("a" => R15LkJsonMut::new(\%jm1, 1), "z" => $i);
+        my str $js1 = JSON::encode_opts(\%jm1, {"canonical" => 1});
+        my hash %jm2 = ("a" => R15LkJsonMut::new(\%jm2, 2), "z" => $i);
+        my str $js2 = JSON::encode_opts(\%jm2, {"canonical" => 1});
+        my hash %jm3 = ("a" => R15LkJsonMut::new(\%jm3, 3), "z" => $i);
+        try { my str $js3 = JSON::encode_opts(\%jm3, {"canonical" => 1}); } catch ($je) {}
+
+        # L4 DBI tied scalar
+        my scalar $dts1 = undef;
+        tie($dts1, "R15LkTieScalar", $i);
+        my scalar $dts2 = undef;
+        tie($dts2, "R15LkTieScalar", undef);
+        DBI::exec($dbh, "INSERT INTO lkt VALUES (?, ?)", [$dts1, $dts2]);
+        untie($dts1);
+        untie($dts2);
+
+        $i = $i + 1;
+    }
+
+    @g_lk_arr = ();
+    %g_lk_hash = ();
+    DBI::disconnect($dbh);
+    say("AUDIT_R15_LEAKS_OK");
+    return 0;
+}

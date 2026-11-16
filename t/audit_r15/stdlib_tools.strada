@@ -1,0 +1,185 @@
+use lib "lib";
+use JSON;
+use DBI;
+use ssl;
+
+package R15Point2;
+has ro int $x = 0;
+has ro int $y = 0;
+use overload '""' => "to_s";
+func to_s(scalar $self) str {
+    return "Point2(" . $self->x() . "," . $self->y() . ")";
+}
+
+package R15ArrOv;
+use overload '""' => "to_s";
+func new(str $label) scalar {
+    my scalar $a = [$label, 123];
+    return bless($a, "R15ArrOv");
+}
+func to_s(scalar $self) str {
+    return "Arr<" . $self->[0] . ">";
+}
+
+package R15JsonMut;
+use overload '""' => "to_s";
+func new(scalar $h, int $mode) scalar {
+    return bless({"h" => $h, "mode" => $mode}, "R15JsonMut");
+}
+func to_s(scalar $self) str {
+    my scalar $h = $self->{"h"};
+    my int $m = $self->{"mode"};
+    if ($m == 1) {
+        delete($h->{"z"});
+    } elsif ($m == 2) {
+        my int $k = 0;
+        while ($k < 32) {
+            $h->{"g_" . $k} = $k;
+            $k = $k + 1;
+        }
+    } elsif ($m == 3) {
+        die("r15_json_abort");
+    }
+    return "mut_ok";
+}
+
+package R15DbiSeqTie;
+func TIESCALAR(str $cls, scalar $st) scalar { return bless({"st" => $st}, $cls); }
+func FETCH(scalar $self) scalar {
+    my int $n = $self->{"st"}->{"calls"} + 1;
+    $self->{"st"}->{"calls"} = $n;
+    my scalar $vals = $self->{"st"}->{"vals"};
+    return $vals->[$n - 1];
+}
+
+package main;
+
+func check(int $ok, str $msg) void {
+    if (!$ok) {
+        die("FAIL: " . $msg);
+    }
+}
+
+func main(int $argc, array @argv) int {
+    my str $cert = $argc > 1 ? $argv[1] : "";
+    my str $key = $argc > 2 ? $argv[2] : "";
+    my int $port = $argc > 3 ? core::atoi($argv[3]) : 0;
+
+    # R15-L1: directly-blessed STRADA_HASH (fused 2-attr constructor) & STRADA_ARRAY & STRADA_REF honor "" overload in JSON::encode
+    my scalar $pt = R15Point2::new("x", 3, "y", 4);
+    my scalar $av = R15ArrOv::new("hi");
+    my scalar $pt_ref = \$pt;
+    my str $jp = JSON::encode($pt);
+    my str $ja = JSON::encode($av);
+    my str $jopts = JSON::encode_opts({"p" => $pt, "a" => $av, "r" => $pt_ref}, {"canonical" => 1});
+    check($jp eq "\"Point2(3,4)\"", "R15-L1 JSON::encode fused 2-attr overload got: " . $jp);
+    check($ja eq "\"Arr<hi>\"", "R15-L1 JSON::encode blessed array overload got: " . $ja);
+    check($jopts eq "{\"a\":\"Arr<hi>\",\"p\":\"Point2(3,4)\",\"r\":\"Point2(3,4)\"}",
+          "R15-L1 JSON::encode_opts nested got: " . $jopts);
+
+    # R15-L2: JSON::encode_opts canonical mutation (delete, grow, throw) + non-canonical mutation
+    my hash %hm1 = ();
+    $hm1{"a"} = R15JsonMut::new(\%hm1, 1);
+    $hm1{"z"} = 99;
+    my str $jm1 = JSON::encode_opts(\%hm1, {"canonical" => 1});
+    my scalar $djm1 = JSON::decode($jm1);
+    check($djm1->{"a"} eq "mut_ok" && $djm1->{"z"} == 99, "R15-L2 canonical delete safe: " . $jm1);
+
+    my hash %hm2 = ();
+    $hm2{"a"} = R15JsonMut::new(\%hm2, 2);
+    $hm2{"z"} = 77;
+    my str $jm2 = JSON::encode_opts(\%hm2, {"canonical" => 1});
+    my scalar $djm2 = JSON::decode($jm2);
+    check($djm2->{"a"} eq "mut_ok" && $djm2->{"z"} == 77, "R15-L2 canonical grow safe");
+
+    my hash %hm3 = ();
+    $hm3{"a"} = R15JsonMut::new(\%hm3, 3);
+    $hm3{"z"} = 55;
+    my int $jthrow = 0;
+    try { my str $bad = JSON::encode_opts(\%hm3, {"canonical" => 1}); } catch ($je) { $jthrow = ($je =~ /r15_json_abort/) ? 1 : 0; }
+    check($jthrow == 1, "R15-L2 canonical exception caught cleanly");
+
+    my hash %hm4 = ();
+    $hm4{"a"} = R15JsonMut::new(\%hm4, 2);
+    $hm4{"z"} = 11;
+    my str $jm4 = JSON::encode(\%hm4);
+    check($jm4 =~ /"a":"mut_ok"/, "R15-L2 non-canonical grow safe: " . $jm4);
+
+    # R15-L4: DBI single FETCH & SQLite NULL / INTEGER / REAL binding for tied scalars
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($dbh, "CREATE TABLE r15t (id INTEGER, v)");
+    my scalar $st1 = {"calls" => 0, "vals" => [42, undef, 3.25]};
+    my scalar $ts1 = undef;
+    tie($ts1, "R15DbiSeqTie", $st1);
+    my array @p1 = ();
+    push(@p1, $ts1);
+    DBI::exec($dbh, "INSERT INTO r15t VALUES (1, ?)", \@p1);
+    check($st1->{"calls"} == 1, "R15-L4 DBI::exec calls FETCH once (int), got " . $st1->{"calls"});
+
+    my array @p2 = ();
+    push(@p2, $ts1);
+    DBI::exec($dbh, "INSERT INTO r15t VALUES (2, ?)", \@p2);
+    check($st1->{"calls"} == 2, "R15-L4 DBI::exec calls FETCH once (undef->NULL), got " . $st1->{"calls"});
+
+    my array @p3 = ();
+    push(@p3, $ts1);
+    DBI::exec($dbh, "INSERT INTO r15t VALUES (3, ?)", \@p3);
+    check($st1->{"calls"} == 3, "R15-L4 DBI::exec calls FETCH once (real), got " . $st1->{"calls"});
+
+    my scalar $q = DBI::prepare($dbh, "SELECT id, v IS NULL, typeof(v), v FROM r15t ORDER BY id");
+    DBI::execute($q, []);
+    my scalar $r1 = DBI::fetchrow_array($q);
+    my scalar $r2 = DBI::fetchrow_array($q);
+    my scalar $r3 = DBI::fetchrow_array($q);
+    check($r1->[2] eq "integer" && $r1->[3] == 42, "R15-L4 SQLite integer binding");
+    check($r2->[1] == 1 && $r2->[2] eq "null", "R15-L4 SQLite NULL binding");
+    check($r3->[2] eq "real", "R15-L4 SQLite real binding");
+    untie($ts1);
+    DBI::finish($q);
+    DBI::disconnect($dbh);
+
+    # R15-L5: ssl::server invalid port validation + 64-bit max_len in ssl::read/readline/read_binary/try_read
+    if (length($cert) > 0 && (-f $cert) && $port > 0) {
+        check(ssl::server(-1, $cert, $key) == 0, "R15-L5 ssl::server(-1) rejected");
+        check(ssl::server(65536, $cert, $key) == 0, "R15-L5 ssl::server(65536) rejected");
+        check(ssl::server(65536 + $port, $cert, $key) == 0, "R15-L5 ssl::server(65536+port) rejected");
+
+        my int $srv = ssl::server($port, $cert, $key);
+        check($srv != 0, "R15-L5 ssl::server valid port bound");
+        if ($srv != 0) {
+            my int $pid = core::fork();
+            if ($pid == 0) {
+                core::usleep(30000);
+                my int $c = ssl::connect_insecure("127.0.0.1", $port);
+                if ($c != 0) {
+                    ssl::write($c, "hello_ssl_64_line1\n");
+                    ssl::write($c, "hello_ssl_64_read2");
+                    ssl::write($c, "hello_ssl_64_bin\x003");
+                    ssl::write($c, "hello_ssl_64_try4");
+                    core::usleep(80000);
+                    ssl::close($c);
+                }
+                core::exit(0);
+            }
+            my int $cli = ssl::accept($srv);
+            check($cli != 0, "R15-L5 ssl::accept");
+            if ($cli != 0) {
+                my str $l1 = ssl::readline($cli, 4294967301); # (1<<32)+5
+                check($l1 eq "hello_ssl_64_line1\n", "R15-L5 ssl::readline 2^32+5 got: " . $l1);
+                my str $l2 = ssl::read($cli, 2147483648); # 1<<31
+                check($l2 eq "hello_ssl_64_read2", "R15-L5 ssl::read 2^31 got: " . $l2);
+                my str $l3 = ssl::read_binary($cli, 2147483648);
+                check(core::byte_length($l3) == 18 && $l3 eq "hello_ssl_64_bin\x003", "R15-L5 ssl::read_binary 2^31");
+                core::usleep(30000);
+                my str $l4 = ssl::try_read($cli, 2147483648);
+                check($l4 eq "hello_ssl_64_try4", "R15-L5 ssl::try_read 2^31 got: " . $l4);
+                ssl::close($cli);
+            }
+            ssl::close($srv);
+            core::waitpid($pid, 0);
+        }
+    }
+
+    say("AUDIT_R15_STDLIB_TOOLS_OK");
+    return 0;
+}

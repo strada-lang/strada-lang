@@ -1571,23 +1571,25 @@ static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
     return dbi_value_bytes_utf8(val, len, NULL);
 }
 
-static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
-    if (!sth || !sth->dbh || !val) return;
-
-    int is_tied = (!STRADA_IS_TAGGED_INT(val) && val->meta && val->meta->is_tied);
+static void dbi_bind_value_resolved(DbiStatement *sth, int idx, StradaValue *val) {
+    if (!sth || !sth->dbh) return;
+    if (!val) {
+        dbi_bind_null(sth, idx);
+        return;
+    }
 
 #ifdef HAVE_SQLITE3
     if (sth->dbh->driver == DBI_DRIVER_SQLITE) {
         if (!sth->stmt) return;
-        if (!is_tied && (STRADA_IS_TAGGED_INT(val) || val->type == STRADA_INT)) {
+        if (STRADA_IS_TAGGED_INT(val) || val->type == STRADA_INT) {
             sqlite3_bind_int64((sqlite3_stmt*)sth->stmt, idx, strada_to_int(val));
             return;
         }
-        if (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_NUM) {
+        if (val->type == STRADA_NUM) {
             sqlite3_bind_double((sqlite3_stmt*)sth->stmt, idx, strada_to_num(val));
             return;
         }
-        if (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF) {
+        if (val->type == STRADA_UNDEF) {
             sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
             return;
         }
@@ -1609,7 +1611,7 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
 
     /* The value's bytes (binary-safe) - MUST be freed! */
     unsigned long str_len = 0;
-    char *str = (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF) ? NULL : dbi_value_bytes(val, &str_len);
+    char *str = (!STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF) ? NULL : dbi_value_bytes(val, &str_len);
 
     switch (sth->dbh->driver) {
 #ifdef HAVE_MYSQL
@@ -1678,6 +1680,24 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
     if (str) {
         free(str);
     }
+}
+
+static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
+    if (!sth || !sth->dbh) return;
+    if (!val) {
+        dbi_bind_null(sth, idx);
+        return;
+    }
+    StradaValue *fetched = NULL;
+    if (!STRADA_IS_TAGGED_INT(val) && val->meta && val->meta->is_tied && val->meta->tied_obj
+        && val->type != STRADA_ARRAY && val->type != STRADA_HASH) {
+        fetched = strada_tied_scalar_fetch(val);
+        val = fetched ? fetched : strada_new_undef();
+        if (!fetched) fetched = val;
+        strada_cleanup_push(fetched);
+    }
+    dbi_bind_value_resolved(sth, idx, val);
+    if (fetched) strada_cleanup_pop_decref(fetched);
 }
 
 /* Step to next row */
@@ -2506,19 +2526,10 @@ func _bind_params(int $sth_ptr, scalar $params) void {
         my scalar $val = $params->[$i];
         my int $idx = $i + 1;
 
-        if (!defined($val)) {
-            __C__ {
-                DbiStatement *sth = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
-                int index = (int)strada_to_int(idx);
-                dbi_bind_null(sth, index);
-            }
-        } else {
-            # Pass the StradaValue directly to C - it handles conversion internally
-            __C__ {
-                DbiStatement *sth = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
-                int index = (int)strada_to_int(idx);
-                dbi_bind_value(sth, index, val);
-            }
+        __C__ {
+            DbiStatement *sth = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+            int index = (int)strada_to_int(idx);
+            dbi_bind_value(sth, index, val);
         }
         $i = $i + 1;
     }

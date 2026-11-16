@@ -172,14 +172,14 @@ This installs `stradac`, `strada` (plus its `strada-driver` binary) and the tool
 | Target | Description |
 |--------|-------------|
 | `./configure` | Detect system dependencies |
-| `make` | Build the self-hosting compiler, the `strada` driver, tools and libraries. **Does not** build `strada-interp` (tree-walking interpreter / bytecode VM) — run `make interpreter` explicitly if you need it. |
+| `make` | Build the self-hosting compiler, the `strada` driver, tools and libraries. **Does not** build `strada-interp` (bytecode VM interpreter) — run `make interpreter` explicitly if you need it. |
 | `make quick` | Fast rebuild of `./stradac` from the existing `./stradac` (skips the bootstrap chain; for compiler development) |
 | `make libs` | Build all standard libraries as **module-only `.o`** files (DBI, crypt, ssl, readline, Eval). Programs that `use Foo;` auto-detect the sibling `.o`. No `.so` is built by default. |
 | `make lib-dbi` | Build DBI as `.o` with detected database drivers (`link_lib` propagates `-lmysqlclient`/`-lsqlite3`/`-lpq` to the final link). |
 | `make lib-crypt` | Build crypt library as `.o`. |
 | `make lib-ssl` | Build SSL library as `.o`. |
 | `make lib-readline` | Build readline library as `.o`. |
-| `make interpreter` | Build the tree-walking interpreter / bytecode VM (`strada-interp`). Opt-in — `strada --repl` and `strada --script` go through `strada-jit` instead by default. |
+| `make interpreter` | Build the bytecode VM interpreter (`strada-interp`). Opt-in — `strada --repl` and `strada --script` go through `strada-jit` instead by default. |
 | `make tools` | Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, strada-jit, etc.) |
 | `make run PROG=name` | Compile and run `examples/name.strada` |
 | `make test` | Run runtime tests |
@@ -264,7 +264,7 @@ strada/
 ├── examples/            # Example programs
 ├── lib/                 # Standard library modules
 │   └── Strada/
-│       ├── Interpreter.strada  # Interpreter library (tree-walk backend)
+│       ├── Interpreter.strada  # Interpreter / Eval library (bytecode VM session)
 │       └── JIT.strada          # JIT eval library
 └── docs/                # Documentation
 ```
