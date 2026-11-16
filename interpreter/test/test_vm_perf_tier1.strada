@@ -1,0 +1,144 @@
+# VM Tier 1 Performance Optimization Parity & Correctness Tests
+
+package Tier1A;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func get(scalar $self) int { return $self->{"v"}; }
+
+package Tier1B;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func get(scalar $self) int { return $self->{"v"} * 10; }
+
+package main;
+
+func test_nanbox_floats() str {
+    my num $pz = 0.0;
+    my num $nz = -0.0;
+    my num $pinf = 1e308 * 10.0;
+    my num $ninf = -1e308 * 10.0;
+    my num $nan = $pinf - $pinf;
+    my str $eq_nz = ($nz == $pz) ? "T" : "F";
+    my str $eq_nan = ($nan == $nan) ? "T" : "F";
+    my str $ne_nan = ($nan != $nan) ? "T" : "F";
+    my str $inf_gt = ($pinf > 1e300 && $ninf < -1e300) ? "T" : "F";
+    return sprintf("%.1f,%.1f,%s,%s,%s,%s,%s,%s,%s",
+        $pz, $nz, "" . $pinf, "" . $ninf, "" . $nan,
+        $eq_nz, $eq_nan, $ne_nan, $inf_gt);
+}
+
+func test_50bit_int_edges() str {
+    my int $max50 = (1 << 49) - 1;       # 562949953421311
+    my int $min50 = 0 - (1 << 49);       # -562949953421312
+    my int $over = $max50 + 1;           # boxes to VM_OBJ_INT64
+    my int $under = $min50 - 1;          # boxes to VM_OBJ_INT64
+    my int $back_hi = $over - 1;         # unboxes back to immediate
+    my int $back_lo = $under + 1;        # unboxes back to immediate
+    my int $neg = -$min50;               # crosses boundary
+    my int $inc = $max50;
+    $inc++;
+    my int $dec = $min50;
+    $dec--;
+    my str $cmp = (($over > $max50) && ($under < $min50) && ($back_hi == $max50) && ($back_lo == $min50)) ? "OK" : "BAD";
+    return $over . ":" . $under . ":" . $back_hi . ":" . $back_lo . ":" . $neg . ":" . $inc . ":" . $dec . ":" . $cmp;
+}
+
+func test_strbuf_cow() str {
+    my str $a = "";
+    for (my int $i = 0; $i < 12; $i++) {
+        $a .= "ab";
+    }
+    my int $len_before = length($a);
+    my str $b = $a;       # marks VMStrBuf shared
+    $a .= "X";            # must detach cleanly without mutating $b
+    $b .= "Y";            # must detach cleanly without mutating $a
+    my str $c = $b;
+    $c = $c . "Z";        # OP_APPEND_CONST path on shared buffer
+    my str $sfx = "!";
+    $c = $c . $sfx;       # OP_APPEND_LOCAL path
+    return length($a) . ":" . length($b) . ":" . length($c) . ":" . $len_before . ":"
+         . substr($a, 22, 3) . ":" . substr($b, 22, 3) . ":" . substr($c, 22, 5);
+}
+
+our int $g_sort_calls = 0;
+
+func cmp_or_abort(scalar $x, scalar $y) int {
+    $g_sort_calls++;
+    if ($g_sort_calls == 50) { throw("sort_abort"); }
+    return $x <=> $y;
+}
+
+func test_mergesort_stable_and_exc() str {
+    # >100 elements to exercise merge passes + run insertion sort
+    my array @nums = ();
+    for (my int $i = 120; $i >= 1; $i--) {
+        push(@nums, $i);
+    }
+    my array @sorted = sort { $a <=> $b } @nums;
+    my str $ends = $sorted[0] . ":" . $sorted[59] . ":" . $sorted[119] . ":" . size(@sorted);
+
+    # Stability: equal keys preserve input sequence (tag 0..39 inside key 0..9)
+    my array @items = ();
+    for (my int $i = 0; $i < 40; $i++) {
+        push(@items, {"k" => $i % 4, "seq" => $i});
+    }
+    my array @st = sort { $a->{"k"} <=> $b->{"k"} } @items;
+    my int $stable = 1;
+    for (my int $i = 1; $i < size(@st); $i++) {
+        my int $k0 = $st[$i - 1]->{"k"};
+        my int $k1 = $st[$i]->{"k"};
+        if ($k0 > $k1) { $stable = 0; }
+        if ($k0 == $k1 && $st[$i - 1]->{"seq"} >= $st[$i]->{"seq"}) { $stable = 0; }
+    }
+
+    # Exception safety mid-sort across >64 elements
+    my str $caught = "";
+    try {
+        $g_sort_calls = 0;
+        my array @bad = sort { cmp_or_abort($a, $b) } @nums;
+    } catch ($e) {
+        $caught = $e;
+    }
+    return $ends . ":ST=" . $stable . ":EX=" . $caught;
+}
+
+func test_superinstructions_and_ic() str {
+    my int $sum = 0;
+    my int $limit = 50;
+    for (my int $i = 0; $i < 25; $i++) {
+        $sum += ($i + 3);
+        $sum += ($limit - 5);
+    }
+    for (my int $j = 0; $j <= 10; $j++) {
+        $sum += $j;
+    }
+    for (my int $k = 0; $k < $limit; $k++) {
+        $sum += 1;
+    }
+    my int $ci = int(19.9);
+    my num $cn = cast_num(7) + 0.5;
+
+    # Monomorphic IC hit + class switch
+    my array @objs = ();
+    for (my int $m = 0; $m < 10; $m++) {
+        push(@objs, ($m < 5) ? Tier1A::new("Tier1A", $m + 1) : Tier1B::new("Tier1B", $m + 1));
+    }
+    my int $msum = 0;
+    for (my int $m = 0; $m < 10; $m++) {
+        $msum += $objs[$m]->get();
+    }
+
+    # Pre-hashed string constants in hash lookup/set
+    my hash %h = ();
+    for (my int $r = 0; $r < 5; $r++) {
+        $h{"alpha"} = ($h{"alpha"} // 0) + $r;
+    }
+    return $sum . ":" . $ci . ":" . sprintf("%.1f", $cn) . ":" . $msum . ":" . $h{"alpha"};
+}
+
+func main() int {
+    say("FLOAT=" . test_nanbox_floats());
+    say("INT50=" . test_50bit_int_edges());
+    say("COW=" . test_strbuf_cow());
+    say("SORT=" . test_mergesort_stable_and_exc());
+    say("SUPER=" . test_superinstructions_and_ic());
+    return 0;
+}

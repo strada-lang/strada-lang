@@ -235,6 +235,17 @@ typedef enum {
     OP_MAP_PUSH,        /* pop src, pop dst_array — append elements if array (else push src incl. undef) */
     OP_SET_CALL_CTX,    /* u8 ctx (0=scalar, 1=array, 2=hash) — set pending call context */
     OP_INIT_GLOBAL,     /* u16 name_str_idx — store to global registry only if not already set */
+    OP_PUSH_I8,         /* push immediate sign-extended int8 (1 byte) */
+    OP_PUSH_I32,        /* push immediate sign-extended int32 (4 bytes) */
+    OP_CAST_INT,        /* coerce top of stack to int in-place */
+    OP_CAST_NUM,        /* coerce top of stack to num in-place */
+    OP_SUB_LOCAL_I32,   /* u16 local_slot, i32 imm — push locals[slot] - imm */
+    OP_ADD_LOCAL_I32,   /* u16 local_slot, i32 imm — push locals[slot] + imm */
+    OP_ADD_LOCALS,      /* u16 slot_a, u16 slot_b — push locals[a] + locals[b] */
+    OP_ADD_TO_LOCAL,    /* u16 dst_slot, u16 src_slot, u8 coerce — locals[dst] += locals[src] */
+    OP_LT_LOCAL_I32_JMP_F,   /* u16 slot, i32 imm, u16 off — jump if !(locals[slot] < imm) */
+    OP_LE_LOCAL_I32_JMP_F,   /* u16 slot, i32 imm, u16 off — jump if !(locals[slot] <= imm) */
+    OP_LT_LOCAL_LOCAL_JMP_F, /* u16 slot_a, u16 slot_b, u16 off — jump if !(locals[a] < locals[b]) */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -587,10 +598,10 @@ enum VMObjType {
     VM_OBJ_FILEHANDLE = 10,
     VM_OBJ_CELL = 12,     /* shared mutable cell for closure capture-by-reference */
     VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
-    VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
+    /* 16 unused: doubles are unboxed NaN-tagged inside VMValue */
     VM_OBJ_SREF = 18,     /* live scalar reference */
     VM_OBJ_TIED_SCALAR = 20, /* TIESCALAR wrapper holding tied object */
-    VM_OBJ_INT64 = 22,    /* boxed 64-bit integer outside 63-bit tagged range */
+    VM_OBJ_INT64 = 22,    /* boxed 64-bit integer outside 50-bit inline range */
     VM_OBJ_WEAKREF = 24,  /* weak reference wrapper; target cleared on GC when unmarked */
     VM_OBJ_UINT64 = 26,   /* boxed unsigned 64-bit integer (> INT64_MAX) */
 };
@@ -616,16 +627,17 @@ struct VMStrBuf {
     char *data;
     size_t len;
     size_t cap;
+    uint8_t shared;
 };
 
 /* VMCell defined after VMValue */
 
 /*
- * Tagged pointer VMValue — 8 bytes.
- *
- * Bit 0 = 1: tagged integer (value in bits 1-63)
- * Bit 0 = 0, value = 0: undef
- * Bit 0 = 0, value != 0: heap pointer
+ * NaN-boxed 64-bit VMValue (offset-double representation):
+ *   v == 0                                  : undef (preserves calloc/memset 0)
+ *   0x0000000000000001 .. 0x0003FFFFFFFFFFFF : heap pointer (50-bit VA, zero-cost cast)
+ *   0x0004000000000000 .. 0xFFF4000000000000 : IEEE-754 double biased by +VM_DOUBLE_BIAS
+ *   0xFFFC000000000000 .. 0xFFFFFFFFFFFFFFFF : inline signed 50-bit integer [-2^49, 2^49 - 1]
  */
 typedef uint64_t VMValue;
 
@@ -636,19 +648,35 @@ typedef struct {
     char data[];
 } VMString;
 
-/* Tagged value operations */
-#define VM_IS_INT(v)    ((v) & 1)
-#define VM_IS_UNDEF(v)  ((v) == 0)
-#define VM_IS_PTR(v)    (((v) != 0) && !((v) & 1))
+/* Pre-hashed immortal constant string stored inside VMChunk->str_const_vals */
+typedef struct {
+    uint32_t hash;
+    uint32_t _pad;
+    VMString str;
+} VMConstString;
 
-#define VM_INT_MAX (INT64_MAX >> 1)
-#define VM_INT_MIN (-(INT64_MAX >> 1) - 1)
+/* Tagged / NaN-boxed value operations */
+#define VM_DOUBLE_BIAS   0x0004000000000000ULL
+#define VM_TAG_INT_BASE  0xFFFC000000000000ULL
+#define VM_IS_UNDEF(v)   ((v) == 0)
+#define VM_IS_INT(v)     ((uint64_t)(v) >= VM_TAG_INT_BASE)
+#define VM_IS_PTR(v)     (((uint64_t)(v) - 1ULL) < (VM_DOUBLE_BIAS - 1ULL))
+#define VM_IS_FLOAT(v)   (((uint64_t)(v) - VM_DOUBLE_BIAS) < (VM_TAG_INT_BASE - VM_DOUBLE_BIAS))
+#define VM_BOTH_INT(a,b) (((uint64_t)(a) & (uint64_t)(b)) >= VM_TAG_INT_BASE)
+
+#define VM_INT_MAX ((1LL << 49) - 1)
+#define VM_INT_MIN (-(1LL << 49))
 VMValue vm_box_int64(int64_t v);
 
-static inline int64_t VM_INT_VAL(VMValue v) { return (int64_t)v >> 1; }
+static inline int64_t VM_INT_VAL(VMValue v) {
+    return (int64_t)((uint64_t)v << 14) >> 14;
+}
+static inline VMValue VM_MAKE_INT_FAST(int64_t i) {
+    return ((uint64_t)i) | VM_TAG_INT_BASE;
+}
 static inline VMValue VM_MAKE_INT(int64_t i) {
-    if (i >= VM_INT_MIN && i <= VM_INT_MAX) {
-        return ((uint64_t)i << 1) | 1ULL;
+    if (__builtin_expect(((uint64_t)i + (1ULL << 49)) < (1ULL << 50), 1)) {
+        return ((uint64_t)i) | VM_TAG_INT_BASE;
     }
     return vm_box_int64(i);
 }
@@ -733,16 +761,19 @@ static inline VMValue VM_MAKE_STR_N(const char *s, size_t len) {
     return VM_MAKE_PTR(vs);
 }
 
-typedef struct {
-    VMObjHeader hdr;
-    double val;
-} VMFloat;
-static inline VMFloat *VM_AS_FLOAT(VMValue v) { return (VMFloat*)VM_TO_PTR(v); }
 static inline VMValue VM_MAKE_FLOAT(double d) {
-    VMFloat *vf = (VMFloat*)malloc(sizeof(VMFloat));
-    vm_gc_init_hdr(&vf->hdr, VM_OBJ_FLOAT);
-    vf->val = d;
-    return VM_MAKE_PTR(vf);
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    if (__builtin_expect((bits << 1) > 0xFFE0000000000000ULL, 0)) {
+        bits = 0x7FF8000000000000ULL;
+    }
+    return bits + VM_DOUBLE_BIAS;
+}
+static inline double VM_FLOAT_VAL(VMValue v) {
+    uint64_t bits = (uint64_t)v - VM_DOUBLE_BIAS;
+    double d;
+    memcpy(&d, &bits, sizeof(d));
+    return d;
 }
 
 #define vm_int(i)  VM_MAKE_INT(i)
@@ -820,6 +851,7 @@ typedef struct {
     size_t int_const_count;
     char **str_consts;
     size_t *str_const_lens;
+    VMValue *str_const_vals;
     size_t str_const_count;
     int local_count;
     int fixed_param_count;
@@ -999,6 +1031,12 @@ typedef struct VM {
         char *method;            /* owned copy */
         int func_idx;
     } method_cache[32];
+    /* Per-PC monomorphic inline cache for static OP_METHOD_CALL / OP_FIELD_ACCESS */
+    struct {
+        uint8_t *ip;
+        char *class_name;
+        int func_idx;
+    } method_ic[256];
     /* Mark-sweep GC state */
     VMObjHeader *gc_objects;
     size_t gc_count;

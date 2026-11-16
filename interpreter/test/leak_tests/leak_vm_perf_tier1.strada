@@ -1,0 +1,67 @@
+# Valgrind leak test for VM Tier 1 performance optimizations
+
+package LeakT1A;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func get(scalar $self) int { return $self->{"v"}; }
+
+package LeakT1B;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, $cls); }
+func get(scalar $self) int { return $self->{"v"} * 2; }
+
+package main;
+
+func main() int {
+    # 50-bit int overflow / underflow boxed VM_OBJ_INT64 GC cleanup
+    my int $m = (1 << 49) - 1;
+    my int $sum = 0;
+    for (my int $i = 0; $i < 200; $i++) {
+        my int $big = $m + $i + 1;
+        $sum += ($big - $m);
+    }
+    if ($sum != 20100) { return 1; }
+
+    # VMStrBuf COW aliasing + self-append loops
+    my str $a = "";
+    for (my int $i = 0; $i < 50; $i++) {
+        $a .= "xy";
+    }
+    my str $b = $a;
+    $a .= "1";
+    $b = $b . "2";
+    my str $s3 = "3";
+    $b = $b . $s3;
+    if (length($a) != 101 || length($b) != 102) { return 2; }
+
+    # Merge sort >100 items + comparator throwing exception
+    my array @arr = ();
+    for (my int $i = 150; $i >= 1; $i--) {
+        push(@arr, {"k" => $i, "s" => "val" . $i});
+    }
+    my array @ok = sort { $a->{"k"} <=> $b->{"k"} } @arr;
+    if ($ok[0]->{"k"} != 1 || $ok[149]->{"k"} != 150) { return 3; }
+
+    try {
+        my int $n = 0;
+        my array @fail = sort {
+            $n++;
+            if ($n == 40) { throw("boom"); }
+            return $b->{"k"} <=> $a->{"k"};
+        } @arr;
+    } catch ($e) {
+        if ($e ne "boom") { return 4; }
+    }
+
+    # Method IC transitions & pre-hashed hash keys
+    my array @objs = ();
+    for (my int $i = 0; $i < 20; $i++) {
+        push(@objs, ($i % 2 == 0) ? LeakT1A::new("LeakT1A", $i) : LeakT1B::new("LeakT1B", $i));
+    }
+    my hash %h = ();
+    for (my int $i = 0; $i < 20; $i++) {
+        $h{"total"} = ($h{"total"} // 0) + $objs[$i]->get();
+    }
+    if ($h{"total"} != 290) { return 5; }
+
+    say("LEAK_VM_PERF_TIER1_OK");
+    return 0;
+}

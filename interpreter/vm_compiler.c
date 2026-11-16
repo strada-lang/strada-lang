@@ -702,16 +702,63 @@ static int ctx_resolve_capture(CompCtx *ctx, const char *name, char sigil) {
     return -1;
 }
 
+static void emit_push_int(VMChunk *chunk, int64_t val) {
+    if (val >= INT8_MIN && val <= INT8_MAX) {
+        vm_chunk_emit(chunk, OP_PUSH_I8);
+        vm_chunk_emit(chunk, (uint8_t)(int8_t)val);
+    } else if (val >= INT32_MIN && val <= INT32_MAX) {
+        vm_chunk_emit(chunk, OP_PUSH_I32);
+        vm_chunk_emit_u32(chunk, (uint32_t)(int32_t)val);
+    } else {
+        vm_chunk_emit(chunk, OP_PUSH_INT);
+        vm_chunk_emit_i64(chunk, val);
+    }
+}
+
+static int find_local_var_slot(CompCtx *ctx, StradaValue *node) {
+    node = ast_deref(node);
+    if (!node || STRADA_IS_TAGGED_INT(node) || (int)ast_int(node, "type") != NI_VARIABLE) return -1;
+    const char *name = ast_str(node, "name");
+    const char *sigil = ast_str(node, "sigil");
+    char sc = (sigil && sigil[0]) ? sigil[0] : '$';
+    if (sc == '$' && name[0] >= '1' && name[0] <= '9' && name[1] == '\0') return -1;
+    return ctx_find_local_sigil(ctx, name, sc);
+}
+
+/* Return 1 if node always produces a tagged/boxed int, 2 if always num/double, else 0. */
+static int infer_expr_scalar_type(StradaValue *node) {
+    node = ast_deref(node);
+    if (!node || STRADA_IS_TAGGED_INT(node)) return 0;
+    int t = (int)ast_int(node, "type");
+    if (t == NI_INT_LITERAL) return 1;
+    if (t == NI_NUM_LITERAL) return 2;
+    if (t == NI_BINARY_OP) {
+        int op = ast_op_code(node);
+        if (op == OP_AST_DIV || op == OP_AST_POW) {
+            int lt = infer_expr_scalar_type(ast_get(node, "left"));
+            int rt = infer_expr_scalar_type(ast_get(node, "right"));
+            if (lt != 0 && rt != 0) return 2;
+            return 0;
+        }
+        if (op == OP_AST_BIT_AND || op == OP_AST_BIT_OR || op == OP_AST_BIT_XOR ||
+            op == OP_AST_BIT_SHL || op == OP_AST_BIT_SHR) return 1;
+        if (op == OP_AST_ADD || op == OP_AST_SUB || op == OP_AST_MUL || op == OP_AST_MOD) {
+            int lt = infer_expr_scalar_type(ast_get(node, "left"));
+            int rt = infer_expr_scalar_type(ast_get(node, "right"));
+            if (lt == 1 && rt == 1) return 1;
+            if (op != OP_AST_MOD && (lt == 1 || lt == 2) && (rt == 1 || rt == 2) && (lt == 2 || rt == 2)) return 2;
+            return 0;
+        }
+    }
+    return 0;
+}
+
 /* Coerce top-of-stack value to the declared scalar storage/return type (int or num). */
 static void emit_scalar_type_coerce(CompCtx *ctx, int var_type) {
     if (var_type == 1) {
-        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT);
-        vm_chunk_emit(ctx->chunk, 1);
+        vm_chunk_emit(ctx->chunk, OP_CAST_INT);
     } else if (var_type == 2) {
-        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_NUM);
-        vm_chunk_emit(ctx->chunk, 1);
+        vm_chunk_emit(ctx->chunk, OP_CAST_NUM);
     }
 }
 
@@ -1169,8 +1216,7 @@ static int is_concat_key(StradaValue *key_node, const char **prefix, StradaValue
 
 static void emit_default_scalar_init(CompCtx *ctx, int64_t var_type) {
     if (var_type == 1) {
-        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-        vm_chunk_emit_i64(ctx->chunk, 0);
+        emit_push_int(ctx->chunk, 0);
     } else if (var_type == 2) {
         vm_chunk_emit(ctx->chunk, OP_PUSH_FLOAT);
         vm_chunk_emit_f64(ctx->chunk, 0.0);
@@ -1914,8 +1960,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     switch (type) {
     case NI_INT_LITERAL: {
         int64_t val = ast_int(node, "value");
-        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-        vm_chunk_emit_i64(ctx->chunk, val);
+        emit_push_int(ctx->chunk, val);
         break;
     }
 
@@ -1986,8 +2031,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 } else {
                     int64_t eval = 0;
                     if (lookup_enum_for_ctx(ctx, name, &eval)) {
-                        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-                        vm_chunk_emit_i64(ctx->chunk, eval);
+                        emit_push_int(ctx->chunk, eval);
                     } else {
                         vm_report_undeclared_var(ctx, node, sigil, name);
                         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
@@ -2046,6 +2090,33 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         StradaValue *r_sq = is_num_cmp ? ast_get(rnode, "from_sq_str") : NULL;
         if (l_sq && (STRADA_IS_TAGGED_INT(l_sq) || l_sq->type != STRADA_STR)) l_sq = NULL;
         if (r_sq && (STRADA_IS_TAGGED_INT(r_sq) || r_sq->type != STRADA_STR)) r_sq = NULL;
+
+        if (!l_sq && !r_sq) {
+            if (op == OP_AST_SUB || op == OP_AST_ADD) {
+                int sa = find_local_var_slot(ctx, lnode);
+                if (sa >= 0) {
+                    StradaValue *rn = ast_deref(rnode);
+                    if (rn && !STRADA_IS_TAGGED_INT(rn) && (int)ast_int(rn, "type") == NI_INT_LITERAL) {
+                        int64_t imm = ast_int(rn, "value");
+                        if (imm >= INT32_MIN && imm <= INT32_MAX) {
+                            vm_chunk_emit(ctx->chunk, (op == OP_AST_SUB) ? OP_SUB_LOCAL_I32 : OP_ADD_LOCAL_I32);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sa);
+                            vm_chunk_emit_u32(ctx->chunk, (uint32_t)(int32_t)imm);
+                            break;
+                        }
+                    }
+                    if (op == OP_AST_ADD) {
+                        int sb = find_local_var_slot(ctx, rnode);
+                        if (sb >= 0) {
+                            vm_chunk_emit(ctx->chunk, OP_ADD_LOCALS);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sa);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sb);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         compile_expr(ctx, lnode);
         compile_expr(ctx, rnode);
@@ -3674,8 +3745,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "is_refto") == 0 && (argc == 1 || argc == 2)) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_IS_REFTO); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "dumper_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DUMPER_STR); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "nsort") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_NSORT); vm_chunk_emit(ctx->chunk, 1); break; }
-        if ((strcmp(name, "cast_int") == 0 || strcmp(name, "int") == 0) && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT); vm_chunk_emit(ctx->chunk, 1); break; }
-        if (strcmp(name, "cast_num") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_NUM); vm_chunk_emit(ctx->chunk, 1); break; }
+        if ((strcmp(name, "cast_int") == 0 || strcmp(name, "int") == 0) && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_CAST_INT); break; }
+        if (strcmp(name, "cast_num") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_CAST_NUM); break; }
         if (strcmp(name, "cast_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_STR); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "byte_index") == 0 && (argc == 2 || argc == 3)) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_BYTE_INDEX); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "substr_bytes") == 0 && (argc == 2 || argc == 3)) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SUBSTR_BYTES); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
@@ -4350,7 +4421,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 }
             }
 
-            emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
+            if (ctx->local_types[slot] != 0 &&
+                (strcmp(op, "=") != 0 || infer_expr_scalar_type(value) != ctx->local_types[slot])) {
+                emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
+            }
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
@@ -5313,31 +5387,84 @@ static void compile_sort_expr(CompCtx *ctx, StradaValue *node) {
 
 /* ===== Statement compilation ===== */
 
-static void compile_stmt(CompCtx *ctx, StradaValue *node) {
-    if (!node || STRADA_IS_TAGGED_INT(node)) return;
+static int is_pure_append_rhs(StradaValue *node) {
     node = ast_deref(node);
-    if (!node || STRADA_IS_TAGGED_INT(node)) return;
+    if (!node || STRADA_IS_TAGGED_INT(node)) return 0;
+    int t = (int)ast_int(node, "type");
+    return (t == NI_STR_LITERAL || t == NI_INT_LITERAL || t == NI_NUM_LITERAL ||
+            t == NI_UNDEF || t == NI_VARIABLE);
+}
 
-    int type = (int)ast_int(node, "type");
+static int is_self_concat_rhs(StradaValue *value, const char *vname, char vsigil, StradaValue **rhs_out) {
+    StradaValue *vn = ast_deref(value);
+    if (!vn || STRADA_IS_TAGGED_INT(vn)) return 0;
+    if ((int)ast_int(vn, "type") != NI_BINARY_OP || ast_op_code(vn) != OP_AST_CONCAT) return 0;
+    StradaValue *ln = ast_deref(ast_get(vn, "left"));
+    if (!ln || STRADA_IS_TAGGED_INT(ln) || (int)ast_int(ln, "type") != NI_VARIABLE) return 0;
+    const char *ln_name = ast_str(ln, "name");
+    const char *ln_sigil = ast_str(ln, "sigil");
+    char ls = (ln_sigil && ln_sigil[0]) ? ln_sigil[0] : '$';
+    if (ls != vsigil || strcmp(ln_name, vname) != 0) return 0;
+    StradaValue *rn = ast_deref(ast_get(vn, "right"));
+    if (!is_pure_append_rhs(rn)) return 0;
+    *rhs_out = rn;
+    return 1;
+}
 
-    switch (type) {
-    case NI_EXPR_STMT: {
-        StradaValue *expr = ast_get(node, "expr");
-        expr = ast_deref(expr);
-        if (expr && !STRADA_IS_TAGGED_INT(expr)) {
-            int etype = (int)ast_int(expr, "type");
-            if (etype == NI_TR || etype == NI_REGEX_SUBST) {
-                compile_stmt(ctx, expr);
-                break;
+static int is_self_unit_step(StradaValue *value, const char *vname, char vsigil, int *is_inc_out) {
+    StradaValue *vn = ast_deref(value);
+    if (!vn || STRADA_IS_TAGGED_INT(vn)) return 0;
+    if ((int)ast_int(vn, "type") != NI_BINARY_OP) return 0;
+    int op = ast_op_code(vn);
+    if (op != OP_AST_ADD && op != OP_AST_SUB) return 0;
+    StradaValue *ln = ast_deref(ast_get(vn, "left"));
+    StradaValue *rn = ast_deref(ast_get(vn, "right"));
+    if (!ln || STRADA_IS_TAGGED_INT(ln) || (int)ast_int(ln, "type") != NI_VARIABLE) return 0;
+    if (!rn || STRADA_IS_TAGGED_INT(rn) || (int)ast_int(rn, "type") != NI_INT_LITERAL) return 0;
+    if (ast_int(rn, "value") != 1) return 0;
+    const char *ln_name = ast_str(ln, "name");
+    const char *ln_sigil = ast_str(ln, "sigil");
+    char ls = (ln_sigil && ln_sigil[0]) ? ln_sigil[0] : '$';
+    if (ls != vsigil || strcmp(ln_name, vname) != 0) return 0;
+    *is_inc_out = (op == OP_AST_ADD);
+    return 1;
+}
+
+static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
+    expr = ast_deref(expr);
+    if (expr && !STRADA_IS_TAGGED_INT(expr)) {
+        int etype = (int)ast_int(expr, "type");
+        if (etype == NI_TR || etype == NI_REGEX_SUBST) {
+            compile_stmt(ctx, expr);
+            return;
+        }
+        if (etype == NI_INCREMENT) {
+            StradaValue *operand = ast_deref(ast_get(expr, "operand"));
+            if (operand && !STRADA_IS_TAGGED_INT(operand) && (int)ast_int(operand, "type") == NI_VARIABLE) {
+                const char *vname = ast_str(operand, "name");
+                const char *vsigil = ast_str(operand, "sigil");
+                char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
+                int slot = ctx_find_local_sigil(ctx, vname, sc);
+                if (slot >= 0) {
+                    int is_inc = (strcmp(ast_str(expr, "op"), "++") == 0);
+                    vm_chunk_emit(ctx->chunk, is_inc ? OP_INCR : OP_DECR);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                    return;
+                }
             }
-            if (etype == NI_ASSIGN && strcmp(ast_str(expr, "op"), ".=") == 0) {
-                StradaValue *t = ast_deref(ast_get(expr, "target"));
-                if (t && !STRADA_IS_TAGGED_INT(t) && (int)ast_int(t, "type") == NI_VARIABLE) {
-                    const char *vname = ast_str(t, "name");
-                    const char *vsigil = ast_str(t, "sigil");
-                    int slot = ctx_find_local_sigil(ctx, vname, vsigil[0]);
-                    if (slot >= 0) {
-                        StradaValue *val_node = ast_deref(ast_get(expr, "value"));
+        } else if (etype == NI_ASSIGN) {
+            StradaValue *t = ast_deref(ast_get(expr, "target"));
+            const char *op = ast_str(expr, "op");
+            if (t && !STRADA_IS_TAGGED_INT(t) && (int)ast_int(t, "type") == NI_VARIABLE &&
+                !is_shortcircuit_assign(op)) {
+                const char *vname = ast_str(t, "name");
+                const char *vsigil = ast_str(t, "sigil");
+                char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
+                int slot = ctx_find_local_sigil(ctx, vname, sc);
+                if (slot >= 0) {
+                    StradaValue *value = ast_get(expr, "value");
+                    if (strcmp(op, ".=") == 0) {
+                        StradaValue *val_node = ast_deref(value);
                         if (val_node && !STRADA_IS_TAGGED_INT(val_node) &&
                             (int)ast_int(val_node, "type") == NI_STR_LITERAL) {
                             size_t slen = 0;
@@ -5347,17 +5474,148 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                             vm_chunk_emit_u16(ctx->chunk, (uint16_t)si);
                             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
                         } else {
-                            compile_expr(ctx, ast_get(expr, "value"));
+                            compile_expr(ctx, value);
                             vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
                             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
                         }
-                        break;
+                        return;
+                    }
+                    StradaValue *append_rhs = NULL;
+                    if (strcmp(op, "=") == 0 && ctx->local_types[slot] == 0 && sc == '$' &&
+                        is_self_concat_rhs(value, vname, '$', &append_rhs)) {
+                        if ((int)ast_int(append_rhs, "type") == NI_STR_LITERAL) {
+                            size_t slen = 0;
+                            const char *sval = ast_str_len(append_rhs, "value", &slen);
+                            size_t si = vm_chunk_add_str_const_len(ctx->chunk, sval, slen);
+                            vm_chunk_emit(ctx->chunk, OP_APPEND_CONST);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)si);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        } else {
+                            compile_expr(ctx, append_rhs);
+                            vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        }
+                        return;
+                    }
+                    int is_inc = 0;
+                    if (strcmp(op, "=") == 0 && ctx->local_types[slot] == 1 && sc == '$' &&
+                        is_self_unit_step(value, vname, '$', &is_inc)) {
+                        vm_chunk_emit(ctx->chunk, is_inc ? OP_INCR : OP_DECR);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        return;
+                    }
+                    if (strcmp(op, "=") == 0) {
+                        StradaValue *vn = ast_deref(value);
+                        if (vn && !STRADA_IS_TAGGED_INT(vn) && (int)ast_int(vn, "type") == NI_BINARY_OP &&
+                            ast_op_code(vn) == OP_AST_ADD) {
+                            int lslot = find_local_var_slot(ctx, ast_get(vn, "left"));
+                            int rslot = find_local_var_slot(ctx, ast_get(vn, "right"));
+                            if (lslot == slot && rslot >= 0) {
+                                vm_chunk_emit(ctx->chunk, OP_ADD_TO_LOCAL);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)rslot);
+                                vm_chunk_emit(ctx->chunk, ctx->local_types[slot]);
+                                return;
+                            }
+                        }
+                    }
+                    int cop = compound_op_to_opcode(op);
+                    if (strcmp(op, "=") == 0) {
+                        compile_assign_var_rhs(ctx, sc, value);
+                    } else if (cop >= 0) {
+                        if (cop == OP_ADD && sc == '$') {
+                            int rslot = find_local_var_slot(ctx, value);
+                            if (rslot >= 0) {
+                                vm_chunk_emit(ctx->chunk, OP_ADD_TO_LOCAL);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)rslot);
+                                vm_chunk_emit(ctx->chunk, ctx->local_types[slot]);
+                                return;
+                            }
+                        }
+                        if ((cop == OP_ADD || cop == OP_SUB) && ctx->local_types[slot] == 1 && sc == '$') {
+                            StradaValue *rn = ast_deref(value);
+                            if (rn && !STRADA_IS_TAGGED_INT(rn) &&
+                                (int)ast_int(rn, "type") == NI_INT_LITERAL && ast_int(rn, "value") == 1) {
+                                vm_chunk_emit(ctx->chunk, (cop == OP_ADD) ? OP_INCR : OP_DECR);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                                return;
+                            }
+                        }
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        compile_expr(ctx, value);
+                        vm_chunk_emit(ctx->chunk, (uint8_t)cop);
+                    } else {
+                        compile_expr(ctx, value);
+                    }
+                    if (ctx->local_types[slot] != 0 &&
+                        (strcmp(op, "=") != 0 || infer_expr_scalar_type(value) != ctx->local_types[slot])) {
+                        emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
+                    }
+                    vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                    return;
+                }
+            }
+        }
+    }
+    compile_expr(ctx, expr);
+    vm_chunk_emit(ctx->chunk, OP_POP);
+}
+
+static size_t emit_cond_jmp_false(CompCtx *ctx, StradaValue *cond) {
+    StradaValue *cn = ast_deref(cond);
+    if (cn && !STRADA_IS_TAGGED_INT(cn) && (int)ast_int(cn, "type") == NI_BINARY_OP) {
+        int op = ast_op_code(cn);
+        if (op == OP_AST_NUM_LT || op == OP_AST_NUM_LE) {
+            StradaValue *ln = ast_get(cn, "left");
+            StradaValue *rn = ast_get(cn, "right");
+            StradaValue *lsq = ast_get(ln, "from_sq_str");
+            StradaValue *rsq = ast_get(rn, "from_sq_str");
+            if (lsq && (STRADA_IS_TAGGED_INT(lsq) || lsq->type != STRADA_STR)) lsq = NULL;
+            if (rsq && (STRADA_IS_TAGGED_INT(rsq) || rsq->type != STRADA_STR)) rsq = NULL;
+            if (!lsq && !rsq) {
+                int sa = find_local_var_slot(ctx, ln);
+                if (sa >= 0) {
+                    StradaValue *rnd = ast_deref(rn);
+                    if (rnd && !STRADA_IS_TAGGED_INT(rnd) && (int)ast_int(rnd, "type") == NI_INT_LITERAL) {
+                        int64_t imm = ast_int(rnd, "value");
+                        if (imm >= INT32_MIN && imm <= INT32_MAX) {
+                            vm_chunk_emit(ctx->chunk, (op == OP_AST_NUM_LT) ? OP_LT_LOCAL_I32_JMP_F : OP_LE_LOCAL_I32_JMP_F);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sa);
+                            vm_chunk_emit_u32(ctx->chunk, (uint32_t)(int32_t)imm);
+                            return emit_patch_u16(ctx);
+                        }
+                    }
+                    if (op == OP_AST_NUM_LT) {
+                        int sb = find_local_var_slot(ctx, rn);
+                        if (sb >= 0) {
+                            vm_chunk_emit(ctx->chunk, OP_LT_LOCAL_LOCAL_JMP_F);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sa);
+                            vm_chunk_emit_u16(ctx->chunk, (uint16_t)sb);
+                            return emit_patch_u16(ctx);
+                        }
                     }
                 }
             }
         }
-        compile_expr(ctx, expr);
-        vm_chunk_emit(ctx->chunk, OP_POP);
+    }
+    compile_expr(ctx, cond);
+    vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+    return emit_patch_u16(ctx);
+}
+
+static void compile_stmt(CompCtx *ctx, StradaValue *node) {
+    if (!node || STRADA_IS_TAGGED_INT(node)) return;
+    node = ast_deref(node);
+    if (!node || STRADA_IS_TAGGED_INT(node)) return;
+
+    int type = (int)ast_int(node, "type");
+
+    switch (type) {
+    case NI_EXPR_STMT: {
+        compile_void_expr(ctx, ast_get(node, "expr"));
         break;
     }
 
@@ -5375,7 +5633,10 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             compile_hash_init_expr(ctx, node, init, 1);
         } else if (init && !STRADA_IS_TAGGED_INT(init)) {
             compile_expr(ctx, init);
-            emit_scalar_type_coerce(ctx, (slot >= 0) ? ctx->local_types[slot] : 0);
+            if (slot >= 0 && ctx->local_types[slot] != 0 &&
+                infer_expr_scalar_type(init) != ctx->local_types[slot]) {
+                emit_scalar_type_coerce(ctx, ctx->local_types[slot]);
+            }
         } else {
             emit_default_scalar_init(ctx, vt);
         }
@@ -5541,9 +5802,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_IF_STMT: {
-        compile_expr(ctx, ast_get(node, "condition"));
-        vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
-        size_t else_patch = emit_patch_u16(ctx);
+        size_t else_patch = emit_cond_jmp_false(ctx, ast_get(node, "condition"));
 
         compile_block(ctx, ast_get(node, "then_block"));
 
@@ -5560,9 +5819,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
 
         for (int i = 0; i < elsif_count; i++) {
-            compile_expr(ctx, ast_arr_get(elsif_conds, i));
-            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
-            size_t next_patch = emit_patch_u16(ctx);
+            size_t next_patch = emit_cond_jmp_false(ctx, ast_arr_get(elsif_conds, i));
             compile_block(ctx, ast_arr_get(elsif_blocks, i));
             vm_chunk_emit(ctx->chunk, OP_JMP);
             end_patches[end_patch_count++] = emit_patch_u16(ctx);
@@ -5606,9 +5863,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         size_t loop_top = ctx->chunk->code_len;
         lctx.continue_target = loop_top; /* next jumps to loop_top to re-check condition */
 
-        compile_expr(ctx, ast_get(node, "condition"));
-        vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
-        size_t exit_patch = emit_patch_u16(ctx);
+        size_t exit_patch = emit_cond_jmp_false(ctx, ast_get(node, "condition"));
 
         /* redo jumps here — after condition check, at body start */
         lctx.redo_target = ctx->chunk->code_len;
@@ -5709,15 +5964,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         size_t loop_top = ctx->chunk->code_len;
 
         StradaValue *cond = ast_get(node, "condition");
+        size_t exit_patch;
         if (cond && !STRADA_IS_TAGGED_INT(cond)) {
-            compile_expr(ctx, cond);
-            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            exit_patch = emit_cond_jmp_false(ctx, cond);
         } else {
-            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-            vm_chunk_emit_i64(ctx->chunk, 1);
+            emit_push_int(ctx->chunk, 1);
             vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            exit_patch = emit_patch_u16(ctx);
         }
-        size_t exit_patch = emit_patch_u16(ctx);
 
         /* redo jumps here — body start */
         lctx.redo_target = ctx->chunk->code_len;
@@ -5732,8 +5986,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *step = ast_get(node, "update");
         if (!step) step = ast_get(node, "step");
         if (step && !STRADA_IS_TAGGED_INT(step)) {
-            compile_expr(ctx, step);
-            vm_chunk_emit(ctx->chunk, OP_POP);
+            compile_void_expr(ctx, step);
         }
 
         vm_chunk_emit(ctx->chunk, OP_JMP);
@@ -6449,6 +6702,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
     case NI_ASSIGN:
     case NI_INCREMENT:
+        compile_void_expr(ctx, node);
+        break;
+
     case NI_CALL:
     case NI_METHOD_CALL:
     case NI_SUPER_CALL:
