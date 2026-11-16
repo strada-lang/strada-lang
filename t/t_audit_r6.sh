@@ -41,18 +41,15 @@ aud_r6_compile_run() {
     return 1
 }
 
-# 1. Runtime & Compiler Cycle 6 suite (-O0 and -O2)
-if aud_r6_compile_run "-O0" "$aud_src/runtime_compiler.strada" "r6_runtime_compiler_o0" "R6_RUNTIME_COMPILER_OK"; then
-    aud_r6_record 0 "Cycle 6 runtime + compiler + stdlib regressions (-O0)" ""
-else
-    aud_r6_record 1 "Cycle 6 runtime + compiler + stdlib regressions (-O0)" "$(cat "$aud_dir/r6_runtime_compiler_o0.diag" 2>/dev/null)"
-fi
-
-if aud_r6_compile_run "-O2" "$aud_src/runtime_compiler.strada" "r6_runtime_compiler_o2" "R6_RUNTIME_COMPILER_OK"; then
-    aud_r6_record 0 "Cycle 6 runtime + compiler + stdlib regressions (-O2)" ""
-else
-    aud_r6_record 1 "Cycle 6 runtime + compiler + stdlib regressions (-O2)" "$(cat "$aud_dir/r6_runtime_compiler_o2.diag" 2>/dev/null)"
-fi
+# 1. Runtime & Compiler Cycle 6 suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
+    tag="o0"; [ "$opt" = "-O2" ] && tag="o2"
+    if aud_r6_compile_run "$opt" "$aud_src/runtime_compiler.strada" "r6_runtime_compiler_${tag}" "R6_RUNTIME_COMPILER_OK"; then
+        aud_r6_record 0 "Cycle 6 runtime + compiler + stdlib regressions ($opt)" ""
+    else
+        aud_r6_record 1 "Cycle 6 runtime + compiler + stdlib regressions ($opt)" "$(cat "$aud_dir/r6_runtime_compiler_${tag}.diag" 2>/dev/null)"
+    fi
+done
 
 # 2. Bootstrap compiler: <=>, 'x', single-quote backslash escapes, try/catch
 cat > "$aud_dir/bs_r6.strada" <<'EOF'
@@ -79,7 +76,7 @@ EOF
 bs_rc=1
 bs_out=""
 if "$PROJECT_DIR/bootstrap/stradac" "$aud_dir/bs_r6.strada" "$aud_dir/bs_r6.c" >"$aud_dir/bs_r6.log" 2>&1 \
-    && gcc -O2 -I"$PROJECT_DIR/runtime" "$aud_dir/bs_r6.c" "$PROJECT_DIR/runtime/strada_runtime.c" -ldl -lm -lpthread -o "$aud_dir/bs_r6" >>"$aud_dir/bs_r6.log" 2>&1; then
+    && gcc ${STRADA_TEST_GCC_OPT:--O0} -I"$PROJECT_DIR/runtime" "$aud_dir/bs_r6.c" "$PROJECT_DIR/runtime/strada_runtime.c" -ldl -lm -lpthread -o "$aud_dir/bs_r6" >>"$aud_dir/bs_r6.log" 2>&1; then
     bs_out=$(timeout 15 "$aud_dir/bs_r6" 2>&1) && bs_rc=0 || bs_rc=$?
 else
     bs_out=$(tail -n 20 "$aud_dir/bs_r6.log" 2>/dev/null || true)

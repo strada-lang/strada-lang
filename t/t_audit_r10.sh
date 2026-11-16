@@ -41,19 +41,15 @@ aud_r10_compile_run() {
     return 1
 }
 
-# 1. Runtime & Compiler Cycle 10 suite (-O0)
-if aud_r10_compile_run "-O0" "$aud_src/runtime_compiler.strada" "r10_runtime_compiler_o0" "R10_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r10_record 0 "Cycle 10 Runtime & Compiler suite (-O0)" ""
-else
-    aud_r10_record 1 "Cycle 10 Runtime & Compiler suite (-O0)" "$(cat "$aud_dir/r10_runtime_compiler_o0.diag" 2>/dev/null)"
-fi
-
-# 2. Runtime & Compiler Cycle 10 suite (-O2)
-if aud_r10_compile_run "-O2" "$aud_src/runtime_compiler.strada" "r10_runtime_compiler_o2" "R10_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r10_record 0 "Cycle 10 Runtime & Compiler suite (-O2)" ""
-else
-    aud_r10_record 1 "Cycle 10 Runtime & Compiler suite (-O2)" "$(cat "$aud_dir/r10_runtime_compiler_o2.diag" 2>/dev/null)"
-fi
+# 1 & 2. Runtime & Compiler Cycle 10 suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
+    tag="o0"; [ "$opt" = "-O2" ] && tag="o2"
+    if aud_r10_compile_run "$opt" "$aud_src/runtime_compiler.strada" "r10_runtime_compiler_${tag}" "R10_RUNTIME_COMPILER_OK" -lpthread; then
+        aud_r10_record 0 "Cycle 10 Runtime & Compiler suite ($opt)" ""
+    else
+        aud_r10_record 1 "Cycle 10 Runtime & Compiler suite ($opt)" "$(cat "$aud_dir/r10_runtime_compiler_${tag}.diag" 2>/dev/null)"
+    fi
+done
 
 # 3. Standard Library Cycle 10 suite (-O0)
 if aud_r10_compile_run "-O0" "$aud_src/stdlib_tools.strada" "r10_stdlib_tools" "R10_STDLIB_OK"; then

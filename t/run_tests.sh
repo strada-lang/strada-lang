@@ -5,11 +5,12 @@
 # Usage: ./t/run_tests.sh [options] [test_pattern]
 #
 # Options:
-#   -v, --verbose    Show detailed output
-#   -k, --keep       Keep generated files
-#   -t, --tap        Output in TAP format
-#   -c, --compile    Only run compile tests
-#   -h, --help       Show this help
+#   -v, --verbose       Show detailed output
+#   -k, --keep          Keep generated files
+#   -t, --tap           Output in TAP format
+#   -c, --compile       Only run compile tests
+#   --default, --default-opt  Use compiler default params (-O2/LTO) instead of -O0
+#   -h, --help          Show this help
 #
 # Examples:
 #   ./t/run_tests.sh                    # Run all tests
@@ -69,13 +70,10 @@ if [ -z "${STRADA_TEST_NO_FASTLD:-}" ]; then
     fi
 fi
 
-# QUICK=1 (unset, empty or 0 = off): trade backend coverage for speed.
-#   - tests compile with tcc and link with gcc (as STRADA_TEST_TCC=1), so the
-#     gcc code generator is only exercised by tests tcc can't compile;
-#   - `strada` builds that pass no -O flag (the delegated t/*/run.sh scenarios)
-#     build at -O0 instead of -O2 + LTO, via STRADA_DEFAULT_OPT.
-# An explicit STRADA_TEST_TCC / STRADA_DEFAULT_OPT wins. Run without QUICK
-# before committing.
+# QUICK=1 (unset, empty or 0 = off): trade gcc backend coverage for speed
+#   by compiling single-file tests with tcc (falling back to gcc per-test).
+# `-O0` is used across all tests by default unless --default /
+# STRADA_TEST_DEFAULT_OPT=1 is given (or STRADA_DEFAULT_OPT is set explicitly).
 if [ -n "${QUICK:-}" ] && [ "$QUICK" != "0" ]; then
     export STRADA_TEST_TCC="${STRADA_TEST_TCC:-1}"
     export STRADA_DEFAULT_OPT="${STRADA_DEFAULT_OPT:-0}"
@@ -109,6 +107,7 @@ VERBOSE=0
 KEEP_FILES=0
 TAP_FORMAT=0
 COMPILE_ONLY=0
+DEFAULT_OPT=0
 TEST_PATTERN=""
 
 # Statistics
@@ -136,8 +135,12 @@ while [[ $# -gt 0 ]]; do
             COMPILE_ONLY=1
             shift
             ;;
+        --default|--default-opt)
+            DEFAULT_OPT=1
+            shift
+            ;;
         -h|--help)
-            head -20 "$0" | tail -19
+            head -19 "$0" | tail -18
             exit 0
             ;;
         *)
@@ -146,6 +149,20 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ -n "${STRADA_TEST_DEFAULT_OPT:-}" ] && [ "$STRADA_TEST_DEFAULT_OPT" != "0" ]; then
+    DEFAULT_OPT=1
+fi
+if [ "$DEFAULT_OPT" -eq 1 ]; then
+    export STRADA_TEST_DEFAULT_OPT=1
+    export STRADA_TEST_AUDIT_OPTS="${STRADA_TEST_AUDIT_OPTS:--O0 -O2}"
+    export STRADA_TEST_GCC_OPT="${STRADA_TEST_GCC_OPT:--O2}"
+else
+    export STRADA_TEST_DEFAULT_OPT=0
+    export STRADA_DEFAULT_OPT="${STRADA_DEFAULT_OPT:-0}"
+    export STRADA_TEST_AUDIT_OPTS="${STRADA_TEST_AUDIT_OPTS:--O0}"
+    export STRADA_TEST_GCC_OPT="${STRADA_TEST_GCC_OPT:--O0}"
+fi
 
 # Create build directory
 mkdir -p "$BUILD_DIR"

@@ -1,12 +1,74 @@
 #!/bin/bash
 # Run all leak tests with valgrind
-# Usage: ./run_leak_tests.sh
+# Usage: ./run_leak_tests.sh [options] [filter]
+#   --default, --default-opt   Use compiler default optimization params (instead of -O0)
+#   -O LEVEL                   Use -OLEVEL (e.g. -O0, -O2)
+#   -j N, --jobs N             Parallel build+valgrind jobs (default: nproc)
+#   -v, --verbose              Show full per-test output even on pass
+#   -h, --help                 Show this help
 
 set +e  # Errors handled per-test below
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STRADA_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$STRADA_DIR"
+
+DEFAULT_OPT=0
+OPT_LEVEL="0"
+JOBS="${STRADA_LEAK_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+VERBOSE=0
+FILTER=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --default|--default-opt)
+            DEFAULT_OPT=1
+            shift
+            ;;
+        -O)
+            if [[ $# -lt 2 ]]; then echo "Option -O requires an argument" >&2; exit 2; fi
+            OPT_LEVEL="$2"
+            DEFAULT_OPT=0
+            shift 2
+            ;;
+        -O*)
+            OPT_LEVEL="${1#-O}"
+            DEFAULT_OPT=0
+            shift
+            ;;
+        -j|--jobs)
+            if [[ $# -lt 2 ]]; then echo "Option $1 requires an argument" >&2; exit 2; fi
+            JOBS="$2"
+            shift 2
+            ;;
+        -j*)
+            JOBS="${1#-j}"
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
+            ;;
+        -h|--help)
+            head -9 "$0" | tail -8
+            exit 0
+            ;;
+        *)
+            FILTER="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -n "${STRADA_LEAK_DEFAULT_OPT:-}" && "${STRADA_LEAK_DEFAULT_OPT}" != "0" ]]; then
+    DEFAULT_OPT=1
+fi
+
+if [[ "$DEFAULT_OPT" -eq 1 ]]; then
+    LEAK_OPT_FLAG=""
+else
+    LEAK_OPT_FLAG="-O${OPT_LEVEL}"
+fi
 
 # Tests that currently pass without memory leaks
 TESTS=(
@@ -186,32 +248,49 @@ TESTS=(
     "test_mem_simplify"
 )
 
-FILTER="${1:-}"
-
 # c::callback needs libffi at build time — include only when configured in
 # (the exit-time trampoline registry sweep is what keeps this leak-free).
 if grep -q "^export STRADA_HAVE_LIBFFI=1" "$STRADA_DIR/config.sh" 2>/dev/null; then
     TESTS+=("test_c_callback")
 fi
 
+if [ -f "$STRADA_DIR/config.sh" ]; then
+    . "$STRADA_DIR/config.sh"
+fi
+
 PASSED=0
 FAILED=0
 
-echo "========================================"
-echo "Running Leak Tests"
-echo "========================================"
-echo ""
+TMP_LOG_DIR=$(mktemp -d)
+cleanup_leak_runner() {
+    rm -rf "$TMP_LOG_DIR"
+    for t in "${TESTS[@]}"; do
+        rm -f "t/leak_tests/${t}"
+    done
+    rm -f "t/leak_tests/test_import_lib_devirt_lib.so"
+}
+trap cleanup_leak_runner EXIT
 
+SELECTED=()
 for test in "${TESTS[@]}"; do
     if [[ -n "$FILTER" ]] && [[ "$test" != *"$FILTER"* ]]; then
         continue
     fi
-    echo "----------------------------------------"
-    echo "Building: $test"
-    echo "----------------------------------------"
+    SELECTED+=("$test")
+done
 
-    # Determine extra linker flags based on test
-    EXTRA_FLAGS=""
+TOTAL_SEL=${#SELECTED[@]}
+echo "========================================"
+echo "Running Leak Tests ($TOTAL_SEL tests, opt=${LEAK_OPT_FLAG:-default}, jobs=$JOBS)"
+echo "========================================"
+echo ""
+
+run_one_leak() {
+    local test="$1"
+    local out_file="$TMP_LOG_DIR/${test}.log"
+    local rc_file="$TMP_LOG_DIR/${test}.rc"
+
+    local EXTRA_FLAGS=""
     case "$test" in
         test_crypt|test_combined)
             EXTRA_FLAGS="-lcrypt"
@@ -226,74 +305,125 @@ for test in "${TESTS[@]}"; do
             EXTRA_FLAGS="-lpthread"
             ;;
         test_audit_r13_leaks|test_audit_r14_leaks|test_audit_r15_leaks|test_audit_r16_leaks|test_audit_r17_leaks)
-            EXTRA_FLAGS="${STRADA_ZLIB_LIBS:--lz}"
             if [ -f "$STRADA_DIR/config.sh" ]; then
-                . "$STRADA_DIR/config.sh"
                 EXTRA_FLAGS="-L lib ${STRADA_ZLIB_LIBS:--lz} ${STRADA_DBI_LIBS:-} -lpthread"
             else
                 EXTRA_FLAGS="-L lib -lz -lsqlite3 -lpthread"
             fi
             ;;
-        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks|test_audit_r8_eval_jit_leaks|test_audit_r9_eval_jit_leaks|test_audit_r11_eval_jit_leaks|test_audit_r12_eval_jit_leaks|test_audit_r13_eval_jit_leaks|test_audit_r14_eval_jit_leaks|test_audit_r15_eval_jit_leaks|test_audit_r16_eval_jit_leaks|test_audit_r17_eval_jit_leaks)
-            EXTRA_FLAGS="-O0 --no-use-artifacts -L lib"
+        test_audit_r5_eval_jit_leaks|test_audit_r6_eval_jit_leaks|test_audit_r7_eval_jit_leaks|test_audit_r8_eval_jit_leaks|test_audit_r9_eval_jit_leaks|test_audit_r10_eval_jit_leaks|test_audit_r11_eval_jit_leaks|test_audit_r12_eval_jit_leaks|test_audit_r13_eval_jit_leaks|test_audit_r14_eval_jit_leaks|test_audit_r15_eval_jit_leaks|test_audit_r16_eval_jit_leaks|test_audit_r17_eval_jit_leaks)
+            EXTRA_FLAGS="--no-use-artifacts -L lib"
             ;;
         test_import_lib_devirt)
-            # Pre-build the companion shared library the host imports
-            if ! ./strada --shared "t/leak_tests/test_import_lib_devirt_lib.strada" \
-                    -o "t/leak_tests/test_import_lib_devirt_lib.so" 2>&1; then
-                echo "FAIL: companion .so build failed for $test"
-                FAILED=$((FAILED + 1))
-                continue
+            if ! ./strada $LEAK_OPT_FLAG ${STRADA_LEAK_FLAGS:-} --shared "t/leak_tests/test_import_lib_devirt_lib.strada" \
+                    -o "t/leak_tests/test_import_lib_devirt_lib.so" > "$out_file" 2>&1; then
+                {
+                    echo "----------------------------------------"
+                    echo "FAIL: $test (companion .so build failed)"
+                    cat "$out_file"
+                } > "${out_file}.print"
+                mv "${out_file}.print" "$out_file"
+                echo 1 > "$rc_file"
+                return
             fi
             ;;
     esac
 
-    if ! ./strada ${STRADA_LEAK_FLAGS:-} "t/leak_tests/${test}.strada" -o "t/leak_tests/${test}" $EXTRA_FLAGS 2>&1; then
-        echo "FAIL: Compilation failed for $test"
-        FAILED=$((FAILED + 1))
-        continue
+    local build_out
+    if ! build_out=$(./strada $LEAK_OPT_FLAG ${STRADA_LEAK_FLAGS:-} "t/leak_tests/${test}.strada" -o "t/leak_tests/${test}" $EXTRA_FLAGS 2>&1); then
+        {
+            echo "----------------------------------------"
+            echo "FAIL: $test (compilation failed)"
+            echo "$build_out"
+        } > "$out_file"
+        echo 1 > "$rc_file"
+        return
     fi
 
-    echo ""
-    echo "Running with valgrind..."
-    echo ""
-
-    # Run with valgrind and capture output
+    local VALGRIND_OUT VALGRIND_EXIT DEFINITELY_LOST INDIRECTLY_LOST
     VALGRIND_OUT=$(valgrind --leak-check=full --errors-for-leak-kinds=definite,indirect --error-exitcode=99 "t/leak_tests/${test}" 2>&1)
     VALGRIND_EXIT=$?
-
-    # Show program output
-    echo "$VALGRIND_OUT" | grep -v "^==" || true
-    echo ""
-
-    # Check for leaks
     DEFINITELY_LOST=$(echo "$VALGRIND_OUT" | grep "definitely lost:" | awk '{print $4}')
     INDIRECTLY_LOST=$(echo "$VALGRIND_OUT" | grep "indirectly lost:" | awk '{print $4}')
 
     if [[ "$VALGRIND_EXIT" -eq 0 ]] && [[ "$DEFINITELY_LOST" == "0" ]] && [[ "$INDIRECTLY_LOST" == "0" ]]; then
-        echo "LEAK CHECK: PASS (no leaks detected)"
-        PASSED=$((PASSED + 1))
+        if [[ "$VERBOSE" -eq 1 ]]; then
+            {
+                echo "----------------------------------------"
+                echo "Building: $test"
+                echo "----------------------------------------"
+                [ -n "$build_out" ] && echo "$build_out"
+                echo ""
+                echo "Running with valgrind..."
+                echo "$VALGRIND_OUT" | grep -v "^==" || true
+                echo "LEAK CHECK: PASS (no leaks detected)"
+                echo ""
+            } > "$out_file"
+        else
+            echo "PASS: $test" > "$out_file"
+        fi
+        echo 0 > "$rc_file"
     else
-        echo "LEAK CHECK: FAIL (exit=$VALGRIND_EXIT)"
-        echo "  Definitely lost: $DEFINITELY_LOST bytes"
-        echo "  Indirectly lost: $INDIRECTLY_LOST bytes"
-        echo ""
-        echo "Valgrind summary:"
-        echo "$VALGRIND_OUT" | grep -A5 "LEAK SUMMARY"
-        FAILED=$((FAILED + 1))
+        {
+            echo "----------------------------------------"
+            echo "LEAK CHECK: FAIL: $test (exit=$VALGRIND_EXIT)"
+            echo "  Definitely lost: $DEFINITELY_LOST bytes"
+            echo "  Indirectly lost: $INDIRECTLY_LOST bytes"
+            [ -n "$build_out" ] && echo "$build_out"
+            echo "$VALGRIND_OUT" | grep -v "^==" || true
+            echo "Valgrind summary:"
+            echo "$VALGRIND_OUT" | grep -A5 "LEAK SUMMARY"
+            echo ""
+        } > "$out_file"
+        echo 1 > "$rc_file"
     fi
-    echo ""
+}
+
+PIDS=()
+PNAMES=()
+for test in "${SELECTED[@]}"; do
+    if [[ "${JOBS:-1}" -le 1 ]]; then
+        run_one_leak "$test"
+        cat "$TMP_LOG_DIR/${test}.log"
+        if [[ "$(cat "$TMP_LOG_DIR/${test}.rc")" -eq 0 ]]; then
+            PASSED=$((PASSED + 1))
+        else
+            FAILED=$((FAILED + 1))
+        fi
+    else
+        run_one_leak "$test" &
+        PIDS+=("$!")
+        PNAMES+=("$test")
+        if [[ "${#PIDS[@]}" -ge "$JOBS" ]]; then
+            wait "${PIDS[0]}"
+            n0="${PNAMES[0]}"
+            cat "$TMP_LOG_DIR/${n0}.log"
+            if [[ "$(cat "$TMP_LOG_DIR/${n0}.rc")" -eq 0 ]]; then
+                PASSED=$((PASSED + 1))
+            else
+                FAILED=$((FAILED + 1))
+            fi
+            PIDS=("${PIDS[@]:1}")
+            PNAMES=("${PNAMES[@]:1}")
+        fi
+    fi
 done
 
+for idx in "${!PIDS[@]}"; do
+    wait "${PIDS[$idx]}"
+    n="${PNAMES[$idx]}"
+    cat "$TMP_LOG_DIR/${n}.log"
+    if [[ "$(cat "$TMP_LOG_DIR/${n}.rc")" -eq 0 ]]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+    fi
+done
+
+echo ""
 echo "========================================"
 echo "Summary: $PASSED passed, $FAILED failed"
 echo "========================================"
-
-# Cleanup binaries
-for test in "${TESTS[@]}"; do
-    rm -f "t/leak_tests/${test}"
-done
-rm -f "t/leak_tests/test_import_lib_devirt_lib.so"
 
 if [[ $FAILED -gt 0 ]]; then
     exit 1

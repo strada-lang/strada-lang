@@ -18,8 +18,8 @@ r17_record() {
     fi
 }
 
-# 1. Compiler & Runtime core suite at -O0 and -O2
-for opt in -O0 -O2; do
+# 1. Compiler & Runtime core suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
     out=$("$PROJECT_DIR/strada" "$opt" "$SCRIPT_DIR/audit_r17/compiler_runtime.strada" -o "$r17_dir/comp_${opt}" 2>&1 \
         && "$r17_dir/comp_${opt}" 2>&1)
     rc=$?

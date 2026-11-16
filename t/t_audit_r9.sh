@@ -41,19 +41,15 @@ aud_r9_compile_run() {
     return 1
 }
 
-# 1. Runtime & Compiler Cycle 9 suite (-O0)
-if aud_r9_compile_run "-O0" "$aud_src/runtime_compiler.strada" "r9_runtime_compiler_o0" "R9_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r9_record 0 "Cycle 9 Runtime & Compiler suite (-O0)" ""
-else
-    aud_r9_record 1 "Cycle 9 Runtime & Compiler suite (-O0)" "$(cat "$aud_dir/r9_runtime_compiler_o0.diag" 2>/dev/null)"
-fi
-
-# 2. Runtime & Compiler Cycle 9 suite (-O2)
-if aud_r9_compile_run "-O2" "$aud_src/runtime_compiler.strada" "r9_runtime_compiler_o2" "R9_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r9_record 0 "Cycle 9 Runtime & Compiler suite (-O2)" ""
-else
-    aud_r9_record 1 "Cycle 9 Runtime & Compiler suite (-O2)" "$(cat "$aud_dir/r9_runtime_compiler_o2.diag" 2>/dev/null)"
-fi
+# 1 & 2. Runtime & Compiler Cycle 9 suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
+    tag="o0"; [ "$opt" = "-O2" ] && tag="o2"
+    if aud_r9_compile_run "$opt" "$aud_src/runtime_compiler.strada" "r9_runtime_compiler_${tag}" "R9_RUNTIME_COMPILER_OK" -lpthread; then
+        aud_r9_record 0 "Cycle 9 Runtime & Compiler suite ($opt)" ""
+    else
+        aud_r9_record 1 "Cycle 9 Runtime & Compiler suite ($opt)" "$(cat "$aud_dir/r9_runtime_compiler_${tag}.diag" 2>/dev/null)"
+    fi
+done
 
 # 3. Standard Library Cycle 9 suite (-O0)
 if aud_r9_compile_run "-O0" "$aud_src/stdlib_tools.strada" "r9_stdlib_tools" "R9_STDLIB_OK"; then
@@ -112,7 +108,7 @@ fi
 # 7. R9-LIB3: lib/perl5 tied scalar + throwing "" overload inside try/catch
 p5_ccopts=$(perl -MExtUtils::Embed -e ccopts 2>/dev/null || true)
 p5_ldopts=$(perl -MExtUtils::Embed -e ldopts 2>/dev/null || true)
-if [ -n "$p5_ccopts" ] && gcc -c -Wall -Wextra -fPIC -O2 -I"$PROJECT_DIR/runtime" $p5_ccopts -o "$aud_dir/strada_perl5.o" "$PROJECT_DIR/lib/perl5/strada_perl5.c" >"$aud_dir/p5_cc.log" 2>&1; then
+if [ -n "$p5_ccopts" ] && gcc -c -Wall -Wextra -fPIC ${STRADA_TEST_GCC_OPT:--O0} -I"$PROJECT_DIR/runtime" $p5_ccopts -o "$aud_dir/strada_perl5.o" "$PROJECT_DIR/lib/perl5/strada_perl5.c" >"$aud_dir/p5_cc.log" 2>&1; then
     cat > "$aud_dir/r9_perl5_test.strada" <<'EOF'
 __C__ {
 extern int strada_perl5_init(void);

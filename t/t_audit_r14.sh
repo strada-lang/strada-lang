@@ -18,8 +18,8 @@ r14_record() {
     fi
 }
 
-# 1. Compiler + Runtime core suite at -O0 and -O2 (R14-C1..C6)
-for opt in -O0 -O2; do
+# 1. Compiler + Runtime core suite (R14-C1..C6)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
     out=$("$PROJECT_DIR/strada" "$opt" "$SCRIPT_DIR/audit_r14/compiler_runtime.strada" -o "$r14_dir/comp_${opt}" 2>&1 \
         && "$r14_dir/comp_${opt}" 2>&1)
     rc=$?

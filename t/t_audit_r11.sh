@@ -40,18 +40,15 @@ aud_r11_compile_run() {
     return 1
 }
 
-# 1. Runtime & Compiler/Lexer suite at -O0 and -O2 (R11-C1..C14, R11-RT1/4/5/6)
-if aud_r11_compile_run "$aud_src/runtime_compiler.strada" "r11_rc_O0" "R11_RUNTIME_COMPILER_OK" -O0 -I "$aud_src/mods"; then
-    aud_r11_record 0 "Cycle 11 runtime/compiler/lexer suite (-O0)" ""
-else
-    aud_r11_record 1 "Cycle 11 runtime/compiler/lexer suite (-O0)" "$(cat "$aud_dir/r11_rc_O0.diag" 2>/dev/null)"
-fi
-
-if aud_r11_compile_run "$aud_src/runtime_compiler.strada" "r11_rc_O2" "R11_RUNTIME_COMPILER_OK" -O2 -I "$aud_src/mods"; then
-    aud_r11_record 0 "Cycle 11 runtime/compiler/lexer suite (-O2)" ""
-else
-    aud_r11_record 1 "Cycle 11 runtime/compiler/lexer suite (-O2)" "$(cat "$aud_dir/r11_rc_O2.diag" 2>/dev/null)"
-fi
+# 1. Runtime & Compiler/Lexer suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
+    tag="O0"; [ "$opt" = "-O2" ] && tag="O2"
+    if aud_r11_compile_run "$aud_src/runtime_compiler.strada" "r11_rc_${tag}" "R11_RUNTIME_COMPILER_OK" "$opt" -I "$aud_src/mods"; then
+        aud_r11_record 0 "Cycle 11 runtime/compiler/lexer suite ($opt)" ""
+    else
+        aud_r11_record 1 "Cycle 11 runtime/compiler/lexer suite ($opt)" "$(cat "$aud_dir/r11_rc_${tag}.diag" 2>/dev/null)"
+    fi
+done
 
 # 2. Stdlib suite (JSON canonical unwind + Gettext invalid set_locale)
 if aud_r11_compile_run "$aud_src/stdlib_tools.strada" "r11_stdlib" "R11_STDLIB_OK" -O0 "$PROJECT_DIR/lib/Gettext/gettext_wrapper.c"; then

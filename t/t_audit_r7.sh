@@ -41,19 +41,15 @@ aud_r7_compile_run() {
     return 1
 }
 
-# 1. Runtime & Compiler Cycle 7 suite (-O0)
-if aud_r7_compile_run "-O0" "$aud_src/runtime_compiler.strada" "r7_runtime_compiler_o0" "R7_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r7_record 0 "Cycle 7 runtime + compiler regressions (-O0)" ""
-else
-    aud_r7_record 1 "Cycle 7 runtime + compiler regressions (-O0)" "$(cat "$aud_dir/r7_runtime_compiler_o0.diag" 2>/dev/null)"
-fi
-
-# 2. Runtime & Compiler Cycle 7 suite (-O2)
-if aud_r7_compile_run "-O2" "$aud_src/runtime_compiler.strada" "r7_runtime_compiler_o2" "R7_RUNTIME_COMPILER_OK" -lpthread; then
-    aud_r7_record 0 "Cycle 7 runtime + compiler regressions (-O2)" ""
-else
-    aud_r7_record 1 "Cycle 7 runtime + compiler regressions (-O2)" "$(cat "$aud_dir/r7_runtime_compiler_o2.diag" 2>/dev/null)"
-fi
+# 1 & 2. Runtime & Compiler Cycle 7 suite (-O0 by default, plus -O2 under --default)
+for opt in ${STRADA_TEST_AUDIT_OPTS:--O0}; do
+    tag="o0"; [ "$opt" = "-O2" ] && tag="o2"
+    if aud_r7_compile_run "$opt" "$aud_src/runtime_compiler.strada" "r7_runtime_compiler_${tag}" "R7_RUNTIME_COMPILER_OK" -lpthread; then
+        aud_r7_record 0 "Cycle 7 runtime + compiler regressions ($opt)" ""
+    else
+        aud_r7_record 1 "Cycle 7 runtime + compiler regressions ($opt)" "$(cat "$aud_dir/r7_runtime_compiler_${tag}.diag" 2>/dev/null)"
+    fi
+done
 
 # 3. Stdlib & Tools Cycle 7 suite (-O0)
 if aud_r7_compile_run "-O0" "$aud_src/stdlib_tools.strada" "r7_stdlib_tools" "R7_STDLIB_TOOLS_OK" -lssl -lcrypto; then
