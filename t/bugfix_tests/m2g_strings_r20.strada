@@ -1,0 +1,25 @@
+# EXPECT: []UU[] 5 aQQbc Jello 3 d1 301 4 3 3 [    A][B  ][00000101][0][    %][44][4464] 03A3,0049,0069.0307,0053.0053,0053.0073.0078 0061.0331.0062,1EB9.0301,1100.0300.1161 4 3 5
+func sh($v) str { if (defined($v)) { return "[" . $v . "]"; } return "U"; }
+func cps(str $s) str { my @o = (); foreach my $c (split(//, $s)) { push(@o, sprintf("%04X", ord($c))); } return join(".", @o); }
+func main() int {
+    my @o = ();
+    my $s = "abc";
+    push(@o, sh(substr($s, -5, 2)) . sh(substr($s, -5, 1)) . sh(substr($s, 4)) . sh(substr($s, -4, -3)));
+    my $t = "abc"; substr($t, 1, 1) = "X\0Y"; push(@o, length($t));
+    my $w = "abc"; my $r = substr($w, 0, 1, "QQ"); push(@o, $r . $w);
+    my %h = ("k" => "hello"); substr($h{"k"}, 0, 1) = "J"; push(@o, $h{"k"});
+    my $a2 = "abc"; substr($a2, 1, 1) = "\x{e9}"; push(@o, length($a2));
+    my $died = 0; try { my $z = "ab"; substr($z, 5, 1, "x"); } catch ($e) { $died = 1; } push(@o, "d" . $died);
+    push(@o, index("abc", "", 10) . rindex("abc", "", -5) . index("abc", "", 1));
+    my $c = "ab\0c\n"; chomp($c); push(@o, length($c));
+    my $d = "ab\r"; chomp($d); push(@o, length($d));
+    my $e = "ab\0c"; chop($e); push(@o, length($e));
+    push(@o, sprintf("[%5c][%-3c][%.8b][%#b][%5%][%hhd][%hd]", 65, 66, 5, 0, 300, 70000));
+    push(@o, cps(uc("\x{03C2}")) . "," . cps(uc("\x{0131}")) . "," . cps(lc("\x{0130}")) . "," . cps(uc("\x{00DF}")) . "," . cps(ucfirst("\x{00DF}x")));
+    push(@o, cps(utf8::nfc("a\x{0331}b")) . "," . cps(utf8::nfc("e\x{0301}\x{0323}")) . "," . cps(utf8::nfc("\x{1100}\x{0300}\x{1161}")));
+    my $sb = sb::new(); sb::append($sb, "caf\x{e9}"); push(@o, length(sb::to_string($sb)));
+    push(@o, length(core::quotemeta("\x{e9}.")));
+    my $q = "aXbXc"; $q =~ s/X/\x{e9}/g; push(@o, length($q));
+    say(join(" ", @o));
+    return 0;
+}

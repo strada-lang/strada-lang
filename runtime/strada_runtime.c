@@ -8225,6 +8225,27 @@ size_t strada_bytes(const char *s) {
 
 /* UTF-8 aware substr - offset and length are in characters, not bytes.
  * Binary-safe: uses struct_size instead of strlen for input strings. */
+/* Perl's substr range rule (Perl_translate_substr_offsets) for a string of
+ * L characters: a negative OFFSET counts from the end; END is OFFSET+LEN
+ * for LEN >= 0, else L+LEN. The result is undef (return 0) when the range
+ * lies wholly before the string or OFFSET is past its end; otherwise both
+ * ends are clamped into [0, L]. The 2-arg form passes LEN = INT64_MAX. */
+int strada_substr_span(int64_t L, int64_t off, int64_t len, int64_t *start, int64_t *count) {
+    __int128 pos = off;
+    if (pos < 0) pos += L;
+    __int128 end = (len >= 0) ? pos + (__int128)len : (__int128)L + len;
+    if (pos < 0) {
+        if (end < 0) return 0;
+        pos = 0;
+    }
+    if (pos > L) return 0;
+    if (end > L) end = L;
+    if (end < pos) end = pos;
+    *start = (int64_t)pos;
+    *count = (int64_t)(end - pos);
+    return 1;
+}
+
 StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
     /* Tied scalar: dispatch FETCH and re-enter with the fetched value
      * so substr operates on the tied content's bytes. Without this,
@@ -8267,26 +8288,7 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
     if (str && !STRADA_IS_TAGGED_INT(str) && str->type == STRADA_STR && !SV_NEEDS_STR_DISPATCH(str)
         && (STRADA_STR_IS_ASCII(str) || !STRADA_STR_IS_UTF8(str))) {
         size_t slen = STRADA_STR_BYTELEN(str);
-        /* Perl semantics: offset > length → undef (out of bounds);
-         * offset == length → "" (valid boundary); negative offset clamps
-         * to max(0, offset + length). */
-        if (offset < 0) {
-            offset = (int64_t)slen + offset;
-            if (offset < 0) offset = 0;
-        }
-        if (offset > (int64_t)slen) return strada_new_undef();
-        if (offset == (int64_t)slen) return strada_new_str("");
-        /* Perl: a negative length means "leave that many chars at the
-         * end", so length = (slen - offset) + length (length<0 here). */
-        if (length < 0) {
-            int64_t adj = (int64_t)slen - offset + length;
-            length = adj < 0 ? 0 : adj;
-        } else if (length > (int64_t)slen - offset) {
-            /* Compare without `offset + length` to avoid signed overflow
-             * when callers pass INT64_MAX as a "to-end-of-string" sentinel
-             * (the codegen does this for the 2-arg form of substr). */
-            length = slen - offset;
-        }
+        if (!strada_substr_span((int64_t)slen, offset, length, &offset, &length)) return strada_new_undef();
         return strada_new_str_len(s + offset, (size_t)length);
     }
 
@@ -8294,18 +8296,7 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
      * to byte semantics. */
     if (!src_utf8 || !utf8_is_valid(s, byte_len)) {
         int64_t slen = (int64_t)byte_len;
-        if (offset < 0) {
-            offset = slen + offset;
-            if (offset < 0) offset = 0;
-        }
-        if (offset > slen) { free(owned); return strada_new_undef(); }
-        if (offset == slen) { free(owned); return strada_new_str(""); }
-        if (length < 0) {
-            int64_t adj = slen - offset + length;
-            length = adj < 0 ? 0 : adj;
-        } else if (length > slen - offset) {
-            length = slen - offset;
-        }
+        if (!strada_substr_span(slen, offset, length, &offset, &length)) { free(owned); return strada_new_undef(); }
         StradaValue *r = strada_new_str_len(s + offset, (size_t)length);
         free(owned);
         return r;
@@ -8317,21 +8308,7 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
 
     /* Handle negative offset (count from end) — UTF-8 path. Same Perl
      * semantics as ASCII fast path: out-of-bounds → undef, == length → "". */
-    if (offset < 0) {
-        offset = (int64_t)char_len + offset;
-        if (offset < 0) offset = 0;
-    }
-    if (offset > (int64_t)char_len) { free(owned); return strada_new_undef(); }
-    if (offset == (int64_t)char_len) { free(owned); return strada_new_str(""); }
-
-    /* Handle length: negative length = "leave that many chars at end". */
-    if (length < 0) {
-        int64_t adj = (int64_t)char_len - offset + length;
-        length = adj < 0 ? 0 : adj;
-    } else if (length > (int64_t)char_len - offset) {
-        /* Avoid signed overflow when callers pass INT64_MAX (sentinel). */
-        length = char_len - offset;
-    }
+    if (!strada_substr_span((int64_t)char_len, offset, length, &offset, &length)) { free(owned); return strada_new_undef(); }
 
     size_t start_byte = utf8_cached_char_to_byte(s, byte_len, (size_t)offset);
     size_t end_byte = (length == 0)
@@ -8460,14 +8437,9 @@ StradaValue* strada_substr_replace(StradaValue *str, int64_t offset, int64_t len
             if (!utf8_is_continuation(p[i])) char_len++;
         }
         int64_t clen = (int64_t)char_len;
-        if (offset < 0) offset += clen;
-        if (offset < 0) offset = 0;
-        if (offset > clen) offset = clen;
-        if (length < 0) {
-            int64_t adj = clen - offset + length;
-            length = adj < 0 ? 0 : adj;
-        } else if (length > clen - offset) {
-            length = clen - offset;
+        if (!strada_substr_span(clen, offset, length, &offset, &length)) {
+            strada_cleanup_drain_to(cmark);
+            strada_throw("substr outside of string");
         }
 
         size_t target_end_char = (size_t)(offset + length);
@@ -8488,14 +8460,9 @@ StradaValue* strada_substr_replace(StradaValue *str, int64_t offset, int64_t len
     } else {
         /* Byte-oriented / pure-ASCII path (O(1) offset calculation). */
         int64_t blen = (int64_t)byte_len;
-        if (offset < 0) offset += blen;
-        if (offset < 0) offset = 0;
-        if (offset > blen) offset = blen;
-        if (length < 0) {
-            int64_t adj = blen - offset + length;
-            length = adj < 0 ? 0 : adj;
-        } else if (length > blen - offset) {
-            length = blen - offset;
+        if (!strada_substr_span(blen, offset, length, &offset, &length)) {
+            strada_cleanup_drain_to(cmark);
+            strada_throw("substr outside of string");
         }
         start_byte = (size_t)offset;
         end_byte = (size_t)(offset + length);
@@ -8691,7 +8658,12 @@ int64_t strada_index_sv2(StradaValue *haystack_sv, StradaValue *needle_sv, int64
     }
     int64_t result = -1;
     if (needle_len == 0) {
+        /* Perl: an empty needle is found at the position clamped to [0, length] */
+        int64_t total = haystack_char_oriented
+            ? (int64_t)utf8_cached_byte_to_char(haystack, haystack_len, haystack_len)
+            : (int64_t)haystack_len;
         result = offset > 0 ? offset : 0;
+        if (result > total) result = total;
     } else {
         size_t start_byte = 0;
         if (offset > 0) {
@@ -10394,6 +10366,19 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
             case 'x':
             case 'X': {
                 int64_t val = arg ? strada_to_int(arg) : 0;
+                /* h / hh: the value is converted to (unsigned) short / char
+                 * first, as Perl does through the C library. */
+                {
+                    size_t ssl = strlen(spec_buf);
+                    if (ssl >= 3 && spec_buf[ssl - 2] == 'h') {
+                        int is_signed = (spec == 'd' || spec == 'i');
+                        if (spec_buf[ssl - 3] == 'h') {
+                            val = is_signed ? (int64_t)(signed char)val : (int64_t)(unsigned char)val;
+                        } else {
+                            val = is_signed ? (int64_t)(short)val : (int64_t)(unsigned short)val;
+                        }
+                    }
+                }
                 /* Fast path for simple specs (no '+', ' ', '#', precision,
                  * length modifiers): hand conversion, bit-identical output. */
                 fast_len = strada_spf_fast_int(spec_buf, val, temp);
@@ -14034,7 +14019,14 @@ static char *pcre2_translate_perl_props(const char *pattern, size_t pat_len, siz
             }
             out = no;
         }
-        /* `\p{NAME}` or `\P{NAME}` */
+        /* Any other escape (notably `\\`, so `\\p{..}` is literal text)
+         * is copied as a pair. */
+        if (p + 1 < pat_end && p[0] == '\\' && p[1] != 'p' && p[1] != 'P') {
+            out[oi++] = *p++;
+            out[oi++] = *p++;
+            continue;
+        }
+        /* `\p{NAME}` or `\P{NAME}`; `\p{^NAME}` is the negation `\P{NAME}` */
         if (p + 2 < pat_end && p[0] == '\\' && (p[1] == 'p' || p[1] == 'P') && p[2] == '{') {
             const char *end = (const char *)memchr(p + 3, '}', (size_t)(pat_end - (p + 3)));
             if (end && !memchr(p + 3, '\0', (size_t)(end - (p + 3)))) {
@@ -14048,11 +14040,17 @@ static char *pcre2_translate_perl_props(const char *pattern, size_t pat_len, siz
                 }
                 memcpy(name, p + 3, nlen);
                 name[nlen] = '\0';
-                /* Strip leading "Is" prefix (perl alias) */
+                char pchar = p[1];
                 char *lookup = name;
-                if (nlen > 2 && (name[0] == 'I' || name[0] == 'i') &&
-                    (name[1] == 's' || name[1] == 'S')) {
-                    lookup = name + 2;
+                if (lookup[0] == '^') {
+                    pchar = (pchar == 'p') ? 'P' : 'p';
+                    lookup++;
+                    nlen--;
+                }
+                /* Strip leading "Is" prefix (perl alias) */
+                if (nlen > 2 && (lookup[0] == 'I' || lookup[0] == 'i') &&
+                    (lookup[1] == 's' || lookup[1] == 'S')) {
+                    lookup += 2;
                 }
                 /* Look up in map (case-insensitive) */
                 const char *replacement = NULL;
@@ -14065,7 +14063,7 @@ static char *pcre2_translate_perl_props(const char *pattern, size_t pat_len, siz
                 if (!replacement) replacement = lookup;
                 /* Emit `\p{REPLACEMENT}` or `\P{...}` */
                 out[oi++] = '\\';
-                out[oi++] = p[1];
+                out[oi++] = pchar;
                 out[oi++] = '{';
                 size_t rl = strlen(replacement);
                 memcpy(out + oi, replacement, rl);
@@ -14187,9 +14185,13 @@ static char *pcre2_expand_xbrace(const char *pattern, size_t pat_len, size_t *ou
                     ub[3] = 0x80 | (cp & 0x3F);
                     ulen = 4;
                 }
+                /* A multi-byte sequence is grouped so a following
+                 * quantifier applies to the whole character. */
+                if (ulen > 1) { out[oi++] = '('; out[oi++] = '?'; out[oi++] = ':'; }
                 for (int i = 0; i < ulen; i++) {
                     oi += snprintf(out + oi, cap - oi, "\\x%02x", ub[i]);
                 }
+                if (ulen > 1) out[oi++] = ')';
                 p = h + 1;
                 continue;
             }
@@ -14453,6 +14455,27 @@ static pcre2_code *regex_cache_insert_len(const char *pattern, size_t pat_len, u
     return compiled;
 }
 
+/* pcre2_compile after the Perl-compatibility rewrites both backends share:
+ * in byte mode `\x{NNNN}` becomes its UTF-8 byte sequence (grouped), and
+ * Perl property names (`\p{Digit}`, `\p{IsUpper}`, `\p{^Digit}`) map to
+ * PCRE2's. The VM's regex cache compiles through this too. */
+pcre2_code *strada_pcre2_compile_perl(const char *pattern, size_t pat_len, uint32_t options,
+                                      int *errcode, PCRE2_SIZE *erroffset) {
+    size_t exp_len = pat_len;
+    char *expanded = (options & PCRE2_UTF) ? NULL : pcre2_expand_xbrace(pattern, pat_len, &exp_len);
+    const char *prop_in = expanded ? expanded : pattern;
+    size_t prop_in_len = expanded ? exp_len : pat_len;
+    size_t trans_len = prop_in_len;
+    char *translated = pcre2_translate_perl_props(prop_in, prop_in_len, &trans_len);
+    const char *to_compile = translated ? translated : prop_in;
+    size_t compile_len = translated ? trans_len : prop_in_len;
+    pcre2_code *re = pcre2_compile((PCRE2_SPTR)to_compile, (PCRE2_SIZE)compile_len,
+                                   options, errcode, erroffset, NULL);
+    if (expanded) free(expanded);
+    if (translated) free(translated);
+    return re;
+}
+
 /* Compile regex with caching. Preprocesses `\x{NNNN}` codepoint
  * escapes to UTF-8 byte escapes since the vendored libpcre2 was
  * built without Unicode support. The cache is keyed by the
@@ -14476,19 +14499,7 @@ static pcre2_code *regex_cache_compile_len(const char *pattern, size_t pat_len, 
     /* In PCRE2_UTF mode, PCRE2 natively parses \x{NNNN} as Unicode codepoint
      * U+NNNN (and forbids raw \xHH >= 0x80 UTF-8 byte sequences). Only expand
      * \x{NNNN} into raw UTF-8 bytes when compiling in byte mode. */
-    size_t exp_len = pat_len;
-    char *expanded = (options & PCRE2_UTF) ? NULL : pcre2_expand_xbrace(pattern, pat_len, &exp_len);
-    const char *prop_in = expanded ? expanded : pattern;
-    size_t prop_in_len = expanded ? exp_len : pat_len;
-    size_t trans_len = prop_in_len;
-    char *translated = pcre2_translate_perl_props(prop_in, prop_in_len, &trans_len);
-    const char *to_compile = translated ? translated : prop_in;
-    size_t compile_len = translated ? trans_len : prop_in_len;
-    re = pcre2_compile(
-        (PCRE2_SPTR)to_compile, (PCRE2_SIZE)compile_len,
-        options, &errcode, &erroffset, NULL);
-    if (expanded) free(expanded);
-    if (translated) free(translated);
+    re = strada_pcre2_compile_perl(pattern, pat_len, options, &errcode, &erroffset);
     if (!re) return NULL;
 
     return regex_cache_insert_len(pattern, pat_len, options, re);
@@ -21982,12 +21993,18 @@ char* strada_lower(const char *str) {
 static uint32_t strada_unicode_to_upper(uint32_t cp) {
     /* ASCII a-z */
     if (cp >= 0x61 && cp <= 0x7A) return cp - 0x20;
+    /* Specials that the range rules below would get wrong */
+    if (cp == 0x0131) return 0x49;       /* dotless i -> I */
+    if (cp == 0x017F) return 0x53;       /* long s -> S */
+    if (cp == 0x03C2) return 0x03A3;     /* final sigma -> Sigma */
+    if (cp == 0x00B5) return 0x039C;     /* micro sign -> Greek Mu */
     /* Latin-1 Supplement a-o with grave/acute/circumflex/tilde/umlaut
      * (except /= U+00F7 which is the division sign, not a letter) */
     if (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) return cp - 0x20;
     /* Latin-1 extras */
     if (cp == 0xFF) return 0x178;        /* y-umlaut -> Y-umlaut */
-    if (cp == 0xDF) return 0x1E9E;       /* sharp-s -> capital sharp-s */
+    /* sharp-s has no single-character uppercase: its full mapping "SS" is
+     * applied by strada_case_map; as a single character it stays. */
     /* Latin Extended-A: U+0100-U+017F is mostly alternating pairs. */
     /* 0x0100-0x0137: even = upper, odd = lower */
     if (cp >= 0x0101 && cp <= 0x0137 && (cp & 1)) return cp - 1;
@@ -22000,7 +22017,6 @@ static uint32_t strada_unicode_to_upper(uint32_t cp) {
     if (cp >= 0x017A && cp <= 0x017E && !(cp & 1)) return cp - 1;
     /* Greek lowercase alpha-omega -> uppercase */
     if (cp >= 0x03B1 && cp <= 0x03C9) return cp - 0x20;
-    if (cp == 0x03C2) return 0x03A3;     /* final sigma -> Sigma */
     /* Greek extended lowercase -> uppercase (common ones) */
     if (cp >= 0x03AC && cp <= 0x03AF) return cp - 0x26;   /* accented alpha-iota */
     if (cp == 0x03CC) return 0x038C;     /* accented omicron */
@@ -22015,6 +22031,9 @@ static uint32_t strada_unicode_to_upper(uint32_t cp) {
 
 static uint32_t strada_unicode_to_lower(uint32_t cp) {
     if (cp >= 0x41 && cp <= 0x5A) return cp + 0x20;
+    /* U+0130 (I with dot) lowercases to "i" + U+0307 (strada_case_map);
+     * as a single character it is "i". */
+    if (cp == 0x0130) return 0x69;
     if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return cp + 0x20;
     if (cp == 0x178) return 0xFF;
     if (cp == 0x1E9E) return 0xDF;
@@ -22032,6 +22051,15 @@ static uint32_t strada_unicode_to_lower(uint32_t cp) {
     if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
     if (cp >= 0x0400 && cp <= 0x040F) return cp + 0x50;
     return cp;
+}
+
+/* Encode the full case mapping of cp into out (at most 8 bytes); returns the
+ * byte count. Multi-character mappings: uc("ß") "SS", ucfirst("ß") "Ss",
+ * lc("İ") "i" + U+0307. */
+static int strada_case_full(uint32_t cp, int to_upper, int title, char *out) {
+    if (to_upper && cp == 0xDF) { out[0] = 'S'; out[1] = title ? 's' : 'S'; return 2; }
+    if (!to_upper && cp == 0x0130) { out[0] = 'i'; return 1 + utf8_encode(0x0307, out + 1); }
+    return utf8_encode(to_upper ? strada_unicode_to_upper(cp) : strada_unicode_to_lower(cp), out);
 }
 
 /* Apply a codepoint-level case-mapping function across a UTF-8 string.
@@ -22057,6 +22085,20 @@ static char* strada_case_map(const char *str, uint32_t (*map_fn)(uint32_t)) {
             continue;
         }
         uint32_t cp = utf8_decode(str + i, NULL);
+        /* Full (multi-character) mappings, as Perl's uc/lc on character
+         * strings: uc("ß") is "SS", lc("İ") is "i" + U+0307. Neither grows
+         * the string past the 2x allocation. */
+        if (map_fn == strada_unicode_to_upper && cp == 0xDF) {
+            out[oi++] = 'S'; out[oi++] = 'S';
+            i += char_len;
+            continue;
+        }
+        if (map_fn == strada_unicode_to_lower && cp == 0x0130) {
+            out[oi++] = 'i';
+            oi += utf8_encode(0x0307, out + oi);
+            i += char_len;
+            continue;
+        }
         uint32_t mapped = map_fn(cp);
         oi += utf8_encode(mapped, out + oi);
         i += char_len;
@@ -22119,39 +22161,98 @@ char* strada_lcfirst_ascii(const char *str) {
  * (complement), s (squeeze), r (return-don't-modify) flags. Returns
  * the result string; *out_count is set to the match/replacement count
  * (Perl's tr/// return value). Caller frees the returned char*. */
-static uint32_t *tr_decode_and_expand_set(const char *set, size_t *out_n) {
+/* Parse a tr/// search or replacement list into codepoints: UTF-8 is
+ * decoded, escapes are processed (\n \t \r \f \e \a \0 \NNN octal, \xHH,
+ * \x{H..}, and \<c> for any other c, so \- and \\ are literal), and a-z
+ * ranges are expanded. An escaped '-' never forms a range. If max_cp is
+ * non-NULL it receives the largest codepoint seen. */
+static uint32_t *tr_decode_and_expand_set_ex(const char *set, size_t *out_n, uint32_t *max_cp) {
     *out_n = 0;
+    if (max_cp) *max_cp = 0;
     if (!set || !set[0]) return NULL;
     size_t slen = strlen(set);
     uint32_t *raw = (uint32_t *)malloc(sizeof(uint32_t) * (slen + 1));
-    if (!raw) return NULL;
+    unsigned char *lit = (unsigned char *)malloc(slen + 1);   /* 1 = escaped (never a range '-') */
+    if (!raw || !lit) { free(raw); free(lit); return NULL; }
     size_t rn = 0;
     for (size_t i = 0; i < slen; ) {
-        int n = utf8_char_len((unsigned char)set[i]);
+        unsigned char c = (unsigned char)set[i];
+        if (c == '\\' && i + 1 < slen) {
+            unsigned char e = (unsigned char)set[i + 1];
+            uint32_t cp;
+            i += 2;
+            switch (e) {
+                case 'n': cp = '\n'; break;
+                case 't': cp = '\t'; break;
+                case 'r': cp = '\r'; break;
+                case 'f': cp = '\f'; break;
+                case 'e': cp = 27; break;
+                case 'a': cp = 7; break;
+                case 'x':
+                    cp = 0;
+                    if (i < slen && set[i] == '{') {
+                        i++;
+                        while (i < slen && set[i] != '}') {
+                            int h = isxdigit((unsigned char)set[i])
+                                ? (isdigit((unsigned char)set[i]) ? set[i] - '0' : (tolower((unsigned char)set[i]) - 'a' + 10)) : -1;
+                            if (h >= 0 && cp <= 0x10FFFF) cp = cp * 16 + (uint32_t)h;
+                            i++;
+                        }
+                        if (i < slen) i++;   /* '}' */
+                        if (cp > 0x10FFFF) cp = 0xFFFD;
+                    } else {
+                        for (int k = 0; k < 2 && i < slen && isxdigit((unsigned char)set[i]); k++, i++) {
+                            unsigned char d = (unsigned char)set[i];
+                            cp = cp * 16 + (uint32_t)(isdigit(d) ? d - '0' : tolower(d) - 'a' + 10);
+                        }
+                    }
+                    break;
+                default:
+                    if (e >= '0' && e <= '7') {
+                        cp = (uint32_t)(e - '0');
+                        for (int k = 0; k < 2 && i < slen && set[i] >= '0' && set[i] <= '7'; k++, i++)
+                            cp = cp * 8 + (uint32_t)(set[i] - '0');
+                    } else {
+                        int n = utf8_char_len(e);
+                        if (n > 1 && i - 1 + (size_t)n <= slen) {
+                            cp = utf8_decode(set + i - 1, NULL);
+                            i += (size_t)n - 1;
+                        } else {
+                            cp = e;
+                        }
+                    }
+                    break;
+            }
+            raw[rn] = cp; lit[rn] = 1; rn++;
+            continue;
+        }
+        int n = utf8_char_len(c);
         if (n <= 0 || i + (size_t)n > slen) {
-            raw[rn++] = (unsigned char)set[i];
+            raw[rn] = c; lit[rn] = 0; rn++;
             i++;
             continue;
         }
-        raw[rn++] = utf8_decode(set + i, NULL);
+        raw[rn] = utf8_decode(set + i, NULL); lit[rn] = 0; rn++;
         i += (size_t)n;
     }
     size_t cap = rn + 32;
     uint32_t *out = (uint32_t *)malloc(sizeof(uint32_t) * cap);
-    if (!out) { free(raw); return NULL; }
+    if (!out) { free(raw); free(lit); return NULL; }
     size_t on = 0;
+    uint32_t mx = 0;
     for (size_t k = 0; k < rn; k++) {
-        if (k + 2 < rn && raw[k + 1] == '-') {
+        if (k + 2 < rn && raw[k + 1] == '-' && !lit[k + 1]) {
             uint32_t from = raw[k];
             uint32_t to = raw[k + 2];
-            if (from <= to && to <= 0x10FFFF && (to - from) <= 0x10FFFF) {
+            if (from <= to && to <= 0x10FFFF) {
                 size_t span = (size_t)(to - from) + 1;
                 if (on + span >= cap) {
                     cap = (on + span) * 2;
                     out = (uint32_t *)sr_xrealloc(out, sizeof(uint32_t) * cap);
                 }
                 for (uint32_t cp = from; cp <= to; cp++) out[on++] = cp;
-            } else if (from > to && from <= 0x10FFFF && (from - to) <= 0x10FFFF) {
+                if (to > mx) mx = to;
+            } else if (from > to && from <= 0x10FFFF) {
                 size_t span = (size_t)(from - to) + 1;
                 if (on + span >= cap) {
                     cap = (on + span) * 2;
@@ -22161,6 +22262,7 @@ static uint32_t *tr_decode_and_expand_set(const char *set, size_t *out_n) {
                     out[on++] = cp;
                     if (cp == to) break;
                 }
+                if (from > mx) mx = from;
             }
             k += 2;
         } else {
@@ -22169,11 +22271,18 @@ static uint32_t *tr_decode_and_expand_set(const char *set, size_t *out_n) {
                 out = (uint32_t *)sr_xrealloc(out, sizeof(uint32_t) * cap);
             }
             out[on++] = raw[k];
+            if (raw[k] > mx) mx = raw[k];
         }
     }
     free(raw);
+    free(lit);
     *out_n = on;
+    if (max_cp) *max_cp = mx;
     return out;
+}
+
+static uint32_t *tr_decode_and_expand_set(const char *set, size_t *out_n) {
+    return tr_decode_and_expand_set_ex(set, out_n, NULL);
 }
 
 static char* strada_tr_utf8_len(const char *subject, size_t subject_byte_len,
@@ -22273,7 +22382,9 @@ char* strada_ucfirst(const char *str) {
     uint32_t cp = utf8_decode(str, NULL);
     uint32_t mapped = strada_unicode_to_upper(cp);
     char encoded[8];
-    int enc_len = utf8_encode(mapped, encoded);
+    int enc_len;
+    if (cp == 0xDF) { encoded[0] = 'S'; encoded[1] = 's'; enc_len = 2; }   /* titlecase of ß */
+    else enc_len = utf8_encode(mapped, encoded);
     /* Allocate: encoded bytes + (in_len - char_len) tail + NUL */
     char *out = malloc((size_t)enc_len + in_len - (size_t)char_len + 1);
     if (!out) return strdup("");
@@ -22292,7 +22403,9 @@ char* strada_lcfirst(const char *str) {
     uint32_t cp = utf8_decode(str, NULL);
     uint32_t mapped = strada_unicode_to_lower(cp);
     char encoded[8];
-    int enc_len = utf8_encode(mapped, encoded);
+    int enc_len;
+    if (cp == 0x0130) { encoded[0] = 'i'; enc_len = 1 + utf8_encode(0x0307, encoded + 1); }
+    else enc_len = utf8_encode(mapped, encoded);
     char *out = malloc((size_t)enc_len + in_len - (size_t)char_len + 1);
     if (!out) return strdup("");
     memcpy(out, encoded, (size_t)enc_len);
@@ -22392,9 +22505,8 @@ static StradaValue* strada_case_sv(StradaValue *sv, int to_upper, int first_only
             return r;
         }
         uint32_t cp = utf8_decode(s, NULL);
-        uint32_t mapped = to_upper ? strada_unicode_to_upper(cp) : strada_unicode_to_lower(cp);
         char enc[8];
-        int enc_len = utf8_encode(mapped, enc);
+        int enc_len = strada_case_full(cp, to_upper, 1, enc);
         size_t tail = len - (size_t)char_len;
         if (tail > SIZE_MAX - (size_t)enc_len - 1) {
             if (ssv) strada_decref(ssv);
@@ -22433,8 +22545,7 @@ static StradaValue* strada_case_sv(StradaValue *sv, int to_upper, int first_only
             continue;
         }
         uint32_t cp = utf8_decode(s + i, NULL);
-        uint32_t mapped = to_upper ? strada_unicode_to_upper(cp) : strada_unicode_to_lower(cp);
-        oi += (size_t)utf8_encode(mapped, out + oi);
+        oi += (size_t)strada_case_full(cp, to_upper, 0, out + oi);
         i += (size_t)char_len;
     }
     out[oi] = '\0';
@@ -23229,35 +23340,35 @@ static uint32_t strada_norm_comp_lookup(uint32_t a, uint32_t b) {
     return 0;
 }
 
+/* Canonical composition (UAX #15): each character combines with the last
+ * starter unless blocked (a character between them has a combining class
+ * >= its own, or is a starter). Characters that do not combine are kept. */
 static size_t strada_norm_compose_run(uint32_t *cps, size_t n) {
     if (n == 0) return 0;
-    size_t out_n = 0;
-    size_t i = 0;
-    while (i < n) {
-        uint32_t starter = cps[i];
-        uint8_t prev_ccc = 0;
-        size_t j = i + 1;
-        while (j < n) {
-            uint32_t c = cps[j];
-            uint8_t cc = strada_norm_ccc_of(c);
-            int blocked = (cc != 0 && prev_ccc >= cc);
-            if (!blocked) {
-                uint32_t composed = strada_norm_comp_lookup(starter, c);
-                if (composed) {
-                    starter = composed;
-                    memmove(&cps[j], &cps[j + 1], (n - j - 1) * sizeof(uint32_t));
-                    n--;
-                    continue;
-                }
-            }
-            if (cc == 0) break;
-            prev_ccc = cc;
-            j++;
+    size_t starter_pos = 0;
+    uint32_t starter = cps[0];
+    int last_class = strada_norm_ccc_of(starter);
+    int have_starter = (last_class == 0);
+    if (last_class != 0) last_class = 256;   /* leading non-starter: nothing composes with it */
+    size_t comp_pos = 1;
+    for (size_t k = 1; k < n; k++) {
+        uint32_t ch = cps[k];
+        int ch_class = strada_norm_ccc_of(ch);
+        uint32_t composite = have_starter ? strada_norm_comp_lookup(starter, ch) : 0;
+        if (composite && (last_class < ch_class || last_class == 0)) {
+            cps[starter_pos] = composite;
+            starter = composite;
+            continue;
         }
-        cps[out_n++] = starter;
-        i = j;
+        if (ch_class == 0) {
+            starter_pos = comp_pos;
+            starter = ch;
+            have_starter = 1;
+        }
+        last_class = ch_class;
+        cps[comp_pos++] = ch;
     }
-    return out_n;
+    return comp_pos;
 }
 
 /* Apply NFC/NFD/NFKC/NFKD to `sv`. `compose=1` selects NFC/NFKC,
@@ -25192,6 +25303,45 @@ StradaValue* strada_hex(StradaValue *sv) {
     return strada_new_uint(acc);   /* above INT64_MAX stays unsigned (Perl UV) */
 }
 
+/* chomp/chop on a string SV (generated code): binary-safe (embedded NULs),
+ * result keeps the source's UTF-8 flag. chomp removes one trailing "\n"
+ * (or "\r\n"), never a lone "\r"; chop removes the last character of a
+ * UTF-8 string, else the last byte. */
+StradaValue* strada_chomp_sv(StradaValue *ssv) {
+    const char *p = "";
+    size_t n = 0;
+    int u8 = 0;
+    if (ssv && !STRADA_IS_TAGGED_INT(ssv) && ssv->type == STRADA_STR && ssv->value.pv) {
+        p = ssv->value.pv;
+        n = STRADA_STR_BYTELEN(ssv);
+        u8 = STRADA_STR_IS_UTF8(ssv) ? 1 : 0;
+    }
+    if (n > 0 && p[n - 1] == '\n') {
+        n--;
+        if (n > 0 && p[n - 1] == '\r') n--;
+    }
+    return u8 ? strada_new_str_len_utf8(p, n) : strada_new_str_len(p, n);
+}
+
+StradaValue* strada_chop_sv(StradaValue *ssv) {
+    const char *p = "";
+    size_t n = 0;
+    int u8 = 0;
+    if (ssv && !STRADA_IS_TAGGED_INT(ssv) && ssv->type == STRADA_STR && ssv->value.pv) {
+        p = ssv->value.pv;
+        n = STRADA_STR_BYTELEN(ssv);
+        u8 = STRADA_STR_IS_UTF8(ssv) ? 1 : 0;
+    }
+    if (n > 0) {
+        size_t cut = n - 1;
+        if (u8 && utf8_is_valid(p, n)) {
+            while (cut > 0 && utf8_is_continuation((unsigned char)p[cut])) cut--;
+        }
+        n = cut;
+    }
+    return u8 ? strada_new_str_len_utf8(p, n) : strada_new_str_len(p, n);
+}
+
 char* strada_chomp(const char *str) {
     if (!str) return strdup("");
 
@@ -25203,8 +25353,6 @@ char* strada_chomp(const char *str) {
         if (len > 0 && str[len - 1] == '\r') {
             len--;
         }
-    } else if (str[len - 1] == '\r') {
-        len--;
     }
     
     char *result = malloc(len + 1);
@@ -25635,6 +25783,7 @@ StradaValue* strada_sb_new(void) {
     StradaStringBuilder *sb = sr_xmalloc(sizeof(StradaStringBuilder));
     sb->capacity = SB_INITIAL_CAPACITY;
     sb->length = 0;
+    sb->utf8 = 0;
     sb->buffer = sr_xmalloc(sb->capacity);
     sb->buffer[0] = '\0';
 
@@ -25654,6 +25803,7 @@ StradaValue* strada_sb_new_cap(StradaValue *capacity) {
     StradaStringBuilder *sb = sr_xmalloc(sizeof(StradaStringBuilder));
     sb->capacity = cap;
     sb->length = 0;
+    sb->utf8 = 0;
     sb->buffer = sr_xmalloc(sb->capacity);
     sb->buffer[0] = '\0';
 
@@ -25674,7 +25824,9 @@ void strada_sb_append(StradaValue *sb_val, StradaValue *str_val) {
     char _tb[256];
     size_t len = 0;
     char *owned = NULL;
-    const char *str = strada_sv_raw_bytes(str_val, _tb, sizeof(_tb), &len, &owned);
+    int u8 = 0;
+    const char *str = strada_sv_raw_bytes_flags(str_val, _tb, sizeof(_tb), &len, &owned, &u8);
+    if (u8) sb->utf8 = 1;
 
     /* Grow buffer if needed (double capacity) */
     while (sb->length + len + 1 > sb->capacity) {
@@ -25711,6 +25863,8 @@ StradaValue* strada_sb_to_string(StradaValue *sb_val) {
     StradaStringBuilder *sb = (StradaStringBuilder*)sb_val->value.ptr;
     if (!sb) return strada_new_str("");
 
+    if (sb->utf8 && utf8_is_valid(sb->buffer, sb->length))
+        return strada_new_str_len_utf8(sb->buffer, sb->length);
     return strada_new_str_len(sb->buffer, sb->length);
 }
 
@@ -25728,6 +25882,7 @@ void strada_sb_clear(StradaValue *sb_val) {
     if (!sb) return;
 
     sb->length = 0;
+    sb->utf8 = 0;
     sb->buffer[0] = '\0';
 }
 
@@ -26565,6 +26720,7 @@ static void strada_copy_payload_into(StradaValue *dst, StradaValue *src) {
                         dsb->buffer[ssb->length] = '\0';
                         dsb->length = ssb->length;
                         dsb->capacity = cap;
+                        dsb->utf8 = ssb->utf8;
                     } else {
                         free(dsb);
                         dsb = NULL;
@@ -28506,7 +28662,16 @@ int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const ch
     for (size_t i = 0; i < replace_len; i++) {
         if ((unsigned char)replace[i] >= 0x80) { rep_non_ascii = 1; break; }
     }
-    int keep_utf8 = was_utf8 && (!rep_non_ascii || utf8_is_valid(result, rlen));
+    /* The result is a character string when the subject was one, or when a
+     * UTF-8 replacement (source literals are UTF-8) goes into pure ASCII. */
+    int src_ascii = 1;
+    if (!was_utf8 && rep_non_ascii) {
+        for (size_t i = 0; i < src_len; i++) {
+            if ((unsigned char)src[i] >= 0x80) { src_ascii = 0; break; }
+        }
+    }
+    int keep_utf8 = (was_utf8 || (rep_non_ascii && src_ascii))
+                    && (!rep_non_ascii || utf8_is_valid(result, rlen));
 
     if (!is_tied_scalar && *target_ptr == target && target && !STRADA_IS_TAGGED_INT(target)
         && !(target->meta && (target->meta->is_tied || target->meta->blessed_package))
@@ -28648,6 +28813,27 @@ StradaValue* strada_replace_sv(StradaValue *str_sv, StradaValue *find_sv, Strada
     return res;
 }
 
+
+/* substr($s, OFFSET, LEN) = REPL with a string SV replacement: binary-safe
+ * (NUL bytes), character offsets on UTF-8 strings, UTF-8 flag of the result
+ * from both sides, Perl's range rule (dies "substr outside of string"), and
+ * STORE on a tied scalar. Generated code uses this one. */
+void strada_substr_assign_sv(StradaValue **sv_ptr, int64_t offset, int64_t length, StradaValue *repl) {
+    if (!sv_ptr) return;
+    StradaValue *orig = *sv_ptr;
+    int is_tied_scalar = (orig && !STRADA_IS_TAGGED_INT(orig) && SV_IS_TIED(orig)
+                          && orig->type != STRADA_HASH && orig->type != STRADA_ARRAY) ? 1 : 0;
+    StradaValue *new_sv = strada_substr_replace(orig, offset, length, repl, NULL);
+    if (is_tied_scalar) {
+        strada_cleanup_push(new_sv);
+        strada_tied_scalar_store(orig, new_sv);
+        strada_cleanup_pop_decref(new_sv);
+        return;
+    }
+    StradaValue *old = *sv_ptr;
+    *sv_ptr = new_sv;
+    strada_decref(old);
+}
 
 /* In-place substr assignment: substr($s, offset, len) = "new" */
 void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, const char *replacement) {
@@ -33712,7 +33898,8 @@ StradaValue* strada_quotemeta(StradaValue *str) {
     char _tb[256];
     size_t len = 0;
     char *owned = NULL;
-    const char *s = strada_sv_raw_bytes(str, _tb, sizeof(_tb), &len, &owned);
+    int qm_utf8 = 0;
+    const char *s = strada_sv_raw_bytes_flags(str, _tb, sizeof(_tb), &len, &owned, &qm_utf8);
     /* Worst case: every char is escaped -> 2x length */
     char *buf = (char *)malloc(len * 2 + 1);
     if (!buf) { free(owned); return strada_new_str(""); }
@@ -33728,7 +33915,7 @@ StradaValue* strada_quotemeta(StradaValue *str) {
     }
     buf[j] = '\0';
     free(owned);
-    StradaValue *result = strada_new_str_len(buf, j);
+    StradaValue *result = qm_utf8 ? strada_new_str_len_utf8(buf, j) : strada_new_str_len(buf, j);
     free(buf);
     return result;
 }
@@ -35899,25 +36086,10 @@ static unsigned char* tr_expand_bytes(const char *spec, unsigned char *stack_buf
     unsigned char *buf = stack_buf;
     size_t cap = stack_cap;
     size_t count = 0;
-    for (const char *p = spec; *p; p++) {
-        if (*(p+1) == '-' && *(p+2)) {
-            unsigned char from = (unsigned char)*p;
-            unsigned char to = (unsigned char)*(p+2);
-            if (from <= to) {
-                for (unsigned int c = from; c <= to; c++) {
-                    tr_append_byte(&buf, stack_buf, &cap, &count, (unsigned char)c);
-                }
-            } else {
-                for (unsigned int c = from; ; c--) {
-                    tr_append_byte(&buf, stack_buf, &cap, &count, (unsigned char)c);
-                    if (c == to) break;
-                }
-            }
-            p += 2;
-        } else {
-            tr_append_byte(&buf, stack_buf, &cap, &count, (unsigned char)*p);
-        }
-    }
+    size_t n = 0;
+    uint32_t *cps = tr_decode_and_expand_set(spec, &n);
+    for (size_t i = 0; i < n; i++) tr_append_byte(&buf, stack_buf, &cap, &count, (unsigned char)cps[i]);
+    free(cps);
     *count_out = count;
     return buf;
 }
@@ -35958,6 +36130,8 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
     }
 
     int orig_utf8 = (!STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && STRADA_STR_IS_UTF8(sv)) ? 1 : 0;
+    /* Codepoint-level tr when a list holds a character above 0xFF (an
+     * escape like \x{100} or raw non-ASCII UTF-8 text). */
     int pat_non_ascii = 0;
     for (const unsigned char *p = (const unsigned char *)search; *p; p++) {
         if (*p >= 0x80) { pat_non_ascii = 1; break; }
@@ -35966,6 +36140,12 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
         for (const unsigned char *p = (const unsigned char *)replace; *p; p++) {
             if (*p >= 0x80) { pat_non_ascii = 1; break; }
         }
+    }
+    if (!pat_non_ascii) {
+        size_t tn = 0; uint32_t mx1 = 0, mx2 = 0;
+        free(tr_decode_and_expand_set_ex(search, &tn, &mx1));
+        free(tr_decode_and_expand_set_ex(replace, &tn, &mx2));
+        if (mx1 > 0xFF || mx2 > 0xFF) pat_non_ascii = 1;
     }
 
     char *str = NULL;
@@ -36026,6 +36206,7 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
 
     if (!complement) {
         for (size_t i = 0; i < search_count; i++) {
+            if (trans[search_chars[i]] != -1) continue;   /* first occurrence wins (Perl) */
             if (delete_flag && i >= replace_count) {
                 trans[search_chars[i]] = -2;  /* -2 = delete */
             } else if (i < replace_count) {
@@ -39184,26 +39365,47 @@ static void strada_split_strip_trailing(StradaArray *parts) {
     }
 }
 
-static int strada_split_is_space(unsigned char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+/* Byte length of the whitespace character at p (0 if none): ASCII \s plus
+ * the Unicode White_Space characters in UTF-8 (U+0085, U+00A0, U+1680,
+ * U+2000-200A, U+2028/2029, U+202F, U+205F, U+3000), as Perl's \s on a
+ * character string. */
+static size_t strada_split_space_len(const unsigned char *p, size_t avail) {
+    if (avail == 0) return 0;
+    unsigned char c = p[0];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') return 1;
+    if (c == 0xC2 && avail >= 2 && (p[1] == 0x85 || p[1] == 0xA0)) return 2;
+    if (avail >= 3) {
+        if (c == 0xE1 && p[1] == 0x9A && p[2] == 0x80) return 3;
+        if (c == 0xE2 && p[1] == 0x80 && (p[2] <= 0x8A || p[2] == 0xA8 || p[2] == 0xA9 || p[2] == 0xAF)) return 3;
+        if (c == 0xE2 && p[1] == 0x81 && p[2] == 0x9F) return 3;
+        if (c == 0xE3 && p[1] == 0x80 && p[2] == 0x80) return 3;
+    }
+    return 0;
 }
 
-/* awk-mode split; limit > 0 caps the field count (last field keeps the rest) */
+/* awk-mode split. limit > 0 caps the field count (the last field keeps the
+ * rest); any nonzero limit keeps a trailing empty field after trailing
+ * whitespace, as in Perl. */
 static StradaArray* strada_split_awk(const char *str, int limit) {
     StradaArray *parts = strada_array_new();
     if (!str) return parts;
+    const unsigned char *u = (const unsigned char *)str;
     size_t len = strada_regex_subject_length(str);
-    size_t i = 0;
-    while (i < len && strada_split_is_space((unsigned char)str[i])) i++;
+    size_t i = 0, w;
+    while (i < len && (w = strada_split_space_len(u + i, len - i)) > 0) i += w;
     while (i < len) {
         if (limit > 0 && (int)parts->size == limit - 1) {
             strada_array_push_take(parts, strada_regex_new_capture(str + i, len - i));
             return parts;
         }
         size_t start = i;
-        while (i < len && !strada_split_is_space((unsigned char)str[i])) i++;
+        while (i < len && strada_split_space_len(u + i, len - i) == 0) i++;
         strada_array_push_take(parts, strada_regex_new_capture(str + start, i - start));
-        while (i < len && strada_split_is_space((unsigned char)str[i])) i++;
+        int sep = 0;
+        while (i < len && (w = strada_split_space_len(u + i, len - i)) > 0) { i += w; sep = 1; }
+        if (sep && i >= len && limit != 0) {
+            strada_array_push_take(parts, strada_regex_new_capture(str + len, 0));
+        }
     }
     return parts;
 }
@@ -39234,7 +39436,8 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
  * limit == 0: same as no limit; limit < 0: unlimited, trailing empties kept. */
 StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
     if (limit == 0) return strada_regex_split(str, pattern);
-    if (pattern && pattern[0] == ' ' && pattern[1] == '\0') return strada_split_awk(str, limit > 0 ? limit : 0);
+    if (!str || strada_regex_subject_length(str) == 0) return strada_array_new();  /* split of "" is () */
+    if (pattern && pattern[0] == ' ' && pattern[1] == '\0') return strada_split_awk(str, limit);
     if (limit < 0) return strada_regex_split_raw(str, pattern);
     return strada_regex_split_limit_raw(str, pattern, limit);
 }

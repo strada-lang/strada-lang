@@ -247,7 +247,7 @@ endif
 VENDOR_PCRE2_DIR = vendor/pcre2
 VENDOR_PCRE2_LIB = $(VENDOR_PCRE2_DIR)/libpcre2-8.a
 
-$(VENDOR_PCRE2_LIB):
+$(VENDOR_PCRE2_LIB): $(wildcard $(VENDOR_PCRE2_DIR)/src/*.c)
 	@echo "=== Building bundled PCRE2 ==="
 	$(MAKE) -C $(VENDOR_PCRE2_DIR) CC="$(CC)"
 

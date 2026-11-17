@@ -2108,7 +2108,7 @@ static inline pcre2_code *regex_cache_get(VM *vm, const char *pattern, size_t pa
     if (!vm) vm = g_active_vm;
     if (!vm) {
         int errcode; PCRE2_SIZE erroff;
-        pcre2_code *re = pcre2_compile((PCRE2_SPTR)pattern, (PCRE2_SIZE)pat_len, opts, &errcode, &erroff, NULL);
+        pcre2_code *re = strada_pcre2_compile_perl(pattern, pat_len, opts, &errcode, &erroff);
         if (!re) { *md_out = NULL; return NULL; }
         *md_out = pcre2_match_data_create_from_pattern(re, NULL);
         *need_free_out = 1;
@@ -2132,7 +2132,7 @@ static inline pcre2_code *regex_cache_get(VM *vm, const char *pattern, size_t pa
     if (e->pattern) { free(e->pattern); e->pattern = NULL; }
     if (e->compiled) { pcre2_code_free(e->compiled); pcre2_match_data_free(e->match_data); e->compiled = NULL; e->match_data = NULL; }
     int errcode; PCRE2_SIZE erroff;
-    pcre2_code *re = pcre2_compile((PCRE2_SPTR)pattern, (PCRE2_SIZE)pat_len, opts, &errcode, &erroff, NULL);
+    pcre2_code *re = strada_pcre2_compile_perl(pattern, pat_len, opts, &errcode, &erroff);
     if (!re) { *md_out = NULL; return NULL; }
     e->pattern = malloc(pat_len + 1);
     if (e->pattern) {
@@ -2611,8 +2611,42 @@ static void vm_sprintf_append_bin(char **result_p, size_t *rcap_p, size_t *rlen_
     *rlen_p = rlen;
 }
 
+static StradaValue *vm_to_sv(VMValue v);
 static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
     if (argc < 1) return vm_str("");
+    /* Plain scalar arguments (numbers, strings, undef): format with the
+     * runtime's sprintf so both backends agree (%c width, %b precision,
+     * %5%, h/hh, ...). References and objects keep the VM formatter, which
+     * knows VM-side overloads and reference addresses. */
+    {
+        int plain = 1;
+        for (int i = 0; i < argc; i++) {
+            if (VM_IS_PTR(args[i]) && VM_PTR_TYPE(args[i]) != VM_OBJ_STR && VM_PTR_TYPE(args[i]) != VM_OBJ_STRBUF) { plain = 0; break; }
+        }
+        if (plain && argc <= 256) {
+            StradaValue *fsv = vm_to_sv(args[0]);
+            StradaValue *arr = strada_new_array();
+            for (int i = 1; i < argc; i++) strada_array_push_take(arr->value.av, vm_to_sv(args[i]));
+            StradaValue * volatile res = NULL;
+            int cm = strada_cleanup_mark();
+            if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+                res = strada_sprintf_sv_arr(fsv, arr);
+                STRADA_TRY_POP();
+            } else {
+                STRADA_TRY_POP();
+                strada_cleanup_drain_to(cm);
+                strada_clear_exception();
+                res = NULL;
+            }
+            strada_decref(fsv);
+            strada_decref(arr);
+            if (res) {
+                VMValue out = sv_to_vm(res);
+                strada_decref(res);
+                return out;
+            }
+        }
+    }
     VMValue fmt_val = args[0];
     if (vm && vm_has_stringify(vm->program, fmt_val)) {
         fmt_val = vm_stringify_ov(vm, fmt_val);
@@ -9016,6 +9050,42 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             SP_PUSH(VM_UNDEF_VAL); strada_decref(var);
             break;
         }
+        case BUILTIN_SUBSTR_REPL: {
+            /* 4-arg / lvalue substr through the runtime's strada_substr_replace
+             * so both backends share the range rule, UTF-8 handling and the
+             * "substr outside of string" error. */
+            if (argc < 4) { SP_PUSH(VM_UNDEF_VAL); break; }
+            int64_t sr_off = vm_to_int(args[1]);
+            int64_t sr_len = vm_to_int(args[2]);   /* 2-arg form passes VM_INT_MAX */
+            StradaValue *sr_cur = vm_to_sv(args[0]);
+            StradaValue *sr_rep = vm_to_sv(args[3]);
+            StradaValue * volatile sr_new = NULL;
+            StradaValue *sr_removed = NULL;
+            int sr_cm = strada_cleanup_mark();
+            volatile int sr_failed = 0;
+            if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+                sr_new = strada_substr_replace(sr_cur, sr_off, sr_len, sr_rep, &sr_removed);
+                STRADA_TRY_POP();
+            } else {
+                STRADA_TRY_POP();
+                strada_cleanup_drain_to(sr_cm);
+                strada_clear_exception();
+                sr_failed = 1;
+            }
+            strada_decref(sr_cur);
+            strada_decref(sr_rep);
+            if (sr_failed) {
+                throw_exc = vm_str("substr outside of string");
+                { *out_throw = throw_exc; vm->stack_top = sp; return 1; }
+            }
+            VMArray *sr_pair = vm_array_new(2);
+            vm_array_push(sr_pair, sv_to_vm(sr_new));
+            vm_array_push(sr_pair, sv_to_vm(sr_removed));
+            strada_decref(sr_new);
+            strada_decref(sr_removed);
+            SP_PUSH(VM_MAKE_PTR(sr_pair));
+            break;
+        }
         case BUILTIN_TIE_ASSIGN: {
             /* @a = LIST / %h = LIST on a tied container (Perl): CLEAR, then
              * STORE each element / pair; the tie stays, and the result (what
@@ -9240,6 +9310,10 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
 
         /* === UTF-8 === */
         case BUILTIN_UTF8_IS_UTF8: RT_CALL_1(strada_utf8_is_utf8); break;
+        case BUILTIN_UTF8_NFC:  RT_CALL_1(strada_utf8_nfc); break;
+        case BUILTIN_UTF8_NFD:  RT_CALL_1(strada_utf8_nfd); break;
+        case BUILTIN_UTF8_NFKC: RT_CALL_1(strada_utf8_nfkc); break;
+        case BUILTIN_UTF8_NFKD: RT_CALL_1(strada_utf8_nfkd); break;
         case BUILTIN_UTF8_VALID:   RT_CALL_1(strada_utf8_valid); break;
         case BUILTIN_UTF8_ENCODE:  RT_CALL_1(strada_utf8_encode); break;
         case BUILTIN_UTF8_DECODE:  RT_CALL_1(strada_utf8_decode); break;
@@ -9804,7 +9878,12 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 int64_t offset = vm_to_int(args[2]);
                 if (offset < 0) offset = 0;
                 int is_u8 = vm_str_is_utf8_chars(args[0], h, hlen);
-                if (is_u8) {
+                if (nlen == 0) {
+                    /* Perl: an empty needle is found at the position
+                     * clamped to [0, length] */
+                    int64_t total = is_u8 ? (int64_t)vm_utf8_char_count(h, hlen) : (int64_t)hlen;
+                    pos = offset > total ? total : offset;
+                } else if (is_u8) {
                     int64_t clen = (int64_t)vm_utf8_char_count(h, hlen);
                     if (offset <= clen) {
                         size_t start_b = vm_utf8_char_to_byte(h, hlen, offset);
@@ -16678,23 +16757,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
 
     CASE(OP_SUBSTR): {
+        /* Range rule shared with the compiled backend (strada_substr_span):
+         * undef when the range lies before the string or starts past it. */
         VMValue len_v = SP_POP(), start_v = SP_POP(), str_v = SP_POP();
+        int64_t ss_off, ss_cnt;
         if (__builtin_expect(VM_IS_PTR(str_v) && VM_PTR_TYPE(str_v) == VM_OBJ_STR &&
                              !VM_AS_STR(str_v)->hdr.is_utf8 && VM_BOTH_INT(start_v, len_v), 1)) {
             VMString *vs = VM_AS_STR(str_v);
-            int64_t slen = (int64_t)vs->len;
-            int64_t start = VM_INT_VAL(start_v);
-            int64_t len = VM_INT_VAL(len_v);
-            if (start < 0) start = slen + start;
-            if (start < 0) start = 0;
-            if (start > slen) start = slen;
-            if (len < 0) {
-                len = slen - start + len;
-                if (len < 0) len = 0;
-            } else if (len > slen - start) {
-                len = slen - start;
+            if (!strada_substr_span((int64_t)vs->len, VM_INT_VAL(start_v), VM_INT_VAL(len_v), &ss_off, &ss_cnt)) {
+                SP_PUSH(VM_UNDEF_VAL);
+                DISPATCH();
             }
-            SP_PUSH(vm_make_str_flag(vs->data + start, (size_t)len, 0));
+            SP_PUSH(vm_make_str_flag(vs->data + ss_off, (size_t)ss_cnt, 0));
             DISPATCH();
         }
         char buf[64];
@@ -16704,30 +16778,19 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         int64_t len = vm_to_int(len_v);
         if (vm_str_is_utf8_chars(str_v, s, blen)) {
             int64_t clen = (int64_t)vm_utf8_char_count(s, blen);
-            if (start < 0) start = clen + start;
-            if (start < 0) start = 0;
-            if (start > clen) start = clen;
-            if (len < 0) {
-                len = clen - start + len;
-                if (len < 0) len = 0;
-            } else if (len > clen - start) {
-                len = clen - start;
+            if (!strada_substr_span(clen, start, len, &ss_off, &ss_cnt)) {
+                SP_PUSH(VM_UNDEF_VAL);
+            } else {
+                size_t b0 = vm_utf8_char_to_byte(s, blen, ss_off);
+                size_t b1 = vm_utf8_char_to_byte(s, blen, ss_off + ss_cnt);
+                SP_PUSH(vm_make_str_flag(s + b0, b1 - b0, 1));
             }
-            size_t b0 = vm_utf8_char_to_byte(s, blen, start);
-            size_t b1 = vm_utf8_char_to_byte(s, blen, start + len);
-            SP_PUSH(vm_make_str_flag(s + b0, b1 - b0, 1));
         } else {
-            int64_t slen = (int64_t)blen;
-            if (start < 0) start = slen + start;
-            if (start < 0) start = 0;
-            if (start > slen) start = slen;
-            if (len < 0) {
-                len = slen - start + len;
-                if (len < 0) len = 0;
-            } else if (len > slen - start) {
-                len = slen - start;
+            if (!strada_substr_span((int64_t)blen, start, len, &ss_off, &ss_cnt)) {
+                SP_PUSH(VM_UNDEF_VAL);
+            } else {
+                SP_PUSH(vm_make_str_flag(s + ss_off, (size_t)ss_cnt, vm_is_utf8(str_v)));
             }
-            SP_PUSH(vm_make_str_flag(s + start, (size_t)len, vm_is_utf8(str_v)));
         }
         vm_val_free(&str_v);
         DISPATCH();
@@ -16828,11 +16891,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         size_t len = 0;
         const char *s = vm_bytes_view(v, buf, sizeof(buf), &len);
         if (len > 0) {
-            if (s[len - 1] == '\n') {
+            if (s[len - 1] == '\n') {   /* never a lone "\r" (strada_chomp_sv) */
                 len--;
                 if (len > 0 && s[len - 1] == '\r') len--;
-            } else if (s[len - 1] == '\r') {
-                len--;
             }
         }
         SP_PUSH(vm_make_str_flag(s, len, vm_is_utf8(v)));

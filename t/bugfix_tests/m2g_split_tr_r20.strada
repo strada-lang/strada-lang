@@ -1,0 +1,26 @@
+# EXPECT: 4:[a][b][c][] 0: 0: L2 3:[][a][b] 3:[a][c][d] tab here xyz zB 123 x cafe aBxc aBxc abXc m n m m
+func j(array @a) str { my @o = (); foreach my $x (@a) { push(@o, "[" . $x . "]"); } return size(@a) . ":" . join("", @o); }
+func main() int {
+    my @o = ();
+    push(@o, j(split(" ", "  a b  c  ", -1)));
+    push(@o, j(split(/,/, "", -1)));
+    push(@o, j(split(/,/, "", 2)));
+    my @lines = split(/^/, "a\nb\n"); push(@o, "L" . size(@lines));
+    push(@o, j(split(/ /, " a b")));
+    push(@o, j(split(/B/i, "aBcbd")));
+    my $t = "tab\there"; $t =~ tr/\t/ /; push(@o, $t);
+    $t = "a-b"; $t =~ tr/a\-b/xyz/; push(@o, $t);
+    $t = "AB"; $t =~ tr/\x41/z/; push(@o, $t);
+    $t = "abc"; $t =~ tr/a-ca/123X/; push(@o, $t);
+    $t = "a"; $t =~ tr/aa/xy/; push(@o, $t);
+    $t = "caf\x{e9}"; $t =~ tr/\x{e9}/e/; push(@o, $t);
+    my $s = "abc"; $s =~ s/(b)/\L\u$1X/; push(@o, $s);
+    $s = "abc"; $s =~ s/(b)/\u\L$1X/; push(@o, $s);
+    $s = "abc"; $s =~ s/(b)/\l\U$1X/; push(@o, $s);
+    push(@o, ("a" =~ /\p{^Digit}/) ? "m" : "n");
+    push(@o, ("5" =~ /\p{^Digit}/) ? "m" : "n");
+    push(@o, ("see \\p{Digit}" =~ /\\p\{Digit\}/) ? "m" : "n");
+    my $e2 = "\x{e9}\x{e9}"; push(@o, ($e2 =~ /^\x{e9}+$/) ? "m" : "n");
+    say(join(" ", @o));
+    return 0;
+}

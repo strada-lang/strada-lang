@@ -1331,6 +1331,28 @@ compiler:
 - `$_` in a module without `main()` is a weak C definition (it was undeclared).
 - Assigning to a tied **parameter** (`func f($v) { $v = ...; }` called with a
   tied scalar) STOREs into the caller's tied scalar; rebind with a new `my`.
+- **Strings (M2g)**: `split(" ", S, LIMIT)` with a nonzero LIMIT keeps a
+  trailing empty field and awk mode splits on Unicode spaces; split of `""` is
+  always `()`; the VM rewrites `/ /`, `/^/` and regex flags exactly like the
+  compiled side (`compile_split_pattern`). `tr///` lists process escapes
+  (`\t \n \- \\ \xHH \x{..}` octal) and the first mapping of a repeated
+  character wins (`tr_decode_and_expand_set_ex`). Byte-mode `\x{NNNN}` expands
+  to a grouped UTF-8 sequence so quantifiers apply to the character;
+  `\p{^Name}` negates; patterns go through `strada_pcre2_compile_perl` on both
+  backends. `\L\u`/`\U\l` in replacements behave as in Perl via a patch to
+  the vendored `pcre2_substitute.c` (a system PCRE2 keeps its own behaviour).
+  `substr` follows Perl's range rule (`strada_substr_span`: undef when the range
+  is left of the string or starts past it; 4-arg/lvalue substr outside the
+  string dies); lvalue substr is binary-safe (`strada_substr_assign_sv`) and
+  the VM supports lvalue and 4-arg substr (`BUILTIN_SUBSTR_REPL`).
+  `index($s, "", POS)` clamps POS to the length. `chomp`/`chop` are binary-safe
+  (`strada_chomp_sv`/`strada_chop_sv`); chomp removes one trailing `\n` or
+  `\r\n` (Strada keeps CRLF stripping) but never a lone `\r`; chop of a byte
+  string removes one byte. sprintf `%hhd`/`%hd` truncate; the VM formats plain
+  scalar arguments with the runtime's sprintf. `uc("ß")` is "SS",
+  `ucfirst("ß")` "Ss", `lc("İ")` "i\x{307}", `uc("ς")` "Σ", `uc("ı")` "I".
+  NFC/NFKC use the UAX #15 composition loop. `sb::to_string`, `quotemeta` and
+  literal `s///` keep or gain the UTF-8 flag.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

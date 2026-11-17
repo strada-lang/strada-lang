@@ -823,25 +823,29 @@ do
 
       if (ptr < repend - 1) switch (ptr[1])
         {
+        /* Strada patch (Perl semantics): a one-shot \u or \l returns to
+        the current \L/\U mode afterwards, and \L/\U following a pending
+        one-shot sets the mode without cancelling it, so \L\u and \u\L
+        both mean "first character upper, the rest lower". */
         case CHAR_L:
-        forcecase = forcecasereset = -1;
+        if (forcecase != forcecasereset) forcecasereset = -1;
+        else forcecase = forcecasereset = -1;
         ptr += 2;
         continue;
 
         case CHAR_l:
         forcecase = -1;
-        forcecasereset = 0;
         ptr += 2;
         continue;
 
         case CHAR_U:
-        forcecase = forcecasereset = 1;
+        if (forcecase != forcecasereset) forcecasereset = 1;
+        else forcecase = forcecasereset = 1;
         ptr += 2;
         continue;
 
         case CHAR_u:
         forcecase = 1;
-        forcecasereset = 0;
         ptr += 2;
         continue;
 

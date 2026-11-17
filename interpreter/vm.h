@@ -495,6 +495,7 @@ enum {
     BUILTIN_TIE,
     BUILTIN_UNTIE,
     BUILTIN_TIED,
+    BUILTIN_SUBSTR_REPL, /* (cur, off, len, repl) -> [new string, removed part] (Perl substr range rule) */
     BUILTIN_TIE_ASSIGN,  /* (target, new): CLEAR+STORE into a tied target -> target; else new */
 
     /* String operations */
@@ -536,6 +537,7 @@ enum {
 
     /* UTF-8 */
     BUILTIN_UTF8_IS_UTF8,
+    BUILTIN_UTF8_NFC, BUILTIN_UTF8_NFD, BUILTIN_UTF8_NFKC, BUILTIN_UTF8_NFKD,
     BUILTIN_UTF8_VALID,
     BUILTIN_UTF8_ENCODE,
     BUILTIN_UTF8_DECODE,

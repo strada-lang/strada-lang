@@ -409,6 +409,7 @@ typedef struct StradaStringBuilder {
     char *buffer;       /* Pre-allocated buffer */
     size_t length;      /* Current string length */
     size_t capacity;    /* Total buffer capacity */
+    int utf8;           /* a UTF-8 (character) string was appended: to_string flags the result */
 } StradaStringBuilder;
 
 /* Buffered socket for efficient I/O */
@@ -1102,6 +1103,8 @@ StradaValue* strada_base64_decode(StradaValue *sv);  /* Decode base64 to string 
 StradaValue* strada_hex(StradaValue *sv);  /* Convert hex string to integer: hex("ff") -> 255 */
 StradaValue* strada_array_copy(StradaValue *src);  /* Deep copy array: new array with incref'd elements */
 char* strada_chomp(const char *str);
+StradaValue* strada_chomp_sv(StradaValue *ssv);
+StradaValue* strada_chop_sv(StradaValue *ssv);
 char* strada_chop(const char *str);
 int strada_strcmp(const char *s1, const char *s2);
 int strada_strncmp(const char *s1, const char *s2, int n);
@@ -1654,6 +1657,10 @@ StradaValue* strada_closure_new(void *func, int params, int captures, StradaValu
 StradaValue* strada_closure_new_shared(void *func, int params, int captures, StradaValue ***cap_array, unsigned char *is_static);
 StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_void, int fixed_params);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
+#ifdef HAVE_PCRE2
+pcre2_code *strada_pcre2_compile_perl(const char *pattern, size_t pat_len, uint32_t options,
+                                      int *errcode, PCRE2_SIZE *erroffset);
+#endif
 StradaValue* strada_closure_call0(StradaValue *closure);
 StradaValue* strada_closure_call1(StradaValue *closure, StradaValue *a0);
 StradaValue* strada_closure_call2(StradaValue *closure, StradaValue *a0, StradaValue *a1);
@@ -1879,6 +1886,8 @@ char* strada_chomp(const char *str);
 char* strada_chop(const char *str);
 StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const char *replace);
 void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, const char *replacement);
+int strada_substr_span(int64_t L, int64_t off, int64_t len, int64_t *start, int64_t *count);
+void strada_substr_assign_sv(StradaValue **sv_ptr, int64_t offset, int64_t length, StradaValue *repl);
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
 StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);

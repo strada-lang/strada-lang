@@ -1146,6 +1146,42 @@ static void patch_u16(CompCtx *ctx, size_t off, uint16_t val) {
 
 /* Forward declarations */
 static void compile_expr(CompCtx *ctx, StradaValue *node);
+
+/* split's pattern, rewritten as in the compiled backend (CodeGenBuiltins):
+ * a /regex/ literal's i/x/s/m flags become an inline (?flags) prefix, `/^/`
+ * means /^/m, and `/ /` is a single-space separator (only the string " " is
+ * awk mode). */
+static void compile_split_pattern(CompCtx *ctx, StradaValue *pat) {
+    if (pat && !STRADA_IS_TAGGED_INT(pat) && (int)ast_int(pat, "type") == NI_STR_LITERAL
+        && ast_int(pat, "is_regex") != 0) {
+        size_t vlen = 0;
+        const char *val = ast_str_len(pat, "value", &vlen);
+        const char *fl = ast_str(pat, "regex_flags");
+        char inl[8]; size_t ni = 0;
+        for (const char *f = fl ? fl : ""; *f && ni < 5; f++)
+            if (*f == 'i' || *f == 'x' || *f == 's' || *f == 'm') inl[ni++] = *f;
+        inl[ni] = '\0';
+        if (vlen == 1 && val[0] == '^' && !strchr(inl, 'm')) { inl[ni++] = 'm'; inl[ni] = '\0'; }
+        const char *out = NULL; size_t olen = 0; char *buf = NULL;
+        if (ni > 0) {
+            buf = (char *)malloc(vlen + ni + 4);
+            if (!buf) { compile_expr(ctx, pat); return; }
+            olen = (size_t)sprintf(buf, "(?%s)", inl);
+            memcpy(buf + olen, val, vlen); olen += vlen;
+            out = buf;
+        } else if (vlen == 1 && val[0] == ' ') {
+            out = "[ ]"; olen = 3;
+        }
+        if (out) {
+            size_t idx = vm_chunk_add_str_const_len(ctx->chunk, out, olen);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx);
+            free(buf);
+            return;
+        }
+    }
+    compile_expr(ctx, pat);
+}
 static void compile_tr(CompCtx *ctx, StradaValue *node);
 static size_t add_pattern_const(CompCtx *ctx, const char *pattern, size_t pat_len, const char *flags);
 static void compile_stmt(CompCtx *ctx, StradaValue *node);
@@ -1828,6 +1864,7 @@ static void compile_assign_var_rhs(CompCtx *ctx, char sigil, StradaValue *value)
     }
 }
 
+static void emit_in_place_xform(CompCtx *ctx, int kind);
 static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop) {
     StradaValue *t = ast_deref(arg0);
     int ttype = (t && !STRADA_IS_TAGGED_INT(t)) ? (int)ast_int(t, "type") : 0;
@@ -1853,13 +1890,7 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
                 vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
             }
-            if (is_chop) {
-                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
-                vm_chunk_emit(ctx->chunk, 1);
-            } else {
-                vm_chunk_emit(ctx->chunk, OP_CHOMP);
-            }
+            emit_in_place_xform(ctx, is_chop);
             vm_chunk_emit(ctx->chunk, OP_DUP);
             if (slot >= 0) {
                 vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
@@ -1896,13 +1927,7 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)k_slot);
         vm_chunk_emit(ctx->chunk, is_hash ? OP_HASH_GET : OP_ARRAY_GET);
 
-        if (is_chop) {
-            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
-            vm_chunk_emit(ctx->chunk, 1);
-        } else {
-            vm_chunk_emit(ctx->chunk, OP_CHOMP);
-        }
+        emit_in_place_xform(ctx, is_chop);
 
         emit_reset_store_local(ctx, v_slot);
 
@@ -1932,13 +1957,7 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
         vm_chunk_emit(ctx->chunk, OP_DEREF_SCALAR);
-        if (is_chop) {
-            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
-            vm_chunk_emit(ctx->chunk, 1);
-        } else {
-            vm_chunk_emit(ctx->chunk, OP_CHOMP);
-        }
+        emit_in_place_xform(ctx, is_chop);
         emit_reset_store_local(ctx, v_slot);
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
@@ -1952,14 +1971,76 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
     }
 
     compile_expr(ctx, arg0);
-    if (is_chop) {
+    emit_in_place_xform(ctx, is_chop);
+}
+
+/* In-place string transforms (compile_in_place_str_op): the current value
+ * is on the stack; leave the new value. kind 0 = chomp, 1 = chop,
+ * 2 = substr replacement using the operand slots in g_sr_slots
+ * (offset, length, replacement, scratch for the [new, removed] pair). */
+static int g_sr_slots[4];
+static void emit_in_place_xform(CompCtx *ctx, int kind) {
+    if (kind == 1) {
         vm_chunk_emit(ctx->chunk, OP_BUILTIN);
         vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
         vm_chunk_emit(ctx->chunk, 1);
+    } else if (kind == 2) {
+        for (int i = 0; i < 3; i++) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)g_sr_slots[i]);
+        }
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_SUBSTR_REPL);
+        vm_chunk_emit(ctx->chunk, 4);
+        emit_reset_store_local(ctx, g_sr_slots[3]);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)g_sr_slots[3]);
+        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+        vm_chunk_emit_i64(ctx->chunk, 0);
+        vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
     } else {
         vm_chunk_emit(ctx->chunk, OP_CHOMP);
     }
 }
+
+/* substr(TARGET, OFF[, LEN]) with a replacement: 4-arg substr (result = the
+ * removed part, want_removed = 1) or lvalue `substr(...) = REPL` (result =
+ * REPL). TARGET is rewritten in place. */
+static void compile_substr_replace(CompCtx *ctx, StradaValue *sargs, int sargc, StradaValue *repl, int want_removed) {
+    int d = ctx->assign_depth++;
+    char nb[32];
+    int slots[4];
+    const char *nm[4] = { "__sr_o", "__sr_l", "__sr_r", "__sr_p" };
+    for (int i = 0; i < 4; i++) {
+        snprintf(nb, sizeof(nb), "%s%d", nm[i], d);
+        slots[i] = ctx_get_or_add_local(ctx, nb, '$');
+    }
+    compile_expr(ctx, ast_arr_get(sargs, 1));
+    emit_reset_store_local(ctx, slots[0]);
+    if (sargc >= 3) compile_expr(ctx, ast_arr_get(sargs, 2));
+    else { vm_chunk_emit(ctx->chunk, OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, VM_INT_MAX); }
+    emit_reset_store_local(ctx, slots[1]);
+    compile_expr(ctx, repl);
+    emit_reset_store_local(ctx, slots[2]);
+    int saved[4];
+    memcpy(saved, g_sr_slots, sizeof(saved));
+    memcpy(g_sr_slots, slots, sizeof(slots));
+    compile_in_place_str_op(ctx, ast_arr_get(sargs, 0), 2);
+    memcpy(g_sr_slots, saved, sizeof(saved));
+    vm_chunk_emit(ctx->chunk, OP_POP);
+    if (want_removed) {
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slots[3]);
+        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+        vm_chunk_emit_i64(ctx->chunk, 1);
+        vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+    } else {
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slots[2]);
+    }
+    ctx->assign_depth--;
+}
+
 
 typedef enum {
     LV_NONE = 0,
@@ -3484,11 +3565,11 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "split") == 0 && (argc == 2 || argc == 3)) {
             if (argc == 3) {
                 compile_expr(ctx, ast_arr_get(args, 2)); /* limit */
-                compile_expr(ctx, ast_arr_get(args, 0)); /* delimiter */
+                compile_split_pattern(ctx, ast_arr_get(args, 0)); /* delimiter */
                 compile_expr(ctx, ast_arr_get(args, 1)); /* string */
                 vm_chunk_emit(ctx->chunk, OP_STR_SPLIT_LIMIT);
             } else {
-                compile_expr(ctx, ast_arr_get(args, 0));
+                compile_split_pattern(ctx, ast_arr_get(args, 0));
                 compile_expr(ctx, ast_arr_get(args, 1));
                 vm_chunk_emit(ctx->chunk, OP_STR_SPLIT);
             }
@@ -3512,6 +3593,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         /* Built-in: substr() */
+        if (strcmp(name, "substr") == 0 && argc == 4) {
+            compile_substr_replace(ctx, args, 4, ast_arr_get(args, 3), 1);
+            break;
+        }
         if (strcmp(name, "substr") == 0 && (argc == 2 || argc == 3)) {
             compile_expr(ctx, ast_arr_get(args, 0));
             compile_expr(ctx, ast_arr_get(args, 1));
@@ -4262,6 +4347,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             }
             int bid = -1;
             if (strcmp(fn, "is_utf8") == 0) bid = BUILTIN_UTF8_IS_UTF8;
+            else if (strcmp(fn, "nfc") == 0) bid = BUILTIN_UTF8_NFC;
+            else if (strcmp(fn, "nfd") == 0) bid = BUILTIN_UTF8_NFD;
+            else if (strcmp(fn, "nfkc") == 0) bid = BUILTIN_UTF8_NFKC;
+            else if (strcmp(fn, "nfkd") == 0) bid = BUILTIN_UTF8_NFKD;
             else if (strcmp(fn, "valid") == 0) bid = BUILTIN_UTF8_VALID;
             else if (strcmp(fn, "encode") == 0) bid = BUILTIN_UTF8_ENCODE;
             else if (strcmp(fn, "decode") == 0) bid = BUILTIN_UTF8_DECODE;
@@ -4544,6 +4633,16 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         target = ast_deref(target);
 
         int target_type = target ? (int)ast_int(target, "type") : 0;
+
+        /* Lvalue substr: substr(TARGET, OFF[, LEN]) = VALUE */
+        if (target_type == NI_CALL && strcmp(op, "=") == 0 && strcmp(ast_str(target, "name"), "substr") == 0) {
+            StradaValue *sargs = ast_get(target, "args");
+            int sargc = (int)ast_int(target, "arg_count");
+            if (sargc == 2 || sargc == 3) {
+                compile_substr_replace(ctx, sargs, sargc, value, 0);
+                break;
+            }
+        }
 
         /* Assignment to array or hash slice (@a[i, j] = ..., @h{k1, k2} = ...) */
         if ((target_type == NI_ARRAY_SLICE || target_type == NI_HASH_SLICE) && strcmp(op, "=") == 0) {

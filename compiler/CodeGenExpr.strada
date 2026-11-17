@@ -1728,16 +1728,15 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             my str $sa_our = "" . $cg->{"our_vars"}->{$sa_vc};
                             emit($cg, "StradaValue *__sa_rsv = strada_to_str_sv(__sa_sv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_rsv); "); }
-                            emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if (length($sa_our) > 0) {
                                 emit($cg, "StradaValue *__sa_tv = strada_global_get_cstr(" . c_str_lit($sa_our) . "); ");
                                 if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                                emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                                emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                                 if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
                                 emit($cg, "strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
                             } else {
                                 my str $sa_ref = scalar_var_c_ref($cg, $sa_tgt->{"name"}, $sa_vc);
-                                emit($cg, "strada_substr_assign((StradaValue**)&" . $sa_ref . ", __sa_off, __sa_len, __sa_r); ");
+                                emit($cg, "strada_substr_assign_sv((StradaValue**)&" . $sa_ref . ", __sa_off, __sa_len, __sa_rsv); ");
                             }
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_rsv); "); }
                             else { emit($cg, "strada_decref(__sa_rsv); "); }
@@ -1760,9 +1759,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
                             emit($cg, "StradaValue *__sa_rsv = strada_to_str_sv(__sa_sv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                            emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_rsv); "); }
-                            emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                            emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_rsv); "); }
                             else { emit($cg, "strada_decref(__sa_rsv); "); }
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
@@ -1794,9 +1792,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
                             emit($cg, "StradaValue *__sa_rsv = strada_to_str_sv(__sa_sv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                            emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_rsv); "); }
-                            emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                            emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_rsv); "); }
                             else { emit($cg, "strada_decref(__sa_rsv); "); }
                             if ($cg->{"uses_tie"} == 1) {
@@ -1822,9 +1819,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
                             emit($cg, "StradaValue *__sa_rsv = strada_to_str_sv(__sa_sv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                            emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_rsv); "); }
-                            emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                            emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_rsv); "); }
                             else { emit($cg, "strada_decref(__sa_rsv); "); }
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
@@ -1843,9 +1839,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_tv); "); }
                             emit($cg, "StradaValue *__sa_rsv = strada_to_str_sv(__sa_sv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                            emit($cg, "const char *__sa_r = (__sa_rsv && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_push(__sa_rsv); "); }
-                            emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                            emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                             if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_rsv); "); }
                             else { emit($cg, "strada_decref(__sa_rsv); "); }
                             emit($cg, "strada_decref(__sa_tv); ");
@@ -2653,7 +2648,6 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if ($sa_rhs_cl == 1) { emit($cg, "__sa_rhs = strada_mortal(__sa_rhs); "); }
                     emit($cg, "strada_incref(__sa_rhs); __sa_val = strada_mortal(__sa_rhs); ");
                     emit($cg, "StradaValue *__sa_rsv = strada_mortal(strada_to_str_sv(__sa_val)); ");
-                    emit($cg, "const char *__sa_r = (__sa_rsv && !STRADA_IS_TAGGED_INT(__sa_rsv) && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                 } else {
                     emit($cg, "StradaValue *__sa_rhs = ");
                     gen_expression($cg, $expr->{"value"});
@@ -2682,18 +2676,17 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "); ");
                     }
                     emit($cg, "StradaValue *__sa_rsv = strada_mortal(strada_to_str_sv(__sa_val)); ");
-                    emit($cg, "const char *__sa_r = (__sa_rsv && !STRADA_IS_TAGGED_INT(__sa_rsv) && __sa_rsv->value.pv) ? __sa_rsv->value.pv : \"\"; ");
                 }
                 if ($sa_tt == NODE_HASH_ACCESS() || $sa_tt == NODE_DEREF_HASH()) {
                     emit($cg, "StradaValue *__sa_tv = strada_hv_fetch_owned_sv(__sa_h, __sa_k); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                    emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_hv_store_sv(__sa_h, __sa_k, __sa_tv); ");
+                    emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); strada_hv_store_sv(__sa_h, __sa_k, __sa_tv); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                     else { emit($cg, "strada_decref(__sa_tv); "); }
                 } elsif ($sa_tt == NODE_SUBSCRIPT() || $sa_tt == NODE_DEREF_ARRAY()) {
                     emit($cg, "StradaValue *__sa_tv = strada_av_fetch_sv(__sa_a, __sa_idx); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                    emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); ");
+                    emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); ");
                     if ($cg->{"uses_tie"} == 1) {
                         emit($cg, "strada_av_store_sv(__sa_a, __sa_idx, __sa_tv); ");
                     } else {
@@ -2704,25 +2697,25 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 } elsif ($sa_tt == NODE_DEREF_SCALAR()) {
                     emit($cg, "StradaValue *__sa_tv = strada_deref(__sa_ref); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                    emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_deref_set(__sa_ref, __sa_tv); ");
+                    emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); strada_deref_set(__sa_ref, __sa_tv); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                     else { emit($cg, "strada_decref(__sa_tv); "); }
                 } elsif ($sa_tt == NODE_VARIABLE() && length($sa_our) > 0) {
                     emit($cg, "StradaValue *__sa_tv = strada_global_get_cstr(" . c_str_lit($sa_our) . "); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                    emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
+                    emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
                     if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                     else { emit($cg, "strada_decref(__sa_tv); "); }
                 } elsif ($sa_tt == NODE_VARIABLE()) {
                     if ($cg->{"uses_tie"} == 1) {
                         emit($cg, "if (strada_scalar_is_tied(" . $sa_ref . ")) { StradaValue *__sa_tv = strada_tied_scalar_fetch(" . $sa_ref . "); ");
                         if ($sa_push == 1) { emit($cg, "strada_cleanup_push_slot((StradaValue **)&__sa_tv); "); }
-                        emit($cg, "strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_tied_scalar_store(" . $sa_ref . ", __sa_tv); ");
+                        emit($cg, "strada_substr_assign_sv(&__sa_tv, __sa_off, __sa_len, __sa_rsv); strada_tied_scalar_store(" . $sa_ref . ", __sa_tv); ");
                         if ($sa_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sa_tv); "); }
                         else { emit($cg, "strada_decref(__sa_tv); "); }
-                        emit($cg, "} else { strada_substr_assign((StradaValue **)&(" . $sa_ref . "), __sa_off, __sa_len, __sa_r); } ");
+                        emit($cg, "} else { strada_substr_assign_sv((StradaValue **)&(" . $sa_ref . "), __sa_off, __sa_len, __sa_rsv); } ");
                     } else {
-                        emit($cg, "strada_substr_assign((StradaValue **)&(" . $sa_ref . "), __sa_off, __sa_len, __sa_r); ");
+                        emit($cg, "strada_substr_assign_sv((StradaValue **)&(" . $sa_ref . "), __sa_off, __sa_len, __sa_rsv); ");
                     }
                 }
                 if ($op eq "&&=" || $op eq "||=" || $op eq "//=") {

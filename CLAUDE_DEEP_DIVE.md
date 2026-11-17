@@ -381,6 +381,15 @@ note — codegen in `CodeGenBuiltins.strada` is authoritative, not the
 ### Regex
 `match`, `replace`, `replace_all`, `capture`, `captures`
 
+**Shared string/regex helpers (2026-11, audit M2g)** — both backends call these, so keep them the single source of truth:
+- `strada_pcre2_compile_perl(pat, len, opts, &err, &off)`: `\x{NNNN}` byte-mode expansion (grouped `(?:\xHH\xHH)`) + Perl property names (`\p{^X}` -> `\P{X}`, escaped `\\p` left alone), then `pcre2_compile`. The runtime regex cache and the VM's `regex_cache_get` both compile through it.
+- `strada_substr_span(L, off, len, &start, &count)`: Perl's substr range rule; used by `strada_substr`, `strada_substr_replace` (dies "substr outside of string") and the VM's `OP_SUBSTR`.
+- `strada_substr_assign_sv(&slot, off, len, repl_sv)`: lvalue substr for generated code (codegen passes the stringified `__sa_rsv`). The VM compiles 4-arg / lvalue substr via `compile_substr_replace` + `BUILTIN_SUBSTR_REPL` (returns `[new, removed]`), reusing `compile_in_place_str_op` (kind 2).
+- `tr_decode_and_expand_set_ex`: escape-aware tr list parser used by both the byte and the UTF-8 tr paths.
+- `strada_chomp_sv` / `strada_chop_sv`: binary-safe, flag-preserving; `gen_chomp_chop` emits them.
+- `strada_case_full(cp, upper, title, out)`: multi-character case mappings (ß, İ) for uc/lc/ucfirst.
+- Vendored PCRE2 patch: `vendor/pcre2/src/pcre2_substitute.c` `\u`/`\l` keep the active `\L`/`\U` mode (Perl). The Makefile rebuilds `libpcre2-8.a` when vendored sources change.
+
 ### Process Control
 `exit`, `sleep`, `usleep`, `fork`, `wait`, `waitpid`, `getpid`, `getppid`, `system`, `exec`, `setprocname`, `getprocname`, `setproctitle`, `getproctitle`, `signal`
 
