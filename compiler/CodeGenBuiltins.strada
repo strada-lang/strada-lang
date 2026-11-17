@@ -1109,29 +1109,19 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 emit($cg, "; ");
                 if ($arr_retain == 1) { emit($cg, "strada_incref(__push_a); "); }
                 if ($push_p == 1) { emit($cg, "strada_cleanup_push(__push_a); "); }
+                # One PUSH call with the whole flattened list (Perl), via a
+                # temp list; an untied target gets the elements appended.
+                my int $pl_p = cleanup_push_useful($cg);
+                emit($cg, "{ StradaValue *__pl = strada_new_array(); ");
+                if ($pl_p == 1) { emit($cg, "strada_cleanup_push(__pl); "); }
                 my int $tpi = 1;
                 while ($tpi < $argc) {
-                    my scalar $tval = $args->[$tpi];
-                    if (list_arg_flattens($cg, $tval) == 1) {
-                        # Flatten into a temp list, then push each element
-                        # through the (possibly tied) target.
-                        emit($cg, "{ StradaValue *__pl = strada_new_array(); ");
-                        emit_list_elem_append($cg, "__pl->value.av", $tval, 0);
-                        emit($cg, "for (size_t __pli = 0; __pli < __pl->value.av->size; __pli++) strada_av_push_sv(__push_a, __pl->value.av->elements[__pl->value.av->head + __pli]); strada_decref(__pl); } ");
-                        $tpi = $tpi + 1;
-                        next;
-                    }
-                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tval) == 1) {
-                        emit($cg, "strada_av_push_take_sv(__push_a, ");
-                        gen_expression($cg, $tval);
-                        emit($cg, "); ");
-                    } else {
-                        emit($cg, "strada_av_push_sv(__push_a, ");
-                        gen_expression($cg, $tval);
-                        emit($cg, "); ");
-                    }
+                    emit_list_elem_append($cg, "__pl->value.av", $args->[$tpi], $pl_p);
                     $tpi = $tpi + 1;
                 }
+                emit($cg, "strada_av_push_list_sv(__push_a, __pl, 0); ");
+                if ($pl_p == 1) { emit($cg, "strada_cleanup_pop_decref(__pl); } "); }
+                else { emit($cg, "strada_decref(__pl); } "); }
                 if ($push_p == 1) {
                     emit($cg, "strada_cleanup_pop_decref(__push_a); ");
                 } elsif ($arr_owned == 1) {
@@ -1279,6 +1269,37 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my int $arr_owned = 0;
             if ($arr_cleanup == 1 || $arr_retain == 1) { $arr_owned = 1; }
             my int $unsh_p = cleanup_push_useful($cg);
+            my int $unsh_flat = 0;
+            my int $ufi = 1;
+            while ($ufi < $argc) {
+                if (list_arg_flattens($cg, $args->[$ufi]) == 1) { $unsh_flat = 1; }
+                $ufi = $ufi + 1;
+            }
+            if ($cg->{"uses_tie"} == 1 || $unsh_flat == 1) {
+                # One UNSHIFT call with the whole flattened list (Perl); also
+                # the path that flattens array arguments.
+                emit($cg, "({ StradaValue *__unsh_a = ");
+                gen_array_target($cg, $args->[0]);
+                emit($cg, "; ");
+                if ($arr_retain == 1) { emit($cg, "strada_incref(__unsh_a); "); }
+                if ($arr_owned == 1 && $unsh_p == 1) { emit($cg, "strada_cleanup_push(__unsh_a); "); }
+                emit($cg, "{ StradaValue *__ul = strada_new_array(); ");
+                if ($unsh_p == 1) { emit($cg, "strada_cleanup_push(__ul); "); }
+                my int $tui = 1;
+                while ($tui < $argc) {
+                    emit_list_elem_append($cg, "__ul->value.av", $args->[$tui], $unsh_p);
+                    $tui = $tui + 1;
+                }
+                emit($cg, "strada_av_push_list_sv(__unsh_a, __ul, 1); ");
+                if ($unsh_p == 1) { emit($cg, "strada_cleanup_pop_decref(__ul); } "); }
+                else { emit($cg, "strada_decref(__ul); } "); }
+                if ($arr_owned == 1) {
+                    if ($unsh_p == 1) { emit($cg, "strada_cleanup_pop_decref(__unsh_a); "); }
+                    else { emit($cg, "strada_decref(__unsh_a); "); }
+                }
+                emit($cg, "strada_undef_static(); })");
+                return 1;
+            }
             emit($cg, "({ StradaValue *__unsh_a = ");
             gen_array_target($cg, $args->[0]);
             emit($cg, "; ");

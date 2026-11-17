@@ -621,7 +621,21 @@ void strada_untie(StradaValue *ref);
 
 StradaValue* strada_tied(StradaValue *ref);
 // Returns the tied object, or undef if not tied
+
+int strada_array_assign_if_tied(StradaValue *target, StradaValue *newval);
+int strada_hash_assign_if_tied(StradaValue *target, StradaValue *newval);
+// @a = LIST / %h = LIST: when target is tied, CLEAR + STORE each element/pair,
+// consume newval, return 1 (tie kept); else 0 and the caller swaps the container.
+// Codegen: emit_container_replace (CodeGenExpr), only when uses_tie.
+
+void strada_av_push_list_sv(StradaValue *sv, StradaValue *list, int at_front);
+// push/unshift LIST: one PUSH/UNSHIFT call on a tied target, else append/prepend.
 ```
+
+Tied array FETCH/STORE/EXISTS/DELETE offset a negative index by FETCHSIZE
+(`tied_av_norm_idx`); still negative -> undef / "Modification of
+non-creatable array value attempted". The VM mirrors list assignment with
+`BUILTIN_TIE_ASSIGN` (vm_compiler emits LOAD_LOCAL target, RHS, builtin, STORE_LOCAL).
 
 ### Type Conversion Functions
 

@@ -9016,6 +9016,54 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             SP_PUSH(VM_UNDEF_VAL); strada_decref(var);
             break;
         }
+        case BUILTIN_TIE_ASSIGN: {
+            /* @a = LIST / %h = LIST on a tied container (Perl): CLEAR, then
+             * STORE each element / pair; the tie stays, and the result (what
+             * the caller stores back into the variable) is the target. */
+            if (argc < 2) { SP_PUSH(argc ? args[0] : VM_UNDEF_VAL); break; }
+            VMValue tgt = args[0], nv = args[1];
+            int tkind = 0;
+            VMValue tobj = VM_UNDEF_VAL;
+            if (VM_IS_PTR(tgt) && VM_PTR_TYPE(tgt) == VM_OBJ_ARRAY && !VM_IS_UNDEF(VM_AS_ARRAY(tgt)->tied_obj)) {
+                tkind = 2; tobj = VM_AS_ARRAY(tgt)->tied_obj;
+            } else if (VM_IS_PTR(tgt) && VM_PTR_TYPE(tgt) == VM_OBJ_HASH && !VM_IS_UNDEF(VM_AS_HASH(tgt)->tied_obj)) {
+                tkind = 1; tobj = VM_AS_HASH(tgt)->tied_obj;
+            }
+            if (!tkind) { SP_PUSH(nv); break; }
+            vm->stack_top = sp;
+            int cf = vm_tied_array_find_method(vm, tobj, "CLEAR");
+            if (cf >= 0) {
+                VMValue r = vm_tied_array_call(vm, tobj, cf, NULL, 0);
+                vm_temp_free(&r);
+            } else if (tkind == 2) {
+                int ssf = vm_tied_array_find_method(vm, tobj, "STORESIZE");
+                VMValue z = VM_MAKE_INT(0);
+                if (ssf >= 0) { VMValue r = vm_tied_array_call(vm, tobj, ssf, &z, 1); vm_temp_free(&r); }
+            }
+            int sf = vm_tied_array_find_method(vm, tobj, "STORE");
+            if (sf >= 0 && !vm->has_pending_exc) {
+                if (tkind == 2 && VM_IS_PTR(nv) && VM_PTR_TYPE(nv) == VM_OBJ_ARRAY) {
+                    VMArray *na = VM_AS_ARRAY(nv);
+                    for (int i = 0; i < na->size && !vm->has_pending_exc; i++) {
+                        VMValue sa[2] = { VM_MAKE_INT(i), na->items[i] };
+                        VMValue r = vm_tied_array_call(vm, tobj, sf, sa, 2);
+                        vm_temp_free(&r);
+                    }
+                } else if (tkind == 1 && VM_IS_PTR(nv) && VM_PTR_TYPE(nv) == VM_OBJ_HASH) {
+                    VMHash *nh = VM_AS_HASH(nv);
+                    for (int i = 0; i < nh->capacity && !vm->has_pending_exc; i++) {
+                        if (nh->entries[i].occupied != 1) continue;
+                        VMValue sa[2] = { vm_make_str_n(nh->entries[i].key, nh->entries[i].keylen), nh->entries[i].value };
+                        VMValue r = vm_tied_array_call(vm, tobj, sf, sa, 2);
+                        vm_temp_free(&r);
+                        vm_temp_free(&sa[0]);
+                    }
+                }
+            }
+            stack = vm->stack; RELOAD();
+            SP_PUSH(tgt);
+            break;
+        }
         case BUILTIN_TIED: {
             if (argc < 1) { SP_PUSH(VM_UNDEF_VAL); break; }
             if (VM_IS_PTR(args[0])) {

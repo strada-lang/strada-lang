@@ -1,0 +1,22 @@
+# EXPECT: F;S6;F;S6a;150000
+# Tied scalar compound assignment in void context FETCHes once; tied keys()
+# has no 100000-key cap.
+package TS;
+func TIESCALAR($c) { return bless({ "v" => 1, "log" => [] }, "TS"); }
+func FETCH($s) { push(@{$s->{"log"}}, "F"); return $s->{"v"}; }
+func STORE($s, $v) { push(@{$s->{"log"}}, "S" . $v); $s->{"v"} = $v; }
+package TBig;
+func TIEHASH($c) { return bless({ "n" => 150000 }, "TBig"); }
+func FIRSTKEY($s) { return 0; }
+func NEXTKEY($s, $l) { my $n = $l + 1; if ($n >= $s->{"n"}) { return undef; } return $n; }
+func FETCH($s, $k) { return $k; }
+package main;
+func main() int {
+    my $x; my $o = tie($x, "TS");
+    $x += 5;
+    $x .= "a";
+    my %h; tie(%h, "TBig");
+    my @k = keys(%h);
+    say(join(";", @{$o->{"log"}}) . ";" . scalar(@k));
+    return 0;
+}

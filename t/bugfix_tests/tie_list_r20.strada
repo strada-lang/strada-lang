@@ -1,0 +1,46 @@
+# EXPECT: CLEAR;S0=1;S1=2;S2=3;tied;Z3;F;3;P4,5;U0,9;7;HCLEAR;HS:z=1;tied;z;42;flat:2,3,9,1,2,3
+# Tied array/hash list assignment (CLEAR + STORE, tie kept), negative index
+# via FETCHSIZE, one PUSH/UNSHIFT call per list, SCALAR, unshift/push flatten.
+package TA;
+func lg($m) { my $l = core::global_get("tlog"); push(@{$l}, $m); }
+func TIEARRAY($c) { return bless({ "a" => [] }, "TA"); }
+func FETCH($s, $i) { lg("F"); return $s->{"a"}->[$i]; }
+func STORE($s, $i, $v) { lg("S" . $i . "=" . $v); $s->{"a"}->[$i] = $v; }
+func FETCHSIZE($s) { lg("Z" . scalar(@{$s->{"a"}})); return scalar(@{$s->{"a"}}); }
+func CLEAR($s) { lg("CLEAR"); $s->{"a"} = []; }
+func PUSH { my $s = shift; lg("P" . join(",", @_)); push(@{$s->{"a"}}, @_); }
+func UNSHIFT { my $s = shift; lg("U" . join(",", @_)); unshift(@{$s->{"a"}}, @_); }
+package TH;
+func lg($m) { my $l = core::global_get("tlog"); push(@{$l}, $m); }
+func TIEHASH($c) { return bless({ "h" => {}, "k" => [] }, "TH"); }
+func FETCH($s, $k) { return $s->{"h"}->{$k}; }
+func STORE($s, $k, $v) { lg("HS:" . $k . "=" . $v); if (!exists($s->{"h"}->{$k})) { push(@{$s->{"k"}}, $k); } $s->{"h"}->{$k} = $v; }
+func EXISTS($s, $k) { return exists($s->{"h"}->{$k}); }
+func CLEAR($s) { lg("HCLEAR"); $s->{"h"} = {}; $s->{"k"} = []; }
+func FIRSTKEY($s) { $s->{"i"} = 0; return $s->{"k"}->[0]; }
+func NEXTKEY($s, $l) { $s->{"i"} = $s->{"i"} + 1; return $s->{"k"}->[$s->{"i"}]; }
+func SCALAR($s) { return 42; }
+package main;
+func lg($m) { my $l = core::global_get("tlog"); push(@{$l}, $m); }
+func main() int {
+    core::global_set("tlog", []);
+    my @a; tie(@a, "TA");
+    @a = (1, 2, 3);
+    if (defined(tied(@a))) { lg("tied"); }
+    my $x = $a[-1];
+    lg("" . $x);
+    push(@a, 4, 5);
+    unshift(@a, 0, 9);
+    lg("" . scalar(@{tied(@a)->{"a"}}));
+    my %h; tie(%h, "TH");
+    %h = ("z" => 1);
+    if (defined(tied(%h))) { lg("tied"); }
+    lg(join(",", keys(%h)));
+    lg("" . scalar(%h));
+    my @p = (1); my @q = (2, 3);
+    unshift(@p, @q, 9);
+    push(@p, @q);
+    lg("flat:" . join(",", @p));
+    say(join(";", @{core::global_get("tlog")}));
+    return 0;
+}

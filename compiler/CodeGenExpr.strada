@@ -1985,11 +1985,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     } else {
                         emit($cg, "strada_read_all_lines(" . scalar_var_c_ref($cg, $varname, $rl_cname) . ")");
                     }
-                    emit($cg, "; StradaValue *__old_a = ");
-                    gen_expression($cg, $target);
                     emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                    emit_container_replace($cg, $target, "a");
                 } elsif ($val_type == NODE_ANON_HASH() && $val->{"pair_count"} == 0) {
                     if ($cg->{"uses_tie"} == 1) {
                         emit($cg, "({ StradaValue *__ta_chk = strada_av_unwrap_tied(");
@@ -2013,11 +2010,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 } elsif ($val_type == NODE_ANON_ARRAY()) {
                     emit($cg, "({ StradaValue *__new_a = ");
                     gen_expression($cg, $val);
-                    emit($cg, "; StradaValue *__old_a = ");
-                    gen_expression($cg, $target);
                     emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                    emit_container_replace($cg, $target, "a");
                 } elsif (is_scalar_expr($val)) {
                     emit($cg, "({ StradaValue *__new_a = strada_new_array(); ");
                     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $val) == 1) {
@@ -2029,11 +2023,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $val);
                         emit($cg, "); ");
                     }
-                    emit($cg, "StradaValue *__old_a = ");
-                    gen_expression($cg, $target);
-                    emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                    emit_container_replace($cg, $target, "a");
                 } else {
                     my int $val_type2 = $val->{"type"};
                     if ($val_type2 == NODE_VARIABLE() && $val->{"sigil"} eq "%") {
@@ -2043,11 +2033,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         if (needs_temp_cleanup($cg, $val) == 1) {
                             emit($cg, "strada_decref(__hfa_s); ");
                         }
-                        emit($cg, "StradaValue *__old_a = ");
-                        gen_expression($cg, $target);
-                        emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                        emit_container_replace($cg, $target, "a");
                     } elsif ($val_type2 == NODE_VARIABLE() || ($val_type2 == NODE_DEREF_SCALAR() && $val->{"sigil"} eq "@")) {
                         emit($cg, "({ StradaValue *__acs = ");
                         gen_expression($cg, $val);
@@ -2055,11 +2041,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         if (needs_temp_cleanup($cg, $val) == 1) {
                             emit($cg, "strada_decref(__acs); ");
                         }
-                        emit($cg, "StradaValue *__old_a = ");
-                        gen_expression($cg, $target);
-                        emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                        emit_container_replace($cg, $target, "a");
                     } else {
                         emit($cg, "({ StradaValue *__new_a = ");
                         if ($val_type2 == NODE_ANON_HASH()) {
@@ -2078,11 +2060,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                                 emit($cg, "; strada_incref(__new_a)");
                             }
                         }
-                        emit($cg, "; StradaValue *__old_a = ");
-                        gen_expression($cg, $target);
                         emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = __new_a; strada_decref(__old_a); __new_a; })");
+                        emit_container_replace($cg, $target, "a");
                     }
                 }
                 return;
@@ -2150,11 +2129,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (needs_temp_cleanup($cg, $val) == 0) {
                         emit($cg, "; strada_incref(__hfa_p)");
                     }
-                    emit($cg, "; StradaValue *__new_h = strada_hash_from_flat_array(__hfa_p); StradaValue *__old_h = ");
-                    gen_expression($cg, $target);
-                    emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_h; strada_decref(__old_h); __new_h; })");
+                    emit($cg, "; StradaValue *__new_h = strada_hash_from_flat_array(__hfa_p); ");
+                    emit_container_replace($cg, $target, "h");
                 } elsif ((($val_type == NODE_VARIABLE() || $val_type == NODE_DEREF_SCALAR()) && $val->{"sigil"} eq "%")
                          || $val_type == NODE_DEREF_HASH()) {
                     # Hash copy: %h = %other / %{$href} (compute copy BEFORE decrefing old target for %h = %h!)
@@ -2164,11 +2140,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (needs_temp_cleanup($cg, $val) == 1) {
                         emit($cg, "strada_decref(__hcs); ");
                     }
-                    emit($cg, "StradaValue *__old_h = ");
-                    gen_expression($cg, $target);
-                    emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_h; strada_decref(__old_h); __new_h; })");
+                    emit_container_replace($cg, $target, "h");
                 } else {
                     emit($cg, "({ StradaValue *__new_h = ");
                     if ($val_type == NODE_CALL()) {
@@ -2181,11 +2153,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (needs_temp_cleanup($cg, $val) == 0) {
                         emit($cg, "; strada_incref(__new_h)");
                     }
-                    emit($cg, "; StradaValue *__old_h = ");
-                    gen_expression($cg, $target);
                     emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_h; strada_decref(__old_h); __new_h; })");
+                    emit_container_replace($cg, $target, "h");
                 }
                 return;
             }
@@ -3043,7 +3012,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 if ($tca_push == 1) { emit($cg, "strada_cleanup_push(__tcv); "); }
                 emit($cg, "StradaValue *__tcr = strada_tied_scalar_compound(");
                 gen_expression($cg, $target);
-                emit($cg, ", __tcv, '" . $tca_opch . "', 1); ");
+                # Void context: no re-FETCH for a result (Perl FETCHes once).
+                my str $tca_want = "1";
+                if ($is_void == 1) { $tca_want = "0"; }
+                emit($cg, ", __tcv, '" . $tca_opch . "', " . $tca_want . "); ");
+                if ($is_void == 1) { emit($cg, "(void)__tcr; __tcr = NULL; "); }
                 if ($tca_cl == 1) {
                     if ($tca_push == 1) { emit($cg, "strada_cleanup_pop_decref(__tcv); "); }
                     else { emit($cg, "strada_decref(__tcv); "); }
@@ -9546,3 +9519,24 @@ func gen_expression(scalar $cg, scalar $expr) void {
 # Statement Code Generation
 # ============================================================
 
+# `@a = NEW` / `%h = NEW` tail, after the caller emitted `StradaValue *__new_K = ...;`
+# (K = "a"/"h"): swap the container, or with tie in the program, hand the
+# values to a tied target's CLEAR/STORE (it stays tied). Yields __new_K.
+func emit_container_replace(scalar $cg, scalar $target, str $k) void {
+    if ($cg->{"uses_tie"} == 1) {
+        my str $fn = "strada_array_assign_if_tied";
+        if ($k eq "h") { $fn = "strada_hash_assign_if_tied"; }
+        emit($cg, "if (" . $fn . "(");
+        gen_expression($cg, $target);
+        emit($cg, ", __new_" . $k . ")) { __new_" . $k . " = ");
+        gen_expression($cg, $target);
+        emit($cg, "; } else { ");
+    }
+    emit($cg, "StradaValue *__old_" . $k . " = ");
+    gen_expression($cg, $target);
+    emit($cg, "; ");
+    gen_expression($cg, $target);
+    emit($cg, " = __new_" . $k . "; strada_decref(__old_" . $k . "); ");
+    if ($cg->{"uses_tie"} == 1) { emit($cg, "} "); }
+    emit($cg, "__new_" . $k . "; })");
+}

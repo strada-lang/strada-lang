@@ -6788,7 +6788,7 @@ StradaArray* strada_hash_keys_sv(StradaValue *sv) {
         StradaArray *av = arr_sv->value.av;
         strada_cleanup_push(arr_sv);
         StradaValue *cur = strada_tied_hash_firstkey(msv);
-        int loop_guard = 100000;  /* defensive: prevent FIRSTKEY/NEXTKEY infinite loops */
+        int64_t loop_guard = INT64_MAX;  /* no cap (Perl): a FIRSTKEY/NEXTKEY that never ends is the class's bug */
         while (cur && (STRADA_IS_TAGGED_INT(cur) || cur->type != STRADA_UNDEF)) {
             if (--loop_guard <= 0) {
                 strada_decref(cur);
@@ -6850,6 +6850,84 @@ int strada_hash_clear_if_tied(StradaValue *sv) {
     return 1;
 }
 
+/* @a = LIST / %h = LIST on a tied container (Perl): CLEAR, then STORE each
+ * element / pair; the tie stays. Returns 1 when target is tied, having
+ * consumed newval (an owned array, or hash for %h); 0 otherwise (newval
+ * untouched, the caller replaces the container). */
+static StradaValue* strada_tied_method_call(StradaValue *tied_obj, const char *method, int argc, ...);
+/* push/unshift LIST: a tied target gets one PUSH/UNSHIFT call with the whole
+ * list (Perl); otherwise the elements are appended / prepended in order.
+ * list is borrowed. */
+void strada_av_push_list_sv(StradaValue *sv, StradaValue *list, int at_front) {
+    StradaArray *src = strada_deref_array(list);
+    StradaValue *t = strada_av_unwrap_tied(sv);
+    if (t && SV_TIED_OBJ(t)) {
+        if (at_front) strada_tied_array_unshift(t, list);
+        else strada_tied_array_push(t, list);
+        return;
+    }
+    StradaArray *av = strada_deref_array(sv);
+    if (!av || !src) return;
+    if (at_front) {
+        for (size_t i = src->size; i > 0; i--) {
+            StradaValue *el = src->elements[src->head + i - 1];
+            strada_array_unshift(av, el ? el : strada_undef_static());
+        }
+    } else {
+        size_t n = src->size;
+        for (size_t i = 0; i < n; i++) {
+            StradaValue *el = src->elements[src->head + i];
+            strada_array_push(av, el ? el : strada_undef_static());
+        }
+    }
+}
+
+int strada_array_assign_if_tied(StradaValue *target, StradaValue *newval) {
+    StradaValue *t = strada_av_unwrap_tied(target);
+    if (!t || !SV_TIED_OBJ(t)) return 0;
+    strada_cleanup_push(newval);
+    strada_tied_array_clear(t);
+    StradaArray *src = strada_deref_array(newval);
+    if (src && src->size > 0) {
+        StradaValue *obj = t->meta->tied_obj;
+        int has_ext = strada_method_can_hook ? strada_method_can_hook(obj, "EXTEND")
+                                             : strada_can(obj, "EXTEND");
+        if (has_ext) {
+            StradaValue *r = strada_tied_method_call(obj, "EXTEND", 1, STRADA_MAKE_TAGGED_INT((int64_t)src->size));
+            if (r) strada_decref(r);
+        }
+    }
+    for (size_t i = 0; src && i < src->size; i++) {
+        StradaValue *el = src->elements[src->head + i];
+        strada_tied_array_store(t, (int64_t)i, el ? el : strada_undef_static());
+    }
+    strada_cleanup_pop_decref(newval);
+    return 1;
+}
+
+int strada_hash_assign_if_tied(StradaValue *target, StradaValue *newval) {
+    StradaValue *t = strada_tied_target(target);
+    if (!t || t->type != STRADA_HASH) return 0;
+    strada_cleanup_push(newval);
+    strada_tied_hash_clear(t);
+    StradaHash *src = strada_deref_hash(newval);
+    if (src) {
+        StradaArray *ks = strada_hash_keys(src);
+        StradaValue *ks_sv = strada_new_array_from_av(ks);
+        strada_cleanup_push(ks_sv);
+        for (size_t i = 0; ks && i < ks->size; i++) {
+            StradaValue *k = ks->elements[ks->head + i];
+            StradaValue *v = strada_hv_fetch_owned_sv(newval, k);
+            strada_cleanup_push(v);
+            strada_tied_hash_store_sv(t, k, v);
+            strada_cleanup_pop_decref(v);
+        }
+        strada_cleanup_pop_decref(ks_sv);
+    }
+    strada_cleanup_pop_decref(newval);
+    return 1;
+}
+
 StradaValue* strada_hash_each_sv(StradaValue *sv) {
     StradaValue *unwrapped = strada_hv_unwrap_meta_sv(sv);
     if (unwrapped && unwrapped->meta && unwrapped->meta->tied_obj) {
@@ -6899,7 +6977,7 @@ StradaArray* strada_hash_values_sv(StradaValue *sv) {
         StradaArray *av = arr_sv->value.av;
         strada_cleanup_push(arr_sv);
         StradaValue *cur = strada_tied_hash_firstkey(msv);
-        int loop_guard = 100000;
+        int64_t loop_guard = INT64_MAX;
         while (cur && (STRADA_IS_TAGGED_INT(cur) || cur->type != STRADA_UNDEF)) {
             if (--loop_guard <= 0) { strada_decref(cur); cur = NULL; break; }
             strada_cleanup_push(cur);
@@ -27372,7 +27450,7 @@ StradaValue* strada_anon_array_owned(int count, ...) {
 
 static void strada_tied_hash_collect_kv(StradaValue *msv, StradaHash *dst_hv, StradaArray *dst_av) {
     StradaValue *cur = strada_tied_hash_firstkey(msv);
-    int loop_guard = 100000;
+    int64_t loop_guard = INT64_MAX;
     while (cur && (STRADA_IS_TAGGED_INT(cur) || cur->type != STRADA_UNDEF)) {
         if (--loop_guard <= 0) {
             strada_decref(cur);
@@ -36743,8 +36821,17 @@ void strada_tied_hash_clear(StradaValue *sv) {
  * Each helper returns owned StradaValue* (caller decrefs) or void as
  * appropriate. They no-op on non-tied SVs so callers can blind-call
  * after the SV_TIED_OBJ() probe. */
+/* Perl: a negative index into a tied array is offset by FETCHSIZE before
+ * FETCH/STORE/EXISTS/DELETE see it. Returns < 0 when it is still out of
+ * range. */
+static int64_t tied_av_norm_idx(StradaValue *sv, int64_t idx) {
+    if (idx >= 0) return idx;
+    return idx + strada_tied_array_fetchsize(sv);
+}
+
 StradaValue* strada_tied_array_fetch(StradaValue *sv, int64_t idx) {
     if (!sv || !SV_TIED_OBJ(sv)) return strada_new_undef();
+    if (idx < 0 && (idx = tied_av_norm_idx(sv, idx)) < 0) return strada_new_undef();
     StradaValue *idx_sv = STRADA_MAKE_TAGGED_INT(idx);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "FETCH", 1, idx_sv);
     return result ? result : strada_new_undef();
@@ -36752,6 +36839,15 @@ StradaValue* strada_tied_array_fetch(StradaValue *sv, int64_t idx) {
 
 void strada_tied_array_store(StradaValue *sv, int64_t idx, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv) || !SV_TIED_OBJ(sv)) return;
+    if (idx < 0) {
+        int64_t orig = idx;
+        if ((idx = tied_av_norm_idx(sv, idx)) < 0) {
+            char msg[96];
+            snprintf(msg, sizeof msg, "Modification of non-creatable array value attempted, subscript %lld", (long long)orig);
+            strada_throw(msg);
+            return;
+        }
+    }
     StradaValue *idx_sv = STRADA_MAKE_TAGGED_INT(idx);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "STORE", 2, idx_sv, val ? val : strada_undef_static());
     if (result) strada_decref(result);
@@ -37017,6 +37113,7 @@ void strada_av_unshift_sv(StradaValue *sv, StradaValue *val) {
 
 int strada_tied_array_exists(StradaValue *sv, int64_t idx) {
     if (!sv || !SV_TIED_OBJ(sv)) return 0;
+    if (idx < 0 && (idx = tied_av_norm_idx(sv, idx)) < 0) return 0;
     StradaValue *idx_sv = STRADA_MAKE_TAGGED_INT(idx);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "EXISTS", 1, idx_sv);
     int ret = 0;
@@ -37030,6 +37127,7 @@ int strada_tied_array_exists(StradaValue *sv, int64_t idx) {
 
 StradaValue* strada_tied_array_delete_take(StradaValue *sv, int64_t idx) {
     if (!sv || !SV_TIED_OBJ(sv)) return strada_new_undef();
+    if (idx < 0 && (idx = tied_av_norm_idx(sv, idx)) < 0) return strada_new_undef();
     StradaValue *idx_sv = STRADA_MAKE_TAGGED_INT(idx);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "DELETE", 1, idx_sv);
     return result ? result : strada_new_undef();

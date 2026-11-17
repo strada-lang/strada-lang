@@ -2366,6 +2366,11 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
         if (sig[0] == '@') return 1;
         return 0;
     }
+    if (t == NI_DEREF_SCALAR) {
+        const char *sig = ast_str(elem, "sigil");
+        if (sig && sig[0] == '@') return 1;
+        return 0;
+    }
     if (t == NI_ANON_ARRAY && (int)ast_int(elem, "is_list") == 1) return 2;
     if (t == NI_MAP || t == NI_GREP || t == NI_SORT) return 2;
     if (t == NI_CALL) {
@@ -3256,22 +3261,47 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
-        /* Built-in: push(@arr, val) */
+        /* Built-in: push(@arr, LIST). Array-valued arguments flatten; with
+         * several values they are gathered first so a tied target gets one
+         * PUSH call with the whole list (Perl). */
         if (strcmp(name, "push") == 0 && argc >= 2) {
             compile_expr(ctx, ast_arr_get(args, 0));
+            if (argc == 2) {
+                StradaValue *parg = ast_deref(ast_arr_get(args, 1));
+                int pat = parg ? (int)ast_int(parg, "type") : 0;
+                if (pat == NI_SPREAD) {
+                    compile_expr(ctx, ast_get(parg, "target"));
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+                } else if (vm_array_flatten_kind(ctx, parg) >= 1) {
+                    compile_expr(ctx, parg);
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+                } else {
+                    vm_chunk_emit(ctx->chunk, OP_DUP);
+                    compile_expr(ctx, parg);
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+                    vm_chunk_emit(ctx->chunk, OP_POP);
+                }
+                vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+                break;
+            }
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, (uint32_t)((argc - 1) * 2));
             for (int pi = 1; pi < argc; pi++) {
                 StradaValue *parg = ast_deref(ast_arr_get(args, pi));
                 int pat = parg ? (int)ast_int(parg, "type") : 0;
-                vm_chunk_emit(ctx->chunk, OP_DUP); /* keep array on stack */
+                vm_chunk_emit(ctx->chunk, OP_DUP);
                 if (pat == NI_SPREAD) {
                     compile_expr(ctx, ast_get(parg, "target"));
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+                } else if (vm_array_flatten_kind(ctx, parg) >= 1) {
+                    compile_expr(ctx, parg);
                     vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
                 } else {
                     compile_expr(ctx, parg);
                     vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
                 }
             }
-            vm_chunk_emit(ctx->chunk, OP_POP);
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
             break;
         }
@@ -3295,7 +3325,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             int has_spread = 0;
             for (int i = 1; i < argc; i++) {
                 StradaValue *ua = ast_deref(ast_arr_get(args, i));
-                if (ua && (int)ast_int(ua, "type") == NI_SPREAD) {
+                if (ua && ((int)ast_int(ua, "type") == NI_SPREAD || vm_array_flatten_kind(ctx, ua) >= 1)) {
                     has_spread = 1;
                     break;
                 }
@@ -3310,6 +3340,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_DUP);
                     if (ut == NI_SPREAD) {
                         compile_expr(ctx, ast_get(ua, "target"));
+                        vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+                    } else if (vm_array_flatten_kind(ctx, ua) >= 1) {
+                        compile_expr(ctx, ua);
                         vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
                     } else {
                         compile_expr(ctx, ua);
@@ -4949,7 +4982,17 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 break;
             } else {
                 int cop = compound_op_to_opcode(op);
-                if (strcmp(op, "=") == 0) {
+                if (strcmp(op, "=") == 0 && (vsigil[0] == '@' || vsigil[0] == '%')) {
+                    /* @a = LIST / %h = LIST: a tied target keeps its tie and
+                     * gets CLEAR + STORE (BUILTIN_TIE_ASSIGN yields what to
+                     * store back: the target itself when tied). */
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                    compile_assign_var_rhs(ctx, vsigil[0], value);
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_TIE_ASSIGN);
+                    vm_chunk_emit(ctx->chunk, 2);
+                } else if (strcmp(op, "=") == 0) {
                     compile_assign_var_rhs(ctx, vsigil[0], value);
                 } else if (cop >= 0) {
                     vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
@@ -6069,7 +6112,15 @@ static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
                         }
                     }
                     int cop = compound_op_to_opcode(op);
-                    if (strcmp(op, "=") == 0) {
+                    if (strcmp(op, "=") == 0 && (sc == '@' || sc == '%')) {
+                        /* tied target: CLEAR + STORE, keep the tie */
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        compile_assign_var_rhs(ctx, sc, value);
+                        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                        vm_chunk_emit_u16(ctx->chunk, BUILTIN_TIE_ASSIGN);
+                        vm_chunk_emit(ctx->chunk, 2);
+                    } else if (strcmp(op, "=") == 0) {
                         compile_assign_var_rhs(ctx, sc, value);
                     } else if (cop >= 0) {
                         if (cop == OP_ADD && sc == '$') {

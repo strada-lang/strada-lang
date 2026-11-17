@@ -495,6 +495,7 @@ enum {
     BUILTIN_TIE,
     BUILTIN_UNTIE,
     BUILTIN_TIED,
+    BUILTIN_TIE_ASSIGN,  /* (target, new): CLEAR+STORE into a tied target -> target; else new */
 
     /* String operations */
     BUILTIN_STR_REPLACE_PLAIN,
