@@ -1,0 +1,5 @@
+# COMPILE-ERROR: #error THING is required
+#ifndef THING
+#error "THING is required"
+#endif
+func main() int { return 0; }

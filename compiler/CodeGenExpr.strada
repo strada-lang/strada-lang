@@ -5761,6 +5761,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         return;
     }
 
+    if ($type == NODE_REGEX_MATCH() || $type == NODE_REGEX_SUBST()) {
+        $cg->{"rx_elems"} = $expr->{"rx_elems"};
+    }
     if ($type == NODE_REGEX_MATCH()) {
         my str $op = $expr->{"op"};
         my str $pattern = $expr->{"pattern"};

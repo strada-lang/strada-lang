@@ -1,0 +1,11 @@
+# COMPILE-ERROR: #else after #else
+func main() int {
+#ifdef NOPE
+    say("a");
+#else
+    say("b");
+#else
+    say("c");
+#endif
+    return 0;
+}

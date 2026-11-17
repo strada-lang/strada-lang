@@ -269,6 +269,7 @@ func lex_pp_word_at(scalar $source, int $pos, int $len) str {
 
 func lex_pp_is_directive(str $w) int {
     if ($w eq "ifdef" || $w eq "ifndef" || $w eq "if" || $w eq "elif" || $w eq "else" || $w eq "endif" || $w eq "define" || $w eq "undef") { return 1; }
+    if ($w eq "include" || $w eq "error" || $w eq "warning") { return 1; }
     return 0;
 }
 
@@ -982,6 +983,12 @@ func lex_pp_try_skip_quote_op(str $src, int $len, int $ws, int $sc, str $kw, int
 # directive line. Returns "else", "elif:<expr>", or "endif"; leaves pos on
 # the newline ending that line.
 func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
+    return lex_pp_skip_e($lexer, $stop_else, $start_line, 0);
+}
+
+# seen_else: the group being skipped already had its #else (a further #else
+# or #elif at this level is an error, as in C).
+func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_else) str {
     my scalar $src = $lexer->{"source"};
     my int $len = $lexer->{"length"};
     my int $pos = $lexer->{"pos"};
@@ -1011,6 +1018,12 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                     return "endif";
                 }
                 $nest = $nest - 1;
+            } elsif (($w eq "else" || $w eq "elif") && $nest == 0 && $stop_else == 0) {
+                if ($seen_else == 1) {
+                    $lexer->{"pos"} = $q;
+                    lex_error($lexer, "#" . $w . " after #else", $line, 1);
+                }
+                if ($w eq "else") { $seen_else = 1; }
             } elsif ($w eq "else" && $nest == 0 && $stop_else == 1) {
                 while ($q < $len && char_at($src, $q) != '\n') { $q = $q + 1; }
                 $lexer->{"pos"} = $q;
@@ -1490,6 +1503,8 @@ func lex_pp_directive(scalar $lexer) int {
     if ($word eq "define") {
         if (length($name) > 0) {
             my int $vq = $q + length($name);
+            # NAME=VALUE (as -DNAME=VALUE on the command line)
+            if ($vq < $eol && char_at($src, $vq) == '=') { $vq = $vq + 1; }
             while ($vq < $eol && (char_at($src, $vq) == ' ' || char_at($src, $vq) == '\t')) { $vq = $vq + 1; }
             my str $val = "1";
             if ($vq < $eol) {
@@ -1512,16 +1527,19 @@ func lex_pp_directive(scalar $lexer) int {
         }
         if ($take == 1) {
             $lexer->{"pp_depth"} = $lexer->{"pp_depth"} + 1;
+            $lexer->{"pp_else_" . $lexer->{"pp_depth"}} = 0;
         } else {
             while (1) {
                 my str $stop = lex_pp_skip($lexer, 1, $dline);
                 if ($stop eq "else") {
                     $lexer->{"pp_depth"} = $lexer->{"pp_depth"} + 1;
+                    $lexer->{"pp_else_" . $lexer->{"pp_depth"}} = 1;
                     last;
                 } elsif (length($stop) >= 5 && substr($stop, 0, 5) eq "elif:") {
                     my str $eexpr = substr($stop, 5, length($stop) - 5);
                     if (lex_pp_eval_expr($lexer, $eexpr) != 0) {
                         $lexer->{"pp_depth"} = $lexer->{"pp_depth"} + 1;
+                        $lexer->{"pp_else_" . $lexer->{"pp_depth"}} = 0;
                         last;
                     }
                 } else {
@@ -1531,17 +1549,123 @@ func lex_pp_directive(scalar $lexer) int {
         }
     } elsif ($word eq "elif") {
         if ($lexer->{"pp_depth"} <= 0) { lex_error($lexer, "#elif without #if/#ifdef/#ifndef", $dline, 1); }
-        lex_pp_skip($lexer, 0, $dline);
+        if (($lexer->{"pp_else_" . $lexer->{"pp_depth"}} + 0) == 1) { lex_error($lexer, "#elif after #else", $dline, 1); }
+        lex_pp_skip_e($lexer, 0, $dline, 0);
         $lexer->{"pp_depth"} = $lexer->{"pp_depth"} - 1;
     } elsif ($word eq "else") {
         if ($lexer->{"pp_depth"} <= 0) { lex_error($lexer, "#else without #if/#ifdef/#ifndef", $dline, 1); }
-        lex_pp_skip($lexer, 0, $dline);
+        if (($lexer->{"pp_else_" . $lexer->{"pp_depth"}} + 0) == 1) { lex_error($lexer, "#else after #else", $dline, 1); }
+        lex_pp_skip_e($lexer, 0, $dline, 1);
         $lexer->{"pp_depth"} = $lexer->{"pp_depth"} - 1;
     } elsif ($word eq "endif") {
         if ($lexer->{"pp_depth"} <= 0) { lex_error($lexer, "#endif without #if/#ifdef/#ifndef", $dline, 1); }
         $lexer->{"pp_depth"} = $lexer->{"pp_depth"} - 1;
+    } elsif ($word eq "error" || $word eq "warning") {
+        my str $msg = lex_pp_trim($rest);
+        if (length($msg) >= 2 && substr($msg, 0, 1) eq "\"" && substr($msg, length($msg) - 1, 1) eq "\"") {
+            $msg = substr($msg, 1, length($msg) - 2);
+        }
+        if ($word eq "error") {
+            lex_error($lexer, "#error " . $msg, $dline, 1);
+        }
+        my str $wloc = "line " . $dline;
+        if (length("" . $lexer->{"file"}) > 0) { $wloc = $lexer->{"file"} . ":" . $dline; }
+        warn($wloc . ": warning: " . $msg . "\n");
+    } elsif ($word eq "include") {
+        lex_pp_include($lexer, lex_pp_trim($rest), $dline);
     }
     return 1;
+}
+
+func lex_pp_trim(str $s) str {
+    my int $a = 0;
+    my int $b = length($s);
+    while ($a < $b && (substr($s, $a, 1) eq " " || substr($s, $a, 1) eq "\t" || substr($s, $a, 1) eq "\r")) { $a = $a + 1; }
+    while ($b > $a && (substr($s, $b - 1, 1) eq " " || substr($s, $b - 1, 1) eq "\t" || substr($s, $b - 1, 1) eq "\r")) { $b = $b - 1; }
+    return substr($s, $a, $b - $a);
+}
+
+# #include "file" / #include <file>: the file is tokenized as its own
+# source (so its diagnostics name it and its own line numbers) and its tokens
+# are emitted in place of the directive. "file" is searched next to the
+# including file, then in STRADA_INCLUDE_PATH (colon separated, from -I);
+# <file> only in STRADA_INCLUDE_PATH. #define/#undef in the included file
+# stay in effect after it, as in C.
+func lex_pp_include(scalar $lexer, str $spec, int $dline) void {
+    my str $q0 = substr($spec, 0, 1);
+    my str $close = "";
+    if ($q0 eq "\"") { $close = "\""; }
+    elsif ($q0 eq "<") { $close = ">"; }
+    else { lex_error($lexer, "#include expects \"file\" or <file>", $dline, 1); }
+    my int $ce = index($spec, $close, 1);
+    if ($ce <= 1) { lex_error($lexer, "#include expects \"file\" or <file>", $dline, 1); }
+    my str $fname = substr($spec, 1, $ce - 1);
+    my str $path = "";
+    my str $content = "";
+    my str $cur = "" . $lexer->{"file"};
+    if ($q0 eq "\"") {
+        if (substr($fname, 0, 1) eq "/") {
+            $content = slurp($fname);
+            if (length($content) > 0) { $path = $fname; }
+        } else {
+            my str $dir = ".";
+            my int $slash = rindex($cur, "/");
+            if ($slash >= 0) { $dir = substr($cur, 0, $slash); }
+            if (length($dir) == 0) { $dir = "/"; }
+            my str $cand = $dir . "/" . $fname;
+            $content = slurp($cand);
+            if (length($content) > 0) { $path = $cand; }
+        }
+    }
+    if (length($path) == 0) {
+        my str $ipath = core::getenv("STRADA_INCLUDE_PATH");
+        if (length($ipath) > 0) {
+            my array @dirs = split(":", $ipath);
+            my int $di = 0;
+            while ($di < size(@dirs) && length($path) == 0) {
+                if (length($dirs[$di]) > 0) {
+                    my str $cand2 = $dirs[$di] . "/" . $fname;
+                    $content = slurp($cand2);
+                    if (length($content) > 0) { $path = $cand2; }
+                }
+                $di = $di + 1;
+            }
+        }
+    }
+    if (length($path) == 0) { lex_error($lexer, "#include: cannot find " . $fname, $dline, 1); }
+    my scalar $defs = $lexer->{"pp_defines"};
+    my int $depth = 0;
+    if (length("" . $defs->{"__STRADA_INCLUDE_DEPTH__"}) > 0) { $depth = $defs->{"__STRADA_INCLUDE_DEPTH__"} + 0; }
+    if ($depth >= 64) { lex_error($lexer, "#include nested too deeply (64)", $dline, 1); }
+    $defs->{"__STRADA_INCLUDE_DEPTH__"} = "" . ($depth + 1);
+    my scalar $itoks = lex_tokenize_file_defs($content, $path, $defs);
+    $defs->{"__STRADA_INCLUDE_DEPTH__"} = "" . $depth;
+    my int $nt = size($itoks);
+    if ($nt > 0) {
+        # the included file's own #define/#undef: carry them back
+        my scalar $fdefs = $itoks->[$nt - 1]->{"pp_final_defines"};
+        if ($fdefs) {
+            my array @fk = keys(%{$fdefs});
+            my int $fi = 0;
+            while ($fi < size(@fk)) {
+                if ($fk[$fi] ne "__STRADA_INCLUDE_DEPTH__") { $defs->{$fk[$fi]} = $fdefs->{$fk[$fi]}; }
+                $fi = $fi + 1;
+            }
+        }
+    }
+    my scalar $pend = $lexer->{"pp_pending"};
+    if (!$pend) {
+        my array @np = ();
+        $lexer->{"pp_pending"} = \@np;
+        $pend = $lexer->{"pp_pending"};
+    }
+    my int $ti = 0;
+    while ($ti < $nt - 1) {
+        my scalar $t = $itoks->[$ti];
+        if (length("" . $t->{"file"}) == 0) { $t->{"file"} = $path; }
+        push($pend, $t);
+        $ti = $ti + 1;
+    }
 }
 
 func lex_skip_comment(scalar $lexer) void {
@@ -2253,6 +2377,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
     my str $source = $lexer->{"source"};
     my array @parts = ();
     my array @vars = ();
+    my array @var_lines = ();   # source line of each ${...} (for diagnostics)
     my int $has_interp = 0;
     my int $var_count = 0;
 
@@ -2271,6 +2396,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                     $token{"type"} = "INTERP_STRING";
                     $token{"parts"} = \@parts;
                     $token{"vars"} = \@vars;
+                    $token{"var_lines"} = \@var_lines;
                     $token{"var_count"} = $var_count;
                     $token{"line"} = $token_line;
                     return \%token;
@@ -2297,6 +2423,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                 $token{"type"} = "INTERP_STRING";
                 $token{"parts"} = \@parts;
                 $token{"vars"} = \@vars;
+                    $token{"var_lines"} = \@var_lines;
                 $token{"var_count"} = $var_count;
                 $token{"line"} = $token_line;
                 return \%token;
@@ -2416,6 +2543,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
             my int $peek_code = lex_current_code($lexer);
 
             if (!lex_at_end($lexer) && $peek_code == '{') {
+                push(\@var_lines, $lexer->{"line"} + 0);
                 my str $ivar = lex_read_braced_interp($lexer, $token_line, "Unterminated interpolation in string");
                 push(\@parts, sb_to_string($sb));
                 push(\@vars, $ivar);
@@ -3019,6 +3147,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
     # Interpolation tracking for qq()
     my array @parts = ();
     my array @vars = ();
+    my array @var_lines = ();   # source line of each ${...} (for diagnostics)
     my int $has_interp = 0;
     my int $var_count = 0;
 
@@ -3039,6 +3168,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
                     $token{"type"} = "INTERP_STRING";
                     $token{"parts"} = \@parts;
                     $token{"vars"} = \@vars;
+                    $token{"var_lines"} = \@var_lines;
                     $token{"var_count"} = $var_count;
                     $token{"line"} = $token_line;
                     return \%token;
@@ -3177,6 +3307,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
             my int $peek_code = lex_current_code($lexer);
 
             if ($peek_code == '{') {
+                push(\@var_lines, $lexer->{"line"} + 0);
                 my str $ivar = lex_read_braced_interp($lexer, $token_line, "Unterminated interpolation in qq string");
                 push(\@parts, sb_to_string($sb));
                 push(\@vars, $ivar);
@@ -3767,6 +3898,17 @@ func lex_hd_find_line_end(str $source, int $src_len, int $scan_pos) scalar {
 }
 
 func lex_next_token(scalar $lexer) scalar {
+    # tokens of an #include'd file come first
+    my scalar $ppq = $lexer->{"pp_pending"};
+    if ($ppq) {
+        my int $ppi = $lexer->{"pp_pending_pos"} + 0;
+        if ($ppi < size($ppq)) {
+            my scalar $ptok = $ppq->[$ppi];
+            $lexer->{"pp_pending_pos"} = $ppi + 1;
+            $lexer->{"tok_col"} = $ptok->{"column"} + 0;
+            return $ptok;
+        }
+    }
     my int $saved_after_sigil = 0;
     my int $saved_after_arrow = 0;
     my int $saved_after_member_arrow = 0;
@@ -3813,6 +3955,18 @@ func lex_next_token(scalar $lexer) scalar {
         if ($code == '#') {
             if (lex_pp_directive($lexer) == 0) {
                 lex_skip_comment($lexer);
+            } else {
+                # an #include queued its tokens: they come before the rest
+                my scalar $ppq2 = $lexer->{"pp_pending"};
+                if ($ppq2) {
+                    my int $ppi2 = $lexer->{"pp_pending_pos"} + 0;
+                    if ($ppi2 < size($ppq2)) {
+                        my scalar $ptok2 = $ppq2->[$ppi2];
+                        $lexer->{"pp_pending_pos"} = $ppi2 + 1;
+                        $lexer->{"tok_col"} = $ptok2->{"column"} + 0;
+                        return $ptok2;
+                    }
+                }
             }
             next;
         }
@@ -4291,6 +4445,8 @@ func lex_next_token(scalar $lexer) scalar {
             if ($hd_quoted != '\'') {
                 my scalar $hd_sub = lex_new($body);
                 $hd_sub->{"file"} = $lexer->{"file"};
+                # body lines are the source lines after the <<TAG line
+                $hd_sub->{"line"} = $token_line + 1;
                 return lex_dq_content($hd_sub, 0, $token_line);
             }
             my hash %token = ();
@@ -4695,6 +4851,7 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
 
         if ($cur_type eq "EOF") {
             $token->{"pp_cli_defines"} = $cli_defs;
+            $token->{"pp_final_defines"} = $lexer->{"pp_defines"};
             return \@tokens;
         }
     }

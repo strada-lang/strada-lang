@@ -1,0 +1,22 @@
+# EXPECT: A def A==1 incl 3 heredoc ok
+#include "m2i_inc/m2i_helpers.strada"
+func main() int {
+    my @o = ();
+#define A=1
+#ifdef A
+    push(@o, "A def");
+#endif
+#if A == 1
+    push(@o, "A==1");
+#endif
+#ifdef FROM_M2I_INC
+    push(@o, "incl " . m2i_h3());
+#endif
+    my $x = "ok";
+    my $hd = <<EOT;
+heredoc ${x}
+EOT
+    push(@o, $hd);
+    say(join(" ", @o));
+    return 0;
+}

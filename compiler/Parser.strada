@@ -169,6 +169,9 @@ func friendly_expected(str $type) str {
 # synthetic/unreadable sources).
 func parser_error(scalar $parser, str $msg) void {
     my str $filename = $parser->{"filename"};
+    # a token from an #include'd file names that file
+    my scalar $pe_tok = parser_current($parser);
+    if ($pe_tok && length("" . $pe_tok->{"file"}) > 0) { $filename = "" . $pe_tok->{"file"}; }
     my int $line = parser_current_line($parser);
     my int $col = parser_current_col($parser);
     my str $loc = "";
@@ -1091,6 +1094,9 @@ func parse_primary(scalar $parser) scalar {
             } else {
                 my scalar $itoks = lex_tokenize_file($vname, $parser->{"filename"});
                 my int $base_line = $tok->{"line"} + 0;
+                # the ${...}'s own line (a heredoc body starts below the token)
+                my scalar $vlines = $tok->{"var_lines"};
+                if ($vlines && size($vlines) > $i && ($vlines->[$i] + 0) > 0) { $base_line = $vlines->[$i] + 0; }
                 if ($base_line > 1) {
                     my int $ti = 0;
                     my int $tc = size($itoks);
@@ -1104,6 +1110,9 @@ func parse_primary(scalar $parser) scalar {
                 $iparser->{"const_names"} = $parser->{"const_names"};
                 $iparser->{"current_package"} = $parser->{"current_package"};
                 $iparser->{"structs"} = $parser->{"structs"};
+                if (parser_check($iparser, "EOF")) {
+                    parser_error($iparser, "empty \${...} interpolation");
+                }
                 $interp_node = parse_expression($iparser);
                 if (!parser_check($iparser, "EOF")) {
                     my scalar $ibad = parser_current($iparser);
@@ -2658,13 +2667,16 @@ func parse_regex_match(scalar $parser) scalar {
 
         if ($right_type eq "REGEX_LITERAL") {
             parser_advance($parser);
-            return ast_new_regex_match($op, $left, $right_tok->{"pattern"}, $right_tok->{"flags"});
+            my scalar $rm_node = ast_new_regex_match($op, $left, $right_tok->{"pattern"}, $right_tok->{"flags"});
+            ast_set_line($rm_node, $right_tok->{"line"} + 0);
+            return $rm_node;
         } elsif ($right_type eq "SUBST_LITERAL") {
             parser_advance($parser);
             if ($op eq "!~") {
                 parser_error($parser, "cannot use !~ with substitution s///");
             }
             my scalar $subst_node = ast_new_regex_subst($left, $right_tok->{"pattern"}, $right_tok->{"replacement"}, $right_tok->{"flags"});
+            ast_set_line($subst_node, $right_tok->{"line"} + 0);
             # If /e flag, parse the replacement string as a Strada expression
             my str $subst_flags = $right_tok->{"flags"};
             if (index($subst_flags, "e") >= 0) {
@@ -2697,7 +2709,9 @@ func parse_regex_match(scalar $parser) scalar {
             if ($op eq "!~") {
                 parser_error($parser, "cannot use !~ with tr///");
             }
-            return ast_new_tr($left, $right_tok->{"search"}, $right_tok->{"replace"}, $right_tok->{"flags"});
+            my scalar $tr_node = ast_new_tr($left, $right_tok->{"search"}, $right_tok->{"replace"}, $right_tok->{"flags"});
+            ast_set_line($tr_node, $right_tok->{"line"} + 0);
+            return $tr_node;
         } else {
             # String expression as pattern: $foo =~ $pattern
             my scalar $right = parse_unary($parser);
@@ -4449,6 +4463,7 @@ func is_c_keyword(str $name) int {
 
 func parse_function(scalar $parser) scalar {
     my int $func_line = parser_current_line($parser);
+    my str $func_file = "" . parser_current($parser)->{"file"};
     parser_expect_func($parser);
 
     my scalar $name_tok = parser_current($parser);
@@ -4511,6 +4526,7 @@ func parse_function(scalar $parser) scalar {
     if (parser_check($parser, "LBRACE")) {
         my scalar $fn = ast_new_function($func_name, TYPE_SCALAR());
         ast_set_line($fn, $func_line);
+        if (length($func_file) > 0) { $fn->{"file"} = $func_file; }
         $fn->{"is_variadic"} = 1;
         my scalar $underscore_param = ast_new_param("_", TYPE_SCALAR(), "@");
         $underscore_param->{"is_variadic"} = 1;
@@ -4525,6 +4541,7 @@ func parse_function(scalar $parser) scalar {
     # Create function node with dummy return type for now
     my scalar $fn = ast_new_function($func_name, TYPE_VOID());
     ast_set_line($fn, $func_line);
+    if (length($func_file) > 0) { $fn->{"file"} = $func_file; }
 
     # Parse parameters
     if (!parser_check($parser, "RPAREN")) {

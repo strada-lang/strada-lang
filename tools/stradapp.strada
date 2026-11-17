@@ -24,6 +24,10 @@
 my hash %g_defines = ();
 my array @g_include_paths = ();
 my int $g_include_depth = 0;
+# --defer-include: leave #include / #error / #warning lines in place for the
+# compiler's lexer, which handles them itself (keeping line numbers and
+# naming the included file in diagnostics). The driver passes it.
+my int $g_defer_include = 0;
 my int $g_eval_depth = 0;
 
 func pp_is_pure_int(str $s) int {
@@ -1326,6 +1330,7 @@ func preprocess(str $filename) str {
     my str $output = "";
     my array @cond_stack = ();
     my array @cond_taken = ();
+    my array @cond_else = ();   # 1 once the group had its #else
     my int $active = 1;
     my int $in_c_block = 0;       # 0 = outside, 1 = inside {..}, 2 = saw __C__ awaiting {
     my int $c_block_depth = 0;
@@ -1592,6 +1597,13 @@ func preprocess(str $filename) str {
                             } else {
                                 $name = $rest;
                             }
+                            # NAME=VALUE, as -DNAME=VALUE on the command line
+                            my int $eq_i = index($name, "=");
+                            if ($eq_i > 0) {
+                                $value = substr($name, $eq_i + 1);
+                                $name = substr($name, 0, $eq_i);
+                                if ($value eq "") { $value = "1"; }
+                            }
                             $g_defines{$name} = $value;
                         }
                     }
@@ -1613,6 +1625,7 @@ func preprocess(str $filename) str {
                         $taken = 1;
                     }
                     push(@cond_taken, $taken);
+                    push(@cond_else, 0);
                 } elsif ($word eq "ifndef") {
                     my str $name = strip_pp_comment($raw_rest);
                     push(@cond_stack, $active);
@@ -1624,6 +1637,7 @@ func preprocess(str $filename) str {
                         $taken = 1;
                     }
                     push(@cond_taken, $taken);
+                    push(@cond_else, 0);
                 } elsif ($word eq "if") {
                     my str $expr = strip_pp_comment($raw_rest);
                     push(@cond_stack, $active);
@@ -1635,12 +1649,16 @@ func preprocess(str $filename) str {
                         $taken = 1;
                     }
                     push(@cond_taken, $taken);
+                    push(@cond_else, 0);
                 } elsif ($word eq "elif") {
                     my str $expr = strip_pp_comment($raw_rest);
                     if (size(@cond_stack) == 0) {
                         die("stradapp: " . $filename . ":" . ($i + 1) . ": #elif without #if/#ifdef/#ifndef");
                     }
                     my int $top = size(@cond_stack) - 1;
+                    if ($cond_else[$top] == 1) {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": #elif after #else");
+                    }
                     my int $parent_active = $cond_stack[$top];
                     if ($parent_active && $cond_taken[$top] == 0) {
                         $active = (pp_eval_expr($expr) != 0) ? 1 : 0;
@@ -1659,6 +1677,10 @@ func preprocess(str $filename) str {
                         die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #if/#ifdef/#ifndef");
                     }
                     my int $top = size(@cond_stack) - 1;
+                    if ($cond_else[$top] == 1) {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": #else after #else");
+                    }
+                    $cond_else[$top] = 1;
                     my int $parent_active = $cond_stack[$top];
                     if ($parent_active && $cond_taken[$top] == 0) {
                         $active = 1;
@@ -1676,6 +1698,11 @@ func preprocess(str $filename) str {
                     }
                     $active = pop(@cond_stack);
                     pop(@cond_taken);
+                    pop(@cond_else);
+                } elsif ($g_defer_include == 1 && ($word eq "include" || $word eq "error" || $word eq "warning")) {
+                    if ($active) {
+                        $output = $output . $line . "\n";
+                    }
                 } elsif ($word eq "include") {
                     if ($active) {
                         my str $rest = strip_pp_comment($raw_rest);
@@ -1769,6 +1796,7 @@ func print_usage() void {
     say("  -D NAME       Define NAME as 1");
     say("  -D NAME=VAL   Define NAME as VAL");
     say("  -I PATH       Add PATH to include search path");
+    say("  --defer-include  Leave #include/#error/#warning for the compiler");
     say("  -h, --help    Show this help");
     say("");
     say("Supported directives:");
@@ -1847,6 +1875,8 @@ func main(int $argc, array @argv) int {
                 $path = $argv[$i];
             }
             push(@g_include_paths, $path);
+        } elsif ($arg eq "--defer-include") {
+            $g_defer_include = 1;
         } elsif (substr($arg, 0, 1) eq "-") {
             die("stradapp: unknown option: " . $arg);
         } else {

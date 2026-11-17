@@ -1,0 +1,2 @@
+#define FROM_M2I_INC 1
+func m2i_h3() int { return 3; }

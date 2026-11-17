@@ -1,0 +1,6 @@
+# COMPILE-ERROR: m2i_regex_noloc_r20.strada:4: error: undefined variable '$nosuch'
+func main() int {
+    my $s = "ab";
+    if ($s =~ /a$nosuch/) { say("m"); }
+    return 0;
+}

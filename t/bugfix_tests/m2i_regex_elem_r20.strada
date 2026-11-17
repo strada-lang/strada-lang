@@ -1,0 +1,14 @@
+# EXPECT: vff AAA m x<v>x noneg
+func main() int {
+    my %h = ("k" => "v");
+    my @arr = ("A", "B");
+    my $i = 1;
+    my @o = ();
+    my $s = "fff"; $s =~ s/f/$h{"k"}/; push(@o, $s);
+    my $t = "fff"; $t =~ s/f/$arr[0]/g; push(@o, $t);
+    if ("abc" =~ /$arr[0]/i) { push(@o, "m"); }
+    my $u = "xBx"; $u =~ s/$arr[$i]/<$h{k}>/; push(@o, $u);
+    my $z = "a1"; if ($z =~ /$arr[-1]/) { push(@o, "neg"); } else { push(@o, "noneg"); }
+    say(join(" ", @o));
+    return 0;
+}

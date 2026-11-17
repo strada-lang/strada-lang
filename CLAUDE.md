@@ -1018,8 +1018,14 @@ must add the name to `anon_local_str`, or it is treated as a capture. Regression
 interpolate `$name` and `${name}` (`regex_pattern_has_interp`,
 `gen_regex_interpolated_pattern`, `gen_subst_pattern_prelude` in CodeGen.strada).
 Substitution patterns used to be passed as the literal text `$var` and silently
-matched nothing. The replacement side of `s///` still does not interpolate
-variables (only `$1`-style backreferences).
+matched nothing. The replacement side of `s///` interpolates the same way.
+Element interpolation (Perl): `$name{KEY}` when `%name` is declared and
+`$name[INDEX]` when `@name` is declared and INDEX is an integer or `$var`
+(otherwise `[...]` stays a character class). The semantic pass parses and
+analyzes the element (`regex_interp_elem`), stores it in the node's
+`rx_elems`, and leaves a `$\x01N\x02` marker that codegen expands. Regex,
+`s///` and `tr///` nodes carry their source line, so these diagnostics are
+located.
 
 Transitive capture works: a closure nested inside another closure captures outer variables through the enclosing closure's `__captures` slots (gen at CodeGenExpr's capture-array emission forces the enclosing closure to capture pass-through names).
 
@@ -1481,6 +1487,20 @@ All compiler diagnostics carry a source location:
   `semantic_error`/`semantic_warn` take `$ctx` and read `$ctx->{"cur_file"}`,
   set per-function in both semantic passes. Nodes without a file fall back to
   the old `error: msg at line N` format.
+
+**Preprocessor (2026-11)**: the lexer handles every directive itself,
+with or without `-D`, in every file it reads: `#if/#ifdef/#ifndef/#elif/#else/
+#endif/#define/#undef`, plus `#include "file"` / `#include <file>`, `#error`
+and `#warning`. An included file is tokenized as its own source and its tokens
+are spliced in (`lex_pp_include`), so its diagnostics name it and keep its line
+numbers; tokens carry `file` and `parse_function` stamps it on functions;
+`#define`s made in it stay in effect after it. `"file"` is looked up next to
+the including file, then in `STRADA_INCLUDE_PATH` (the driver sets it from
+`-I`). With `-D` the driver still runs `stradapp`, now with `--defer-include`
+so it leaves `#include/#error/#warning` lines for the lexer (no line shift).
+`#else`/`#elif` after `#else` is an error in both, and `#define NAME=VALUE`
+means NAME is VALUE in both. Interpolated `${...}` expressions are located on
+their own line, also inside heredocs.
 
 **Multi-error reporting (2026-08)**: one compile reports every error, not
 just the first.
