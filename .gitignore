@@ -118,3 +118,4 @@ tools/tt/
 runtime/perla_dbi.c
 runtime/perla_stash.c
 *.smeta
+__pycache__/
