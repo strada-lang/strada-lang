@@ -471,8 +471,10 @@ test-all: test test-selfhost test-examples
 	@echo "════════════════════════════════════"
 
 # Build the bytecode VM interpreter
+# Parallel by default (its four objects are independent); an outer `make -jN`
+# jobserver is inherited instead.
 interpreter: stradac
-	@cd interpreter && $(MAKE)
+	@cd interpreter && $(MAKE) $(if $(findstring jobserver,$(MAKEFLAGS)),,-j$(shell nproc 2>/dev/null || echo 2))
 
 # Run interpreter compatibility tests against compiler test suite
 test-interp: interpreter

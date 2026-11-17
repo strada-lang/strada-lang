@@ -81,6 +81,18 @@ Note also that the stage-1 compiler is throwaway (its only job is to regenerate
 `Combined.c`), so it is now built at `-O0` (`FAST_CFLAGS`) regardless of `DEV`,
 which roughly halves a clean `make` with no effect on the final compiler.
 
+**Interpreter build (`make interpreter`, 2026-11)**: `interpreter/Makefile` compiles
+`Combined.c`, `vm.c`, `vm_compiler.c` and the runtime as separate ccache-wrapped
+objects (`interp_*.o`); the top-level target runs the sub-make with `-j$(nproc)`.
+The generated front end (`Combined.c`) builds at `-O1` (gcc `-O2` on it took ~70s;
+same trade as `STRADAC_CFLAGS`); the VM and runtime stay `-O2`. `DEV=1`/`QUICK=1`
+→ `-O0` (~2s); override with `INTERP_FRONT_OPT=-O2`. The front-end object name
+carries its opt level (`interp_Combined-O1.o`), so switching levels never reuses a
+stale object. Note `make interpreter` depends on `stradac`, so after a
+`compiler/*.strada` edit it first runs the FULL bootstrap. The fast loop after a
+compiler edit is `make quick && make -C interpreter -j2 QUICK=1` (~9s). Compiled
+Strada programs are unaffected by any of this.
+
 ### Configure Script
 
 ```bash
