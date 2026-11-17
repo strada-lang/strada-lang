@@ -206,7 +206,10 @@ func main() int {
         $r9l_obj = undef;
 
         $r9l_fn = func(str $x, str $y) str { return $x . ":" . $y; };
-        my str $cr = $r9l_fn->("X_" . $iter, r9l_mut_fn());
+        # the argument clears the callee: the call dies (Perl evaluates
+        # arguments first); the owned temporaries must still be released
+        my str $cr = "";
+        try { $cr = $r9l_fn->("X_" . $iter, r9l_mut_fn()); } catch ($e) { $cr = "died"; }
         $r9l_fn = func(str $x, str $y) str { return $x . ":" . $y; };
         try {
             $r9l_fn->("X_" . $iter, r9l_throw_arg());

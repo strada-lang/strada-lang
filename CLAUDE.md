@@ -639,7 +639,19 @@ fallback if that fails); `@{$r} = LIST` / `%{$r} = LIST` replace in place
 (`BUILTIN_CONTAINER_REPLACE`); a map block whose value is `[..]`/`{..}`/`\X`
 yields one element (`vm_map_value_kind`); `printf`, `free`/`release`,
 `getaddrinfo`, `hash_get/hash_set`, `set_package`, `readline` and bare
-`strada_*` runtime calls work. `interpreter/Makefile`: the front-end object
+`strada_*` runtime calls work. Also (M4 part 2): `$_` outside a
+topicalizer is the global `main::_`; `reverse(LIST)`; list-valued slice
+indices/keys; `sprintf`/`pack` list args (`BUILTIN_SPRINTF_LIST` /
+`BUILTIN_PACK_LIST`); list-context regex (`compile_regex_list` ->
+`strada_regex_list`); `s///` replacement interpolation; `split(/$p/)`;
+`'('` into an int is 40 (`vm_try_char_code`); scalar `splice`;
+autovivifying `push/unshift/splice` targets (`compile_mutable_array_target`,
+`BUILTIN_AUTOVIV_ARRAY`); `keys` resets `each`; `delete @h{...}`;
+`chomp(@a)`; `(LIST) x N`; `return ()` / `my $x = ()` are undef; `gc_*`,
+`spew_fh`, `*_default_capacity`. The generic bridge maps `core::X` to the
+runtime's `strada_X` when not harvested and passes NULL for omitted
+trailing parameters (`vm_generic_builtin_find_min`); the generator also
+harvests per-arity calls inside handler blocks (743 entries). `interpreter/Makefile`: the front-end object
 depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **only string temporaries are owned by the stack** — consume sites must use `vm_temp_free` (freeing a shared container/filehandle/closure is a use-after-free; this was the `defined($fh)` corruption bug).
 
 ## Language Features Reference
@@ -1411,6 +1423,11 @@ compiler:
   `compile_list_src` -> `BUILTIN_HASH_FLAT`); `map {...} ("x")` iterates
   once (`ast_hash_list_input` wraps a parenthesized single item); a hash in
   string/numeric context is its key count. `Math::BigInt::div` floors (bdiv).
+- **Closure calls (M4)**: arguments are evaluated before the callee (Perl), so
+  `$f->(($f = sub {...}) ? 1 : 1)` calls the new code; calling a non-code
+  value dies catchably: "Can't use an undefined value as a subroutine
+  reference" (undef) / "Not a CODE reference" (`strada_not_code_call`; VM
+  `L_do_op_call_closure`). It used to return undef silently.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

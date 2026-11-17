@@ -32,6 +32,19 @@ int vm_generic_builtin_find(const char *name, int argc) {
     }
     return -1;
 }
+
+/* Like vm_generic_builtin_find, but also accepts an entry taking MORE
+ * parameters (the missing trailing ones are passed as NULL). */
+int vm_generic_builtin_find_min(const char *name, int argc) {
+    int exact = vm_generic_builtin_find(name, argc);
+    if (exact >= 0) return exact;
+    for (int i = 0; i < VM_GENERIC_BUILTIN_COUNT; i++) {
+        if (vm_generic_builtins[i].argc > argc &&
+            strcmp(vm_generic_builtins[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -1930,6 +1943,7 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
             hdr->gc_next = dead_list;
             dead_list = hdr;
             vm->gc_count--;
+            vm->gc_freed_total++;
         }
     }
     vm_gc_reset_worker_marks(vm);
@@ -1942,6 +1956,8 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
         dead_list = next;
     }
     vm->gc_threshold = (vm->gc_count < 4096) ? 8192 : (vm->gc_count * 2);
+    if (vm->gc_user_disabled) vm->gc_threshold = SIZE_MAX / 2;
+    vm->gc_runs++;
 }
 
 void vm_gc_collect(VM *vm) {
@@ -6705,13 +6721,16 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         if (bid >= VM_GENERIC_BID_BASE) {
             int gidx = bid - VM_GENERIC_BID_BASE;
             if (gidx < VM_GENERIC_BUILTIN_COUNT &&
-                argc == vm_generic_builtins[gidx].argc) {
+                argc <= vm_generic_builtins[gidx].argc) {
                 const VMGenericBuiltin *gb = &vm_generic_builtins[gidx];
-                StradaValue *sa[4];
+                StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
+                /* trailing parameters the call omits are NULL, as the
+                 * compiled backend passes them (e.g. localtime() = now) */
                 for (int i = 0; i < argc; i++) sa[i] = vm_to_sv(args[i]);
+                int call_argc = gb->argc;
                 StradaValue *r = NULL;
                 vm->stack_top = sp;
-                int threw = vm_c_call_generic(vm, gb, sa, argc, &r, &throw_exc);
+                int threw = vm_c_call_generic(vm, gb, sa, call_argc, &r, &throw_exc);
                 stack = vm->stack;
                 RELOAD();
                 for (int i = 0; i < argc; i++) vm_fh_sync_from_sv(args[i]);
@@ -7353,6 +7372,174 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                                 vm_make_str_flag(vm->regex_captures[i], vm->regex_capture_len[i], vm->regex_capture_utf8[i]));
             }
             SP_PUSH(VM_MAKE_PTR(nh));
+            break;
+        }
+        case BUILTIN_SPRINTF_LIST:
+        case BUILTIN_PACK_LIST: {
+            VMArray *la = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            if (!la || la->size == 0) { SP_PUSH(vm_str("")); break; }
+            if (bid == BUILTIN_SPRINTF_LIST) {
+                vm->stack_top = sp;
+                vm->gc_pause++;
+                VMValue sres = vm_sprintf(vm, la->size, la->items);
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    vm_val_free(&sres);
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+                SP_PUSH(sres);
+            } else {
+                char fbuf[256];
+                const char *fmt = vm_to_cstr(la->items[0], fbuf, sizeof(fbuf));
+                StradaValue *pk_arr = strada_new_array();
+                for (int i = 1; i < la->size; i++) strada_array_push_take(pk_arr->value.av, vm_to_sv(la->items[i]));
+                StradaValue *packed = strada_pack(fmt, pk_arr);
+                VMValue vm_res = sv_to_vm(packed);
+                strada_decref(pk_arr);
+                strada_decref(packed);
+                SP_PUSH(vm_res);
+            }
+            break;
+        }
+        case BUILTIN_GC_OP: {
+            int64_t op = argc >= 1 ? vm_to_int(args[0]) : 0;
+            VMValue gres = VM_UNDEF_VAL;
+            if (op == 0) {
+                vm->stack_top = sp;
+                vm_gc_collect(vm);
+                strada_gc_collect();
+                stack = vm->stack; RELOAD();
+            } else if (op == 1) {
+                vm->gc_user_disabled = 0;
+                vm->gc_threshold = (vm->gc_count < 4096) ? 8192 : (vm->gc_count * 2);
+                strada_gc_set_enabled(1);
+            } else if (op == 2) {
+                vm->gc_user_disabled = 1;
+                vm->gc_threshold = SIZE_MAX / 2;
+                strada_gc_set_enabled(0);
+            } else if (op == 3) {
+                int64_t n = argc >= 2 ? vm_to_int(args[1]) : 0;
+                if (n > 0) {
+                    strada_gc_set_threshold((long)n);
+                    if (!vm->gc_user_disabled) vm->gc_threshold = (size_t)(n < 1024 ? 1024 : n);
+                }
+            } else if (op == 4) {
+                gres = VM_MAKE_INT((int64_t)(vm->gc_runs + strada_gc_collections()));
+            } else if (op == 5) {
+                gres = VM_MAKE_INT((int64_t)(vm->gc_freed_total + strada_gc_objects_freed()));
+            }
+            SP_PUSH(gres);
+            break;
+        }
+        case BUILTIN_SPEW_FH: {
+            if (argc >= 2) {
+                StradaValue *fsv = vm_to_sv(args[0]);
+                StradaValue *dsv = vm_to_sv(args[1]);
+                vm->stack_top = sp;
+                strada_spew_fh(fsv, dsv);
+                if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) vm_fh_sync_from_sv(args[0]);
+                strada_decref(fsv);
+                strada_decref(dsv);
+            }
+            SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+        case BUILTIN_DEFAULT_CAP: {
+            int64_t which = argc >= 1 ? vm_to_int(args[0]) : 0;
+            if (argc >= 2) {
+                int64_t n = vm_to_int(args[1]);
+                if (which == 0) strada_set_hash_default_capacity(n);
+                else strada_set_array_default_capacity(n);
+            }
+            SP_PUSH(VM_MAKE_INT(which == 0 ? strada_get_hash_default_capacity() : strada_get_array_default_capacity()));
+            break;
+        }
+        case BUILTIN_REGEX_LIST: {
+            if (argc < 4) { SP_PUSH(VM_MAKE_PTR(vm_array_new(0))); break; }
+            char sbuf[512], pbuf[256], fbuf[32];
+            const char *subj = vm_to_cstr(args[0], sbuf, sizeof(sbuf));
+            const char *rpat = vm_to_cstr(args[1], pbuf, sizeof(pbuf));
+            const char *rfl = vm_to_cstr(args[2], fbuf, sizeof(fbuf));
+            int rglob = (int)vm_to_int(args[3]);
+            StradaValue *subj_sv = vm_to_sv(args[0]);
+            strada_regex_set_subject_for_sv(subj_sv);
+            StradaValue *rl = strada_regex_list(subj ? subj : "", rpat ? rpat : "", (rfl && rfl[0]) ? rfl : NULL, rglob);
+            strada_regex_clear_subject_len();
+            strada_decref(subj_sv);
+            VMValue rv = rl ? sv_to_vm(rl) : VM_MAKE_PTR(vm_array_new(0));
+            if (rl) strada_decref(rl);
+            SP_PUSH(rv);
+            break;
+        }
+        case BUILTIN_AUTOVIV_ARRAY: {
+            VMValue av = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            if (VM_IS_UNDEF(av)) {
+                SP_PUSH(VM_MAKE_PTR(vm_array_new(4)));
+            } else if (VM_IS_PTR(av) && VM_PTR_TYPE(av) == VM_OBJ_ARRAY) {
+                SP_PUSH(av);
+            } else if (VM_IS_PTR(av) && VM_PTR_TYPE(av) == VM_OBJ_SREF) {
+                SP_PUSH(av);   /* leave scalar refs to the existing error path */
+            } else {
+                throw_exc = vm_str("Not an ARRAY reference");
+                goto L_builtin_throw_exc;
+            }
+            break;
+        }
+        case BUILTIN_HASH_DELETE_SLICE: {
+            /* delete @h{LIST}: remove each key, return the removed values */
+            VMArray *out = vm_array_new(4);
+            if (argc >= 2 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH &&
+                VM_IS_PTR(args[1]) && VM_PTR_TYPE(args[1]) == VM_OBJ_ARRAY) {
+                VMHash *dh = VM_AS_HASH(args[0]);
+                VMArray *ka = VM_AS_ARRAY(args[1]);
+                for (int i = 0; i < ka->size; i++) {
+                    char kb[256];
+                    size_t kl = 0;
+                    const char *kp = vm_bytes_view(ka->items[i], kb, sizeof(kb), &kl);
+                    VMValue old = vm_hash_delete_ret_n(dh, kp ? kp : "", kp ? kl : 0);
+                    vm_array_push(out, old);
+                }
+            }
+            SP_PUSH(VM_MAKE_PTR(out));
+            break;
+        }
+        case BUILTIN_CHOMP_ARRAY: {
+            /* chomp(@a): chomp every element in place; the count removed */
+            int64_t removed = 0;
+            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *ca = VM_AS_ARRAY(args[0]);
+                for (int i = 0; i < ca->size; i++) {
+                    VMValue ev = ca->items[i];
+                    if (!VM_IS_PTR(ev) || (VM_PTR_TYPE(ev) != VM_OBJ_STR && VM_PTR_TYPE(ev) != VM_OBJ_STRBUF)) continue;
+                    char eb[256];
+                    size_t el = 0;
+                    const char *ep = vm_bytes_view(ev, eb, sizeof(eb), &el);
+                    size_t nl = el;
+                    if (nl >= 2 && ep[nl - 2] == '\r' && ep[nl - 1] == '\n') nl -= 2;
+                    else if (nl >= 1 && ep[nl - 1] == '\n') nl -= 1;
+                    if (nl != el) {
+                        removed += (int64_t)(el - nl);
+                        VMValue nv = vm_make_str_flag(ep, nl, vm_is_utf8(ev));
+                        vm_val_free(&ca->items[i]);
+                        ca->items[i] = nv;
+                    }
+                }
+            }
+            SP_PUSH(VM_MAKE_INT(removed));
+            break;
+        }
+        case BUILTIN_LIST_REPEAT: {
+            /* (LIST) x N */
+            VMArray *out = vm_array_new(4);
+            int64_t n = argc >= 2 ? vm_to_int(args[1]) : 0;
+            if (argc >= 1 && n > 0 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *la = VM_AS_ARRAY(args[0]);
+                for (int64_t r = 0; r < n; r++)
+                    for (int i = 0; i < la->size; i++) vm_array_push(out, vm_val_copy(la->items[i]));
+            }
+            SP_PUSH(VM_MAKE_PTR(out));
             break;
         }
         case BUILTIN_HASH_FLAT: {
@@ -16849,6 +17036,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     DISPATCH();
                 }
             }
+            h->iter_pos = 0;   /* keys() resets the each() iterator (Perl) */
             SP_PUSH(VM_MAKE_PTR(vm_hash_keys(h)));
         } else {
             SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
@@ -17920,7 +18108,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         sp -= (argc + 1);
         vm->stack_top = sp;
         char errbuf[600];
-        snprintf(errbuf, sizeof(errbuf), "Can't call method \"%s\" on unblessed reference", method);
+        /* Perl's wording (and the compiled runtime's) */
+        if (VM_IS_UNDEF(self))
+            snprintf(errbuf, sizeof(errbuf), "Can't call method \"%s\" on an undefined value", method);
+        else if (!VM_IS_PTR(self) || VM_PTR_TYPE(self) == VM_OBJ_STR || VM_PTR_TYPE(self) == VM_OBJ_STRBUF)
+            snprintf(errbuf, sizeof(errbuf), "Can't call method \"%s\" without a package or object reference", method);
+        else
+            snprintf(errbuf, sizeof(errbuf), "Can't call method \"%s\" on unblessed reference", method);
         throw_exc = vm_str(errbuf);
         goto L_vm_throw_exc;
     }
@@ -18677,14 +18871,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             VMValue r = nr ? sv_to_vm(nr) : VM_UNDEF_VAL;
             if (nr) strada_decref(nr);
             SP_PUSH(r);
-        } else if (VM_IS_PTR(closure_val) && VM_PTR_TYPE(closure_val) == VM_OBJ_HASH) {
-            /* Might be a method call on an object (from around modifier $orig->($self)) */
-            /* Not a closure, skip */
-            for (int i = 0; i < argc; i++) (void)SP_POP();
-            SP_PUSH(VM_UNDEF_VAL);
         } else {
-            for (int i = 0; i < argc; i++) (void)SP_POP();
-            SP_PUSH(VM_UNDEF_VAL);
+            /* Calling something that is not code dies (Perl), catchably */
+            for (int i = 0; i < argc; i++) { VMValue dv = SP_POP(); vm_temp_free(&dv); }
+            vm->stack_top = sp;
+            throw_exc = vm_str(VM_IS_UNDEF(closure_val)
+                ? "Can't use an undefined value as a subroutine reference"
+                : "Not a CODE reference");
+            goto L_vm_throw_exc;
         }
         DISPATCH();
     }

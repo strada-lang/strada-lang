@@ -304,8 +304,11 @@ func main() int {
 
     @r9_log = ();
     $r9_c1_fn = func(str $x, str $y) str { return $x . "+" . $y; };
-    my str $cres = $r9_c1_fn->(c1_cl_arg1(), c1_cl_arg2());
-    check($cres eq "X+Y" && join(",", @r9_log) eq "cl1,cl2", "R9-C1 closure LTR+callee: " . $cres);
+    # Perl evaluates the arguments before the callee: c1_cl_arg2 clears
+    # $r9_c1_fn, so the call dies (catchably) instead of using the old code.
+    my str $cres = "";
+    try { $cres = $r9_c1_fn->(c1_cl_arg1(), c1_cl_arg2()); } catch ($e) { $cres = "died:" . (index("" . $e, "undefined value as a subroutine") >= 0 ? "undef" : $e); }
+    check($cres eq "died:undef" && join(",", @r9_log) eq "cl1,cl2", "R9-C1 closure LTR+callee: " . $cres);
 
     # R9-C2: loop tmps mark with do/map/grep + next/last/redo/goto/return/async
     # c2_helper: i=1 -> d=3 (acc=3); i=2 -> next; i=3 -> d=9 (acc=12); i=4 -> d=12 (acc=24); i=5 -> returns 1024

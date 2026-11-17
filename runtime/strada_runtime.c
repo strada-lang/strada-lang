@@ -20126,8 +20126,17 @@ static StradaValue* strada_call_env_argv(void *func_ptr, StradaValue ***caps, in
     }
 }
 
+/* Calling something that is not code (Perl): undef -> "Can't use an
+ * undefined value as a subroutine reference", else "Not a CODE reference".
+ * Both are catchable. */
+static StradaValue *strada_not_code_call(StradaValue *v) {
+    int is_undef = (!v || (!STRADA_IS_TAGGED_INT(v) && v->type == STRADA_UNDEF));
+    strada_throw(is_undef ? "Can't use an undefined value as a subroutine reference" : "Not a CODE reference");
+    return strada_new_undef();
+}
+
 static StradaValue* strada_closure_call_argv(StradaValue *closure, int argc, StradaValue **argv) {
-    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_new_undef();
+    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_not_code_call(closure);
 
     /* Handle plain function pointers (legacy \&func CPOINTER syntax) */
     if (closure->type == STRADA_CPOINTER) {
@@ -20139,10 +20148,10 @@ static StradaValue* strada_closure_call_argv(StradaValue *closure, int argc, Str
         return strada_call_plain_argv(closure->value.ptr, 0, argc, argv);
     }
 
-    if (closure->type != STRADA_CLOSURE) return strada_new_undef();
+    if (closure->type != STRADA_CLOSURE) return strada_not_code_call(closure);
 
     StradaClosure *cl = (StradaClosure*)closure->value.ptr;
-    if (!cl) return strada_new_undef();
+    if (!cl) return strada_not_code_call(closure);
 
     if (argc < 0) argc = 0;
 
@@ -20229,7 +20238,7 @@ static StradaValue* strada_closure_call_argv(StradaValue *closure, int argc, Str
 /* Closure call - handles up to 16 arguments (or arbitrary count for variadic)
  * Also handles plain function pointers (STRADA_CPOINTER) for compatibility */
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...) {
-    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_new_undef();
+    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_not_code_call(closure);
     if (argc < 0) argc = 0;
 
     StradaValue *stack_argv[16];
@@ -20324,7 +20333,7 @@ StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaV
 
 /* Call closure with args from a StradaValue array */
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv) {
-    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_new_undef();
+    if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_not_code_call(closure);
     StradaArray *av = strada_deref_array(args_sv);
     int argc = av ? (int)strada_array_length(av) : 0;
     StradaValue **argv = (av && argc > 0) ? (av->elements + av->head) : NULL;

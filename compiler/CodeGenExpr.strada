@@ -9322,16 +9322,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
             emit($cg, "strada_tmps_free(" . $cl_tm . "); __cl_res2; })");
         } elsif ($needs_arg_cleanup == 1 || $callee_cleanup == 1 || ($cg->{"cleanup_enabled"} == 1 && $arg_count > 0 && $cl_any_imp == 1)) {
+            # Perl evaluates the arguments before the callee, so an argument
+            # that reassigns the callee variable calls the NEW code ref; the
+            # callee is therefore loaded after the arguments (no copy needed).
             my int $cl_fn_copy = 0;
-            if ($callee_cleanup == 0 && $cg->{"cleanup_enabled"} == 1 && $cl_args_imp == 1 && expr_is_always_tagged_int($cg, $expr->{"closure"}) == 0) {
-                $cl_fn_copy = 1;
-                # A plain local of this function can only change while the
-                # arguments are evaluated if an argument assigns it.
-                if (closure_callee_is_frame_local($cg, $expr->{"closure"}) == 1
-                    && node_writes_var($args, "" . $expr->{"closure"}->{"name"}) == 0) {
-                    $cl_fn_copy = 0;
-                }
-            }
             my array @ca_mos = ();
             my int $any_mo2 = 0;
             my int $ca = 0;
@@ -9358,15 +9352,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my str $cl_tm2 = "";
             if ($use_tmps == 1) {
                 $cl_tm2 = next_tmps_var($cg);
-                emit($cg, "({ size_t " . $cl_tm2 . " = strada_tmps_mark(); StradaValue *__cl_fn = ");
+                emit($cg, "({ size_t " . $cl_tm2 . " = strada_tmps_mark(); StradaValue *__cl_fn; ");
             } else {
-                emit($cg, "({ StradaValue *__cl_fn = ");
+                emit($cg, "({ StradaValue *__cl_fn; ");
             }
-            if ($use_tmps == 1 && $callee_cleanup == 1) { emit($cg, "strada_mortal("); }
-            elsif ($cl_fn_copy == 1) { emit($cg, "strada_mortal_copy("); }
-            gen_expression($cg, $expr->{"closure"});
-            if (($use_tmps == 1 && $callee_cleanup == 1) || $cl_fn_copy == 1) { emit($cg, ")"); }
-            emit($cg, "; ");
             $ca = 0;
             while ($ca < $arg_count) {
                 my int $ca_mo = $ca_mos[$ca];
@@ -9378,6 +9367,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 $ca = $ca + 1;
             }
+            emit($cg, "__cl_fn = ");
+            if ($use_tmps == 1 && $callee_cleanup == 1) { emit($cg, "strada_mortal("); }
+            gen_expression($cg, $expr->{"closure"});
+            if ($use_tmps == 1 && $callee_cleanup == 1) { emit($cg, ")"); }
+            emit($cg, "; ");
             emit($cg, "StradaValue *__clres = ");
             emit_closure_call_n($cg, "__cl_fn", $arg_count, "__cla");
             emit($cg, "; ");

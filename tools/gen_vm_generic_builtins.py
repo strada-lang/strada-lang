@@ -19,9 +19,13 @@ import collections
 ENTRIES = {}
 
 
+EXTRA = {}   # (name, arity) -> cfunc: further arities of a name
+
+
 def add(names_str, cfunc, arity):
     for n in re.findall(r'"([a-z_0-9:]+)"', names_str):
         ENTRIES.setdefault(n, (cfunc, int(arity)))
+        EXTRA.setdefault((n, int(arity)), cfunc)
 
 
 def harvest(src):
@@ -50,6 +54,22 @@ def harvest(src):
         add(m.group(1), m.group(2), len(re.findall(r'gen_expression', m.group(3))))
 
 
+def harvest_blocks(src):
+    """E: inside an `if ($name eq "sys::X") {` block, every
+    gen_call_with_arg_cleanup($cg, "strada_Y", $args, N) maps (X, N) -> Y
+    (handlers that pick the runtime function by argument count)."""
+    starts = [m for m in re.finditer(r'\n([ \t]*)if \((\$name eq "[a-z_0-9:]+"(?:\s*\|\|\s*\$name eq "[a-z_0-9:]+")*)\) \{', src)]
+    for i, m in enumerate(starts):
+        indent = m.group(1)
+        end = src.find("\n" + indent + "}", m.end())
+        if end < 0:
+            continue
+        body = src[m.end():end]
+        for c in re.finditer(r'gen_call_with_arg_cleanup\(\$cg, "(strada_[a-z_0-9]+)", \$(?:args|expr->\{"args"\}), (\d+)\)', body):
+            for n in re.findall(r'"([a-z_0-9:]+)"', m.group(2)):
+                EXTRA.setdefault((n, int(c.group(2))), c.group(1))
+
+
 def uniform_protos(hdr):
     protos = {}
     for m in re.finditer(r'^StradaValue\*\s+(strada_[a-z_0-9]+)\(([^)]*)\);', hdr, re.M):
@@ -64,7 +84,9 @@ def uniform_protos(hdr):
 
 
 def main():
-    harvest(open("compiler/CodeGenBuiltins.strada").read())
+    cgb = open("compiler/CodeGenBuiltins.strada").read()
+    harvest(cgb)
+    harvest_blocks(cgb)
     protos = uniform_protos(open("runtime/strada_runtime.h").read())
 
     # coroutines need VM-native closures (a closure cannot cross the
@@ -75,6 +97,15 @@ def main():
                   if (n.startswith("sys::") or n.startswith("math::"))
                   and not n.startswith(EXCLUDE_PREFIXES)
                   and a <= 4 and protos.get(c) == a)
+    have_na = set((n, a) for n, _, a in ents)
+    for (n, a), c in sorted(EXTRA.items()):
+        if (n, a) in have_na:
+            continue
+        if not (n.startswith("sys::") or n.startswith("math::")) or n.startswith(EXCLUDE_PREFIXES):
+            continue
+        if a <= 4 and protos.get(c) == a:
+            ents.append((n, c, a))
+            have_na.add((n, a))
     # Keep entries of the existing table that are still valid (some were
     # added from emission patterns the harvester does not recognise).
     try:

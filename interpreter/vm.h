@@ -569,6 +569,16 @@ enum {
     BUILTIN_SET_PACKAGE,
     BUILTIN_PRINTF,
     BUILTIN_HASH_FLAT,
+    BUILTIN_HASH_DELETE_SLICE, /* (hash, keys) -> removed values */
+    BUILTIN_CHOMP_ARRAY,  /* (array) -> chars removed */
+    BUILTIN_LIST_REPEAT,  /* (list, n) -> list repeated */
+    BUILTIN_AUTOVIV_ARRAY, /* (v) -> v if array, new array if undef, else throws */
+    BUILTIN_REGEX_LIST,   /* (subject, pattern, flags, global) -> list of captures */
+    BUILTIN_GC_OP,        /* (subop[, n]): 0 collect 1 enable 2 disable 3 threshold 4 collections 5 freed */
+    BUILTIN_SPEW_FH,      /* (fh, data) -> undef */
+    BUILTIN_DEFAULT_CAP,  /* (which: 0 hash 1 array[, n]) -> capacity */
+    BUILTIN_SPRINTF_LIST, /* ([fmt, args...]) -> sprintf */
+    BUILTIN_PACK_LIST,    /* ([fmt, args...]) -> core::pack */
     BUILTIN_CONTAINER_REPLACE, /* (container, LIST) -> container, contents replaced in place */    /* (HASH) -> new array of key, value, ... */       /* (ARRAY of [fh,] fmt, args) -> printf */  /* set_package(NAME): current package for 1-arg inherit() */
     BUILTIN_CAPTURES,
     BUILTIN_NAMED_CAPTURES,
@@ -1160,6 +1170,9 @@ typedef struct VM {
     /* Mark-sweep GC state */
     VMObjHeader *gc_objects;
     size_t gc_count;
+    uint64_t gc_runs;            /* core::gc_collections() */
+    uint64_t gc_freed_total;     /* core::gc_freed(): objects reclaimed */
+    int gc_user_disabled;        /* core::gc_disable(): no automatic runs */
     size_t gc_threshold;
     int gc_pause;
     int has_weakrefs;
@@ -1244,6 +1257,7 @@ void vm_program_add_attr(VMProgram *prog, const char *cls, const char *name, con
  * (core:: -> sys::) with exact arity match; returns table index or -1. */
 #define VM_GENERIC_BID_BASE 20000
 int vm_generic_builtin_find(const char *name, int argc);
+int vm_generic_builtin_find_min(const char *name, int argc);
 
 /* MI-aware isa walk over the inherits table */
 int vm_class_isa(VMProgram *p, const char *cls, const char *target, int depth);

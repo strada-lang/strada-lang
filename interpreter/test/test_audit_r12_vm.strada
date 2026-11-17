@@ -77,9 +77,10 @@ func main() int {
     my scalar $afn = func(array @arr) int { return scalar(@arr); };
     say("VM11=" . $afn->([10, 20, 30]));
 
-    # R12-VM12: non-closure call returns undef & C-style for shared var
+    # R12-VM12: calling a non-code value dies (Perl, catchable) & C-style for shared var
     my scalar $nf = 42;
-    my scalar $nfr = $nf->();
+    my scalar $nfr = undef;
+    try { $nfr = $nf->(); } catch ($e) { $nfr = undef; }
     my array @cfns = ();
     for (my int $i = 0; $i < 3; $i = $i + 1) {
         push(@cfns, func() int { return $i; });

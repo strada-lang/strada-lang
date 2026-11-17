@@ -37,7 +37,8 @@ func main() int {
         my hash %mh = $b->ctx_m();
         my str $ord = $b->order();
         my scalar $nf = 42;
-        my scalar $nfr = $nf->();
+        my scalar $nfr = undef;
+        try { $nfr = $nf->(); } catch ($e) { $nfr = undef; }
         my str $kept = "";
         foreach ("keep") {
             foreach my str $it ("p", "q") { }

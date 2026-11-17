@@ -1,4 +1,4 @@
-# EXPECT: 3;ab;u;7;x+y;v;1,2,3;9;5;new;8;12;1;2;6;cyc=1
+# EXPECT: 3;ab;u;7;x+y;v;1,2,3;0;5;new;8;12;1;2;6;cyc=1
 package P;
 has rw int $x = 0;
 func sq(scalar $self) int { return $self->x() * $self->x(); }
@@ -25,7 +25,8 @@ func main() int {
     push(@o, defined($vr) ? "d" : "v");
     my scalar $vf = \&varf;
     push(@o, $vf->(1, 2, 3));
-    # argument reassigns the callee variable: the old closure is called
+    # argument reassigns the callee variable: Perl evaluates the arguments
+    # first, so the NEW closure is called
     my scalar $f = fn ($n) { return $n + 8; };
     push(@o, $f->(($f = fn ($n) { return 0; }) ? 1 : 1));
     push(@o, 5);

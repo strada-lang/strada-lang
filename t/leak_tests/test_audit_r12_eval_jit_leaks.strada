@@ -31,7 +31,7 @@ func main() int {
             my array @mp = map { ($_, $_ + 1); } (1, 2);
             my array @rg = (5..1);
             my scalar $nf = 1;
-            $nf->();
+            try { $nf->(); } catch ($e) { }
         ');
         Strada::Interpreter::reset();
         Strada::Interpreter::eval_string_vm('
