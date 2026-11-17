@@ -346,10 +346,10 @@ valgrind --leak-check=full ./my_program 2>&1 | grep -A5 "LEAK SUMMARY"
 A Bacon–Rajan synchronous trial-deletion collector that automatically reclaims **indirect** reference cycles (`A→B→A`) which plain refcounting leaks — so `core::weaken()` is no longer required for the common hashref/arrayref/object-graph cycle. Implemented entirely in `runtime/strada_runtime.c` under `#ifdef STRADA_CYCLE_GC` using side tables (no `StradaValue` ABI change). Key properties:
 
 - **Hook**: only the survive path (`new_rc > 0`) of `strada_decref` buffers a candidate root; drop-to-zero is unchanged. Buffered roots are **pinned** (incref'd) so they can't be freed underneath the collector.
-- **Scope**: covers `ARRAY`/`HASH`/`REF` roots. Closure-capture cycles, futures/channels, and tied containers fall back to `core::weaken()`.
+- **Scope**: covers `ARRAY`/`HASH`/`REF` roots and traverses closure captures and cells. Futures/channels and tied containers fall back to `core::weaken()`.
 - **Threading**: works under threads via a **stop-the-world** pause. Mutators poll a safepoint in the threaded `strada_decref` path (after buffering, never before — parking before the buffer read would let the collector free the candidate underneath it); threads blocked in a syscall (sleep/recv/await/join/pool-idle) mark themselves safe via `cc_blocking_enter/leave` so the collector needn't wait for them. The collector requests a stop, waits (bounded by a 200ms timeout → a thread that can't reach a safepoint just causes a *skipped* collection, never a hang) for every other registered mutator to park/block, then runs the trial-deletion with the graph stable. Single-threaded keeps the original lock-free fast path. The candidate buffer + side table are mutex-protected only while threading is active.
 - **Triggers**: automatically at a candidate-count threshold (default 10000, **adaptive**: a collection that frees nothing doubles the trigger, capped at ~1M candidates; one that frees cycles resets it to the base — so cycle-free programs converge to near-zero collection work) and a final sweep at exit; or explicitly via the API below. `core::gc_threshold($n)` sets the base and resets the current trigger.
-- **Caveat**: a cyclic *blessed* object reclaimed by the collector does **not** run `DESTROY` (parallels Perl global destruction).
+- **DESTROY**: a cyclic blessed object reclaimed by the collector runs `DESTROY` (deferred until the cycle's internal refcounts are restored, `cc_def_dsv`). Closure-capture cycles (`$self->{cb} = func () { $self }`) are traversed too (`cc_each_child` STRADA_CLOSURE case) and reclaimed. Regression: `t/bugfix_tests/gc_destroy_closure_r20.strada`.
 - Build `./configure --without-cycle-gc` to compile it out.
 
 API (Strada): `core::gc_collect()`, `core::gc_enable()`, `core::gc_disable()`, `core::gc_threshold($n)`, `core::gc_collections()`, `core::gc_freed()`. Runtime C: `strada_gc_collect()`, `strada_gc_set_enabled()`, `strada_gc_set_threshold()`, `strada_gc_collections()`, `strada_gc_objects_freed()`.
@@ -505,6 +505,28 @@ When adding **inline codegen** for a new built-in function in `compiler/CodeGen.
    This was the root cause of an enormous per-statement leak in perla (commit `b5f48978`): `needs_temp_cleanup()` did a plain `$cg->{"functions"}->{$c_name}` lookup, while the call emitter (`gen_call`, around line 12518) tries `$c_name` first AND falls back to `<c_pkg>_<c_name>` for unqualified calls inside non-`main` packages. The predicate missed the fallback, returned 0 (no cleanup needed), so `push(@arr, fn(...))` emitted `strada_array_push(av, fn(...))` without the `__push_v` / `strada_decref` wrapper — every owned return leaked. Each `my $X = N;` in a compiled Perl program leaked ~74 blocks before the fix; 0 after.
 
    **Rule of thumb:** every predicate that maps a function-call AST node to a behavior (cleanup needed? incref needed? owned-return type?) must call the same name-resolver as the emitter, or factor that resolver into a shared helper. Test in a **non-`main` package**, not just in `main` — `main` doesn't exercise the mangle/fallback path. Pure-Strada test cases living in `package main` (or using fully namespaced calls) never reproduce this class of bug.
+
+### Cleanup stack and balance checking (2026-11)
+
+The pending-cleanup stack (owned temps / variable slots released when an
+exception unwinds) starts in a 256-entry per-thread inline buffer and grows on
+the heap (`strada_pc_reserve`); it used to be a fixed 16384-entry array that
+silently dropped pushes past the cap. `strada --check-cleanup` (or
+`STRADA_CHECK_CLEANUP=1` in the environment, e.g. for a whole test-suite run)
+compiles with full frame tracking and `-DSTRADA_CLEANUP_CHECK`: each frame
+records the cleanup depth at entry and a normal return with a different depth
+aborts with `cleanup stack imbalance in FUNC()` (`STRADA_CLEANUP_CHECK_WARN=1`
+reports without aborting). Run it after touching codegen push/pop logic.
+
+Codegen rule: an owned operand that stays in a C local while another operand
+is evaluated must be on the cleanup stack -- `emit_arg_hold` /
+`emit_arg_release`, or `cleanup_pd_str($pushed, "VAR")` for hand-written
+release strings (CodeGenBuiltins). Borrowed holds (a variable's current value,
+a container) must NOT be pushed.
+
+Hash memory: insert/delete churn rehashes in place (no index doubling); a
+mostly-empty hash shrinks its index after deletes and an emptied hash shrinks
+its entries array on the next insert.
 
 ### Leak Test Suite
 

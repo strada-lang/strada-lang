@@ -341,6 +341,17 @@ static inline int hv_ent_in_block(StradaHash *hv) {
 }
 
 static inline uint32_t hash_get_slot(StradaHash *hv) {
+    /* An emptied hash starts its entries over (the array and its free list
+     * otherwise kept the peak size forever); a large array is shrunk. */
+    if (__builtin_expect(hv->num_entries == 0 && hv->next_slot > 0, 0)) {
+        hv->next_slot = 0;
+        hv->free_head = HASH_EMPTY;
+        hv->iter_index = 0;
+        if (hv->capacity > 64 && !hv_ent_in_block(hv)) {
+            StradaHashEntry *ne = realloc(hv->entries, 8 * sizeof(StradaHashEntry));
+            if (ne) { hv->entries = ne; hv->capacity = 8; }
+        }
+    }
     if (hv->free_head != HASH_EMPTY) {
         uint32_t slot = hv->free_head;
         hv->free_head = hv->entries[slot].next;
@@ -380,6 +391,23 @@ static void hash_rebuild_index(StradaHash *hv) {
     }
     /* Index now mirrors entries[] exactly. */
     hv->index_dirty = 0;
+}
+
+/* After a delete: a mostly-empty hash gives back its index (it never shrank:
+ * a hash that once held a million keys kept a 2M-bucket index). Leaves an
+ * index in the compact block alone. Safe here because the delete paths call
+ * it after updating the entry and before releasing the old value. */
+static void hash_maybe_shrink_index(StradaHash *hv) {
+    if (hv->num_buckets <= 64 || hv->num_entries * 8 >= hv->num_buckets) return;
+    if (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash))) return;
+    size_t nb = 16;
+    while (nb < hv->num_entries * 4) nb *= 2;
+    if (nb >= hv->num_buckets) return;
+    uint32_t *ni = realloc(hv->hash_index, nb * sizeof(uint32_t));
+    if (!ni) return;
+    hv->hash_index = ni;
+    hv->num_buckets = nb;
+    hash_rebuild_index(hv);
 }
 
 /* Linear-scan fallback for hash_index corruption (same mode self-healed
@@ -4034,6 +4062,7 @@ static StradaValue* strada_hash_delete_take_len(StradaHash *hv, const char *key,
                 e->next = hv->free_head; hv->free_head = idx;
                 hv->num_entries--;
                 hv->num_tombstones++;
+                hash_maybe_shrink_index(hv);
                 return val ? val : strada_undef_static();
             }
         }
@@ -5686,6 +5715,7 @@ void strada_hash_delete(StradaHash *hv, const char *key) {
                 e->next = hv->free_head; hv->free_head = idx;
                 hv->num_entries--;
                 hv->num_tombstones++;
+                hash_maybe_shrink_index(hv);
                 if (old) strada_decref(old);
                 return;
             }
@@ -6316,6 +6346,7 @@ void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv) {
                 e->next = hv->free_head; hv->free_head = idx;
                 hv->num_entries--;
                 hv->num_tombstones++;
+                hash_maybe_shrink_index(hv);
                 if (key_alloc) free(key_alloc);
                 if (old) strada_decref(old);
                 return;
@@ -6582,6 +6613,7 @@ static StradaValue* strada_hash_delete_take_with_hash_len(StradaHash *hv, const 
                 e->next = hv->free_head; hv->free_head = idx;
                 hv->num_entries--;
                 hv->num_tombstones++;
+                hash_maybe_shrink_index(hv);
                 return old ? old : strada_undef_static();
             }
         }
@@ -11933,6 +11965,17 @@ int strada_call_depth = 0;
 __thread StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 __thread int strada_call_depth = 0;
 #endif
+#ifdef STRADA_NO_TLS
+int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
+#else
+__thread int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
+#endif
+void strada_cleanup_check_fail(const char *func_name, int entry_mark, int exit_mark) {
+    fprintf(stderr, "strada: cleanup stack imbalance in %s(): depth %d at entry, %d at return\n",
+            func_name ? func_name : "?", entry_mark, exit_mark);
+    if (getenv("STRADA_CLEANUP_CHECK_WARN")) return;
+    abort();
+}
 /* ---- Stack overflow report ---------------------------------------------
  * The recursion limit below is part of stack-trace tracking, which is only
  * compiled into programs that use try/throw/caller/stack_trace. In any other
@@ -12210,17 +12253,62 @@ static void strada_snapshot_exception_trace(void) {
  * thread-local storage never crosses the ABI boundary — a tcc-compiled program
  * linking the gcc-built runtime calls these functions rather than touching the
  * __thread variable directly (tcc can't do __thread). */
-static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
-static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
-static STRADA_CLEANUP_TLS int strada_pending_cleanup_overflow = 0;
+/* The stack starts in a small per-thread inline buffer and grows on the heap
+ * (it was a fixed 16384-entry array -- 256 KB of TLS per thread -- and every
+ * push past the cap was silently dropped, leaking that value on a throw).
+ * `overflow` now only counts pushes dropped because growing failed (OOM). */
+#define STRADA_CLEANUP_INLINE_CAP 256
+static STRADA_CLEANUP_TLS StradaValue *strada_pc_inline[STRADA_CLEANUP_INLINE_CAP];
 /* The value a pushed variable held when pushed. Never released from here:
  * it only keeps that value visibly referenced, so a leak checker run when
  * the program exits from deep inside (exit() in a callee) doesn't report
  * values that are still owned by live frames. */
-static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup_seen[STRADA_MAX_PENDING_CLEANUP];
+static STRADA_CLEANUP_TLS StradaValue *strada_pcs_inline[STRADA_CLEANUP_INLINE_CAP];
+static STRADA_CLEANUP_TLS StradaValue **strada_pc_heap = NULL;
+static STRADA_CLEANUP_TLS StradaValue **strada_pcs_heap = NULL;
+static STRADA_CLEANUP_TLS int strada_pc_cap = STRADA_CLEANUP_INLINE_CAP;
+static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
+static STRADA_CLEANUP_TLS int strada_pending_cleanup_overflow = 0;
+#define strada_pending_cleanup (strada_pc_heap ? strada_pc_heap : strada_pc_inline)
+#define strada_pending_cleanup_seen (strada_pcs_heap ? strada_pcs_heap : strada_pcs_inline)
+
+/* Make room for `need` entries. Returns 0 when the allocation failed. */
+static int strada_pc_reserve(int need) {
+    if (need <= strada_pc_cap) return 1;
+    int ncap = strada_pc_cap;
+    while (ncap < need) {
+        if (ncap > (1 << 28)) return 0;
+        ncap *= 2;
+    }
+    StradaValue **a = (StradaValue **)malloc((size_t)ncap * sizeof(StradaValue *));
+    StradaValue **b = (StradaValue **)malloc((size_t)ncap * sizeof(StradaValue *));
+    if (!a || !b) { free(a); free(b); return 0; }
+    memcpy(a, strada_pending_cleanup, (size_t)strada_pending_cleanup_count * sizeof(StradaValue *));
+    memcpy(b, strada_pending_cleanup_seen, (size_t)strada_pending_cleanup_count * sizeof(StradaValue *));
+    free(strada_pc_heap);
+    free(strada_pcs_heap);
+    strada_pc_heap = a;
+    strada_pcs_heap = b;
+    strada_pc_cap = ncap;
+    return 1;
+}
+
+/* Free a thread's grown buffers once its stack is empty (thread exit). */
+void strada_cleanup_stack_release(void) {
+    if (strada_pending_cleanup_count != 0) return;
+    free(strada_pc_heap); strada_pc_heap = NULL;
+    free(strada_pcs_heap); strada_pcs_heap = NULL;
+    strada_pc_cap = STRADA_CLEANUP_INLINE_CAP;
+}
+
+static inline int strada_pc_room(void) {
+    if (__builtin_expect(strada_pending_cleanup_overflow != 0, 0)) return 0;
+    if (__builtin_expect(strada_pending_cleanup_count < strada_pc_cap, 1)) return 1;
+    return strada_pc_reserve(strada_pending_cleanup_count + 1);
+}
 
 void strada_cleanup_push(StradaValue *sv) {
-    if (__builtin_expect(strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP && strada_pending_cleanup_overflow == 0, 1))
+    if (__builtin_expect(strada_pc_room(), 1))
         strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
     else
         strada_pending_cleanup_overflow++;
@@ -12231,7 +12319,7 @@ void strada_cleanup_push(StradaValue *sv) {
  * already be freed). The throw drains the stack before longjmp'ing, while
  * the frames holding these variables still exist. */
 void strada_cleanup_push_slot(StradaValue **slot) {
-    if (__builtin_expect(strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP && strada_pending_cleanup_overflow == 0, 1)) {
+    if (__builtin_expect(strada_pc_room(), 1)) {
         strada_pending_cleanup_seen[strada_pending_cleanup_count] = *slot;
         strada_pending_cleanup[strada_pending_cleanup_count++] = (StradaValue *)((uintptr_t)slot | 2);
     } else {
@@ -12239,7 +12327,7 @@ void strada_cleanup_push_slot(StradaValue **slot) {
     }
 }
 void strada_cleanup_push_cell(StradaValue **cell_slot) {
-    if (__builtin_expect(strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP && strada_pending_cleanup_overflow == 0, 1)) {
+    if (__builtin_expect(strada_pc_room(), 1)) {
         strada_pending_cleanup_seen[strada_pending_cleanup_count] = cell_slot ? *cell_slot : NULL;
         strada_pending_cleanup[strada_pending_cleanup_count++] = (StradaValue *)((uintptr_t)cell_slot | 4);
     } else {
@@ -20098,10 +20186,12 @@ static void strada_tls_thread_cleanup(void);
 /* Set by the pool worker around each task so a running task can reach
  * its own future (async::sleep early-wake, async::cancelled). */
 static STRADA_TLS StradaFuture *strada_current_future = NULL;
+void strada_cleanup_stack_release(void);
 static void strada_thread_state_cleanup(void) {
     if (strada_local_depth_get() > 0) {
         strada_local_restore_to(0);
     }
+    strada_cleanup_stack_release();
 #ifndef STRADA_NO_TLS
     if (strada_default_output) {
         strada_decref(strada_default_output);
@@ -38204,6 +38294,7 @@ static int coro_local_resume(StradaLocalSave *stack, int depth, StradaValue **er
 
 /* Swap helpers: stash the live TLS segment and install another context's. */
 static int coro_ctx_install(StradaCoro *c, StradaValue **err_out) {
+    strada_pc_reserve(c->cleanup_saved);
     memcpy(strada_pending_cleanup, c->cleanup_save,
            (size_t)c->cleanup_saved * sizeof(StradaValue *));
     strada_pending_cleanup_count = c->cleanup_saved;
@@ -38540,7 +38631,7 @@ restore_host:
     }
     strada_inflight_depth = host_id;
     strada_inflight_shrink_if_empty();
-    if (host_cstash) memcpy(strada_pending_cleanup, host_cstash, (size_t)host_cc * sizeof(StradaValue *));
+    if (host_cstash) { strada_pc_reserve(host_cc); memcpy(strada_pending_cleanup, host_cstash, (size_t)host_cc * sizeof(StradaValue *)); }
     strada_pending_cleanup_count = host_cc;
     strada_pending_cleanup_overflow = host_co_cleanup;
     free(host_cstash);

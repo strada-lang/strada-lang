@@ -3203,9 +3203,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
                 emit($cg, "StradaValue *__ca_cur = ");
                 gen_expression($cg, $target);
+                my int $hpd47 = 0;
+                if ((1) == 1 && cleanup_push_useful($cg) == 1) { $hpd47 = 1; emit($cg, "; strada_cleanup_push(__ca_cur)"); }
                 emit($cg, "; ");
                 gen_expression($cg, $target);
-                emit($cg, " = __ca_res; strada_decref(__ca_cur); ");
+                emit($cg, " = __ca_res; " . cleanup_pd_str($hpd47, "__ca_cur") . "");
                 if ($ca_bit_tie == 1) { emit($cg, "} "); }
                 emit($cg, "__ca_res; })");
                 if ($tied_ca_wrap == 1) { emit($cg, "))"); }
@@ -4114,9 +4116,11 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
             # (LIST) x N: the list repeated N times (it stringified the list).
             emit($cg, "({ StradaValue *__lr_src = ");
             gen_expression($cg, $expr->{"left"});
+            my int $hpd46 = 0;
+            if ((1) == 1 && cleanup_push_useful($cg) == 1) { $hpd46 = 1; emit($cg, "; strada_cleanup_push(__lr_src)"); }
             emit($cg, "; int64_t __lr_n = ");
             emit_int_operand($cg, $expr->{"right"});
-            emit($cg, "; StradaValue *__lr_out = strada_new_array(); for (int64_t __lr_i = 0; __lr_i < __lr_n; __lr_i++) strada_av_append_all(__lr_out->value.av, __lr_src); strada_decref(__lr_src); __lr_out; })");
+            emit($cg, "; StradaValue *__lr_out = strada_new_array(); for (int64_t __lr_i = 0; __lr_i < __lr_n; __lr_i++) strada_av_append_all(__lr_out->value.av, __lr_src); " . cleanup_pd_str($hpd46, "__lr_src") . "__lr_out; })");
         } elsif ($op eq "x") {
             # String repetition: "ab" x 3
             my int $left_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"left"}) == 1;
@@ -6459,15 +6463,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             if ($is_prefix == 1) {
                 if ($op eq "++") {
-                    emit($cg, "strada_preincr(&");
+                    emit($cg, "strada_preincr((StradaValue **)&");
                 } else {
-                    emit($cg, "strada_predecr(&");
+                    emit($cg, "strada_predecr((StradaValue **)&");
                 }
             } else {
                 if ($op eq "++") {
-                    emit($cg, "strada_postincr(&");
+                    emit($cg, "strada_postincr((StradaValue **)&");
                 } else {
-                    emit($cg, "strada_postdecr(&");
+                    emit($cg, "strada_postdecr((StradaValue **)&");
                 }
             }
             gen_expression($cg, $operand);

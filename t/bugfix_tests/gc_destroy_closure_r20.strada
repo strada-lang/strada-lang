@@ -1,0 +1,28 @@
+# EXPECT: destroyed=2000 closure_cycles_freed=1
+package Node;
+our int $destroyed = 0;
+func new($name) { my %h = ("name" => $name); return bless(\%h, "Node"); }
+func DESTROY($self) { $destroyed = $destroyed + 1; }
+func count() int { return $destroyed; }
+package main;
+func main() int {
+    my $i = 0;
+    while ($i < 1000) {
+        my $a = Node::new("a"); my $b = Node::new("b");
+        $a->{"peer"} = $b; $b->{"peer"} = $a;
+        $i++;
+    }
+    core::gc_collect();
+    my $f1 = core::gc_freed();
+    my $d1 = Node::count();
+    my $j = 0;
+    while ($j < 1000) {
+        my %obj = ("n" => $j);
+        my $self = \%obj;
+        $self->{"cb"} = func () { return $self->{"n"}; };
+        $j++;
+    }
+    core::gc_collect();
+    say("destroyed=" . $d1 . " closure_cycles_freed=" . (core::gc_freed() > $f1 ? 1 : 0));
+    return 0;
+}

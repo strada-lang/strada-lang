@@ -50,6 +50,7 @@ our int $CHECK_ONLY = 0;
 our int $ENABLE_PROFILING = 0;
 our int $FULL_PROFILE = 0;
 our int $NO_STACK_TRACE = 0;
+our int $CHECK_CLEANUP = 0;   # --check-cleanup / STRADA_CHECK_CLEANUP=1
 our int $NO_LTO = 0;
 our int $REPL_MODE = 0;
 our str $SCRIPT_FILE = "";
@@ -412,6 +413,8 @@ func parse_args(array @av) void {
     # STRADA_DEFAULT_OPT=0|1|2|3|s|fast (a leading "-O" is accepted): the
     # optimization level when no -O flag is given. An explicit -O still wins.
     # The test suite sets it to 0 under QUICK=1 (skips the -O2 LTO link).
+    my str $ccheck = env("STRADA_CHECK_CLEANUP");
+    if (length($ccheck) > 0 && $ccheck ne "0") { $CHECK_CLEANUP = 1; }
     my str $dopt = env("STRADA_DEFAULT_OPT");
     if (sw($dopt, "-O")) { $dopt = substr($dopt, 2, length($dopt) - 2); }
     if ($dopt eq "0" || $dopt eq "1" || $dopt eq "2" || $dopt eq "3" || $dopt eq "s" || $dopt eq "fast") {
@@ -478,6 +481,7 @@ func parse_args(array @av) void {
         elsif ($a eq "--full-profile") { $FULL_PROFILE = 1; $i = $i + 1; }
         elsif ($a eq "-fno-lto" || $a eq "--no-lto") { $NO_LTO = 1; $i = $i + 1; }
         elsif ($a eq "--no-stack-trace") { $NO_STACK_TRACE = 1; $i = $i + 1; }
+        elsif ($a eq "--check-cleanup") { $CHECK_CLEANUP = 1; $i = $i + 1; }
         elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
         elsif ($a eq "--no-use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "0"); $i = $i + 1; }
         elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
@@ -562,6 +566,7 @@ func usage() void {
     say("  -p, --profile       Function-level profiling to stderr");
     say("  --full-profile      Line-level profiling (writes strada-prof.out)");
     say("  --no-stack-trace    Omit stack-trace tracking (faster)");
+    say("  --check-cleanup     Debug: abort when a function returns with an unbalanced cleanup stack");
     say("  -v, --verbose       Verbose output (show subcommands)");
     say("");
     say("Compile-time inputs:");
@@ -821,6 +826,7 @@ func build_gcc_flags() array {
     if ($SHARED_LIB != 1) {
         @f = (@f, "-ffunction-sections", "-fdata-sections");
     }
+    if ($CHECK_CLEANUP == 1) { @f = (@f, "-DSTRADA_CLEANUP_CHECK"); }
     # GCC-only flags (skip on clang)
     my int $is_clang = cc_is_clang();
     if ($is_clang == 0) {
@@ -1162,6 +1168,7 @@ func main() int {
     if ($ENABLE_PROFILING == 1) { @sc = (@sc, "-p"); }
     if ($FULL_PROFILE == 1) { @sc = (@sc, "--full-profile"); }
     if ($NO_STACK_TRACE == 1) { @sc = (@sc, "--no-stack-trace"); }
+    elsif ($CHECK_CLEANUP == 1) { @sc = (@sc, "--stack-trace"); }
     my int $lp = 0;
     while ($lp < size(@LIB_PATHS)) { @sc = (@sc, "-L"); @sc = (@sc, $LIB_PATHS[$lp]); $lp = $lp + 1; }
     $lp = 0;

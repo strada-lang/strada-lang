@@ -1249,6 +1249,8 @@ int strada_in_try_block(void);
  * functions, not inline, so the per-thread storage never crosses the ABI
  * boundary (a tcc-built program linking the gcc runtime calls these rather than
  * touching the __thread variable, which tcc cannot express). */
+/* The pending-cleanup stack grows on demand (runtime); this is only the
+ * historical size, kept for code that sized buffers with it. */
 #define STRADA_MAX_PENDING_CLEANUP 16384
 void strada_cleanup_push(StradaValue *sv);
 void strada_cleanup_push_slot(StradaValue **slot);  /* a variable: its CURRENT value is released on unwind */
@@ -1306,6 +1308,19 @@ extern __thread int strada_call_depth;
 extern __thread int strada_call_overflow;
 #endif
 #endif
+/* Cleanup-stack balance checking (debug builds: -DSTRADA_CLEANUP_CHECK, set by
+ * `strada --check-cleanup` or STRADA_CHECK_CLEANUP=1). Each frame records the
+ * pending-cleanup depth at entry; a normal return with a different depth means
+ * codegen pushed without popping (or popped twice) -- reported and aborted. */
+#ifndef STRADA_TCC_COMPAT
+#ifdef STRADA_NO_TLS
+extern int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
+#else
+extern __thread int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
+#endif
+#endif
+int strada_cleanup_mark(void);
+void strada_cleanup_check_fail(const char *func_name, int entry_mark, int exit_mark);
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 
@@ -1349,9 +1364,20 @@ static inline void strada_stack_push_il(const char *func_name, const char *file_
     f->func_name = func_name;
     f->file_name = file_name;
     f->line = 0;
+#ifdef STRADA_CLEANUP_CHECK
+    strada_cs_marks[d + 1] = strada_cleanup_mark();
+#endif
 }
 static inline void strada_stack_pop_il(void) {
     if (__builtin_expect(strada_call_overflow > 0, 0)) { strada_call_overflow--; return; }
+#ifdef STRADA_CLEANUP_CHECK
+    if (strada_call_depth > 0) {
+        int __csm = strada_cleanup_mark();
+        if (__builtin_expect(__csm != strada_cs_marks[strada_call_depth], 0))
+            strada_cleanup_check_fail(strada_call_stack[strada_call_depth].func_name,
+                                      strada_cs_marks[strada_call_depth], __csm);
+    }
+#endif
     if (strada_call_depth > 0) strada_call_depth--;
 }
 /* Lightweight recursion-depth-only guard (mode 2: files without
