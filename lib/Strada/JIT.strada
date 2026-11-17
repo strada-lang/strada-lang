@@ -1857,10 +1857,10 @@ private func strip_toplevel_my(str $input) str {
                                     }
                                 }
                                 my int $k = $j;
-                                while ($k < $len && jit_is_ws(substr($input, $k, 1)) == 1) {
+                                while ($k < $len && jit_is_ws(substr($cleaned, $k, 1)) == 1) {
                                     $k = $k + 1;
                                 }
-                                if ($k == $len || substr($input, $k, 1) eq ";") {
+                                if ($k == $len || substr($cleaned, $k, 1) eq ";") {
                                     # Standalone `my int $x;` -> reset to default value
                                     my str $defv = "undef";
                                     if ($sigil eq "@" || $sigil eq "%") { $defv = "()"; }
@@ -2007,9 +2007,11 @@ private func generate_source(str $input) str {
 
     my int $use_closure_wrap = (index($input, "__C__") < 0) ? 1 : 0;
 
-    # Main eval function (always in package repl even if functions above switched package)
-    $src = $src . "package repl;\n";
-    $src = $src . "func repl_eval() scalar {\n";
+    # Emit main eval function in the active target package; keep repl::repl_eval as entry point
+    my str $eval_pkg = get_target_package();
+    my str $eval_fn_name = ($eval_pkg eq "repl") ? "repl_eval" : "__jit_repl_eval";
+    $src = $src . "package " . $eval_pkg . ";\n";
+    $src = $src . "func " . $eval_fn_name . "() scalar {\n";
 
     # Declare tracked variables as real C `my` locals in repl_eval() and restore
     # previously-saved values from the global registry (unless redeclared in $input).
@@ -2307,6 +2309,9 @@ private func generate_source(str $input) str {
 
     $src = $src . "\n    return \$__result;\n";
     $src = $src . "}\n";
+    if ($eval_pkg ne "repl") {
+        $src = $src . "\npackage repl;\nfunc repl_eval() scalar {\n    return " . $eval_pkg . "::__jit_repl_eval();\n}\n";
+    }
 
     return $src;
 }

@@ -1,0 +1,425 @@
+# Cycle 19 Compiler, Runtime & Stdlib Regression Suite (C1-C8, R1-R7, L3-L7)
+use lib "lib";
+use YAML;
+use LWP;
+use LWP_SSL;
+use Digest::MD5;
+
+package R19Flat;
+func new(str $cls, int $v) scalar {
+    return bless({"v" => $v, "cls" => $cls}, "R19Flat");
+}
+func get(scalar $s) int { return $s->{"v"}; }
+
+package R19NS::Box;
+func new(str $cls, int $v) scalar {
+    return bless({"v" => $v, "cls" => $cls}, "R19NS::Box");
+}
+func make(str $cls, int $v) scalar {
+    return R19NS::Box::new($cls, $v * 2);
+}
+func get(scalar $s) int { return $s->{"v"}; }
+func cls(scalar $s) str { return $s->{"cls"}; }
+
+package async::R19Worker;
+func ping(str $cls, int $n) str {
+    return $cls . ":" . $n;
+}
+
+package R19TieScalar;
+func TIESCALAR(str $cls, scalar $init) scalar {
+    return bless({"v" => $init, "fetches" => 0, "stores" => 0}, $cls);
+}
+func FETCH(scalar $s) scalar {
+    $s->{"fetches"} = $s->{"fetches"} + 1;
+    return $s->{"v"};
+}
+func STORE(scalar $s, scalar $val) void {
+    $s->{"stores"} = $s->{"stores"} + 1;
+    $s->{"v"} = $val;
+}
+
+package R19TieArr;
+func TIEARRAY(str $cls, scalar ...@init) scalar {
+    return bless({"a" => \@init}, $cls);
+}
+func FETCHSIZE(scalar $s) int { return size($s->{"a"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"a"}->[$i]; }
+func STORE(scalar $s, int $i, scalar $v) void { $s->{"a"}->[$i] = $v; }
+func STORESIZE(scalar $s, int $n) void {
+    my scalar $a = $s->{"a"};
+    while (size($a) < $n) { push($a, undef); }
+    while (size($a) > $n) { pop($a); }
+}
+func SPLICE(scalar $s, int $off, int $len, scalar ...@rep_list) scalar {
+    my scalar $rep = \@rep_list;
+    my scalar $a = $s->{"a"};
+    my array @rem = ();
+    for (my int $i = 0; $i < $len; $i = $i + 1) {
+        push(@rem, $a->[$off + $i]);
+    }
+    my array @nxt = ();
+    for (my int $i = 0; $i < $off; $i = $i + 1) { push(@nxt, $a->[$i]); }
+    for (my int $i = 0; $i < size($rep); $i = $i + 1) { push(@nxt, $rep->[$i]); }
+    for (my int $i = $off + $len; $i < size($a); $i = $i + 1) { push(@nxt, $a->[$i]); }
+    $s->{"a"} = \@nxt;
+    return \@rem;
+}
+
+package R19TieHash;
+func TIEHASH(str $cls) scalar {
+    return bless({"h" => {}, "ops" => 0}, $cls);
+}
+func FETCH(scalar $s, str $k) scalar {
+    $s->{"ops"} = $s->{"ops"} + 1;
+    return $s->{"h"}->{$k};
+}
+func STORE(scalar $s, str $k, scalar $v) void {
+    $s->{"ops"} = $s->{"ops"} + 1;
+    $s->{"h"}->{$k} = $v;
+}
+func EXISTS(scalar $s, str $k) int {
+    return exists($s->{"h"}, $k) ? 1 : 0;
+}
+func DELETE(scalar $s, str $k) scalar {
+    $s->{"ops"} = $s->{"ops"} + 1;
+    my scalar $old = $s->{"h"}->{$k};
+    delete($s->{"h"}->{$k});
+    return $old;
+}
+func FIRSTKEY(scalar $s) scalar {
+    my array @ks = keys($s->{"h"});
+    $s->{"keys"} = \@ks;
+    $s->{"ki"} = 1;
+    return size(@ks) > 0 ? $ks[0] : undef;
+}
+func NEXTKEY(scalar $s, str $last) scalar {
+    my int $idx = $s->{"ki"};
+    $s->{"ki"} = $idx + 1;
+    my scalar $ks = $s->{"keys"};
+    return ($idx < size($ks)) ? $ks->[$idx] : undef;
+}
+
+package R19Ov;
+use overload
+    "+"  => "add",
+    "-"  => "sub",
+    "**" => "pow",
+    "x"  => "rep",
+    "&"  => "band",
+    "|"  => "bor",
+    "^"  => "bxor",
+    "<<" => "bshl",
+    ">>" => "bshr",
+    "~"  => "bnot",
+    "0+" => "to_num",
+    '""' => "to_str";
+func new(int $v) scalar { return bless({"v" => $v}, "R19Ov"); }
+func ov_val(scalar $x) int {
+    return (ref($x) eq "R19Ov") ? $x->{"v"} : ($x + 0);
+}
+func add(scalar $s, scalar $o, int $rev) scalar { return R19Ov::new($s->{"v"} + ov_val($o)); }
+func sub(scalar $s, scalar $o, int $rev) scalar { my int $y = ov_val($o); return R19Ov::new($rev ? ($y - $s->{"v"}) : ($s->{"v"} - $y)); }
+func pow(scalar $s, scalar $o, int $rev) scalar { my int $y = ov_val($o); return R19Ov::new($rev ? ($y * 100 + $s->{"v"}) : ($s->{"v"} * 100 + $y)); }
+func rep(scalar $s, scalar $o, int $rev) scalar { my int $y = ov_val($o); return R19Ov::new($rev ? ($y * 10 + $s->{"v"}) : ($s->{"v"} * 10 + $y)); }
+func band(scalar $s, scalar $o, int $rev) scalar { return R19Ov::new($s->{"v"} & ov_val($o)); }
+func bor(scalar $s, scalar $o, int $rev) scalar { return R19Ov::new($s->{"v"} | ov_val($o)); }
+func bxor(scalar $s, scalar $o, int $rev) scalar { return R19Ov::new($s->{"v"} ^ ov_val($o)); }
+func bshl(scalar $s, scalar $o, int $rev) scalar { my int $y = ov_val($o); return R19Ov::new($rev ? ($y << $s->{"v"}) : ($s->{"v"} << $y)); }
+func bshr(scalar $s, scalar $o, int $rev) scalar { my int $y = ov_val($o); return R19Ov::new($rev ? ($y >> $s->{"v"}) : ($s->{"v"} >> $y)); }
+func bnot(scalar $s) scalar { return R19Ov::new(~$s->{"v"}); }
+func to_num(scalar $s) num { return $s->{"v"} + 0.0; }
+func to_str(scalar $s) str { return "Ov(" . $s->{"v"} . ")"; }
+
+package R19NegNum;
+use overload "0+" => "to_num", '""' => "to_s";
+func new(int $v) scalar { return bless({"v" => $v}, "R19NegNum"); }
+func to_num(scalar $s) num { return $s->{"v"} + 0.0; }
+func to_s(scalar $s) str { return "N:" . $s->{"v"}; }
+
+package main;
+
+struct R19CS {
+    str label;
+    int numv;
+}
+
+our scalar $g_r19_ov = undef;
+our int $g_r19_sig_cnt = 0;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func c3_local_our(int $use_goto) str {
+    if ($use_goto == 1) {
+        goto after_decl;
+    }
+    our array @c3_arr = ("p", "q");
+    our hash %c3_hash = ("k" => 7);
+after_decl:
+    return size(@c3_arr) . ":" . join(",", @c3_arr) . ":" . $c3_hash{"k"};
+}
+
+async func c4_async_compute(int $n) int {
+    return $n * 2 + 3;
+}
+
+func c7_key(str $prefix, int $n) str {
+    return $prefix . "_" . $n;
+}
+
+func c7_throw_key() str {
+    throw("c7_key_err");
+}
+
+func test_c_fixes() void {
+    # C1: qualified & dynamic & async:: class arrows
+    my scalar $b1 = R19NS::Box->new(5);
+    check($b1->get() == 5 && $b1->cls() eq "R19NS::Box", "C1 qualified Class->new");
+    my str $m1 = "make";
+    my scalar $b2 = R19NS::Box->$m1(6);
+    check($b2->get() == 12, "C1 qualified Class->\$m");
+    my str $m2 = "new";
+    my scalar $b3 = R19Flat->$m2(9);
+    check($b3->get() == 9, "C1 bareword Class->\$m");
+    check(async::R19Worker->ping(4) eq "async::R19Worker:4", "C1 async::Class->m");
+
+    # C2: sort/map/grep/foreach boxing isolation with outer unboxed $a/$b/$_
+    my int $a = 100;
+    my int $b = 200;
+    my int $_ = 300;
+    my array @src = (3, 1, 2);
+    my array @sorted = sort { $a <=> $b } @src;
+    my array @mapped = map { $_ * 10 } @sorted;
+    my array @filtered = grep { $_ >= 20 } @mapped;
+    my int $acc = 0;
+    my int $fv = 77;
+    foreach my int $fv (@filtered) {
+        $acc = $acc + $fv;
+    }
+    check(join(",", @sorted) eq "1,2,3" && join(",", @filtered) eq "20,30" && $acc == 50,
+          "C2 sort/map/grep/foreach correctness");
+    check($a == 100 && $b == 200 && $_ == 300 && $fv == 77,
+          "C2 outer unboxed vars preserved");
+
+    # C3: function-local our @/% initialized cleanly without hoisting over goto
+    check(c3_local_our(0) eq "2:p,q:7", "C3 local our array/hash initialized");
+    check(c3_local_our(1) eq "2:p,q:7", "C3 local our survives goto path");
+
+    # C4: async func returning int does not misregister raw int return type
+    my scalar $fut = c4_async_compute(20);
+    my int $av = await $fut;
+    check($av == 43, "C4 async int future awaits cleanly");
+
+    # C5: foreach over range onto pre-existing tied scalar
+    my scalar $tv = 0;
+    tie($tv, "R19TieScalar", 0);
+    my int $rsum = 0;
+    foreach $tv (1..4) {
+        $rsum = $rsum + $tv;
+    }
+    check($rsum == 10 && tied($tv)->{"stores"} == 4, "C5 foreach range dispatches tied STORE");
+
+    # C6: compound overloads on **=, x=, &=, |=, ^=, <<=, >>=, rhs-only, unboxed LHS, our, $$ref, tied
+    my scalar $ov = R19Ov::new(3);
+    $ov **= 2;    # 3*100+2 = 302
+    $ov x= 4;     # 302*10+4 = 3024
+    check($ov->{"v"} == 3024, "C6 **= and x= overloads");
+
+    my scalar $bw = R19Ov::new(12);
+    $bw &= 10;    # 8
+    $bw |= 5;     # 13
+    $bw ^= 3;     # 14
+    $bw <<= 1;    # 28
+    $bw >>= 2;    # 7
+    check($bw->{"v"} == 7, "C6 local &= |= ^= <<= >>= overloads");
+
+    my int $ui = 15;
+    $ui &= R19Ov::new(6);
+    # The overload is dispatched; an int variable still holds an int (via "0+").
+    check(ref($ui) eq "" && $ui == 6, "C6 int LHS compound with RHS blessed");
+
+    $g_r19_ov = R19Ov::new(5);
+    $g_r19_ov |= 2;
+    $g_r19_ov <<= 1;
+    check($g_r19_ov->{"v"} == 14, "C6 our global scalar compound overloads");
+
+    my scalar $dval = R19Ov::new(9);
+    my scalar $dref = \$dval;
+    $$dref ^= 5;  # 12
+    $$dref x= 3;  # 123
+    check($dval->{"v"} == 123, "C6 scalar deref compound overloads");
+
+    my scalar $tov = 0;
+    tie($tov, "R19TieScalar", R19Ov::new(12));
+    $tov &= R19Ov::new(10);
+    $tov |= R19Ov::new(1);
+    check($tov->{"v"} == 9 && tied($tov)->{"stores"} == 2, "C6 tied+overloaded compound");
+
+    # C7: autoviv key temp evaluation order + throw cleanup
+    my hash %tree = ();
+    $tree{c7_key("a", 1)}{c7_key("b", 2)} = "leaf";
+    check($tree{"a_1"}{"b_2"} eq "leaf", "C7 autoviv computed keys");
+    try {
+        my hash %bad = ();
+        $bad{c7_key("k", 9)}{c7_throw_key()} = "never";
+    } catch ($e) {
+    }
+
+    # C8: cstruct str field assign/append cleanup
+    my R19CS $cs;
+    for (my int $i = 0; $i < 20; $i = $i + 1) {
+        $cs->label = c7_key("lbl", $i);
+        $cs->label .= "_s";
+    }
+    check($cs->label eq "lbl_19_s", "C8 cstruct str = and .=");
+}
+
+func test_r_fixes() void {
+    # R1: open() memory stream write onto tied scalar and scalar ref
+    my str $mbuf = "";
+    my scalar $fh = core::open(\$mbuf, ">");
+    say($fh, "line1");
+    core::close($fh);
+    check($mbuf eq "line1\n", "R1 in-memory stream writes to string");
+
+    my scalar $ts = "";
+    tie($ts, "R19TieScalar", "");
+    my scalar $tfh = core::open(\$ts, ">");
+    say($tfh, "tied_line");
+    core::close($tfh);
+    check($ts eq "tied_line\n" && tied($ts)->{"stores"} >= 1, "R1 in-memory stream dispatches tied STORE");
+
+    # R2: splice with self-alias and tied source array
+    my array @self_a = (1, 2, 3);
+    splice(@self_a, 1, 1, @self_a);
+    check(join(",", @self_a) eq "1,1,2,3,3", "R2 self-aliasing splice");
+
+    my array @tsrc = ();
+    tie(@tsrc, "R19TieArr", 10, 20);
+    my array @dst = (1, 2, 3);
+    splice(@dst, 1, 1, @tsrc);
+    check(join(",", @dst) eq "1,10,20,3", "R2 splice with tied replacement array");
+
+    my array @tdst = ();
+    tie(@tdst, "R19TieArr", 5, 6, 7);
+    my array @removed = splice(@tdst, 1, 1, @tsrc);
+    check(join(",", @removed) eq "6" && $tdst[0] == 5 && $tdst[1] == 10 && $tdst[2] == 20 && $tdst[3] == 7,
+          "R2 tied target splice with tied repl");
+
+    # R3: signal handler throwing resets strada_in_sig_dispatch for subsequent signals
+    $g_r19_sig_cnt = 0;
+    core::signal("USR1", func (int $sig) void {
+        $g_r19_sig_cnt = $g_r19_sig_cnt + 1;
+        throw("sig_abort_" . $g_r19_sig_cnt);
+    });
+    my int $caught1 = 0;
+    try {
+        core::kill(core::getpid(), 10);
+    } catch ($e1) {
+        if (index("" . $e1, "sig_abort_1") >= 0) { $caught1 = 1; }
+    }
+    my int $caught2 = 0;
+    try {
+        core::kill(core::getpid(), 10);
+    } catch ($e2) {
+        if (index("" . $e2, "sig_abort_2") >= 0) { $caught2 = 1; }
+    }
+    core::signal("USR1", "DEFAULT");
+    check($caught1 == 1 && $caught2 == 1 && $g_r19_sig_cnt == 2,
+          "R3 signal handler throw resets strada_in_sig_dispatch");
+
+    # R4: dumper_str preserves embedded NULs in strings & keys cleanly
+    my str $nul_k = "a\0b";
+    my str $nul_v = "x\0y";
+    my hash %nh = ();
+    $nh{$nul_k} = $nul_v;
+    my str $dump = core::dumper_str(\%nh);
+    check(index($dump, "b") >= 0 && index($dump, "y") >= 0, "R4 dumper_str preserves post-NUL bytes");
+
+    # R5: tied hash preserves embedded NUL in key
+    my hash %th = ();
+    tie(%th, "R19TieHash");
+    $th{"p\0q"} = 11;
+    $th{"p\0r"} = 22;
+    check(exists($th{"p\0q"}) && exists($th{"p\0r"}) && $th{"p\0q"} == 11 && $th{"p\0r"} == 22,
+          "R5 tied hash EXISTS/FETCH/STORE binary keys");
+    delete($th{"p\0q"});
+    check(!exists($th{"p\0q"}) && exists($th{"p\0r"}), "R5 tied hash DELETE binary keys");
+
+    # R6: negative signed 0+ overload, tied array int/num coercion, tied+overload compound
+    my scalar $neg_ov = R19NegNum::new(-5);
+    check(int($neg_ov) == -5 && ($neg_ov + 10) == 5, "R6 negative overloaded 0+ int/num coercion");
+    check((0 + @tsrc) == 2 && (0.5 + @tsrc) == 2.5, "R6 tied array numeric coercion uses FETCHSIZE");
+
+    # R7: pack decimal framing + w* + unpack non-string slash form
+    my str $p_dec = core::pack("A2/a*", "hello");
+    my array @u_dec = core::unpack("A2/a*", $p_dec);
+    check(size(@u_dec) == 1 && $u_dec[0] eq "hello", "R7 pack/unpack decimal slash A2/a*");
+
+    my str $p_ber = core::pack("w*", 0, 127, 128, 16384);
+    my array @u_ber = core::unpack("w*", $p_ber);
+    check(size(@u_ber) == 4 && $u_ber[0] == 0 && $u_ber[3] == 16384, "R7 pack w* star count");
+
+    my str $p_slash_num = core::pack("C s> s>", 2, -5, 42);
+    my array @u_slash_num = core::unpack("C/s>*", $p_slash_num);
+    check(size(@u_slash_num) == 2 && $u_slash_num[0] == -5 && $u_slash_num[1] == 42,
+          "R7 unpack C/s>* non-string slash form");
+}
+
+func test_l_fixes() void {
+    # L3: LWP & LWP_SSL multi-header Transfer-Encoding consistency
+    my str $hdrs = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n";
+    my str $part_resp = $hdrs . "5\r\nhello";
+    my str $full_resp = $hdrs . "5\r\nhello\r\n0\r\n\r\n";
+    check(LWP::_response_complete($part_resp, "GET") == 0, "L3 LWP _response_complete sees multi TE chunked");
+    check(LWP::_check_framing_truncation($part_resp, "GET") ne "", "L3 LWP detects chunked truncation");
+    check(LWP::_response_complete($full_resp, "GET") == 1, "L3 LWP _response_complete sees terminator");
+    my hash %lres = LWP::parse_response($full_resp);
+    check($lres{"content"} eq "hello", "L3 LWP parse_response decodes chunked multi TE");
+
+    check(LWP_SSL::_response_complete($part_resp, "GET") == 0, "L3 LWP_SSL _response_complete sees multi TE chunked");
+    check(LWP_SSL::_check_framing_truncation($part_resp, "GET") ne "", "L3 LWP_SSL detects chunked truncation");
+    my hash %sres = LWP_SSL::parse_response($full_resp);
+    check($sres{"content"} eq "hello", "L3 LWP_SSL parse_response decodes chunked multi TE");
+
+    # L4: YAML block scalar sequence element
+    my scalar $yl4 = YAML::Load("items:\n  - |\n    alpha\n    beta\n  - two\n  - >-\n    fold1\n    fold2\n");
+    check(size($yl4->{"items"}) == 3 && $yl4->{"items"}->[0] eq "alpha\nbeta\n" && $yl4->{"items"}->[1] eq "two" && $yl4->{"items"}->[2] eq "fold1 fold2",
+          "L4 YAML sequence block scalars");
+
+    # L5: YAML::Dump unwraps tied scalars before ref()/typeof()
+    my scalar $ty_h = ""; tie($ty_h, "R19TieScalar", {"k" => 7});
+    my scalar $ty_n = ""; tie($ty_n, "R19TieScalar", 42);
+    my scalar $ty_a = ""; tie($ty_a, "R19TieScalar", [1, 2]);
+    my str $dh = YAML::Dump($ty_h);
+    my str $dn = YAML::Dump($ty_n);
+    my str $da = YAML::Dump($ty_a);
+    check(index($dh, "HASH(") < 0 && index($dh, "k: 7") >= 0, "L5 YAML::Dump tied hashref");
+    check($dn eq "42\n" || $dn eq "42", "L5 YAML::Dump tied int unquoted got=" . $dn);
+    check(index($da, "ARRAY(") < 0 && index($da, "- 1") >= 0, "L5 YAML::Dump tied arrayref");
+
+    # L6: YAML::Load throws on malformed inline mapping entry
+    my int $yerr1 = 0;
+    try { my scalar $bad = YAML::Load("{a: 1, garbage}"); } catch ($e1) { $yerr1 = 1; }
+    my int $yerr2 = 0;
+    try { my scalar $bad2 = YAML::Load("{: 1}"); } catch ($e2) { $yerr2 = 1; }
+    my int $yerr3 = 0;
+    try { my scalar $bad3 = YAML::Load("{a: 1, , b: 2}"); } catch ($e3) { $yerr3 = 1; }
+    check($yerr1 == 1 && $yerr2 == 1 && $yerr3 == 1, "L6 YAML rejects malformed flow mapping");
+
+    # L7: Digest::MD5 correctness with chunked compute helper
+    check(Digest::MD5::md5_hex("abc") eq "900150983cd24fb0d6963f7d28e17f72", "L7 Digest::MD5");
+}
+
+func main() int {
+    test_c_fixes();
+    test_r_fixes();
+    test_l_fixes();
+    say("AUDIT_R19_COMPILER_RUNTIME_OK");
+    return 0;
+}

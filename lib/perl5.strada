@@ -379,6 +379,7 @@ func call(str $sub_name, str $arg) str {
     my int $arg_undef = 0;
     my int $arg_utf8 = 0;
     my int $arg_is_int = 0;
+    my int $arg_is_uv = 0;
     my int $arg_is_num = 0;
     my int $arg_iv = 0;
     my num $arg_nv = 0.0;
@@ -410,6 +411,8 @@ func call(str $sub_name, str $arg) str {
             } else if (use_arg->type == STRADA_INT) {
                 strada_decref(arg_is_int);
                 arg_is_int = strada_new_int(1);
+                strada_decref(arg_is_uv);
+                arg_is_uv = strada_new_int(STRADA_INT_IS_UV(use_arg) ? 1 : 0);
                 strada_decref(arg_iv);
                 arg_iv = strada_new_int(use_arg->value.iv);
                 if (fetched) strada_decref(fetched);
@@ -461,7 +464,10 @@ func call(str $sub_name, str $arg) str {
                 if (strada_to_int(arg_undef)) {
                     XPUSHs(&PL_sv_undef);
                 } else if (strada_to_int(arg_is_int)) {
-                    XPUSHs(sv_2mortal(newSViv((IV)strada_to_int(arg_iv))));
+                    SV *isv = strada_to_int(arg_is_uv)
+                        ? newSVuv((UV)(uint64_t)strada_to_int(arg_iv))
+                        : newSViv((IV)strada_to_int(arg_iv));
+                    XPUSHs(sv_2mortal(isv));
                 } else if (strada_to_int(arg_is_num)) {
                     XPUSHs(sv_2mortal(newSVnv((NV)strada_to_num(arg_nv))));
                 } else {
@@ -549,8 +555,13 @@ func use_module(str $module) int {
                 char code[2048];
                 snprintf(code, sizeof(code), "use %s; 1;", mod_str);
                 free(mod_str);
+                dSP;
+                ENTER;
+                SAVETMPS;
                 eval_pv(code, FALSE);
                 result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+                FREETMPS;
+                LEAVE;
             }
         }
     }
@@ -573,8 +584,13 @@ func require_module(str $module) int {
                 char code[2048];
                 snprintf(code, sizeof(code), "require %s; 1;", mod_str);
                 free(mod_str);
+                dSP;
+                ENTER;
+                SAVETMPS;
                 eval_pv(code, FALSE);
                 result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+                FREETMPS;
+                LEAVE;
             }
         }
     }

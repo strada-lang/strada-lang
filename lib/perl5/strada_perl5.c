@@ -289,6 +289,7 @@ StradaValue* strada_perl5_eval_sv(StradaValue *code_sv) {
     }
 
     dSP;
+    (void)sp;
     ENTER;
     SAVETMPS;
     SV *sv = perl5_sv_from_conv(&ca);
@@ -342,6 +343,7 @@ void strada_perl5_run(StradaValue *code_sv) {
     }
 
     dSP;
+    (void)sp;
     ENTER;
     SAVETMPS;
     SV *sv = perl5_sv_from_conv(&ca);
@@ -483,6 +485,7 @@ StradaValue* strada_perl5_call_sv(StradaValue *sub_sv, StradaValue *args_sv) {
     }
 
     dSP;
+    (void)sp;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
@@ -543,6 +546,7 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
     }
 
     dSP;
+    (void)sp;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
@@ -595,23 +599,32 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
     return result;
 }
 
+static int perl5_eval_mod_cmd(const char *verb, const char *mod) {
+    if (!my_perl || !perl5_valid_module_name(mod)) {
+        return 0;
+    }
+    char code[2048];
+    snprintf(code, sizeof(code), "%s %s; 1;", verb, mod);
+    dSP;
+    (void)sp;
+    ENTER;
+    SAVETMPS;
+    eval_pv(code, FALSE);
+    int ok = !SvTRUE(ERRSV);
+    FREETMPS;
+    LEAVE;
+    return ok;
+}
+
 /* Use a Perl module */
 int strada_perl5_use(StradaValue *module_sv) {
     if (!my_perl) {
         return 0;
     }
-
     char *module = strada_to_str(module_sv);
-    if (!perl5_valid_module_name(module)) {
-        free(module);
-        return 0;
-    }
-    char code[2048];
-    snprintf(code, sizeof(code), "use %s; 1;", module);
+    int ok = perl5_eval_mod_cmd("use", module);
     free(module);
-
-    eval_pv(code, FALSE);
-    return !SvTRUE(ERRSV);
+    return ok;
 }
 
 /* Require a Perl module */
@@ -619,18 +632,10 @@ int strada_perl5_require(StradaValue *module_sv) {
     if (!my_perl) {
         return 0;
     }
-
     char *module = strada_to_str(module_sv);
-    if (!perl5_valid_module_name(module)) {
-        free(module);
-        return 0;
-    }
-    char code[2048];
-    snprintf(code, sizeof(code), "require %s; 1;", module);
+    int ok = perl5_eval_mod_cmd("require", module);
     free(module);
-
-    eval_pv(code, FALSE);
-    return !SvTRUE(ERRSV);
+    return ok;
 }
 
 /* Set a Perl scalar variable */
@@ -721,24 +726,31 @@ char* strada_perl5_eval_raw(const char *code) {
         return strdup("Error: Perl not initialized");
     }
 
+    char *ret = NULL;
+    dSP;
+    (void)sp;
+    ENTER;
+    SAVETMPS;
     SV *result = eval_pv(code, FALSE);
 
     if (SvTRUE(ERRSV)) {
         STRLEN len;
         const char *err = SvPV_nomg(ERRSV, len);
-        return strdup(err);
-    }
-
-    if (result) {
+        (void)len;
+        ret = strdup(err);
+    } else if (result) {
         SvGETMAGIC(result);
         if (SvOK(result)) {
             STRLEN len;
             const char *str = SvPV_nomg(result, len);
-            return strdup(str);
+            (void)len;
+            ret = strdup(str);
         }
     }
+    FREETMPS;
+    LEAVE;
 
-    return strdup("");
+    return ret ? ret : strdup("");
 }
 
 /* Execute Perl code (no return value) - raw C types */
@@ -746,33 +758,23 @@ void strada_perl5_run_raw(const char *code) {
     if (!my_perl) {
         return;
     }
+    dSP;
+    (void)sp;
+    ENTER;
+    SAVETMPS;
     eval_pv(code, FALSE);
+    FREETMPS;
+    LEAVE;
 }
 
 /* Use a Perl module - raw C types */
 int strada_perl5_use_raw(const char *module) {
-    if (!my_perl || !perl5_valid_module_name(module)) {
-        return 0;
-    }
-
-    char code[2048];
-    snprintf(code, sizeof(code), "use %s; 1;", module);
-
-    eval_pv(code, FALSE);
-    return !SvTRUE(ERRSV);
+    return perl5_eval_mod_cmd("use", module);
 }
 
 /* Require a Perl module - raw C types */
 int strada_perl5_require_raw(const char *module) {
-    if (!my_perl || !perl5_valid_module_name(module)) {
-        return 0;
-    }
-
-    char code[2048];
-    snprintf(code, sizeof(code), "require %s; 1;", module);
-
-    eval_pv(code, FALSE);
-    return !SvTRUE(ERRSV);
+    return perl5_eval_mod_cmd("require", module);
 }
 
 /* Set a Perl scalar variable - raw C types */
@@ -852,6 +854,7 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
     }
 
     dSP;
+    (void)sp;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);

@@ -650,11 +650,26 @@ func parse_eval_program(str $code) scalar {
     my str $top_src = $units->{"top"};
     my str $body_src = $units->{"body"};
     my str $body_pkg = $units->{"body_pkg"};
+    my scalar $segs = $units->{"segments"};
+    my int $seg_cnt = defined($segs) ? size($segs) : 0;
     my str $source = $trimmed;
     if (length($body_src) == 0) {
         if (eval_has_entry_func($top_src) == 0) {
             $source = $top_src . "\npackage main;\nfunc main() int { return 0; }\n";
         }
+    } elsif ($seg_cnt > 1) {
+        $source = $top_src . "\n";
+        my str $calls = "";
+        my int $si = 0;
+        while ($si < $seg_cnt) {
+            my scalar $sg = $segs->[$si];
+            my str $spkg = $sg->{"pkg"};
+            my str $sfn = "__eval_seg_" . $si . "__";
+            $source = $source . "package " . $spkg . ";\nfunc " . $sfn . "() void {\n" . $sg->{"body"} . "\n}\n";
+            $calls = $calls . "    " . $spkg . "::" . $sfn . "();\n";
+            $si = $si + 1;
+        }
+        $source = $source . "package main;\nfunc main() int {\n" . $calls . "    return 0;\n}\n";
     } elsif ($body_pkg ne "main") {
         $source = $top_src . "\npackage " . $body_pkg . ";\nfunc __eval_body__() void {\n" . $body_src . "\n}\npackage main;\nfunc main() int { " . $body_pkg . "::__eval_body__(); return 0; }\n";
     } else {

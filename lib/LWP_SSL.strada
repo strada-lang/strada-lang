@@ -424,7 +424,12 @@ func parse_headers(str $header_block) hash {
             while (length($value) > 0 && substr($value, 0, 1) eq " ") {
                 $value = substr($value, 1, length($value) - 1);
             }
-            $headers{lc($name)} = $value;
+            my str $lkey = lc($name);
+            if (exists(%headers, $lkey) && $lkey eq "transfer-encoding") {
+                $headers{$lkey} = $headers{$lkey} . ", " . $value;
+            } else {
+                $headers{$lkey} = $value;
+            }
         }
         $i = $i + 1;
     }
@@ -545,24 +550,40 @@ func _find_header_value(str $headers_part, str $hdr_lower_colon) scalar {
     my int $hlen = core::byte_length($headers_part);
     my str $tail_lc = lc(core::byte_substr($headers_part, $first_eol, $hlen - $first_eol));
     my str $needle = "\n" . $hdr_lower_colon;
-    my int $found = core::byte_index($tail_lc, $needle);
-    if ($found < 0) {
-        return undef;
+    my int $nlen = core::byte_length($needle);
+    my int $tlen = core::byte_length($tail_lc);
+    my int $combine_dups = ($hdr_lower_colon eq "transfer-encoding:") ? 1 : 0;
+    my int $search_pos = 0;
+    my int $found_any = 0;
+    my str $combined = "";
+    while ($search_pos < $tlen) {
+        my int $found = core::byte_index($tail_lc, $needle, $search_pos);
+        if ($found < 0) {
+            last;
+        }
+        my int $val_start = $found + $nlen;
+        my int $val_end = core::byte_index($tail_lc, "\n", $val_start);
+        if ($val_end < 0) {
+            $val_end = $tlen;
+        }
+        my str $val = core::byte_substr($tail_lc, $val_start, $val_end - $val_start);
+        my int $vlen = core::byte_length($val);
+        if ($vlen > 0 && core::byte_substr($val, $vlen - 1, 1) eq "\r") {
+            $val = core::byte_substr($val, 0, $vlen - 1);
+        }
+        $val = LWP_SSL::_trim_ows($val);
+        if ($combine_dups == 0) {
+            return $val;
+        }
+        if ($found_any == 1) {
+            $combined = $combined . ", " . $val;
+        } else {
+            $combined = $val;
+            $found_any = 1;
+        }
+        $search_pos = $val_end;
     }
-    my int $val_start = $found + core::byte_length($needle);
-    my int $val_end = core::byte_index($tail_lc, "\n", $val_start);
-    if ($val_end < 0) {
-        $val_end = core::byte_length($tail_lc);
-    }
-    my str $val = core::byte_substr($tail_lc, $val_start, $val_end - $val_start);
-    my int $vlen = core::byte_length($val);
-    if ($vlen > 0 && core::byte_substr($val, $vlen - 1, 1) eq "\r") {
-        $val = core::byte_substr($val, 0, $vlen - 1);
-    }
-    while (length($val) > 0 && (substr($val, 0, 1) eq " " || substr($val, 0, 1) eq "\t")) {
-        $val = substr($val, 1, length($val) - 1);
-    }
-    return $val;
+    return ($found_any == 1) ? $combined : undef;
 }
 
 # Internal: check case-insensitively whether a header exists in custom headers hash ref

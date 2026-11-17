@@ -1,0 +1,140 @@
+# Cycle 19 2-way parity suite (Compiled vs Bytecode VM / JIT)
+use lib "lib";
+use YAML;
+
+package R19PFlat;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, "R19PFlat"); }
+
+package R19PNS::Cls;
+func new(str $cls, int $v) scalar { return bless({"v" => $v}, "R19PNS::Cls"); }
+
+package async::R19PVM;
+func hello(str $cls, int $n) str { return $cls . ":" . $n; }
+
+package R19PMask;
+use overload
+    "**" => "pow",
+    "x"  => "rep",
+    "&"  => "band",
+    "|"  => "bor",
+    "^"  => "bxor",
+    "<<" => "bshl",
+    ">>" => "bshr",
+    "~"  => "bnot",
+    "0+" => "to_n",
+    '""' => "to_s";
+func new(int $v) scalar { return bless({"v" => $v}, "R19PMask"); }
+func mv(scalar $x) int { return ref($x) eq "R19PMask" ? $x->{"v"} : ($x + 0); }
+func pow(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} * 100 + mv($o)); }
+func rep(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} * 10 + mv($o)); }
+func band(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} & mv($o)); }
+func bor(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} | mv($o)); }
+func bxor(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} ^ mv($o)); }
+func bshl(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} << mv($o)); }
+func bshr(scalar $s, scalar $o, int $r) scalar { return R19PMask::new($s->{"v"} >> mv($o)); }
+func bnot(scalar $s) scalar { return R19PMask::new(~$s->{"v"}); }
+func to_n(scalar $s) num { return $s->{"v"} + 0.0; }
+func to_s(scalar $s) str { return "M(" . $s->{"v"} . ")"; }
+
+package R19PTieS;
+func TIESCALAR(str $c, scalar $v) scalar { return bless({"v" => $v, "st" => 0}, $c); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"st"} = $s->{"st"} + 1; $s->{"v"} = $v; }
+
+package R19PTieA;
+func TIEARRAY(str $c) scalar { return bless({"a" => [10, 20]}, $c); }
+func FETCHSIZE(scalar $s) int { return size($s->{"a"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"a"}->[$i]; }
+
+package R19PTieH;
+func TIEHASH(str $c) scalar { return bless({"h" => {}}, $c); }
+func FETCH(scalar $s, str $k) scalar { return $s->{"h"}->{$k}; }
+func STORE(scalar $s, str $k, scalar $v) void { $s->{"h"}->{$k} = $v; }
+func EXISTS(scalar $s, str $k) int { return exists($s->{"h"}, $k) ? 1 : 0; }
+func DELETE(scalar $s, str $k) scalar { my scalar $o = $s->{"h"}->{$k}; delete($s->{"h"}->{$k}); return $o; }
+
+package main;
+
+func jit_bw_fn(scalar $a, scalar $b) int {
+    my scalar $c1 = $a & $b;
+    my scalar $c2 = $a | $b;
+    my scalar $c3 = $a ^ $b;
+    my scalar $c4 = $a << 1;
+    my scalar $c5 = $b >> 1;
+    my scalar $c6 = ~$a;
+    return $c1->{"v"} + $c2->{"v"} + $c3->{"v"} + $c4->{"v"} + $c5->{"v"} + $c6->{"v"};
+}
+
+func jit_tarr_sum(scalar $ta) int {
+    # Numeric context on the tied array itself (FETCHSIZE), not on the ref.
+    return int(0 + @{$ta}) + (0 + @{$ta}) + size(@{$ta});
+}
+
+func c3_parity(int $flag) str {
+    if ($flag == 1) { goto skip; }
+    our array @p_arr = ("u", "v");
+skip:
+    return join(",", @p_arr);
+}
+
+func main() int {
+    # C1
+    my str $dm = "new";
+    my scalar $o1 = R19PNS::Cls->new(4);
+    my scalar $o2 = R19PFlat->$dm(7);
+    say("C1=" . $o1->{"v"} . ":" . $o2->{"v"} . ":" . async::R19PVM->hello(2));
+
+    # C2 & C3
+    my int $a = 50; my int $b = 60; my int $_ = 70;
+    my array @nums = (3, 1, 2);
+    my array @ss = sort { $a <=> $b } @nums;
+    my array @mm = map { $_ + 1 } @ss;
+    my int $fs = 0;
+    foreach my int $x (@mm) { $fs = $fs + $x; }
+    say("C2C3=" . $fs . ":" . $a . ":" . $b . ":" . $_ . ":" . c3_parity(0) . ":" . c3_parity(1));
+
+    # C5
+    my scalar $ts = 0; tie($ts, "R19PTieS", 0);
+    my int $rsum = 0;
+    foreach $ts (1..4) { $rsum = $rsum + $ts; }
+    say("C5=" . $rsum . ":" . tied($ts)->{"st"});
+
+    # C6 + V3
+    my scalar $m1 = R19PMask::new(12);
+    my scalar $m2 = R19PMask::new(10);
+    my int $bw = 0;
+    for (my int $i = 0; $i < 150; $i = $i + 1) { $bw = jit_bw_fn($m1, $m2); }
+    $m1 **= 2;
+    $m1 x= 3;
+    $m1 &= 255;
+    my int $ui = 15;
+    $ui &= R19PMask::new(6);
+    say("C6V3=" . $bw . ":" . $m1->{"v"} . ":" . $ui . ref($ui));
+
+    # R1 & R2 & V4
+    my scalar $ts2 = ""; tie($ts2, "R19PTieS", "");
+    my scalar $fh = core::open(\$ts2, ">");
+    print($fh, "mem");
+    core::close($fh);
+    my array @dst = (1, 2, 3);
+    my array @ta = (); tie(@ta, "R19PTieA");
+    splice(@dst, 1, 1, @ta);
+    say("R1V4=" . $ts2 . ":" . join(",", @dst));
+
+    # R5 & R7 & V7
+    my hash %th = (); tie(%th, "R19PTieH");
+    $th{"k\01"} = 11; $th{"k\02"} = 22;
+    my hash %bh = ("a\0b" => 10, "a" => 20);
+    { local $bh{"a\0b"} = 99; }
+    my array @up = core::unpack("C/s>*", core::pack("C s> s>", 2, -5, 42));
+    say("R5R7V7=" . $th{"k\01"} . ":" . $th{"k\02"} . ":" . $bh{"a\0b"} . ":" . $bh{"a"} . ":" . join(",", @up));
+
+    # V8 & L4
+    my int $tsum = 0;
+    for (my int $i = 0; $i < 150; $i = $i + 1) { $tsum = jit_tarr_sum(\@ta); }
+    my scalar $dc = clone(\@ta);
+    my scalar $yl = YAML::Load("xs:\n  - |\n    a\n    b\n  - z\n");
+    say("V8L4=" . $tsum . ":" . $dc->[0] . "," . $dc->[1] . ":" . size($yl->{"xs"}) . ":" . ($yl->{"xs"}->[0] eq "a\nb\n" ? 1 : 0));
+
+    return 0;
+}

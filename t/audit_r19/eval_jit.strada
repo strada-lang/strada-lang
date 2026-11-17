@@ -1,0 +1,223 @@
+# Cycle 19 Eval, VM, Worker STW GC & JIT Regression Suite (V1-V8)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        core::exit(1);
+    }
+}
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    # V1, V3, V4, V7, V8: inside VM + x86_64 JIT loop thresholds
+    my scalar $v_res = Strada::Interpreter::eval(q{
+        # V1: push(@a, ...@a) self-extend must snapshot sa->size
+        my array @self_push = (10, 20);
+        push(@self_push, ...@self_push);
+        my int $v1_ok = (join(",", @self_push) eq "10,20,10,20") ? 1 : 0;
+
+        # V3: bitwise overloads in VM interpreter + x86_64 JIT
+        package R19VmMask;
+        use overload
+            "&"  => "band",
+            "|"  => "bor",
+            "^"  => "bxor",
+            "<<" => "bshl",
+            ">>" => "bshr",
+            "~"  => "bnot";
+        func new(int $v) scalar { return bless({"v" => $v}, "R19VmMask"); }
+        func mv(scalar $o) int { return ref($o) eq "R19VmMask" ? $o->{"v"} : ($o + 0); }
+        func band(scalar $s, scalar $o, int $r) scalar { return R19VmMask::new($s->{"v"} & mv($o)); }
+        func bor(scalar $s, scalar $o, int $r) scalar { return R19VmMask::new($s->{"v"} | mv($o)); }
+        func bxor(scalar $s, scalar $o, int $r) scalar { return R19VmMask::new($s->{"v"} ^ mv($o)); }
+        func bshl(scalar $s, scalar $o, int $r) scalar { return R19VmMask::new($s->{"v"} << mv($o)); }
+        func bshr(scalar $s, scalar $o, int $r) scalar { return R19VmMask::new($s->{"v"} >> mv($o)); }
+        func bnot(scalar $s) scalar { return R19VmMask::new(~$s->{"v"}); }
+        package main;
+
+        func jit_bit_loop(scalar $a, scalar $b) int {
+            my int $tot = 0;
+            for (my int $i = 0; $i < 150; $i = $i + 1) {
+                my scalar $c1 = $a & $b;
+                my scalar $c2 = $a | $b;
+                my scalar $c3 = $a ^ $b;
+                my scalar $c4 = $a << 1;
+                my scalar $c5 = $b >> 1;
+                my scalar $c6 = ~$a;
+                $tot = $c1->{"v"} + $c2->{"v"} + $c3->{"v"} + $c4->{"v"} + $c5->{"v"} + $c6->{"v"};
+            }
+            return $tot;
+        }
+        my scalar $ma = R19VmMask::new(12); # ~(12)=-13, <<1=24
+        my scalar $mb = R19VmMask::new(10); # & =8, |=14, ^=6, >>1=5 -> sum=44
+        my int $v3_val = jit_bit_loop($ma, $mb);
+        my int $v3_ok = ($v3_val == 44) ? 1 : 0;
+
+        # V4: BUILTIN_ARRAY_SPLICE on untied target with tied replacement array
+        package R19VmSrcTie;
+        func TIEARRAY(str $c) scalar { return bless({}, $c); }
+        func FETCHSIZE(scalar $s) int { return 2; }
+        func FETCH(scalar $s, int $i) scalar { return $i + 100; }
+        package main;
+        my array @udst = (1, 2, 3);
+        my array @tsrc = ();
+        tie(@tsrc, "R19VmSrcTie");
+        splice(@udst, 1, 1, @tsrc);
+        my int $v4_ok = (join(",", @udst) eq "1,100,101,3") ? 1 : 0;
+
+        # V7: binary keys with embedded NUL in local $h{$k} save/restore
+        my hash %bh = ("a\0b" => 10, "a" => 20);
+        {
+            local $bh{"a\0b"} = 99;
+        }
+        my int $v7_ok = ($bh{"a\0b"} == 10 && $bh{"a"} == 20) ? 1 : 0;
+
+        # V8: tied array int/num coercion, weakref coercion, dclone tied/weakref/sref
+        func jit_tarr_arith(scalar $ta) int {
+            my int $r = 0;
+            for (my int $i = 0; $i < 150; $i = $i + 1) {
+                $r = int($ta) + (0 + $ta) + abs($ta);
+            }
+            return $r;
+        }
+        my int $v8_tarr = (jit_tarr_arith(\@tsrc) == 6 && (-@tsrc) == -2.0) ? 1 : 0;
+
+        package R19VmBox;
+        func new(int $v) scalar { return bless({"v" => $v}, "R19VmBox"); }
+        package main;
+        my scalar $strong_n = R19VmBox::new(55);
+        my scalar $wref = \$strong_n;
+        core::weaken($wref);
+        my scalar $dc_arr = clone(\@tsrc);
+        package R19VmHashTie;
+        func TIEHASH(str $c) scalar { return bless({}, $c); }
+        func FETCH(scalar $s, str $k) scalar { return $k eq "k" ? 77 : undef; }
+        func FIRSTKEY(scalar $s) scalar { return "k"; }
+        func NEXTKEY(scalar $s, str $p) scalar { return undef; }
+        package main;
+        my hash %th_dc = ();
+        tie(%th_dc, "R19VmHashTie");
+        my scalar $dc_hash = clone(\%th_dc);
+        my int $v8_dc = (size($dc_arr) == 2 && $dc_arr->[1] == 101 && $dc_hash->{"k"} == 77) ? 1 : 0;
+
+        # V8: weakref to sref and weakref to hash inside clone
+        my scalar $wh = {"x" => 88};
+        my scalar $wr = $wh;
+        core::weaken($wr);
+        my scalar $dc_w = clone($wr);
+        my scalar $wstrong = {"y" => 99};
+        my scalar $wsr = \$wstrong;
+        core::weaken($wsr);
+        my scalar $dc_sr = clone($wsr);
+        my int $v8_wk = (ref($dc_w) eq "HASH" && $dc_w->{"x"} == 88 && ref($dc_sr) eq "SCALAR" && $$dc_sr->{"y"} == 99) ? 1 : 0;
+
+        ($v1_ok == 1 && $v3_ok == 1 && $v4_ok == 1 && $v7_ok == 1 &&
+         $v8_tarr == 1 && $v8_dc == 1 && $v8_wk == 1) ? 1 : 0;
+    });
+    check($v_res == 1, "V1/V3/V4/V7/V8 VM+JIT suite");
+
+    # V2: Worker STW GC safety across blocking builtins & __C__ JIT compilation
+    my scalar $v2_ok = Strada::Interpreter::eval(q{
+        my scalar $ch = async::channel(4);
+        # The worker blocks in readline on a pipe whose writer sleeps, while
+        # the root thread runs stop-the-world collections below.
+        my scalar $t_rl = thread::create(func () {
+            my scalar $rfh = core::popen("sleep 0.2; echo unblocked", "r");
+            async::send($ch, 1);
+            my scalar $ln = core::readline($rfh);
+            core::pclose($rfh);
+            return $ln;
+        });
+        my scalar $t_qx = thread::create(func () {
+            my str $q = core::qx("sleep 0.04; echo okqx");
+            my int $sr = core::system("sleep 0.04");
+            return $q . ":" . $sr;
+        });
+        my scalar $t_cb = thread::create(func () {
+            my int $x = 19;
+            __C__ {
+                strada_decref(x);
+                x = strada_new_int(strada_to_int(x) + 1);
+            }
+            return $x;
+        });
+        my int $r1 = async::recv($ch);
+        for (my int $i = 0; $i < 6; $i = $i + 1) {
+            my hash %tmp = ("i" => $i);
+            core::gc_collect();
+            sys::usleep(10000);
+        }
+        my scalar $j1 = thread::join($t_rl);
+        my str $j2 = thread::join($t_qx);
+        my int $j3 = thread::join($t_cb);
+        ($r1 == 1 && $j1 eq "unblocked" && index($j2, "okqx") >= 0 && $j3 == 20) ? 1 : 0;
+    });
+    check($v2_ok == 1, "V2 STW worker GC blocking builtins & cblock");
+
+    # V5: multi-package Strada::Interpreter::eval + transactional rollback on exception
+    Strada::Interpreter::reset();
+    my str $mp = Strada::Interpreter::eval(
+        "package R19MP1;\nmy int \$x = 11;\nfunc get_x() int { return \$x; }\nmy str \$p1 = __PACKAGE__;\n" .
+        "package R19MP2;\nmy str \$p2 = __PACKAGE__;\n\$p2 . ':' . R19MP1::get_x();"
+    );
+    check($mp eq "R19MP2:11", "V5 multi-package eval got=" . $mp);
+
+    Strada::Interpreter::eval("package R19TxnBase;\nour int \$g_ok = 10;\nfunc good_fn() int { return 7; }\nfunc set_ok(int \$v) void { \$g_ok = \$v; }");
+    my int $threw = 0;
+    try {
+        Strada::Interpreter::eval(
+            "R19TxnBase::set_ok(999);\n" .
+            "package R19BrokenPkg;\n" .
+            "our str \$bad_our = 'oops';\n" .
+            "func leaked_fn() int { return 88; }\n" .
+            "throw('txn_fail');\n"
+        );
+    } catch ($e) {
+        if (index("" . $e, "txn_fail") >= 0) { $threw = 1; }
+    }
+    check($threw == 1, "V5 failed eval threw expected error");
+    my str $after = Strada::Interpreter::eval("__PACKAGE__ . ':' . \$g_ok . ':' . good_fn();");
+    check($after eq "R19TxnBase:10:7", "V5 failed eval rolled back pkg, globals, and funcs got=" . $after);
+    my int $fn_missing = 0;
+    try {
+        Strada::Interpreter::eval("R19BrokenPkg::leaked_fn()");
+    } catch ($e2) {
+        $fn_missing = 1;
+    }
+    check($fn_missing == 1, "V5 leaked_fn rolled back on throw");
+
+    # V6: Strada::JIT package tracking & strip_toplevel_my inline comment fix
+    Strada::JIT::init();
+    my str $jp = Strada::JIT::eval("package R19JitPkg; __PACKAGE__;");
+    check($jp eq "R19JitPkg", "V6 Strada::JIT respects package decl got=" . $jp);
+    Strada::JIT::eval("package R19JitPkg; func jmul(int \$x) int { return \$x * 4; }");
+    check(Strada::JIT::eval("jmul(5)") == 20, "V6 Strada::JIT unqualified call inside active package");
+    Strada::JIT::eval("package main; my int \$jc = 42;");
+    my int $jr = Strada::JIT::eval("my int \$jc /* inline comment */ ; \$jc;");
+    check($jr == 0, "V6 strip_toplevel_my inline comment resets scalar got=" . $jr);
+    Strada::JIT::reset();
+
+    # V8: >256 our/const vars and >32 local restores in vm_compiler.c
+    my str $big_src = "";
+    for (my int $i = 0; $i < 265; $i = $i + 1) {
+        $big_src = $big_src . "our int \$r19_ov_" . $i . " = " . $i . ";\n";
+        $big_src = $big_src . "const int \$r19_cv_" . $i . " = " . $i . ";\n";
+    }
+    $big_src = $big_src . "func r19_many_locals() int {\n";
+    for (my int $i = 0; $i < 40; $i = $i + 1) {
+        $big_src = $big_src . "    local \$r19_ov_" . $i . " = " . ($i + 1000) . ";\n";
+    }
+    $big_src = $big_src . "    return \$r19_ov_39 + \$r19_cv_264;\n}\n";
+    $big_src = $big_src . "my int \$res = r19_many_locals();\n" .
+                          "(\$res == (1039 + 264) && \$r19_ov_39 == 39 && \$r19_ov_264 == 264) ? 1 : 0;";
+    Strada::Interpreter::reset();
+    check(Strada::Interpreter::eval($big_src) == 1, "V8 >256 our/const and >32 local restores");
+
+    Strada::Interpreter::reset();
+    say("AUDIT_R19_EVAL_JIT_OK");
+    return 0;
+}

@@ -254,14 +254,20 @@ typedef struct {
 } CaptureInfo;
 
 /* Global name tracking for our variables */
-static char *g_our_vars[256];
+static char **g_our_vars = NULL;
 static int g_our_count = 0;
+static int g_our_cap = 0;
 
 static void register_our_var(const char *name) {
+    if (!name) return;
     for (int i = 0; i < g_our_count; i++)
         if (strcmp(g_our_vars[i], name) == 0) return;
-    if (g_our_count < 256)
-        g_our_vars[g_our_count++] = strdup(name);
+    if (g_our_count >= g_our_cap) {
+        int ncap = g_our_cap ? g_our_cap * 2 : 256;
+        g_our_vars = realloc(g_our_vars, (size_t)ncap * sizeof(char *));
+        g_our_cap = ncap;
+    }
+    g_our_vars[g_our_count++] = strdup(name);
 }
 
 static const char *find_our_var_ptr(const char *name) {
@@ -275,14 +281,20 @@ static const char *find_our_var_ptr(const char *name) {
  * decls land in the program's globals list (compiled in __globals_init), so
  * they behave exactly like our-globals — registered here, stored/loaded via
  * OP_STORE_GLOBAL/OP_LOAD_GLOBAL. */
-static char *g_const_vars[256];
+static char **g_const_vars = NULL;
 static int g_const_count = 0;
+static int g_const_cap = 0;
 
 static void register_const_var(const char *name) {
+    if (!name) return;
     for (int i = 0; i < g_const_count; i++)
         if (strcmp(g_const_vars[i], name) == 0) return;
-    if (g_const_count < 256)
-        g_const_vars[g_const_count++] = strdup(name);
+    if (g_const_count >= g_const_cap) {
+        int ncap = g_const_cap ? g_const_cap * 2 : 256;
+        g_const_vars = realloc(g_const_vars, (size_t)ncap * sizeof(char *));
+        g_const_cap = ncap;
+    }
+    g_const_vars[g_const_count++] = strdup(name);
 }
 
 static const char *find_const_var_ptr(const char *name) {
@@ -379,14 +391,18 @@ static int find_pkg_func_alias(const char *name) {
 static void reset_compiler_globals(void) {
     for (int i = 0; i < g_our_count; i++) {
         free(g_our_vars[i]);
-        g_our_vars[i] = NULL;
     }
+    free(g_our_vars);
+    g_our_vars = NULL;
     g_our_count = 0;
+    g_our_cap = 0;
     for (int i = 0; i < g_const_count; i++) {
         free(g_const_vars[i]);
-        g_const_vars[i] = NULL;
     }
+    free(g_const_vars);
+    g_const_vars = NULL;
     g_const_count = 0;
+    g_const_cap = 0;
     for (int i = 0; i < g_enum_count; i++) {
         free(g_enums[i].name);
     }
@@ -452,8 +468,9 @@ typedef struct {
     /* Parent context for nested functions */
     void *parent_ctx;
     /* Local restore tracking */
-    char *local_restores[32];
+    char **local_restores;
     int local_restore_count;
+    int local_restore_cap;
     /* Label & goto tracking */
     const char *pending_loop_label;
     VMLabelDef *labels;
@@ -678,6 +695,7 @@ static int compound_op_to_opcode(const char *op) {
     if (strcmp(op, "%=") == 0)  return OP_MOD;
     if (strcmp(op, ".=") == 0)  return OP_CONCAT;
     if (strcmp(op, "**=") == 0) return OP_POWER;
+    if (strcmp(op, "x=") == 0)  return OP_STR_REPEAT;
     if (strcmp(op, "&=") == 0)  return OP_BIT_AND;
     if (strcmp(op, "|=") == 0)  return OP_BIT_OR;
     if (strcmp(op, "^=") == 0)  return OP_BIT_XOR;
@@ -1046,13 +1064,19 @@ static int infer_expr_scalar_type(StradaValue *node) {
     return 0;
 }
 
-/* Coerce top-of-stack value to the declared scalar storage/return type (int or num). */
-static void emit_scalar_type_coerce(CompCtx *ctx, int var_type) {
+/* Coerce top-of-stack value to the declared scalar storage/return type (int or num).
+ * When preserve_blessed is non-zero (compound assignments), blessed objects retain
+ * their overloaded object identity rather than being stripped to a primitive number. */
+static void emit_scalar_type_coerce_ex(CompCtx *ctx, int var_type, int preserve_blessed) {
     if (var_type == 1) {
-        vm_chunk_emit(ctx->chunk, OP_CAST_INT);
+        vm_chunk_emit(ctx->chunk, preserve_blessed ? OP_CAST_ASSIGN_INT : OP_CAST_INT);
     } else if (var_type == 2) {
-        vm_chunk_emit(ctx->chunk, OP_CAST_NUM);
+        vm_chunk_emit(ctx->chunk, preserve_blessed ? OP_CAST_ASSIGN_NUM : OP_CAST_NUM);
     }
+}
+
+static void emit_scalar_type_coerce(CompCtx *ctx, int var_type) {
+    emit_scalar_type_coerce_ex(ctx, var_type, 0);
 }
 
 static void emit_local_restore(VMChunk *chunk, const char *lr_name) {
@@ -1138,20 +1162,43 @@ static int loop_in_chain(LoopCtx *chain, LoopCtx *target) {
     return 0;
 }
 
+static void ctx_push_local_restore(CompCtx *ctx, const char *key) {
+    if (ctx->local_restore_count >= ctx->local_restore_cap) {
+        int ncap = ctx->local_restore_cap ? ctx->local_restore_cap * 2 : 32;
+        ctx->local_restores = realloc(ctx->local_restores, (size_t)ncap * sizeof(char *));
+        ctx->local_restore_cap = ncap;
+    }
+    ctx->local_restores[ctx->local_restore_count++] = strdup(key);
+}
+
+static void ctx_free_local_restores(CompCtx *ctx) {
+    for (int i = 0; i < ctx->local_restore_count; i++) free(ctx->local_restores[i]);
+    free(ctx->local_restores);
+    ctx->local_restores = NULL;
+    ctx->local_restore_count = 0;
+    ctx->local_restore_cap = 0;
+}
+
+static char **ctx_snapshot_local_restores(CompCtx *ctx, int count, char **stack_buf, size_t stack_len) {
+    if (count <= 0) return NULL;
+    char **ptrs = ((size_t)count <= stack_len) ? stack_buf : malloc((size_t)count * sizeof(char *));
+    memcpy(ptrs, ctx->local_restores, (size_t)count * sizeof(char *));
+    return ptrs;
+}
+
 /* Unwind all active try/finally contexts and local saves in the current function
  * before OP_RETURN. Expects return value on VM stack top, leaves it there. */
 static void emit_try_unwind_for_return(CompCtx *ctx) {
     int saved_lr_count = ctx->local_restore_count;
-    char *saved_lr_ptrs[32];
-    if (saved_lr_count > 0) {
-        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
-    }
+    char *lr_sbuf[32];
+    char **saved_lr_ptrs = ctx_snapshot_local_restores(ctx, saved_lr_count, lr_sbuf, 32);
     int cur_lr = saved_lr_count;
 
     if (!ctx->try_ctx) {
         while (cur_lr > 0) {
             emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
         }
+        if (saved_lr_ptrs && saved_lr_ptrs != lr_sbuf) free(saved_lr_ptrs);
         return;
     }
 
@@ -1191,6 +1238,7 @@ static void emit_try_unwind_for_return(CompCtx *ctx) {
     while (cur_lr > 0) {
         emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
     }
+    if (saved_lr_ptrs && saved_lr_ptrs != lr_sbuf) free(saved_lr_ptrs);
     if (any_finally) {
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)ret_slot);
@@ -1201,10 +1249,8 @@ static void emit_try_unwind_for_return(CompCtx *ctx) {
 static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
     if (!target) return;
     int saved_lr_count = ctx->local_restore_count;
-    char *saved_lr_ptrs[32];
-    if (saved_lr_count > 0) {
-        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
-    }
+    char *lr_sbuf[32];
+    char **saved_lr_ptrs = ctx_snapshot_local_restores(ctx, saved_lr_count, lr_sbuf, 32);
     int cur_lr = saved_lr_count;
 
     if (ctx->try_ctx) {
@@ -1235,6 +1281,7 @@ static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
     while (cur_lr > target->local_restore_depth) {
         emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
     }
+    if (saved_lr_ptrs && saved_lr_ptrs != lr_sbuf) free(saved_lr_ptrs);
 }
 
 static VMLabelDef *vm_ctx_find_label(CompCtx *ctx, const char *name) {
@@ -1491,10 +1538,8 @@ static int prescan_vm_labels(CompCtx *ctx, StradaValue *node, int try_h, int loc
 
 static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_local_d) {
     int saved_lr_count = ctx->local_restore_count;
-    char *saved_lr_ptrs[32];
-    if (saved_lr_count > 0) {
-        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
-    }
+    char *lr_sbuf[32];
+    char **saved_lr_ptrs = ctx_snapshot_local_restores(ctx, saved_lr_count, lr_sbuf, 32);
     int cur_lr = saved_lr_count;
 
     int cur_try_h = 0;
@@ -1536,6 +1581,7 @@ static void emit_try_unwind_to_depth(CompCtx *ctx, int target_try_h, int target_
     while (cur_lr > target_local_d) {
         emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
     }
+    if (saved_lr_ptrs && saved_lr_ptrs != lr_sbuf) free(saved_lr_ptrs);
 }
 
 static void resolve_vm_gotos(CompCtx *ctx) {
@@ -3065,7 +3111,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         /* Cleanup inner context */
         for (int i = 0; i < inner_final_lc; i++) if (inner.local_names[i]) free(inner.local_names[i]);
         for (int i = 0; i < inner.capture_count; i++) free(inner.captures[i].name);
-        for (int i = 0; i < inner.local_restore_count; i++) free(inner.local_restores[i]);
+        ctx_free_local_restores(&inner);
         break;
     }
 
@@ -5873,7 +5919,7 @@ static void compile_sort_expr(CompCtx *ctx, StradaValue *node) {
 
     for (int i = 0; i < cmp_final_lc; i++) if (cmp_ctx.local_names[i]) free(cmp_ctx.local_names[i]);
     for (int i = 0; i < cmp_ctx.capture_count; i++) free(cmp_ctx.captures[i].name);
-    for (int i = 0; i < cmp_ctx.local_restore_count; i++) free(cmp_ctx.local_restores[i]);
+    ctx_free_local_restores(&cmp_ctx);
 
     /* Now compile: OP_ARRAY_SORT func_idx (or 0xFFFF for closure comparator) */
     compile_expr_in_ctx(ctx, array, 1);
@@ -6353,9 +6399,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             }
             vm_chunk_emit(ctx->chunk, OP_HASH_SET);
 
-            if (ctx->local_restore_count < 32) {
-                ctx->local_restores[ctx->local_restore_count++] = strdup("__HASH_ELEM__");
-            }
+            ctx_push_local_restore(ctx, "__HASH_ELEM__");
             ctx->assign_depth--;
             break;
         }
@@ -6378,9 +6422,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
 
         /* Track for restore on scope exit / return */
-        if (ctx->local_restore_count < 32) {
-            ctx->local_restores[ctx->local_restore_count++] = strdup(lkey);
-        }
+        ctx_push_local_restore(ctx, lkey);
         break;
     }
 
@@ -7579,7 +7621,7 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         if (ctx.local_names[i]) free(ctx.local_names[i]);
     }
     for (int i = 0; i < ctx.capture_count; i++) free(ctx.captures[i].name);
-    for (int i = 0; i < ctx.local_restore_count; i++) free(ctx.local_restores[i]);
+    ctx_free_local_restores(&ctx);
     chunk->int_only = all_int;
     return ctx.errors;
 }
@@ -8167,7 +8209,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         ichunk->local_count = ifinal_lc;
         for (int j = 0; j < ifinal_lc; j++) if (ictx.local_names[j]) free(ictx.local_names[j]);
         for (int j = 0; j < ictx.capture_count; j++) free(ictx.captures[j].name);
-        for (int j = 0; j < ictx.local_restore_count; j++) free(ictx.local_restores[j]);
+        ctx_free_local_restores(&ictx);
 
         int fidx = vm_program_find_func(prog, iname);
         /* Add as a BEGIN block so it runs first */
@@ -8208,7 +8250,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         bchunk->local_count = bfinal_lc;
         for (int j = 0; j < bfinal_lc; j++) if (bctx.local_names[j]) free(bctx.local_names[j]);
         for (int j = 0; j < bctx.capture_count; j++) free(bctx.captures[j].name);
-        for (int j = 0; j < bctx.local_restore_count; j++) free(bctx.local_restores[j]);
+        ctx_free_local_restores(&bctx);
 
         int fidx = vm_program_find_func(prog, bname);
         prog->begin_blocks = realloc(prog->begin_blocks, (prog->begin_count + 1) * sizeof(int));
@@ -8248,7 +8290,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         echunk->local_count = efinal_lc;
         for (int j = 0; j < efinal_lc; j++) if (ectx.local_names[j]) free(ectx.local_names[j]);
         for (int j = 0; j < ectx.capture_count; j++) free(ectx.captures[j].name);
-        for (int j = 0; j < ectx.local_restore_count; j++) free(ectx.local_restores[j]);
+        ctx_free_local_restores(&ectx);
 
         int fidx = vm_program_find_func(prog, ename);
         prog->end_blocks = realloc(prog->end_blocks, (prog->end_count + 1) * sizeof(int));

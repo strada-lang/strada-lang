@@ -710,6 +710,8 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
     my str $cur_pkg = $start_pkg;
     my str $body_pkg = $start_pkg;
     my int $has_body = 0;
+    my array @body_segs = ();
+    my str $last_seg_pkg = "";
 
     my int $len = length($code);
     my int $pos = eval_skip_ws_cmt($code, 0, $len);
@@ -852,6 +854,16 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
                 $has_body = 1;
             }
             $body = $body . $chunk . "\n";
+            if (size(@body_segs) == 0 || $last_seg_pkg ne $cur_pkg) {
+                my hash %seg = ();
+                $seg{"pkg"} = $cur_pkg;
+                $seg{"body"} = $chunk . "\n";
+                push(@body_segs, \%seg);
+                $last_seg_pkg = $cur_pkg;
+            } else {
+                my scalar $lseg = $body_segs[size(@body_segs) - 1];
+                $lseg->{"body"} = $lseg->{"body"} . $chunk . "\n";
+            }
         }
         $pos = eval_skip_ws_cmt($code, $end, $len);
     }
@@ -864,6 +876,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
     $res{"body"} = $body;
     $res{"last_pkg"} = $cur_pkg;
     $res{"body_pkg"} = $body_pkg;
+    $res{"segments"} = \@body_segs;
     return \%res;
 }
 
@@ -1053,6 +1066,57 @@ func eval_vm_rewrite_tail_return(scalar $block) void {
     $block->{"statement_count"} = $scnt + 1;
 }
 
+private func eval_vm_record_our(str $vn, str $vsig, int $vt, str $seg_pkg, scalar $program, scalar $prom_state) void {
+    if (length($vn) == 0) { return; }
+    my scalar $nd_ref = $prom_state->{"newly_declared"};
+    my scalar $ao_ref = $prom_state->{"added_our"};
+    my str $qvn = ($seg_pkg ne "" && $seg_pkg ne "main" && index($vn, "::") < 0) ? ($seg_pkg . "::" . $vn) : $vn;
+    $nd_ref->{$qvn} = 1;
+    if (!exists(%g_eval_vm_our_names, $qvn) && !defined($ao_ref->{$qvn})) {
+        $ao_ref->{$qvn} = 1;
+        $prom_state->{"added_our_stubs"} = $prom_state->{"added_our_stubs"} . "package " . $seg_pkg . ";\nour " . $vsig . $vn . ";\n";
+        $prom_state->{"added_our_cnt"} = $prom_state->{"added_our_cnt"} + 1;
+        my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
+        $od->{"package"} = $seg_pkg;
+        ast_add_global($program, $od);
+    }
+}
+
+private func eval_vm_promote_body(scalar $body, str $seg_pkg, scalar $program, scalar $prom_state, int $rewrite_tail) void {
+    if (!defined($body)) { return; }
+    my scalar $stmts = $body->{"statements"};
+    my int $scnt = $body->{"statement_count"};
+    my int $si = 0;
+    while ($si < $scnt) {
+        my scalar $st = $stmts->[$si];
+        if (defined($st) && $st->{"type"} == NI::VAR_DECL) {
+            my str $vn = $st->{"name"};
+            my str $vsig = $st->{"sigil"};
+            my int $vt = $st->{"var_type"};
+            $st->{"type"} = NI::OUR_DECL;
+            $st->{"package"} = $seg_pkg;
+            eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state);
+        } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
+            $st->{"is_decl"} = 0;
+            my scalar $dvars = $st->{"vars"};
+            my int $dvc = $st->{"var_count"};
+            my int $dvi = 0;
+            while ($dvi < $dvc) {
+                my scalar $dv = $dvars->[$dvi];
+                my str $vn = $dv->{"name"};
+                my str $vsig = defined($dv->{"sigil"}) ? $dv->{"sigil"} : "\$";
+                my int $vt = defined($dv->{"var_type"}) ? $dv->{"var_type"} : 0;
+                eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state);
+                $dvi = $dvi + 1;
+            }
+        }
+        $si = $si + 1;
+    }
+    if ($rewrite_tail == 1) {
+        eval_vm_rewrite_tail_return($body);
+    }
+}
+
 # Evaluate code using the bytecode VM backend with optional filename, search
 # paths, and load-only mode (skips top-level main() and top-level body).
 func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_load) scalar {
@@ -1087,12 +1151,33 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         my str $next_vm_pkg = $units->{"last_pkg"};
         my str $body_pkg = $units->{"body_pkg"};
         my str $body_src = ($is_load == 1) ? "" : $units->{"body"};
+        my scalar $segs = $units->{"segments"};
+        my int $seg_cnt = ($is_load == 1 || !defined($segs)) ? 0 : size($segs);
 
         my str $source = $g_eval_vm_decls;
         if (length($g_eval_vm_decls) > 0) {
             $source = $source . "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n";
         }
-        if (length($body_src) > 0) {
+        if ($seg_cnt > 1) {
+            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\n";
+            my str $dispatch_calls = "";
+            my int $sgi = 0;
+            while ($sgi < $seg_cnt) {
+                my scalar $sg = $segs->[$sgi];
+                my str $spkg = $sg->{"pkg"};
+                my str $sfn = "__eval_seg_" . $sgi . "__";
+                my str $sret = ($sgi == $seg_cnt - 1) ? "scalar" : "void";
+                $source = $source . "package " . $spkg . ";\nfunc " . $sfn . "() " . $sret . " {\n" . $sg->{"body"} . "\n}\n";
+                my str $qcall = $spkg . "::" . $sfn . "()";
+                if ($sgi == $seg_cnt - 1) {
+                    $dispatch_calls = $dispatch_calls . "    return " . $qcall . ";\n";
+                } else {
+                    $dispatch_calls = $dispatch_calls . "    " . $qcall . ";\n";
+                }
+                $sgi = $sgi + 1;
+            }
+            $source = $source . "package " . $next_vm_pkg . ";\nfunc __eval__() scalar {\n" . $dispatch_calls . "}\n";
+        } elsif (length($body_src) > 0) {
             $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
         } else {
             $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
@@ -1146,12 +1231,16 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             $pgi = $pgi + 1;
         }
 
-        # Promote top-level my declarations in __eval__ to persistent our declarations,
-        # and rewrite trailing expression statement of __eval__ to NI::RETURN_STMT.
+        # Promote top-level my declarations in __eval__ (or __eval_seg_N__) to persistent our declarations,
+        # and optionally rewrite trailing expression statement to NI::RETURN_STMT.
         my hash %added_our = ();
         my hash %new_funcs = ();
-        my str $added_our_stubs = "";
-        my int $added_our_cnt = 0;
+        my hash %prom_state = ();
+        $prom_state{"newly_declared"} = \%newly_declared;
+        $prom_state{"added_our"} = \%added_our;
+        $prom_state{"added_our_stubs"} = "";
+        $prom_state{"added_our_cnt"} = 0;
+
         my scalar $pfuncs = $program->{"functions"};
         my int $pfcount = $program->{"function_count"};
         my str $eval_entry_name = "__eval__";
@@ -1164,59 +1253,13 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             my str $bare = defined($pfn->{"bare_name"}) ? ("" . $pfn->{"bare_name"}) : "";
             if ($fn_name eq "__eval__" || $bare eq "__eval__") {
                 $eval_entry_name = $fn_name;
-                my scalar $body = $pfn->{"body"};
-                if (defined($body)) {
-                    my scalar $stmts = $body->{"statements"};
-                    my int $scnt = $body->{"statement_count"};
-                    my int $si = 0;
-                    while ($si < $scnt) {
-                        my scalar $st = $stmts->[$si];
-                        if (defined($st) && $st->{"type"} == NI::VAR_DECL) {
-                            my str $vn = $st->{"name"};
-                            my str $vsig = $st->{"sigil"};
-                            my int $vt = $st->{"var_type"};
-                            $st->{"type"} = NI::OUR_DECL;
-                            $st->{"package"} = $body_pkg;
-                            my str $qvn = ($body_pkg ne "" && $body_pkg ne "main" && index($vn, "::") < 0) ? ($body_pkg . "::" . $vn) : $vn;
-                            if (length($vn) > 0) {
-                                $newly_declared{$qvn} = 1;
-                                if (!exists(%g_eval_vm_our_names, $qvn) && !exists(%added_our, $qvn)) {
-                                    $added_our{$qvn} = 1;
-                                    $added_our_stubs = $added_our_stubs . "package " . $body_pkg . ";\nour " . $vsig . $vn . ";\n";
-                                    $added_our_cnt = $added_our_cnt + 1;
-                                    my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
-                                    $od->{"package"} = $body_pkg;
-                                    ast_add_global($program, $od);
-                                }
-                            }
-                        } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
-                            $st->{"is_decl"} = 0;
-                            my scalar $dvars = $st->{"vars"};
-                            my int $dvc = $st->{"var_count"};
-                            my int $dvi = 0;
-                            while ($dvi < $dvc) {
-                                my scalar $dv = $dvars->[$dvi];
-                                my str $vn = $dv->{"name"};
-                                my str $vsig = defined($dv->{"sigil"}) ? $dv->{"sigil"} : "\$";
-                                my int $vt = defined($dv->{"var_type"}) ? $dv->{"var_type"} : 0;
-                                my str $qvn = ($body_pkg ne "" && $body_pkg ne "main" && index($vn, "::") < 0) ? ($body_pkg . "::" . $vn) : $vn;
-                                if (length($vn) > 0) {
-                                    $newly_declared{$qvn} = 1;
-                                    if (!exists(%g_eval_vm_our_names, $qvn) && !exists(%added_our, $qvn)) {
-                                        $added_our{$qvn} = 1;
-                                        $added_our_stubs = $added_our_stubs . "package " . $body_pkg . ";\nour " . $vsig . $vn . ";\n";
-                                        $added_our_cnt = $added_our_cnt + 1;
-                                        my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
-                                        $od->{"package"} = $body_pkg;
-                                        ast_add_global($program, $od);
-                                    }
-                                }
-                                $dvi = $dvi + 1;
-                            }
-                        }
-                        $si = $si + 1;
-                    }
-                    eval_vm_rewrite_tail_return($body);
+                if ($seg_cnt <= 1) {
+                    eval_vm_promote_body($pfn->{"body"}, $body_pkg, $program, \%prom_state, 1);
+                }
+            } elsif ($seen_top_start == 1 && $seg_cnt > 1 && $bare =~ /^__eval_seg_[0-9]+__$/) {
+                my int $sgi = cast_int(substr($bare, 11, length($bare) - 13));
+                if ($sgi >= 0 && $sgi < $seg_cnt) {
+                    eval_vm_promote_body($pfn->{"body"}, $segs->[$sgi]->{"pkg"}, $program, \%prom_state, ($sgi == $seg_cnt - 1) ? 1 : 0);
                 }
             } elsif ($bare eq "__strada_eval_top_start__" || $fn_name eq "__strada_eval_sep____strada_eval_top_start__") {
                 $seen_top_start = 1;
@@ -1228,6 +1271,8 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             }
             $pfi = $pfi + 1;
         }
+        my str $added_our_stubs = $prom_state{"added_our_stubs"};
+        my int $added_our_cnt = $prom_state{"added_our_cnt"};
         if ($is_load == 0 && length($body_src) == 0 && $has_new_main == 1) {
             $eval_entry_name = "main";
         }
@@ -1282,6 +1327,13 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         if ($compiled_ok == 0) {
             throw("VM compilation failed");
         }
+        my str $rb_pkg = $g_eval_vm_pkg;
+        my str $rb_decls = $g_eval_vm_decls;
+        my int $rb_decls_globals = $g_eval_vm_decls_globals;
+        my hash %rb_our_added = ();
+        my hash %rb_funcs_added = ();
+        my hash %rb_funcs_prev = ();
+
         $g_eval_vm_pkg = $next_vm_pkg;
         if (length($units->{"top_persist"}) > 0) {
             $g_eval_vm_decls = $g_eval_vm_decls . "package " . $prev_vm_pkg . ";\n" . $units->{"top_persist"} . "\n";
@@ -1291,13 +1343,24 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             $g_eval_vm_decls = $g_eval_vm_decls . $added_our_stubs;
             $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $added_our_cnt;
             foreach my str $ovn (keys(%added_our)) {
+                if (!exists(%g_eval_vm_our_names, $ovn)) {
+                    $rb_our_added{$ovn} = 1;
+                }
                 $g_eval_vm_our_names{$ovn} = 1;
             }
         }
         foreach my str $nvn (keys(%newly_declared)) {
+            if (!exists(%g_eval_vm_our_names, $nvn)) {
+                $rb_our_added{$nvn} = 1;
+            }
             $g_eval_vm_our_names{$nvn} = 1;
         }
         foreach my str $fnk (keys(%new_funcs)) {
+            if (exists(%g_eval_vm_funcs, $fnk)) {
+                $rb_funcs_prev{$fnk} = $g_eval_vm_funcs{$fnk};
+            } else {
+                $rb_funcs_added{$fnk} = 1;
+            }
             $g_eval_vm_funcs{$fnk} = $new_funcs{$fnk};
         }
 
@@ -1368,9 +1431,11 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                 if (pushed && es_run->depth > 0 && es_run->vms[es_run->depth - 1] == vvm) {
                     es_run->depth--;
                 }
-                vm_export_globals(vvm, globals_ref);
-                if (es_run->depth > 0 && es_run->vms[es_run->depth - 1]) {
-                    eval_seed_changed_globals(es_run->vms[es_run->depth - 1], pre_snap, globals_ref);
+                if (!strada_to_int(had_vm_exc)) {
+                    vm_export_globals(vvm, globals_ref);
+                    if (es_run->depth > 0 && es_run->vms[es_run->depth - 1]) {
+                        eval_seed_changed_globals(es_run->vms[es_run->depth - 1], pre_snap, globals_ref);
+                    }
                 }
                 if (pre_snap) strada_decref(pre_snap);
                 vm_suspend(vvm);
@@ -1378,6 +1443,20 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             }
             free(ebuf);
             vm_program_free(exec_vprog);
+        }
+        if ($had_vm_exc == 1) {
+            $g_eval_vm_pkg = $rb_pkg;
+            $g_eval_vm_decls = $rb_decls;
+            $g_eval_vm_decls_globals = $rb_decls_globals;
+            foreach my str $ak (keys(%rb_our_added)) {
+                delete($g_eval_vm_our_names{$ak});
+            }
+            foreach my str $fk (keys(%rb_funcs_added)) {
+                delete($g_eval_vm_funcs{$fk});
+            }
+            foreach my str $fk (keys(%rb_funcs_prev)) {
+                $g_eval_vm_funcs{$fk} = $rb_funcs_prev{$fk};
+            }
         }
     } finally {
         __C__ {

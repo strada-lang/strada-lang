@@ -1,0 +1,65 @@
+# Cycle 19 Valgrind Leak Test (Eval / VM / JIT / Worker STW GC)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    my scalar $ok = Strada::Interpreter::eval(q{
+        my array @sp = (1, 2);
+        push(@sp, ...@sp);
+
+        package R19ELkM;
+        use overload "&" => "band", "~" => "bnot";
+        func new(int $v) scalar { return bless({"v" => $v}, "R19ELkM"); }
+        func band(scalar $s, scalar $o, int $r) scalar { return R19ELkM::new($s->{"v"} & ($o + 0)); }
+        func bnot(scalar $s) scalar { return R19ELkM::new(~$s->{"v"}); }
+        package main;
+        func jit_bw(scalar $m) int { return ((~$m) & 15)->{"v"}; }
+        my scalar $mv = R19ELkM::new(3);
+        my int $bw = 0;
+        for (my int $i = 0; $i < 130; $i = $i + 1) { $bw = jit_bw($mv); }
+
+        package R19ELkTA;
+        func TIEARRAY(str $c) scalar { return bless({}, $c); }
+        func FETCHSIZE(scalar $s) int { return 2; }
+        func FETCH(scalar $s, int $i) scalar { return $i + 10; }
+        package main;
+        my array @ta = (); tie(@ta, "R19ELkTA");
+        my array @dst = (1, 2, 3);
+        splice(@dst, 1, 1, @ta);
+        my scalar $dc = clone(\@ta);
+
+        my hash %bh = ("a\0b" => 10, "a" => 20);
+        { local $bh{"a\0b"} = 99; }
+
+        my scalar $ch = async::channel(2);
+        my scalar $th = thread::create(func () {
+            my int $x = async::recv($ch);
+            my str $q = core::qx("echo qok");
+            return (index($q, "qok") >= 0) ? ($x + 1) : -1;
+        });
+        core::gc_collect();
+        async::send($ch, 10);
+        my int $jr = thread::join($th);
+        (size(@sp) == 4 && $bw == 12 && $dst[2] == 11 && size($dc) == 2 && $bh{"a\0b"} == 10 && $jr == 11) ? 1 : 0;
+    });
+    if ($ok != 1) { return 1; }
+
+    Strada::Interpreter::eval("package R19ELkBase; our int \$v = 5; func set_v(int \$n) void { \$v = \$n; }");
+    try {
+        Strada::Interpreter::eval("R19ELkBase::set_v(9); package R19ELkBad; our int \$x = 1; throw('fail');");
+    } catch ($e) {}
+    if (Strada::Interpreter::eval("__PACKAGE__ . ':' . \$v;") ne "R19ELkBase:5") { return 2; }
+
+    Strada::JIT::init();
+    if (Strada::JIT::eval("package R19EJitPkg; __PACKAGE__;") ne "R19EJitPkg") { return 3; }
+    Strada::JIT::eval("package main; my int \$c = 17;");
+    if (Strada::JIT::eval("my int \$c /* comment */; \$c;") != 0) { return 4; }
+    Strada::JIT::reset();
+
+    Strada::Interpreter::reset();
+    say("LEAK_AUDIT_R19_EVAL_OK");
+    return 0;
+}

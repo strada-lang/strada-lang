@@ -258,6 +258,16 @@ func parser_expect_ident_like(scalar $parser) void {
     parser_error($parser, "expected an identifier, got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
 
+func parser_check_class_arrow(scalar $parser) int {
+    if (parser_check($parser, "ARROW")) {
+        my scalar $after = parser_peek($parser);
+        if ($after->{"is_word"} != 0 || $after->{"type"} eq "DOLLAR") {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 func parser_match(scalar $parser, str $type) int {
     my scalar $tok = parser_current($parser);
     if ($tok->{"type"} eq $type) {
@@ -1738,6 +1748,10 @@ func parse_primary(scalar $parser) scalar {
                 return $call;
             }
 
+            if (parser_check_class_arrow($parser) == 1) {
+                return ast_new_str_literal($name);
+            }
+
             # async::something without () - treat as variable (shouldn't happen normally)
             return ast_new_variable($name, "$");
         }
@@ -1921,6 +1935,10 @@ func parse_primary(scalar $parser) scalar {
                 return $call;
             }
 
+            if (parser_check_class_arrow($parser) == 1) {
+                return ast_new_str_literal($name);
+            }
+
             # Qualified name without parens - treat as constant (e.g., enum value)
             # Create a 0-arg call node, codegen will handle it as a constant
             my scalar $const_ref = ast_new_call($name);
@@ -1967,12 +1985,9 @@ func parse_primary(scalar $parser) scalar {
             }
         }
 
-        # Bareword class invocant before ->method() (e.g. Foo->new())
-        if (parser_check($parser, "ARROW")) {
-            my scalar $after_arrow = parser_peek($parser);
-            if ($after_arrow->{"is_word"} != 0) {
-                return ast_new_str_literal($name);
-            }
+        # Bareword class invocant before ->method() or ->$m() (e.g. Foo->new(), Foo->$m())
+        if (parser_check_class_arrow($parser) == 1) {
+            return ast_new_str_literal($name);
         }
 
         # Disallow barewords in general expression position (e.g. `i < 4` missing `$`)

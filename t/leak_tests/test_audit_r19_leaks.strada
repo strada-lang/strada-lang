@@ -1,0 +1,112 @@
+# Cycle 19 Valgrind Leak Test (Compiled C1-C8, R1-R7, L3-L7)
+use lib "lib";
+use YAML;
+use LWP;
+use Digest::MD5;
+
+package R19LkOv;
+use overload
+    "**" => "pow",
+    "x"  => "rep",
+    "&"  => "band",
+    "|"  => "bor",
+    "^"  => "bxor",
+    "<<" => "bshl",
+    ">>" => "bshr",
+    "~"  => "bnot",
+    "0+" => "to_num",
+    '""' => "to_str";
+func new(int $v) scalar { return bless({"v" => $v}, "R19LkOv"); }
+func ov_v(scalar $x) int { return (ref($x) eq "R19LkOv") ? $x->{"v"} : ($x + 0); }
+func pow(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} * 100 + ov_v($o)); }
+func rep(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} * 10 + ov_v($o)); }
+func band(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} & ov_v($o)); }
+func bor(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} | ov_v($o)); }
+func bxor(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} ^ ov_v($o)); }
+func bshl(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} << ov_v($o)); }
+func bshr(scalar $s, scalar $o, int $r) scalar { return R19LkOv::new($s->{"v"} >> ov_v($o)); }
+func bnot(scalar $s) scalar { return R19LkOv::new(~$s->{"v"}); }
+func to_num(scalar $s) num { return $s->{"v"} + 0.0; }
+func to_str(scalar $s) str { return "O" . $s->{"v"}; }
+
+package R19LkTie;
+func TIESCALAR(str $c, scalar $v) scalar { return bless({"v" => $v}, $c); }
+func FETCH(scalar $s) scalar { return $s->{"v"}; }
+func STORE(scalar $s, scalar $v) void { $s->{"v"} = $v; }
+
+package R19LkTH;
+func TIEHASH(str $c) scalar { return bless({"h" => {}}, $c); }
+func FETCH(scalar $s, str $k) scalar { return $s->{"h"}->{$k}; }
+func STORE(scalar $s, str $k, scalar $v) void { $s->{"h"}->{$k} = $v; }
+func EXISTS(scalar $s, str $k) int { return exists($s->{"h"}, $k) ? 1 : 0; }
+func DELETE(scalar $s, str $k) scalar { my scalar $o = $s->{"h"}->{$k}; delete($s->{"h"}->{$k}); return $o; }
+
+package R19LkTA;
+func TIEARRAY(str $c) scalar { return bless({"a" => [10, 20]}, $c); }
+func FETCHSIZE(scalar $s) int { return size($s->{"a"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"a"}->[$i]; }
+
+package main;
+
+struct R19LkCS {
+    str name;
+    int cnt;
+}
+
+func lk_key(int $i) str { return "k_" . $i; }
+
+func main() int {
+    # C6-C8, R1, R2, R4, R5, L4-L6 leak checks
+    for (my int $i = 0; $i < 25; $i = $i + 1) {
+        my scalar $o = R19LkOv::new(3);
+        $o **= 2;
+        $o &= 15;
+        $o |= 4;
+        my scalar $tov = "";
+        tie($tov, "R19LkTie", R19LkOv::new(6));
+        $tov &= 10;
+        untie($tov);
+
+        my hash %autoh = ();
+        $autoh{lk_key($i)}{lk_key($i + 1)} = "v";
+
+        my R19LkCS $cs;
+        $cs->name = lk_key($i);
+        $cs->name .= "_x";
+
+        my scalar $ts = "";
+        tie($ts, "R19LkTie", "");
+        my scalar $fh = core::open(\$ts, ">");
+        say($fh, "mem_" . $i);
+        core::close($fh);
+        untie($ts);
+
+        my array @sa = (1, 2, 3);
+        splice(@sa, 1, 1, @sa);
+        my array @ta = ();
+        tie(@ta, "R19LkTA");
+        splice(@sa, 1, 1, @ta);
+        untie(@ta);
+
+        my hash %nh = ();
+        $nh{"a\0b"} = "x\0y";
+        my str $ds = core::dumper_str(\%nh);
+        if (index($ds, "y") < 0) { return 1; }
+
+        my hash %th = ();
+        tie(%th, "R19LkTH");
+        $th{"p\0q"} = $i;
+        delete($th{"p\0q"});
+        untie(%th);
+    }
+
+    my scalar $ty = "";
+    tie($ty, "R19LkTie", {"k" => [1, 2]});
+    my str $yd = YAML::Dump($ty);
+    untie($ty);
+    my scalar $yl = YAML::Load("- |\n  hi\n  there\n- end\n");
+    if (index($yd, "k:") < 0 || $yl->[0] ne "hi\nthere\n") { return 2; }
+
+    say("LEAK_AUDIT_R19_OK");
+    return 0;
+}

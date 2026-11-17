@@ -1,0 +1,83 @@
+# Cycle 19 Bytecode VM Valgrind Leak Test (V1-V4, V7, V8)
+
+package R19VmLkMask;
+use overload
+    "&"  => "band",
+    "|"  => "bor",
+    "^"  => "bxor",
+    "<<" => "bshl",
+    ">>" => "bshr",
+    "~"  => "bnot";
+func new(int $v) scalar { return bless({"v" => $v}, "R19VmLkMask"); }
+func mv(scalar $x) int { return ref($x) eq "R19VmLkMask" ? $x->{"v"} : ($x + 0); }
+func band(scalar $s, scalar $o, int $r) scalar { return R19VmLkMask::new($s->{"v"} & mv($o)); }
+func bor(scalar $s, scalar $o, int $r) scalar { return R19VmLkMask::new($s->{"v"} | mv($o)); }
+func bxor(scalar $s, scalar $o, int $r) scalar { return R19VmLkMask::new($s->{"v"} ^ mv($o)); }
+func bshl(scalar $s, scalar $o, int $r) scalar { return R19VmLkMask::new($s->{"v"} << mv($o)); }
+func bshr(scalar $s, scalar $o, int $r) scalar { return R19VmLkMask::new($s->{"v"} >> mv($o)); }
+func bnot(scalar $s) scalar { return R19VmLkMask::new(~$s->{"v"}); }
+
+package R19VmLkTA;
+func TIEARRAY(str $c) scalar { return bless({"a" => [10, 20]}, $c); }
+func FETCHSIZE(scalar $s) int { return size($s->{"a"}); }
+func FETCH(scalar $s, int $i) scalar { return $s->{"a"}->[$i]; }
+
+package R19VmLkTH;
+func TIEHASH(str $c) scalar { return bless({"h" => {"k" => 5}}, $c); }
+func FETCH(scalar $s, str $k) scalar { return $s->{"h"}->{$k}; }
+func FIRSTKEY(scalar $s) scalar { return "k"; }
+func NEXTKEY(scalar $s, str $p) scalar { return undef; }
+
+package main;
+
+func lk_bw(scalar $a, scalar $b) int {
+    return ((~$a) & $b)->{"v"};
+}
+
+func lk_ta(scalar $ta) int {
+    return int($ta) + (0 + $ta) + abs($ta);
+}
+
+func main() int {
+    # V1
+    my array @sp = (1, 2);
+    push(@sp, ...@sp);
+    if (join(",", @sp) ne "1,2,1,2") { return 1; }
+
+    # V3
+    my scalar $m1 = R19VmLkMask::new(3);
+    my scalar $m2 = R19VmLkMask::new(15);
+    my int $bv = 0;
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $bv = lk_bw($m1, $m2); }
+    if ($bv != 12) { return 2; }
+
+    # V4 & V8
+    my array @ta = (); tie(@ta, "R19VmLkTA");
+    my hash %th = (); tie(%th, "R19VmLkTH");
+    my array @dst = (1, 2, 3);
+    splice(@dst, 1, 1, @ta);
+    my int $tv = 0;
+    for (my int $i = 0; $i < 140; $i = $i + 1) { $tv = lk_ta(\@ta); }
+    my scalar $dca = clone(\@ta);
+    my scalar $dch = clone(\%th);
+    if (size(@dst) != 4 || $tv != 6 || size($dca) != 2 || $dch->{"k"} != 5) { return 3; }
+
+    # V7
+    my hash %bh = ("a\0b" => 10, "a" => 20);
+    { local $bh{"a\0b"} = 99; }
+    if ($bh{"a\0b"} != 10 || $bh{"a"} != 20) { return 4; }
+
+    # V2
+    my scalar $ch = async::channel(2);
+    my scalar $t = thread::create(func () {
+        my int $x = async::recv($ch);
+        my str $q = core::qx("echo okvm");
+        return (index($q, "okvm") >= 0) ? ($x + 1) : -1;
+    });
+    core::gc_collect();
+    async::send($ch, 10);
+    if (thread::join($t) != 11) { return 5; }
+
+    say("LEAK_AUDIT_R19_VM_OK");
+    return 0;
+}

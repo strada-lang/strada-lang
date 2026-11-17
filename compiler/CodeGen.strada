@@ -2120,6 +2120,7 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "/");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "%");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "**");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, "x");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, ".");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "==");
             gen_overload_reg_if($sb, $pkg, $pkg_ol, "!=");
@@ -2320,9 +2321,10 @@ func could_be_blessed(scalar $expr) int {
         return 1;
     }
 
-    # Hash/array dereference access could return blessed
+    # Hash/array/scalar dereference access could return blessed
     if ($type == NODE_HASH_ACCESS() || $type == NODE_DEREF_HASH() ||
-        $type == NODE_DEREF_ARRAY() || $type == NODE_SUBSCRIPT()) {
+        $type == NODE_DEREF_ARRAY() || $type == NODE_SUBSCRIPT() ||
+        $type == NODE_DEREF_SCALAR()) {
         return 1;
     }
 
@@ -2389,6 +2391,8 @@ func emit_overload_binary_fallback(scalar $cg, str $op) void {
         emit($cg, "({ int64_t __shl_l = strada_to_int(__ol_l); int64_t __shl_r = strada_to_int(__ol_r); strada_new_int_il((__shl_r < 0 || __shl_r >= 64) ? 0 : (int64_t)((uint64_t)__shl_l << (int)__shl_r)); })");
     } elsif ($op eq ">>") {
         emit($cg, "({ int64_t __shr_l = strada_to_int(__ol_l); int64_t __shr_r = strada_to_int(__ol_r); strada_new_int_il((__shr_r < 0 || __shr_r >= 64) ? (__shr_l < 0 ? -1 : 0) : (__shr_l >> (int)__shr_r)); })");
+    } elsif ($op eq "x") {
+        emit($cg, "strada_string_repeat(__ol_l, (int64_t)strada_to_int(__ol_r))");
     } elsif ($op eq ".") {
         emit($cg, "strada_concat_sv(__ol_l, __ol_r)");
     } elsif ($op eq "==") {
@@ -4125,6 +4129,8 @@ func is_unboxed_var_node(scalar $cg, scalar $expr) int {
     if (("" . $expr->{"sigil"}) ne "$") { return 0; }
     my str $vname = "" . $expr->{"name"};
     if ($vname eq "__program_name" || index($vname, "::") >= 0) { return 0; }
+    if ($cg->{"in_sort_block"} != 0 && ($vname eq "a" || $vname eq "b")) { return 0; }
+    if (($cg->{"in_map_block"} != 0 || $cg->{"in_grep_block"} != 0) && $vname eq "_") { return 0; }
     my str $cname = escape_c_keyword($vname);
     if (length("" . $cg->{"our_vars"}->{$cname}) > 0) { return 0; }
     if (is_unboxed_int($cg, $cname) == 1 || is_unboxed_num($cg, $cname) == 1) {
@@ -8076,6 +8082,32 @@ func compound_overload_base_op(str $op) str {
     if ($op eq "/=") { return "/"; }
     if ($op eq "%=") { return "%"; }
     if ($op eq ".=") { return "."; }
+    if ($op eq "**=") { return "**"; }
+    if ($op eq "x=") { return "x"; }
+    if ($op eq "&=") { return "&"; }
+    if ($op eq "|=") { return "|"; }
+    if ($op eq "^=") { return "^"; }
+    if ($op eq "<<=") { return "<<"; }
+    if ($op eq ">>=") { return ">>"; }
+    return "";
+}
+
+# Returns the base operator name if compound assignment $op might invoke
+# operator overloading on $target or $rhs, or "" otherwise.
+func compound_overload_active(scalar $cg, scalar $target, scalar $rhs, str $op) str {
+    if ($cg->{"has_overloads"} == 0) { return ""; }
+    my str $base = compound_overload_base_op($op);
+    if (length($base) == 0) { return ""; }
+    my scalar $ol_ops = $cg->{"overloaded_ops"};
+    my int $active = length("" . $ol_ops->{$base}) > 0;
+    if ($active == 0 && $op eq ".=") {
+        my str $sq = chr(34) . chr(34);
+        if (length("" . $ol_ops->{$sq}) > 0) { $active = 1; }
+    }
+    if ($active == 0) { return ""; }
+    if (could_be_blessed($target) == 1 || could_be_blessed($rhs) == 1) {
+        return $base;
+    }
     return "";
 }
 

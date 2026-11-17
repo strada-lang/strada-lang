@@ -799,6 +799,10 @@ func parse_inline_hash_d(str $s, int $depth) scalar {
             }
             my scalar $val = YAML::parse_value_d($val_str, $depth + 1);
             $result->{$key} = $val;
+        } elsif (length($part) > 0) {
+            throw "YAML parse error: invalid entry in inline mapping: " . $part;
+        } elsif ($i < $count - 1) {
+            throw "YAML parse error: empty entry in inline mapping";
         }
 
         $i = $i + 1;
@@ -1173,6 +1177,8 @@ func parse_array(scalar $state, int $base_indent) scalar {
                 }
 
                 push($result, $item);
+            } elsif (YAML::is_block_scalar_spec($after_dash) == 1) {
+                push($result, YAML::parse_block_scalar($state, $indent, $after_dash));
             } else {
                 # Simple value
                 push($result, YAML::parse_value($after_dash));
@@ -1364,10 +1370,27 @@ func dump_value(scalar $value, int $indent) str {
     return YAML::dump_value_d($value, $indent, 0);
 }
 
-func dump_value_d(scalar $value, int $indent, int $depth) str {
+private func _unwrap_tied_scalar(scalar $v) scalar {
+    my scalar $cur = $v;
+    __C__ {
+        for (int depth = 0; depth < 16 && cur && !STRADA_IS_TAGGED_INT(cur) &&
+             cur->meta && cur->meta->is_tied &&
+             cur->type != STRADA_ARRAY && cur->type != STRADA_HASH; depth++) {
+            StradaValue *fetched = strada_tied_scalar_fetch(cur);
+            strada_decref(cur);
+            cur = fetched ? fetched : strada_new_undef();
+        }
+    }
+    return $cur;
+}
+
+func dump_value_d(scalar $value_in, int $indent, int $depth) str {
     if ($depth >= 64 || $indent > 512) {
         throw "YAML: maximum nesting depth (64) exceeded";
     }
+    # A fresh local, not `$value_in = ...`: assigning to a tied parameter
+    # would STORE into the caller's tied scalar instead of rebinding.
+    my scalar $value = YAML::_unwrap_tied_scalar($value_in);
     if (!defined($value)) {
         return "~";
     }
@@ -1550,7 +1573,7 @@ func dump_hash_d(scalar $hval, int $indent, int $depth) str {
 
     while ($i < $count) {
         my str $key = $keys[$i];
-        my scalar $val = $hval->{$key};
+        my scalar $val = YAML::_unwrap_tied_scalar($hval->{$key});
         my str $rtype = ref($val);
 
         my str $qkey = YAML::format_key($key);
@@ -1594,7 +1617,7 @@ func dump_array_d(scalar $arr, int $indent, int $depth) str {
     my str $pad = YAML::make_indent($indent);
 
     while ($i < $count) {
-        my scalar $val = $arr->[$i];
+        my scalar $val = YAML::_unwrap_tied_scalar($arr->[$i]);
         my str $rtype = ref($val);
 
         if ($rtype eq "HASH") {
@@ -1602,7 +1625,7 @@ func dump_array_d(scalar $arr, int $indent, int $depth) str {
             my array @keys = keys($val);
             if (size(@keys) > 0) {
                 my str $first_key = $keys[0];
-                my scalar $first_val = $val->{$first_key};
+                my scalar $first_val = YAML::_unwrap_tied_scalar($val->{$first_key});
                 my str $first_rtype = ref($first_val);
 
                 my str $qfirst_key = YAML::format_key($first_key);
@@ -1629,7 +1652,7 @@ func dump_array_d(scalar $arr, int $indent, int $depth) str {
                 my int $j = 1;
                 while ($j < size(@keys)) {
                     my str $key = $keys[$j];
-                    my scalar $kval = $val->{$key};
+                    my scalar $kval = YAML::_unwrap_tied_scalar($val->{$key});
                     my str $krtype = ref($kval);
 
                     my str $qkey = YAML::format_key($key);

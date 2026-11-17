@@ -226,11 +226,6 @@ func goto_hoist_stmts_decls(scalar $cg, scalar $stmts, int $stmt_count) scalar {
                     }
                 }
                 goto_hoist_one_var($cg, \%hoisted, $c_name, $box_scalar);
-            } elsif ($ht == NODE_OUR_DECL()) {
-                my str $osig = "" . $hs->{"sigil"};
-                if ($osig eq "@" || $osig eq "%") {
-                    goto_hoist_one_var($cg, \%hoisted, escape_c_keyword($hs->{"name"}), 0);
-                }
             } elsif ($ht == NODE_DESTRUCTURE() && ($hs->{"is_decl"} + 0) == 1) {
                 my scalar $dvars = $hs->{"vars"};
                 my int $dvc = $hs->{"var_count"} + 0;
@@ -296,6 +291,9 @@ func save_block_type_state(scalar $cg, scalar $block) scalar {
     $st{"fl"} = copy_type_map($cg->{"func_locals_seen"});
     $st{"kt"} = copy_type_map($cg->{"known_types"});
     $st{"sv"} = copy_type_map($cg->{"struct_vars"});
+    $st{"ui"} = copy_type_map($cg->{"unboxed_int_vars"});
+    $st{"un"} = copy_type_map($cg->{"unboxed_num_vars"});
+    $st{"ss"} = copy_type_map($cg->{"safe_str_vars"});
     $st{"shadow"} = our_shadow_mark($cg);
     return \%st;
 }
@@ -307,7 +305,43 @@ func restore_block_type_state(scalar $cg, scalar $st) void {
     $cg->{"func_locals_seen"} = $st->{"fl"};
     $cg->{"known_types"} = $st->{"kt"};
     $cg->{"struct_vars"} = $st->{"sv"};
+    $cg->{"unboxed_int_vars"} = $st->{"ui"};
+    $cg->{"unboxed_num_vars"} = $st->{"un"};
+    $cg->{"safe_str_vars"} = $st->{"ss"};
     our_shadow_restore($cg, $st->{"shadow"} + 0);
+}
+
+func clear_var_type_metadata(scalar $cg, str $c_name) void {
+    $cg->{"int_vars"}->{$c_name} = "";
+    $cg->{"num_vars"}->{$c_name} = "";
+    $cg->{"known_types"}->{$c_name} = "";
+    $cg->{"struct_vars"}->{$c_name} = "";
+    $cg->{"active_boxed_vars"}->{$c_name} = 0;
+    $cg->{"unboxed_int_vars"}->{$c_name} = 0;
+    $cg->{"unboxed_num_vars"}->{$c_name} = 0;
+    $cg->{"safe_str_vars"}->{$c_name} = 0;
+    our_shadow_begin($cg, $c_name);
+}
+
+func emit_foreach_init_zero(scalar $cg, str $var_name, str $fe_our_key, int $fe_tie, int $fe_is_int, int $fe_is_num) void {
+    emit_indent($cg);
+    if (length($fe_our_key) > 0) {
+        emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", strada_new_undef());\n");
+    } elsif ($fe_tie == 1) {
+        if ($fe_is_int == 1) {
+            emit($cg, "if (!strada_scalar_is_tied(" . $var_name . ")) { strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int(0); }\n");
+        } elsif ($fe_is_num == 1) {
+            emit($cg, "if (!strada_scalar_is_tied(" . $var_name . ")) { strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num(0.0); }\n");
+        } else {
+            emit($cg, "if (!strada_scalar_is_tied(" . $var_name . ")) { strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef(); }\n");
+        }
+    } elsif ($fe_is_int == 1) {
+        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int(0);\n");
+    } elsif ($fe_is_num == 1) {
+        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num(0.0);\n");
+    } else {
+        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef();\n");
+    }
 }
 
 func intersect_type_maps(scalar $a, scalar $b) scalar {
@@ -1019,71 +1053,24 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my str $our_key = resolve_our_decl_key($stmt, "" . $cg->{"package"});
 
         if ($sigil eq "@" || $sigil eq "%") {
-            # Array/hash our: create local C variable backed by global registry
-            if ($cg->{"in_anon_func"}) {
-                my str $our_locals = $cg->{"anon_local_str"};
-                if ($our_locals eq "") {
-                    $cg->{"anon_local_str"} = $var_name;
-                } else {
-                    $cg->{"anon_local_str"} = $our_locals . "," . $var_name;
-                }
-            }
+            # Register in our_vars so all accesses and whole-container writes
+            # share the global registry entry across functions and closures.
+            $cg->{"our_vars"}->{$c_name} = $our_key;
             my str $new_func = "strada_new_array()";
             if ($sigil eq "%") {
                 $new_func = "strada_new_hash()";
             }
-
-            my int $our_predecl = $cg->{"predeclared_goto_vars"}->{$c_name} + 0;
             if ($stmt->{"init"}) {
-                my scalar $init = $stmt->{"init"};
-                if ($our_predecl > 0) {
-                    emit_indent($cg);
-                    emit($cg, "strada_decref(" . $c_name . "); " . $c_name . " = NULL;\n");
-                    emit_indent($cg);
-                    emit($cg, $c_name . " = ");
-                } else {
-                    emit_indent($cg);
-                    emit_sv_ptr_decl($cg, $c_name);
-                    emit($cg, " = ");
-                }
-                emit_our_global_init($cg, $init, $sigil, $stmt->{"var_type"});
-                emit($cg, ";\n");
-                if ($our_predecl == 0) {
-                    scope_track_var($cg, $c_name);
-                    if (cleanup_push_useful($cg) == 1) {
-                        emit_indent($cg);
-                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-                    } else {
-                        scope_mark_no_push($cg, $c_name);
-                    }
-                }
                 emit_indent($cg);
-                emit($cg, "strada_incref(" . $c_name . ");\n");
-                emit_indent($cg);
-                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . ");\n");
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", ");
+                emit_our_global_init($cg, $stmt->{"init"}, $sigil, $stmt->{"var_type"});
+                emit($cg, ");\n");
             } else {
-                if ($our_predecl > 0) {
-                    emit_indent($cg);
-                    emit($cg, "strada_decref(" . $c_name . "); " . $c_name . " = NULL;\n");
-                    emit_indent($cg);
-                    emit($cg, $c_name . " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
-                } else {
-                    emit_indent($cg);
-                    emit_sv_ptr_decl($cg, $c_name);
-                    emit($cg, " = strada_global_get_cstr(" . c_str_lit($our_key) . ");\n");
-                    scope_track_var($cg, $c_name);
-                    if (cleanup_push_useful($cg) == 1) {
-                        emit_indent($cg);
-                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
-                    } else {
-                        scope_mark_no_push($cg, $c_name);
-                    }
-                }
                 emit_indent($cg);
-                emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $c_name . ") && " . $c_name . "->type == STRADA_UNDEF) { strada_decref(" . $c_name . "); ");
-                emit($cg, $c_name . " = " . $new_func . "; ");
-                emit($cg, "strada_incref(" . $c_name . "); ");
-                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $c_name . "); }\n");
+                emit($cg, "{ StradaValue *__our_chk = strada_global_get_cstr(" . c_str_lit($our_key) . "); ");
+                emit($cg, "if (!STRADA_IS_TAGGED_INT(__our_chk) && __our_chk->type == STRADA_UNDEF) { ");
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $new_func . "); ");
+                emit($cg, "} strada_decref(__our_chk); }\n");
             }
             return;
         }
@@ -2064,7 +2051,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         return;
     }
 
-    # Foreach statement
+# Foreach statement
     if ($type == NODE_FOREACH_STMT()) {
         my str $label = $stmt->{"label"};
         if (length($label) > 0) {
@@ -2110,6 +2097,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         my int $foreach_id = $cg->{"foreach_counter"};
         $cg->{"foreach_counter"} = $foreach_id + 1;
+        my int $fe_tie = $cg->{"uses_tie"} + 0;
+        my int $fe_sp = cleanup_push_useful($cg);
 
         if ($array_expr->{"type"} == NODE_RANGE()
             && expr_is_int_typed($cg, $array_expr->{"start"}) == 1
@@ -2138,16 +2127,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             if (!$var_decl) {
                 $cg->{"known_types"}->{$var_cname} = "";
-                emit_indent($cg);
-                if (length($fe_our_key) > 0) {
-                    emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", strada_new_undef());\n");
-                } elsif ($fe_is_int == 1) {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int(0);\n");
-                } elsif ($fe_is_num == 1) {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num(0.0);\n");
-                } else {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef();\n");
-                }
+                emit_foreach_init_zero($cg, $var_name, $fe_our_key, $fe_tie, $fe_is_int, $fe_is_num);
             } else {
                 if ($fr_box == 0) {
                     emit_indent($cg);
@@ -2161,32 +2141,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 }
             }
 
-            invalidate_written_known_types($cg, $body);
-            my scalar $fr_saved_iv = copy_type_map($cg->{"int_vars"});
-            my scalar $fr_saved_nv = copy_type_map($cg->{"num_vars"});
-            my scalar $fr_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
-            my scalar $fr_saved_fl = copy_type_map($cg->{"func_locals_seen"});
-            my scalar $fr_saved_kt = copy_type_map($cg->{"known_types"});
-            my scalar $fr_saved_sv = copy_type_map($cg->{"struct_vars"});
-            my int $fr_shadow = our_shadow_mark($cg);
+            my scalar $fr_saved_st = save_block_type_state($cg, $body);
             my int $fr_decl_num = 0;
             if ($var_decl) {
                 my int $fr_vtype = $var_decl->{"var_type"};
-                our_shadow_begin($cg, $var_name);
+                clear_var_type_metadata($cg, $var_name);
                 if ($fr_vtype == TYPE_INT()) {
                     $cg->{"int_vars"}->{$var_name} = 1;
-                } else {
-                    $cg->{"int_vars"}->{$var_name} = "";
                 }
                 if ($fr_vtype == TYPE_NUM()) {
                     $cg->{"num_vars"}->{$var_name} = 1;
                     $fr_decl_num = 1;
-                } else {
-                    $cg->{"num_vars"}->{$var_name} = "";
                 }
                 $cg->{"active_boxed_vars"}->{$var_name} = $fr_box;
                 $cg->{"func_locals_seen"}->{$var_name} = 1;
-                $cg->{"known_types"}->{$var_name} = "";
             }
 
             emit_indent($cg);
@@ -2220,12 +2188,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 $fr_ctor = "strada_new_num((double)__fr_i_" . $foreach_id . ")";
             }
             if (!$var_decl) {
+                my str $fr_set_val = "strada_new_int_il(__fr_i_" . $foreach_id . ")";
+                if ($fe_is_num == 1) {
+                    $fr_set_val = "strada_new_num((double)__fr_i_" . $foreach_id . ")";
+                }
                 if (length($fe_our_key) > 0) {
-                    emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", strada_new_int_il(__fr_i_" . $foreach_id . "));\n");
-                } elsif ($fe_is_num == 1) {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num((double)__fr_i_" . $foreach_id . ");\n");
+                    emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", " . $fr_set_val . ");\n");
+                } elsif ($fe_tie == 1) {
+                    emit($cg, "{ StradaValue *__fr_tv = " . $fr_set_val . "; if (strada_scalar_is_tied(" . $var_name . ")) { ");
+                    if ($fe_sp == 1) { emit($cg, "strada_cleanup_push(__fr_tv); "); }
+                    emit($cg, "strada_tied_scalar_store(" . $var_name . ", __fr_tv); ");
+                    if ($fe_sp == 1) { emit($cg, "strada_cleanup_pop(); "); }
+                    emit($cg, "strada_decref(__fr_tv); } else { strada_decref(" . $var_name . "); " . $var_name . " = __fr_tv; } }\n");
                 } else {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int_il(__fr_i_" . $foreach_id . ");\n");
+                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = " . $fr_set_val . ";\n");
                 }
             } elsif ($fr_box == 1) {
                 if ($cg->{"func_has_try"} == 1) {
@@ -2314,13 +2290,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit_indent($cg);
             emit($cg, "}\n");
 
-            $cg->{"int_vars"} = $fr_saved_iv;
-            $cg->{"num_vars"} = $fr_saved_nv;
-            $cg->{"active_boxed_vars"} = $fr_saved_bv;
-            $cg->{"func_locals_seen"} = $fr_saved_fl;
-            $cg->{"known_types"} = $fr_saved_kt;
-            $cg->{"struct_vars"} = $fr_saved_sv;
-            our_shadow_restore($cg, $fr_shadow);
+            restore_block_type_state($cg, $fr_saved_st);
 
             scope_pop($cg);
             dedent($cg);
@@ -2378,8 +2348,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             foreach_cleanup_enter($cg, $saved_fe_depth, "__foreach_arr_" . $foreach_id);
         }
 
-        my int $fe_tie = $cg->{"uses_tie"} + 0;
-        my int $fe_sp = cleanup_push_useful($cg);
         if ($fe_tie == 1) {
             emit_indent($cg);
             emit($cg, "int64_t __foreach_len_" . $foreach_id . " = strada_av_size_sv(__foreach_arr_" . $foreach_id . ");\n");
@@ -2393,53 +2361,24 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if (!$var_decl) {
             $cg->{"known_types"}->{$var_cname} = "";
-            emit_indent($cg);
-            if (length($fe_our_key) > 0) {
-                emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", strada_new_undef());\n");
-            } elsif ($fe_tie == 1) {
-                if ($fe_is_int == 1) {
-                    emit($cg, "{ StradaValue *__fe_z = strada_new_int(0); if (strada_scalar_is_tied(" . $var_name . ")) { strada_tied_scalar_store(" . $var_name . ", __fe_z); strada_decref(__fe_z); } else { strada_decref(" . $var_name . "); " . $var_name . " = __fe_z; } }\n");
-                } elsif ($fe_is_num == 1) {
-                    emit($cg, "{ StradaValue *__fe_z = strada_new_num(0.0); if (strada_scalar_is_tied(" . $var_name . ")) { strada_tied_scalar_store(" . $var_name . ", __fe_z); strada_decref(__fe_z); } else { strada_decref(" . $var_name . "); " . $var_name . " = __fe_z; } }\n");
-                } else {
-                    emit($cg, "if (strada_scalar_is_tied(" . $var_name . ")) { strada_tied_scalar_store(" . $var_name . ", strada_undef_static()); } else { strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef(); }\n");
-                }
-            } elsif ($fe_is_int == 1) {
-                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int(0);\n");
-            } elsif ($fe_is_num == 1) {
-                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num(0.0);\n");
-            } else {
-                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef();\n");
-            }
+            emit_foreach_init_zero($cg, $var_name, $fe_our_key, $fe_tie, $fe_is_int, $fe_is_num);
         }
 
-        invalidate_written_known_types($cg, $body);
-        my scalar $fe_saved_iv = copy_type_map($cg->{"int_vars"});
-        my scalar $fe_saved_nv = copy_type_map($cg->{"num_vars"});
-        my scalar $fe_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
-        my scalar $fe_saved_fl = copy_type_map($cg->{"func_locals_seen"});
-        my scalar $fe_saved_kt = copy_type_map($cg->{"known_types"});
-        my scalar $fe_saved_sv = copy_type_map($cg->{"struct_vars"});
-        my int $fe_shadow = our_shadow_mark($cg);
+        my scalar $fe_saved_st = save_block_type_state($cg, $body);
         my int $fe_box = 0;
         if ($var_decl && ($cg->{"cand_boxed_vars"}->{$var_name} + 0) == 1) {
             $fe_box = 1;
         }
         if ($var_decl) {
-            our_shadow_begin($cg, $var_name);
+            clear_var_type_metadata($cg, $var_name);
             if ($var_decl->{"var_type"} == TYPE_INT()) {
                 $cg->{"int_vars"}->{$var_name} = 1;
-            } else {
-                $cg->{"int_vars"}->{$var_name} = "";
             }
             if ($var_decl->{"var_type"} == TYPE_NUM()) {
                 $cg->{"num_vars"}->{$var_name} = 1;
-            } else {
-                $cg->{"num_vars"}->{$var_name} = "";
             }
             $cg->{"active_boxed_vars"}->{$var_name} = $fe_box;
             $cg->{"func_locals_seen"}->{$var_name} = 1;
-            $cg->{"known_types"}->{$var_name} = "";
         }
 
         emit_indent($cg);
@@ -2656,13 +2595,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit_indent($cg);
         emit($cg, "}\n");
 
-        $cg->{"int_vars"} = $fe_saved_iv;
-        $cg->{"num_vars"} = $fe_saved_nv;
-        $cg->{"active_boxed_vars"} = $fe_saved_bv;
-        $cg->{"func_locals_seen"} = $fe_saved_fl;
-        $cg->{"known_types"} = $fe_saved_kt;
-        $cg->{"struct_vars"} = $fe_saved_sv;
-        our_shadow_restore($cg, $fe_shadow);
+        restore_block_type_state($cg, $fe_saved_st);
 
         if ($foreach_arr_cleanup) {
             foreach_cleanup_leave($cg);
@@ -5070,7 +5003,7 @@ func gen_program(scalar $cg, scalar $program) void {
         my scalar $fn = $funcs->[$fri];
         my str $fn_name = sanitize_name($fn->{"name"});
         my int $fn_ret = $fn->{"return_type"};
-        if ($fn_ret == TYPE_INT()) {
+        if ($fn->{"type"} != NODE_ASYNC_FUNC() && $fn_ret == TYPE_INT()) {
             $func_ret_types{$fn_name} = 1;
         }
         $fri = $fri + 1;

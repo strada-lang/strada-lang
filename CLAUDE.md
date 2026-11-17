@@ -684,7 +684,7 @@ func to_str(scalar $self) str { ... }
 use overload "+" => "add", '""' => "to_str", "fallback" => 1;
 ```
 
-Supported: `+`, `-`, `*`, `/`, `%`, `**`, `.`, `""`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>`, `eq`, `ne`, `cmp`, `neg`, `!`, `~`, `bool`. Zero overhead when not used.
+Supported: `+`, `-`, `*`, `/`, `%`, `**`, `x`, `.`, `""`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>`, `eq`, `ne`, `cmp`, `neg`, `!`, `~`, `bool`. Zero overhead when not used.
 
 ### `__C__` Blocks (C Interop)
 
@@ -1212,6 +1212,18 @@ compiler:
   `thread::x`, `utf8::x` that no handler claims) are a located compile error
   raised in `gen_user_call` (`unknown_builtin_name`), and `--check` now runs the
   code generator (output discarded) so it reports them too.
+- **Compound assignment on an `int`/`num` variable with an overloaded operand**
+  (`my int $n = 15; $n &= $obj;`) dispatches the overload, then coerces the
+  result to the declared type (honoring `0+`), on every path: unboxed, boxed,
+  and the VM (`vm_to_int_ov` / `vm_to_num_ov` in `OP_CAST_INT`/`OP_CAST_NUM`).
+- **Tied containers**: `ref()`/`typeof()` of a tied scalar describe what `FETCH`
+  returns; `clone()` copies tied arrays/hashes/scalars through
+  `FETCHSIZE`/`FETCH`/`FIRSTKEY`/`NEXTKEY` into plain untied values; `splice`
+  into a tied target reads a tied replacement array through `FETCH`. Tied
+  `SPLICE` receives the replacement list flattened (`SPLICE($self, $off, $len,
+  LIST...)`, as in Perl).
+- Assigning to a tied **parameter** (`func f($v) { $v = ...; }` called with a
+  tied scalar) STOREs into the caller's tied scalar; rebind with a new `my`.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

@@ -259,6 +259,8 @@ typedef enum {
     OP_INCR_LT_LOCAL_JMP_T,  /* u16 sa, u16 sb, u16 off — ++locals[sa]; if (locals[sa] < locals[sb]) jmp */
     OP_BIT_AND_ADD_I32,      /* u16 slot, i32 mask_imm, i32 add_imm — push (locals[slot] & mask_imm) + add_imm */
     OP_TAIL_CALL,            /* u16 func_idx, u8 argc — reuse frame & tail-call callee */
+    OP_CAST_ASSIGN_INT,      /* coerce top of stack to int in-place unless blessed object */
+    OP_CAST_ASSIGN_NUM,      /* coerce top of stack to num in-place unless blessed object */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -865,6 +867,7 @@ typedef struct {
     char *mem_buf;
     size_t mem_len;
     int is_mem; /* 1 = fmemopen read, 2 = open_memstream write */
+    VMValue mem_sref; /* backing scalar ref for open(\$var, ">"/"<") */
 } VMFileHandle;
 
 /* Opaque wrapper for native StradaValue* objects (e.g., from import_lib OOP) */
@@ -971,6 +974,7 @@ typedef struct {
     int is_hash_elem;
     VMHash *hash;
     char *hash_key;
+    size_t hash_keylen;
     int existed;
 } VMGlobalSave;
 

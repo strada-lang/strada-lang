@@ -417,6 +417,12 @@ static inline int vm_is_float_operand(VMValue v) {
 }
 
 static inline int64_t vm_to_int(VMValue v) {
+    for (int depth = 0; depth < 16 && VM_IS_PTR(v); depth++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else break;
+    }
     if (VM_IS_INT(v)) return VM_INT_VAL(v);
     if (VM_IS_FLOAT(v)) {
         double d = VM_FLOAT_VAL(v);
@@ -437,6 +443,12 @@ static inline int64_t vm_to_int(VMValue v) {
 }
 
 static inline double vm_to_num(VMValue v) {
+    for (int depth = 0; depth < 16 && VM_IS_PTR(v); depth++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else break;
+    }
     if (VM_IS_INT(v)) return (double)VM_INT_VAL(v);
     if (VM_IS_FLOAT(v)) return VM_FLOAT_VAL(v);
     if (VM_IS_PTR(v)) {
@@ -1531,6 +1543,11 @@ static void vm_gc_mark_all(VM *vm) {
             vm_gc_mark_val(ts->tied_obj, &work, &wlen, &wcap);
             break;
         }
+        case VM_OBJ_FILEHANDLE: {
+            VMFileHandle *fh = (VMFileHandle*)obj;
+            vm_gc_mark_val(fh->mem_sref, &work, &wlen, &wcap);
+            break;
+        }
         case VM_OBJ_WEAKREF:
             /* Weak references never keep their targets alive */
             break;
@@ -2505,7 +2522,15 @@ static VMValue vm_transliterate(const char *str, const char *from, const char *t
 
 static int vm_has_stringify(VMProgram *prog, VMValue v);
 static VMValue vm_stringify_ov(VM *vm, VMValue v);
+static int vm_tied_array_find_method(VM *vm, VMValue tied_obj, const char *method);
+static VMValue vm_tied_array_call(VM *vm, VMValue tied_obj, int fidx, VMValue *extra, int extra_argc);
+static VMArray *vm_materialize_array(VM *vm, VMArray *src);
+static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_firstkey);
 static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj);
+static int64_t vm_to_int_vm(VM *vm, VMValue v);
+static double vm_to_num_vm(VM *vm, VMValue v);
+static int64_t vm_to_int_ov(VM *vm, VMValue v, int depth);
+static double vm_to_num_ov(VM *vm, VMValue v, int depth);
 static VMValue sv_to_vm(StradaValue *sv);
 static size_t vm_utf8_char_count(const char *s, size_t blen);
 static size_t vm_utf8_char_to_byte(const char *s, size_t blen, int64_t char_idx);
@@ -3572,6 +3597,16 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
         if (oa->class_name) na->class_name = strdup(oa->class_name);
         VMValue out = VM_MAKE_PTR(na);
         vm_clone_map_put(m, v, out);
+        if (!VM_IS_UNDEF(oa->tied_obj) && vm) {
+            VMArray *src = vm_materialize_array(vm, oa);
+            if (vm->has_pending_exc) return out;
+            for (int i = 0; i < src->size; i++) {
+                VMValue cv = vm_clone_val_rec(vm, src->items[i], m, depth + 1);
+                if (vm->has_pending_exc) return out;
+                vm_array_push(na, cv);
+            }
+            return out;
+        }
         if (oa->size > 0) {
             if (oa->holes) {
                 na->holes = calloc((size_t)na->cap, 1);
@@ -3587,6 +3622,7 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
                         ev = VM_AS_WEAKREF(ev)->target;
                     }
                     na->items[i] = vm_clone_val_rec(vm, ev, m, depth + 1);
+                    if (vm && vm->has_pending_exc) return out;
                 }
             }
         }
@@ -3598,6 +3634,31 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
         if (oh->class_name) nh->class_name = strdup(oh->class_name);
         VMValue out = VM_MAKE_PTR(nh);
         vm_clone_map_put(m, v, out);
+        if (!VM_IS_UNDEF(oh->tied_obj) && vm) {
+            int has_fk = 0;
+            VMArray *keys = vm_tied_hash_collect_keys(vm, oh->tied_obj, &has_fk);
+            if (vm->has_pending_exc) return out;
+            if (keys) {
+                int ffidx = vm_tied_array_find_method(vm, oh->tied_obj, "FETCH");
+                for (int i = 0; i < keys->size; i++) {
+                    VMValue kv = keys->items[i];
+                    VMValue vv = VM_UNDEF_VAL;
+                    if (ffidx >= 0) {
+                        /* vm_tied_array_call prepends the tied object itself. */
+                        VMValue fargs[1] = { kv };
+                        vv = vm_tied_array_call(vm, oh->tied_obj, ffidx, fargs, 1);
+                        if (vm->has_pending_exc) return out;
+                    }
+                    VMValue cv = vm_clone_val_rec(vm, vv, m, depth + 1);
+                    if (vm->has_pending_exc) return out;
+                    char kbuf[256];
+                    size_t klen = 0;
+                    const char *ks = vm_bytes_view(kv, kbuf, sizeof(kbuf), &klen);
+                    vm_hash_set_n(nh, ks, klen, cv);
+                }
+            }
+            return out;
+        }
         for (int i = 0; i < oh->capacity; i++) {
             if (oh->entries[i].occupied == 1) {
                 VMValue ev = oh->entries[i].value;
@@ -3605,6 +3666,7 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
                     ev = VM_AS_WEAKREF(ev)->target;
                 }
                 VMValue cv = vm_clone_val_rec(vm, ev, m, depth + 1);
+                if (vm && vm->has_pending_exc) return out;
                 vm_hash_set_n(nh, oh->entries[i].key, oh->entries[i].keylen, cv);
             }
         }
@@ -3624,12 +3686,22 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
             if (vm && vm->globals) tv = vm_globals_get(vm, sr->global_name);
         } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
             tv = VM_AS_CELL(sr->cell)->val;
+        } else {
+            tv = sr->cell;
         }
         nc->val = vm_clone_val_rec(vm, tv, m, depth + 1);
         return out;
     }
     case VM_OBJ_CELL:
         return vm_clone_val_rec(vm, VM_AS_CELL(v)->val, m, depth + 1);
+    case VM_OBJ_WEAKREF:
+        return vm_clone_val_rec(vm, VM_AS_WEAKREF(v)->target, m, depth + 1);
+    case VM_OBJ_TIED_SCALAR: {
+        if (!vm) return v;
+        VMValue fv = vm_tied_scalar_fetch(vm, v);
+        if (vm->has_pending_exc) return VM_UNDEF_VAL;
+        return vm_clone_val_rec(vm, fv, m, depth + 1);
+    }
     case VM_OBJ_NATIVE_SV: {
         VMNativeSV *nsv = (VMNativeSV *)VM_TO_PTR(v);
         if (nsv->sv) {
@@ -3851,7 +3923,7 @@ static VMValue vm_unwrap_weak_gc(VM *vm, VMValue raw, VMValue *roots, int nroots
     return wr->target;
 }
 
-static void vm_restore_one_hash_elem(VM *vm, VMHash *h, char *hkey, int existed, VMValue saved_value, int propagate_exc) {
+static void vm_restore_one_hash_elem(VM *vm, VMHash *h, char *hkey, size_t hkeylen, int existed, VMValue saved_value, int propagate_exc) {
     if (h && hkey) {
         const char *tcls = !VM_IS_UNDEF(h->tied_obj) ? vm_obj_class_name(h->tied_obj) : NULL;
         if (tcls) {
@@ -3862,7 +3934,7 @@ static void vm_restore_one_hash_elem(VM *vm, VMHash *h, char *hkey, int existed,
                 vm->has_pending_exc = 0;
                 vm->pending_exc = VM_UNDEF_VAL;
             }
-            VMValue ksv = vm_str(hkey);
+            VMValue ksv = VM_MAKE_STR_N(hkey, hkeylen);
             if (existed) {
                 int sfidx = vm_find_method(vm->program, tcls, "STORE");
                 if (sfidx >= 0) {
@@ -3884,9 +3956,9 @@ static void vm_restore_one_hash_elem(VM *vm, VMHash *h, char *hkey, int existed,
             vm->gc_pause--;
         } else {
             if (existed) {
-                vm_hash_set(h, hkey, saved_value);
+                vm_hash_set_n(h, hkey, hkeylen, saved_value);
             } else {
-                vm_hash_delete(h, hkey);
+                vm_hash_delete_n(h, hkey, hkeylen);
             }
         }
     }
@@ -3900,12 +3972,14 @@ static void vm_unwind_global_saves(VM *vm, int target_depth) {
         if (gs->is_hash_elem) {
             VMHash *h = gs->hash;
             char *hkey = gs->hash_key;
+            size_t hkeylen = gs->hash_keylen;
             int existed = gs->existed;
             VMValue saved_value = gs->saved_value;
             gs->hash_key = NULL;
+            gs->hash_keylen = 0;
             gs->hash = NULL;
             gs->saved_value = VM_UNDEF_VAL;
-            vm_restore_one_hash_elem(vm, h, hkey, existed, saved_value, 0);
+            vm_restore_one_hash_elem(vm, h, hkey, hkeylen, existed, saved_value, 0);
         } else if (gs->name) {
             vm_globals_set(vm, gs->name, gs->saved_value);
             free(gs->name);
@@ -4938,6 +5012,164 @@ static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj) {
     return vm_to_int(r);
 }
 
+static int64_t vm_to_int_vm(VM *vm, VMValue v) {
+    for (int depth = 0; depth < 16 && VM_IS_PTR(v); depth++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else if (t == VM_OBJ_TIED_SCALAR && vm) {
+            v = vm_tied_scalar_fetch(vm, v);
+            if (vm->has_pending_exc) return 0;
+        } else break;
+    }
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY && vm) {
+        VMArray *a = VM_AS_ARRAY(v);
+        if (!VM_IS_UNDEF(a->tied_obj)) return vm_tied_array_fetchsize(vm, a->tied_obj);
+        return a->size;
+    }
+    return vm_to_int(v);
+}
+
+static double vm_to_num_vm(VM *vm, VMValue v) {
+    for (int depth = 0; depth < 16 && VM_IS_PTR(v); depth++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else if (t == VM_OBJ_TIED_SCALAR && vm) {
+            v = vm_tied_scalar_fetch(vm, v);
+            if (vm->has_pending_exc) return 0.0;
+        } else break;
+    }
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY && vm) {
+        VMArray *a = VM_AS_ARRAY(v);
+        if (!VM_IS_UNDEF(a->tied_obj)) return (double)vm_tied_array_fetchsize(vm, a->tied_obj);
+        return (double)a->size;
+    }
+    return vm_to_num(v);
+}
+
+static int vm_pair_to_num(VM *vm, VMValue a, VMValue b, double *out_a, double *out_b) {
+    if (!VM_IS_PTR(a) && !VM_IS_PTR(b)) {
+        *out_a = vm_to_num(a);
+        *out_b = vm_to_num(b);
+        return 0;
+    }
+    vm->gc_pause++;
+    *out_a = vm_to_num_vm(vm, a);
+    *out_b = vm->has_pending_exc ? 0.0 : vm_to_num_vm(vm, b);
+    vm->gc_pause--;
+    return vm->has_pending_exc;
+}
+
+static int vm_pair_to_int(VM *vm, VMValue a, VMValue b, int64_t *out_a, int64_t *out_b) {
+    if (!VM_IS_PTR(a) && !VM_IS_PTR(b)) {
+        *out_a = vm_to_int(a);
+        *out_b = vm_to_int(b);
+        return 0;
+    }
+    vm->gc_pause++;
+    *out_a = vm_to_int_vm(vm, a);
+    *out_b = vm->has_pending_exc ? 0 : vm_to_int_vm(vm, b);
+    vm->gc_pause--;
+    return vm->has_pending_exc;
+}
+
+static VMValue vm_sref_fetch_val(VM *vm, VMValue ref) {
+    if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_WEAKREF, 0)) {
+        ref = vm_unwrap_weak_gc(vm, ref, NULL, 0);
+    }
+    VMValue tv = VM_UNDEF_VAL;
+    if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_SREF) {
+        VMScalarRef *sr = VM_AS_SREF(ref);
+        if (sr->global_name) {
+            tv = vm_globals_get(vm, sr->global_name);
+        } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
+            tv = VM_AS_CELL(sr->cell)->val;
+        }
+    } else if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_CELL) {
+        tv = VM_AS_CELL(ref)->val;
+    } else if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_TIED_SCALAR) {
+        tv = ref;
+    } else if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_NATIVE_SV) {
+        VMNativeSV *nsv = (VMNativeSV *)VM_TO_PTR(ref);
+        if (nsv->sv && !STRADA_IS_TAGGED_INT(nsv->sv) && nsv->sv->type == STRADA_REF) {
+            StradaValue *d = strada_deref(nsv->sv);
+            VMValue res = sv_to_vm(d);
+            strada_decref(d);
+            return res;
+        }
+        return vm_val_copy(ref);
+    } else {
+        return vm_val_copy(ref);
+    }
+    if (__builtin_expect(VM_IS_PTR(tv) && VM_PTR_TYPE(tv) == VM_OBJ_TIED_SCALAR, 0)) {
+        vm->gc_pause++;
+        VMValue fv = vm_tied_scalar_fetch(vm, tv);
+        vm->gc_pause--;
+        return fv;
+    }
+    if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(tv) && VM_PTR_TYPE(tv) == VM_OBJ_WEAKREF, 0)) {
+        tv = vm_unwrap_weak_gc(vm, tv, &ref, 1);
+    }
+    return vm_val_copy(tv);
+}
+
+static void vm_sref_store_val(VM *vm, VMValue ref, VMValue newv) {
+    if (__builtin_expect(vm->has_weakrefs && VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_WEAKREF, 0)) {
+        ref = vm_unwrap_weak_gc(vm, ref, &newv, 1);
+    }
+    if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_SREF) {
+        VMScalarRef *sr = VM_AS_SREF(ref);
+        if (sr->global_name) {
+            VMValue tv = vm_globals_get(vm, sr->global_name);
+            if (__builtin_expect(VM_IS_PTR(tv) && VM_PTR_TYPE(tv) == VM_OBJ_TIED_SCALAR, 0)) {
+                vm->gc_pause++;
+                vm_tied_scalar_store(vm, tv, newv);
+                vm->gc_pause--;
+            } else {
+                vm_globals_set(vm, sr->global_name, vm_val_copy(newv));
+            }
+        } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
+            VMValue old_cv = VM_AS_CELL(sr->cell)->val;
+            if (__builtin_expect(VM_IS_PTR(old_cv) && VM_PTR_TYPE(old_cv) == VM_OBJ_TIED_SCALAR, 0)) {
+                vm->gc_pause++;
+                vm_tied_scalar_store(vm, old_cv, newv);
+                vm->gc_pause--;
+            } else {
+                vm_temp_free(&old_cv);
+                VM_AS_CELL(sr->cell)->val = vm_val_copy(newv);
+            }
+        }
+    } else if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_CELL) {
+        VMValue old_cv = VM_AS_CELL(ref)->val;
+        if (__builtin_expect(VM_IS_PTR(old_cv) && VM_PTR_TYPE(old_cv) == VM_OBJ_TIED_SCALAR, 0)) {
+            vm->gc_pause++;
+            vm_tied_scalar_store(vm, old_cv, newv);
+            vm->gc_pause--;
+        } else {
+            vm_temp_free(&old_cv);
+            VM_AS_CELL(ref)->val = vm_val_copy(newv);
+        }
+    } else if (VM_IS_PTR(ref) && VM_PTR_TYPE(ref) == VM_OBJ_NATIVE_SV) {
+        VMNativeSV *nsv = (VMNativeSV *)VM_TO_PTR(ref);
+        if (nsv->sv) {
+            StradaValue *nv = vm_to_sv(newv);
+            strada_deref_set(nsv->sv, nv);
+            strada_decref(nv);
+        }
+    }
+}
+
+/* Flush an open_memstream handle backed by a scalar ref back to its scalar. */
+static void vm_fh_sync_mem_sref(VM *vm, VMFileHandle *fh) {
+    if (!fh || fh->is_mem != 2 || !VM_IS_PTR(fh->mem_sref)) return;
+    if (fh->fp) fflush((FILE*)fh->fp);
+    vm->gc_pause++;
+    VMValue sv = VM_MAKE_STR_N(fh->mem_buf ? fh->mem_buf : "", fh->mem_len);
+    vm_sref_store_val(vm, fh->mem_sref, sv);
+    vm->gc_pause--;
+}
+
 static int vm_collect_spread_items(VM *vm, VMValue arr_val, VMValue *stk_buf, int stk_cap, VMValue **out_items, int *out_count) {
     *out_items = stk_buf;
     *out_count = 0;
@@ -5182,8 +5414,14 @@ static int vm_sort_num_decor_cmp(const void *a, const void *b) {
 }
 
 static double vm_to_num_ov(VM *vm, VMValue v, int depth) {
-    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) {
-        v = VM_AS_WEAKREF(v)->target;
+    for (int d = 0; d < 16 && VM_IS_PTR(v); d++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else if (t == VM_OBJ_TIED_SCALAR && vm) {
+            v = vm_tied_scalar_fetch(vm, v);
+            if (vm->has_pending_exc) return 0.0;
+        } else break;
     }
     if (depth < 8 && vm && vm->program && vm_obj_class_name(v) != NULL) {
         VMValue ov = VM_UNDEF_VAL;
@@ -5192,7 +5430,29 @@ static double vm_to_num_ov(VM *vm, VMValue v, int depth) {
             return vm_to_num_ov(vm, ov, depth + 1);
         }
     }
-    return vm_to_num(v);
+    return vm_to_num_vm(vm, v);
+}
+
+/* Integer coercion that honors a "0+" overload on a blessed value (the
+ * int-variable store path: `my int $x op= $obj`), like strada_to_int. */
+static int64_t vm_to_int_ov(VM *vm, VMValue v, int depth) {
+    for (int d = 0; d < 16 && VM_IS_PTR(v); d++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else if (t == VM_OBJ_TIED_SCALAR && vm) {
+            v = vm_tied_scalar_fetch(vm, v);
+            if (vm->has_pending_exc) return 0;
+        } else break;
+    }
+    if (depth < 8 && vm && vm->program && vm_obj_class_name(v) != NULL) {
+        VMValue ov = VM_UNDEF_VAL;
+        if (vm_try_un_overload(vm, "0+", v, &ov)) {
+            if (vm->has_pending_exc) return 0;
+            return vm_to_int_ov(vm, ov, depth + 1);
+        }
+    }
+    return vm_to_int_vm(vm, v);
 }
 
 static VMArray *vm_sort_default_impl(VM *vm, VMValue input) {
@@ -5278,14 +5538,19 @@ static VMArray *vm_tied_array_splice(VM *vm, VMArray *arr, int argc, VMValue *ar
     if (vm->has_pending_exc) { vm->gc_pause--; return vm_array_new(0); }
     if (sz < 0) sz = 0;
 
-    int64_t offset = (argc >= 2 && !VM_IS_UNDEF(args[1])) ? vm_to_int(args[1]) : 0;
+    int64_t offset = 0;
+    if (argc >= 2 && !VM_IS_UNDEF(args[1])) {
+        offset = VM_IS_PTR(args[1]) ? vm_to_int_vm(vm, args[1]) : vm_to_int(args[1]);
+        if (vm->has_pending_exc) { vm->gc_pause--; return vm_array_new(0); }
+    }
     if (offset < 0) offset = sz + offset;
     if (offset < 0) offset = 0;
     if (offset > sz) offset = sz;
 
     int64_t length;
     if (argc >= 3 && !VM_IS_UNDEF(args[2])) {
-        length = vm_to_int(args[2]);
+        length = VM_IS_PTR(args[2]) ? vm_to_int_vm(vm, args[2]) : vm_to_int(args[2]);
+        if (vm->has_pending_exc) { vm->gc_pause--; return vm_array_new(0); }
         if (length < 0) {
             length = (sz - offset) + length;
             if (length < 0) length = 0;
@@ -5593,13 +5858,23 @@ static VMValue vm_replace_literal(const char *s, size_t slen,
 
 /* Evaluate abs() with tied-scalar FETCH and unary "abs"/"0+" overload dispatch. */
 static int vm_eval_abs_slow(VM *vm, VMValue v, VMValue *out) {
-    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_CELL) {
-        v = VM_AS_CELL(v)->val;
+    for (int depth = 0; depth < 16 && VM_IS_PTR(v); depth++) {
+        enum VMObjType t = VM_PTR_TYPE(v);
+        if (t == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+        else if (t == VM_OBJ_WEAKREF) v = VM_AS_WEAKREF(v)->target;
+        else if (t == VM_OBJ_TIED_SCALAR) {
+            v = vm_tied_scalar_fetch(vm, v);
+            if (vm->has_pending_exc) return 1;
+        } else break;
     }
-    for (int depth = 0; depth < 16 && VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_TIED_SCALAR; depth++) {
-        v = vm_tied_scalar_fetch(vm, v);
-        if (vm->has_pending_exc) return 1;
-        if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_CELL) v = VM_AS_CELL(v)->val;
+    if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY) {
+        VMArray *a = VM_AS_ARRAY(v);
+        if (!VM_IS_UNDEF(a->tied_obj)) {
+            int64_t sz = vm_tied_array_fetchsize(vm, a->tied_obj);
+            if (vm->has_pending_exc) return 1;
+            *out = VM_MAKE_INT(sz < 0 ? -sz : sz);
+            return 0;
+        }
     }
     if (vm_obj_class_name(v) != NULL) {
         VMValue ov = VM_UNDEF_VAL;
@@ -5757,6 +6032,14 @@ static __attribute__((noinline)) void vm_slow_store_local(VM *vm, uint16_t slot,
 }
 
 static __attribute__((noinline)) VMValue vm_slow_bin_arith(VM *vm, int op_kind, VMValue a, VMValue b) {
+    if (VM_IS_PTR(a) && vm_slow_unwrap_local(vm, &a)) return VM_UNDEF_VAL;
+    if (VM_IS_PTR(b)) {
+        if (vm->stack_top >= vm->stack_cap) vm_stack_grow(vm, vm->stack_top);
+        vm->stack[vm->stack_top++] = a;
+        int exc = vm_slow_unwrap_local(vm, &b);
+        a = vm->stack[--vm->stack_top];
+        if (exc) return VM_UNDEF_VAL;
+    }
     const char *opstr = (op_kind == 0) ? "+" : (op_kind == 1) ? "-" : "*";
     if (__builtin_expect(vm_obj_class_name(a) != NULL || vm_obj_class_name(b) != NULL, 0)) {
         VMValue ov = VM_UNDEF_VAL;
@@ -5766,11 +6049,14 @@ static __attribute__((noinline)) VMValue vm_slow_bin_arith(VM *vm, int op_kind, 
         if (vm->has_pending_exc) return VM_UNDEF_VAL;
     }
     if (!vm_is_float_operand(a) && !vm_is_float_operand(b)) {
-        uint64_t ua = (uint64_t)vm_to_int(a), ub = (uint64_t)vm_to_int(b);
+        int64_t ia = 0, ib = 0;
+        if (vm_pair_to_int(vm, a, b, &ia, &ib)) return VM_UNDEF_VAL;
+        uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
         int64_t r = (op_kind == 0) ? (int64_t)(ua + ub) : (op_kind == 1) ? (int64_t)(ua - ub) : (int64_t)(ua * ub);
         return VM_MAKE_INT(r);
     }
-    double da = vm_to_num(a), db = vm_to_num(b);
+    double da = 0.0, db = 0.0;
+    if (vm_pair_to_num(vm, a, b, &da, &db)) return VM_UNDEF_VAL;
     return VM_MAKE_FLOAT((op_kind == 0) ? (da + db) : (op_kind == 1) ? (da - db) : (da * db));
 }
 
@@ -5785,7 +6071,9 @@ static __attribute__((noinline)) VMValue vm_slow_local_imm_arith(VM *vm, VMValue
         if (vm->has_pending_exc) return VM_UNDEF_VAL;
     }
     if (op_kind == 2) {
-        return VM_MAKE_INT(vm_to_int(a) & (int64_t)imm);
+        int64_t ia = vm_to_int_vm(vm, a);
+        if (vm->has_pending_exc) return VM_UNDEF_VAL;
+        return VM_MAKE_INT(ia & (int64_t)imm);
     }
     if (op_kind == 3) {
         int64_t bv = (int64_t)imm;
@@ -5794,7 +6082,8 @@ static __attribute__((noinline)) VMValue vm_slow_local_imm_arith(VM *vm, VMValue
             vm->has_pending_exc = 1;
             return VM_UNDEF_VAL;
         }
-        int64_t av = vm_to_int(a);
+        int64_t av = vm_to_int_vm(vm, a);
+        if (vm->has_pending_exc) return VM_UNDEF_VAL;
         int64_t r = 0;
         if (!(av == INT64_MIN && bv == -1)) {
             r = av % bv;
@@ -5803,10 +6092,13 @@ static __attribute__((noinline)) VMValue vm_slow_local_imm_arith(VM *vm, VMValue
         return VM_MAKE_INT(r);
     }
     if (!vm_is_float_operand(a)) {
-        uint64_t ua = (uint64_t)vm_to_int(a), ub = (uint64_t)(int64_t)imm;
+        int64_t ia = vm_to_int_vm(vm, a);
+        if (vm->has_pending_exc) return VM_UNDEF_VAL;
+        uint64_t ua = (uint64_t)ia, ub = (uint64_t)(int64_t)imm;
         return VM_MAKE_INT((op_kind == 0) ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
     }
-    double da = vm_to_num(a);
+    double da = vm_to_num_vm(vm, a);
+    if (vm->has_pending_exc) return VM_UNDEF_VAL;
     return VM_MAKE_FLOAT((op_kind == 0) ? (da - (double)imm) : (da + (double)imm));
 }
 
@@ -5827,9 +6119,13 @@ static __attribute__((noinline)) VMValue vm_slow_add_locals(VM *vm, VMValue va, 
         if (vm->has_pending_exc) return VM_UNDEF_VAL;
     }
     if (!vm_is_float_operand(va) && !vm_is_float_operand(vb)) {
-        return VM_MAKE_INT((int64_t)((uint64_t)vm_to_int(va) + (uint64_t)vm_to_int(vb)));
+        int64_t ia = 0, ib = 0;
+        if (vm_pair_to_int(vm, va, vb, &ia, &ib)) return VM_UNDEF_VAL;
+        return VM_MAKE_INT((int64_t)((uint64_t)ia + (uint64_t)ib));
     }
-    return VM_MAKE_FLOAT(vm_to_num(va) + vm_to_num(vb));
+    double da = 0.0, db = 0.0;
+    if (vm_pair_to_num(vm, va, vb, &da, &db)) return VM_UNDEF_VAL;
+    return VM_MAKE_FLOAT(da + db);
 }
 
 static __attribute__((noinline)) int vm_slow_cmp_local_i32(VM *vm, VMValue v, int32_t imm, int is_le) {
@@ -5846,7 +6142,8 @@ static __attribute__((noinline)) int vm_slow_cmp_local_i32(VM *vm, VMValue v, in
         int64_t iv = VM_ANY_INT_VAL(v);
         return is_le ? (iv <= (int64_t)imm) : (iv < (int64_t)imm);
     }
-    double dv = vm_to_num(v);
+    double dv = vm_to_num_vm(vm, v);
+    if (vm->has_pending_exc) return 0;
     return is_le ? (dv <= (double)imm) : (dv < (double)imm);
 }
 
@@ -5867,7 +6164,10 @@ static __attribute__((noinline)) int vm_slow_cmp_vals_lt(VM *vm, VMValue a, VMVa
         }
         if (vm->has_pending_exc) return 0;
     }
-    return (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) < VM_ANY_INT_VAL(b)) : (vm_to_num(a) < vm_to_num(b));
+    if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) return VM_ANY_INT_VAL(a) < VM_ANY_INT_VAL(b);
+    double da = 0.0, db = 0.0;
+    if (vm_pair_to_num(vm, a, b, &da, &db)) return 0;
+    return da < db;
 }
 
 static __attribute__((noinline)) void vm_slow_add_to_local(VM *vm, uint16_t d, VMValue rhs, uint8_t coerce, int is_sub) {
@@ -5888,24 +6188,41 @@ static __attribute__((noinline)) void vm_slow_add_to_local(VM *vm, uint16_t d, V
                 if (!vm_try_bin_overload(vm, is_sub ? "-" : "+", lhs, cur_rhs, &out)) {
                     if (!vm->has_pending_exc) {
                         if (!vm_is_float_operand(lhs) && !vm_is_float_operand(cur_rhs)) {
-                            uint64_t ua = (uint64_t)vm_to_int(lhs), ub = (uint64_t)vm_to_int(cur_rhs);
-                            out = VM_MAKE_INT(is_sub ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
+                            int64_t ia = 0, ib = 0;
+                            if (!vm_pair_to_int(vm, lhs, cur_rhs, &ia, &ib)) {
+                                uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
+                                out = VM_MAKE_INT(is_sub ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
+                            }
                         } else {
-                            double da = vm_to_num(lhs), db = vm_to_num(cur_rhs);
-                            out = VM_MAKE_FLOAT(is_sub ? (da - db) : (da + db));
+                            double da = 0.0, db = 0.0;
+                            if (!vm_pair_to_num(vm, lhs, cur_rhs, &da, &db)) {
+                                out = VM_MAKE_FLOAT(is_sub ? (da - db) : (da + db));
+                            }
                         }
                     }
                 }
             } else if (!vm_is_float_operand(lhs) && !vm_is_float_operand(cur_rhs)) {
-                uint64_t ua = (uint64_t)vm_to_int(lhs), ub = (uint64_t)vm_to_int(cur_rhs);
-                out = VM_MAKE_INT(is_sub ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
+                int64_t ia = 0, ib = 0;
+                if (!vm_pair_to_int(vm, lhs, cur_rhs, &ia, &ib)) {
+                    uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
+                    out = VM_MAKE_INT(is_sub ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
+                }
             } else {
-                double da = vm_to_num(lhs), db = vm_to_num(cur_rhs);
-                out = VM_MAKE_FLOAT(is_sub ? (da - db) : (da + db));
+                double da = 0.0, db = 0.0;
+                if (!vm_pair_to_num(vm, lhs, cur_rhs, &da, &db)) {
+                    out = VM_MAKE_FLOAT(is_sub ? (da - db) : (da + db));
+                }
             }
             if (!vm->has_pending_exc) {
-                if (coerce == 1 && !VM_IS_INT(out)) out = VM_MAKE_INT(vm_to_int(out));
-                else if (coerce == 2 && !VM_IS_FLOAT(out)) out = VM_MAKE_FLOAT(vm_to_num(out));
+                if (coerce == 1 && !VM_IS_INT(out)) {
+                    int64_t iv = vm_to_int_vm(vm, out);
+                    if (vm->has_pending_exc) { vm->gc_pause--; return; }
+                    out = VM_MAKE_INT(iv);
+                } else if (coerce == 2 && !VM_IS_FLOAT(out)) {
+                    double nv = vm_to_num_vm(vm, out);
+                    if (vm->has_pending_exc) { vm->gc_pause--; return; }
+                    out = VM_MAKE_FLOAT(nv);
+                }
                 vm_tied_scalar_store(vm, ts, out);
             }
         }
@@ -5944,22 +6261,42 @@ static __attribute__((noinline)) void vm_slow_add_to_local(VM *vm, uint16_t d, V
             cur_locals = vm->stack + vm->frames[vm->frame_count - 1].local_base;
             dstp = &cur_locals[d];
             if (VM_IS_PTR(*dstp) && VM_PTR_TYPE(*dstp) == VM_OBJ_CELL) dstp = &VM_AS_CELL(*dstp)->val;
-            if (coerce == 1 && !VM_IS_INT(out)) out = VM_MAKE_INT(vm_to_int(out));
-            else if (coerce == 2 && !VM_IS_FLOAT(out)) out = VM_MAKE_FLOAT(vm_to_num(out));
+            if (coerce == 1 && !VM_IS_INT(out)) {
+                int64_t iv = vm_to_int_vm(vm, out);
+                if (vm->has_pending_exc) return;
+                out = VM_MAKE_INT(iv);
+            } else if (coerce == 2 && !VM_IS_FLOAT(out)) {
+                double nv = vm_to_num_vm(vm, out);
+                if (vm->has_pending_exc) return;
+                out = VM_MAKE_FLOAT(nv);
+            }
             *dstp = out;
             return;
         }
         if (vm->has_pending_exc) return;
     }
     if (!vm_is_float_operand(lhs) && !vm_is_float_operand(rhs)) {
-        uint64_t ua = (uint64_t)vm_to_int(lhs), ub = (uint64_t)vm_to_int(rhs);
+        int64_t ia = 0, ib = 0;
+        if (vm_pair_to_int(vm, lhs, rhs, &ia, &ib)) return;
+        uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
         out = VM_MAKE_INT(is_sub ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
     } else {
-        double da = vm_to_num(lhs), db = vm_to_num(rhs);
+        double da = 0.0, db = 0.0;
+        if (vm_pair_to_num(vm, lhs, rhs, &da, &db)) return;
         out = VM_MAKE_FLOAT(is_sub ? (da - db) : (da + db));
     }
-    if (coerce == 1 && !VM_IS_INT(out)) out = VM_MAKE_INT(vm_to_int(out));
-    else if (coerce == 2 && !VM_IS_FLOAT(out)) out = VM_MAKE_FLOAT(vm_to_num(out));
+    if (coerce == 1 && !VM_IS_INT(out)) {
+        int64_t iv = vm_to_int_vm(vm, out);
+        if (vm->has_pending_exc) return;
+        out = VM_MAKE_INT(iv);
+    } else if (coerce == 2 && !VM_IS_FLOAT(out)) {
+        double nv = vm_to_num_vm(vm, out);
+        if (vm->has_pending_exc) return;
+        out = VM_MAKE_FLOAT(nv);
+    }
+    cur_locals = vm->stack + vm->frames[vm->frame_count - 1].local_base;
+    dstp = &cur_locals[d];
+    if (VM_IS_PTR(*dstp) && VM_PTR_TYPE(*dstp) == VM_OBJ_CELL) dstp = &VM_AS_CELL(*dstp)->val;
     *dstp = out;
 }
 
@@ -6234,9 +6571,84 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         switch (bid) {
         case BUILTIN_CORE_OPEN: {
             if (argc >= 2) {
+                VMValue target = args[0];
                 char fbuf[256], mbuf[32];
-                const char *path = vm_to_cstr(args[0], fbuf, 256);
                 const char *mode = vm_to_cstr(args[1], mbuf, 32);
+                if (VM_IS_PTR(target) && VM_PTR_TYPE(target) == VM_OBJ_WEAKREF) {
+                    vm->stack_top = sp;
+                    target = vm_unwrap_weak_gc(vm, target, NULL, 0);
+                    stack = vm->stack; RELOAD();
+                }
+                if (VM_IS_PTR(target) && VM_PTR_TYPE(target) == VM_OBJ_SREF) {
+                    if (strcmp(mode, "<") == 0 || strcmp(mode, "r") == 0) {
+                        vm->stack_top = sp;
+                        VMValue cur = vm_sref_fetch_val(vm, target);
+                        stack = vm->stack; RELOAD();
+                        if (__builtin_expect(vm->has_pending_exc, 0)) {
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                        char dbuf[256];
+                        size_t dlen = 0;
+                        const char *data = vm_bytes_view(cur, dbuf, sizeof(dbuf), &dlen);
+                        char *copy = (dlen > 0) ? malloc(dlen) : NULL;
+                        if (copy && dlen > 0) memcpy(copy, data, dlen);
+                        FILE *fp = (dlen > 0 && copy) ? fmemopen(copy, dlen, "r") : fopen("/dev/null", "r");
+                        if (fp) {
+                            VMFileHandle *fh = calloc(1, sizeof(VMFileHandle));
+                            vm_gc_init_hdr(&fh->hdr, VM_OBJ_FILEHANDLE);
+                            fh->fp = fp;
+                            fh->mem_buf = copy;
+                            fh->mem_len = dlen;
+                            fh->is_mem = 1;
+                            SP_PUSH(VM_MAKE_PTR(fh));
+                        } else {
+                            free(copy);
+                            SP_PUSH(VM_UNDEF_VAL);
+                        }
+                    } else if (strcmp(mode, ">") == 0 || strcmp(mode, "w") == 0 ||
+                               strcmp(mode, ">>") == 0 || strcmp(mode, "a") == 0) {
+                        int is_append = (mode[0] == '>' && mode[1] == '>') || mode[0] == 'a';
+                        VMValue cur = VM_UNDEF_VAL;
+                        if (is_append) {
+                            vm->stack_top = sp;
+                            vm->gc_pause++;
+                            cur = vm_sref_fetch_val(vm, target);
+                            vm->gc_pause--;
+                            stack = vm->stack; RELOAD();
+                            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                                goto L_builtin_throw_exc;
+                            }
+                        }
+                        VMFileHandle *fh = calloc(1, sizeof(VMFileHandle));
+                        vm_gc_init_hdr(&fh->hdr, VM_OBJ_FILEHANDLE);
+                        FILE *fp = open_memstream(&fh->mem_buf, &fh->mem_len);
+                        if (fp) {
+                            fh->fp = fp;
+                            fh->is_mem = 2;
+                            fh->mem_sref = target;
+                            if (is_append && !VM_IS_UNDEF(cur)) {
+                                char dbuf[256];
+                                size_t dlen = 0;
+                                const char *data = vm_bytes_view(cur, dbuf, sizeof(dbuf), &dlen);
+                                if (dlen > 0) fwrite(data, 1, dlen, fp);
+                                fflush(fp);
+                            }
+                            SP_PUSH(VM_MAKE_PTR(fh));
+                        } else {
+                            free(fh->mem_buf);
+                            fh->mem_buf = NULL;
+                            fh->fp = NULL;
+                            fh->mem_sref = VM_UNDEF_VAL;
+                            SP_PUSH(VM_UNDEF_VAL);
+                        }
+                    } else {
+                        SP_PUSH(VM_UNDEF_VAL);
+                    }
+                    break;
+                }
+                const char *path = vm_to_cstr(target, fbuf, 256);
                 /* Convert Perl-style modes */
                 const char *cmode = mode;
                 if (strcmp(mode, "<") == 0) cmode = "r";
@@ -6308,8 +6720,34 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     SP_PUSH(sv_to_vm(rc));
                     if (rc) strada_decref(rc);
                 } else if (fh->fp) {
-                    fclose((FILE*)fh->fp);
-                    fh->fp = NULL;
+                    if (fh->is_mem == 2 && VM_IS_PTR(fh->mem_sref)) {
+                        VMValue sref = fh->mem_sref;
+                        fh->mem_sref = VM_UNDEF_VAL;
+                        fclose((FILE*)fh->fp);
+                        fh->fp = NULL;
+                        char *mbuf = fh->mem_buf;
+                        size_t mlen = fh->mem_len;
+                        fh->mem_buf = NULL;
+                        fh->mem_len = 0;
+                        vm->stack_top = sp;
+                        vm->gc_pause++;
+                        VMValue sv = VM_MAKE_STR_N(mbuf ? mbuf : "", mlen);
+                        free(mbuf);
+                        vm_sref_store_val(vm, sref, sv);
+                        vm->gc_pause--;
+                        stack = vm->stack; RELOAD();
+                        if (__builtin_expect(vm->has_pending_exc, 0)) {
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                    } else {
+                        fclose((FILE*)fh->fp);
+                        fh->fp = NULL;
+                        if (fh->is_mem == 1) {
+                            free(fh->mem_buf);
+                            fh->mem_buf = NULL;
+                        }
+                    }
                     SP_PUSH(VM_MAKE_INT(1));
                 } else {
                     SP_PUSH(VM_MAKE_INT(0));
@@ -6332,6 +6770,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 size_t cap = 256, len = 0;
                 char *buf = malloc(cap);
                 int c = EOF;
+                int _prev_safe = vm_worker_enter_safe(vm);
                 while ((max_bytes <= 0 || (int64_t)len < max_bytes) && (c = fgetc(fp)) != EOF) {
                     if (len + 1 >= cap) {
                         cap *= 2;
@@ -6340,6 +6779,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     buf[len++] = (char)c;
                     if (c == '\n') break;
                 }
+                vm_worker_leave_safe(vm, _prev_safe);
                 if (len == 0 && c == EOF) {
                     free(buf);
                     SP_PUSH(VM_UNDEF_VAL);
@@ -6428,6 +6868,15 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
                 VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
                 if (fh->fp) fflush((FILE*)fh->fp);
+                if (fh->is_mem == 2 && VM_IS_PTR(fh->mem_sref)) {
+                    vm->stack_top = sp;
+                    vm_fh_sync_mem_sref(vm, fh);
+                    stack = vm->stack; RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                        goto L_builtin_throw_exc;
+                    }
+                }
             }
             SP_PUSH(VM_UNDEF_VAL);
             break;
@@ -6584,10 +7033,13 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             if (argc >= 1) {
                 char cbuf[1024];
                 const char *cmd = vm_to_cstr(args[0], cbuf, 1024);
+                int _prev_safe = vm_worker_enter_safe(vm);
                 FILE *fp = popen(cmd, "r");
+                char *out = NULL;
+                size_t total = 0;
                 if (fp) {
-                    size_t cap = 4096, total = 0;
-                    char *out = malloc(cap);
+                    size_t cap = 4096;
+                    out = malloc(cap);
                     size_t n;
                     for (;;) {
                         if (total + 1024 >= cap) {
@@ -6600,9 +7052,14 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     }
                     out[total] = 0;
                     pclose(fp);
+                }
+                vm_worker_leave_safe(vm, _prev_safe);
+                if (out) {
                     SP_PUSH(VM_MAKE_STR_N(out, total));
                     free(out);
-                } else SP_PUSH(vm_str(""));
+                } else {
+                    SP_PUSH(vm_str(""));
+                }
             } else SP_PUSH(vm_str(""));
             break;
         }
@@ -6610,7 +7067,9 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             if (argc >= 1) {
                 char cbuf[1024];
                 const char *cmd = vm_to_cstr(args[0], cbuf, 1024);
+                int _prev_safe = vm_worker_enter_safe(vm);
                 int rc = system(cmd);
+                vm_worker_leave_safe(vm, _prev_safe);
                 SP_PUSH(VM_MAKE_INT(WEXITSTATUS(rc)));
             } else SP_PUSH(VM_MAKE_INT(-1));
             break;
@@ -7189,16 +7648,33 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     SP_PUSH(VM_MAKE_PTR(rem));
                     break;
                 }
-                int64_t offset = (argc >= 2) ? vm_to_int(args[1]) : 0;
-                if (offset < 0) offset = arr->size + offset;
-                if (offset < 0) offset = 0;
-                if (offset > arr->size) offset = arr->size;
-                int64_t length = (argc >= 3) ? vm_to_int(args[2]) : arr->size - offset;
-                if (length < 0) {
-                    length = (arr->size - offset) + length;
-                    if (length < 0) length = 0;
+                int64_t offset = 0;
+                if (argc >= 2) {
+                    if (VM_IS_PTR(args[1])) {
+                        vm->stack_top = sp; vm->gc_pause++;
+                        offset = vm_to_int_vm(vm, args[1]);
+                        vm->gc_pause--; stack = vm->stack; RELOAD();
+                        if (__builtin_expect(vm->has_pending_exc, 0)) {
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                        arr = VM_AS_ARRAY(args[0]);
+                    } else offset = vm_to_int(args[1]);
                 }
-                if (length > (int64_t)arr->size - offset) length = (int64_t)arr->size - offset;
+                int has_len = (argc >= 3);
+                int64_t length = 0;
+                if (has_len) {
+                    if (VM_IS_PTR(args[2])) {
+                        vm->stack_top = sp; vm->gc_pause++;
+                        length = vm_to_int_vm(vm, args[2]);
+                        vm->gc_pause--; stack = vm->stack; RELOAD();
+                        if (__builtin_expect(vm->has_pending_exc, 0)) {
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                        arr = VM_AS_ARRAY(args[0]);
+                    } else length = vm_to_int(args[2]);
+                }
                 if (__builtin_expect(vm->has_weakrefs, 0)) {
                     vm->stack_top = sp;
                     vm_unwrap_container_weak_gc(vm, args[0], args, argc);
@@ -7210,19 +7686,9 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                         }
                     }
                     stack = vm->stack; RELOAD();
+                    arr = VM_AS_ARRAY(args[0]);
                 }
-                /* Collect removed elements */
-                VMArray *removed = vm_array_new(length > 0 ? (int)length : 8);
-                for (int64_t i = 0; i < length; i++) {
-                    if (arr->holes && arr->holes[offset + i]) {
-                        vm_array_push(removed, VM_UNDEF_VAL);
-                        if (!removed->holes) removed->holes = calloc((size_t)removed->cap, sizeof(uint8_t));
-                        removed->holes[removed->size - 1] = 1;
-                    } else {
-                        vm_array_push(removed, vm_val_copy(arr->items[offset + i]));
-                    }
-                }
-                /* Collect replacement elements: argc==4 carries undef, packed/target VMArray, or scalar */
+                /* Collect replacement elements before mutating arr (handles tied & self-spliced arrays) */
                 VMValue snap_buf[16];
                 VMValue *snap = NULL;
                 const VMValue *repl_items = NULL;
@@ -7233,15 +7699,16 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     if (VM_IS_UNDEF(rarg)) {
                         repl_count = 0;
                     } else if (VM_IS_PTR(rarg) && VM_PTR_TYPE(rarg) == VM_OBJ_ARRAY) {
-                        VMArray *ra = VM_AS_ARRAY(rarg);
-                        repl_count = ra->size;
-                        if (ra == arr && repl_count > 0) {
-                            snap = (repl_count > 16) ? malloc((size_t)repl_count * sizeof(VMValue)) : snap_buf;
-                            for (int i = 0; i < repl_count; i++) snap[i] = vm_val_copy(ra->items[i]);
-                            repl_items = snap;
-                        } else {
-                            repl_items = ra->items;
+                        vm->stack_top = sp;
+                        int exc = vm_collect_spread_items(vm, rarg, snap_buf, 16, &snap, &repl_count);
+                        stack = vm->stack; RELOAD();
+                        arr = VM_AS_ARRAY(args[0]);
+                        if (__builtin_expect(exc || vm->has_pending_exc, 0)) {
+                            if (snap && snap != snap_buf) free(snap);
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
                         }
+                        repl_items = snap;
                     } else {
                         single_item = rarg;
                         repl_items = &single_item;
@@ -7250,6 +7717,26 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 } else if (argc > 4) {
                     repl_count = argc - 3;
                     repl_items = &args[3];
+                }
+                if (offset < 0) offset = arr->size + offset;
+                if (offset < 0) offset = 0;
+                if (offset > arr->size) offset = arr->size;
+                if (!has_len) length = arr->size - offset;
+                if (length < 0) {
+                    length = (arr->size - offset) + length;
+                    if (length < 0) length = 0;
+                }
+                if (length > (int64_t)arr->size - offset) length = (int64_t)arr->size - offset;
+                /* Collect removed elements */
+                VMArray *removed = vm_array_new(length > 0 ? (int)length : 8);
+                for (int64_t i = 0; i < length; i++) {
+                    if (arr->holes && arr->holes[offset + i]) {
+                        vm_array_push(removed, VM_UNDEF_VAL);
+                        if (!removed->holes) removed->holes = calloc((size_t)removed->cap, sizeof(uint8_t));
+                        removed->holes[removed->size - 1] = 1;
+                    } else {
+                        vm_array_push(removed, vm_val_copy(arr->items[offset + i]));
+                    }
                 }
                 /* Shift elements */
                 int64_t diff = (int64_t)repl_count - length;
@@ -8145,7 +8632,10 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_SOCKET_FLUSH: RT_VOID_1_SV(strada_socket_flush); break;
         case BUILTIN_CORE_SOCKET_SELECT: {
             StradaValue *socks = vm_to_sv(args[0]);
-            StradaValue *r = strada_socket_select(socks, (int)vm_to_int(args[1]));
+            int ms = (int)vm_to_int(args[1]);
+            int _prev_safe = vm_worker_enter_safe(vm);
+            StradaValue *r = strada_socket_select(socks, ms);
+            vm_worker_leave_safe(vm, _prev_safe);
             SP_PUSH(sv_to_vm(r)); strada_decref(r); strada_decref(socks);
             break;
         }
@@ -8176,7 +8666,10 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         }
         case BUILTIN_CORE_UDP_RECVFROM: {
             StradaValue *sock = vm_to_sv(args[0]);
-            StradaValue *r = strada_udp_recvfrom(sock, (int)vm_to_int(args[1]));
+            int maxb = (int)vm_to_int(args[1]);
+            int _prev_safe = vm_worker_enter_safe(vm);
+            StradaValue *r = strada_udp_recvfrom(sock, maxb);
+            vm_worker_leave_safe(vm, _prev_safe);
             SP_PUSH(sv_to_vm(r)); strada_decref(r); strada_decref(sock);
             break;
         }
@@ -8737,7 +9230,10 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_SELECT_FDS: {
             if (argc >= 2) {
                 StradaValue *fds_sv = vm_to_sv(args[0]);
-                StradaValue *r = strada_select_fds(fds_sv, (int)vm_to_int(args[1]));
+                int ms = (int)vm_to_int(args[1]);
+                int _prev_safe = vm_worker_enter_safe(vm);
+                StradaValue *r = strada_select_fds(fds_sv, ms);
+                vm_worker_leave_safe(vm, _prev_safe);
                 SP_PUSH(r ? sv_to_vm(r) : VM_UNDEF_VAL);
                 if (r) strada_decref(r);
                 strada_decref(fds_sv);
@@ -9167,11 +9663,39 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             break;
         }
         case BUILTIN_CAST_INT: {
-            SP_PUSH(VM_MAKE_INT(vm_to_int(args[0])));
+            VMValue v = args[0];
+            if (VM_IS_PTR(v)) {
+                vm->stack_top = sp;
+                vm->gc_pause++;
+                int64_t iv = vm_to_int_vm(vm, v);
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+                SP_PUSH(VM_MAKE_INT(iv));
+            } else {
+                SP_PUSH(VM_MAKE_INT(vm_to_int(v)));
+            }
             break;
         }
         case BUILTIN_CAST_NUM: {
-            VM_PUSH_DOUBLE(sp, vm_to_num(args[0]));
+            VMValue v = args[0];
+            if (VM_IS_PTR(v)) {
+                vm->stack_top = sp;
+                vm->gc_pause++;
+                double nv = vm_to_num_vm(vm, v);
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+                VM_PUSH_DOUBLE(sp, nv);
+            } else {
+                VM_PUSH_DOUBLE(sp, vm_to_num(v));
+            }
             break;
         }
         case BUILTIN_CAST_STR: {
@@ -9441,7 +9965,18 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         }
 
         case BUILTIN_CLONE: {
-            SP_PUSH(argc >= 1 ? vm_clone_val(vm, args[0]) : VM_UNDEF_VAL);
+            if (argc >= 1) {
+                vm->stack_top = sp;
+                VMValue res = vm_clone_val(vm, args[0]);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+                SP_PUSH(res);
+            } else {
+                SP_PUSH(VM_UNDEF_VAL);
+            }
             break;
         }
 
@@ -10409,15 +10944,26 @@ static __attribute__((noinline)) int vm_jit_store_local_slow(VM *vm, const VMIns
 }
 
 static __attribute__((noinline)) int vm_jit_cast_slow(VM *vm, const VMInsn *di) {
-    VMValue *top = &vm->stack[vm->stack_top - 1];
-    VMValue v = *top;
-    if (di->op == OP_CAST_INT) {
+    VMValue v = vm->stack[vm->stack_top - 1];
+    if ((di->op == OP_CAST_ASSIGN_INT || di->op == OP_CAST_ASSIGN_NUM) &&
+        vm_obj_class_name(v) != NULL) {
+        return VM_JIT_OK;
+    }
+    if (di->op == OP_CAST_INT || di->op == OP_CAST_ASSIGN_INT) {
         if (!VM_IS_INT(v) && (!VM_IS_PTR(v) || VM_PTR_TYPE(v) != VM_OBJ_INT64)) {
-            *top = VM_MAKE_INT(vm_to_int(v));
+            vm->gc_pause++;
+            int64_t iv = vm_to_int_ov(vm, v, 0);
+            vm->gc_pause--;
+            if (vm->has_pending_exc) return VM_JIT_EXC;
+            vm->stack[vm->stack_top - 1] = VM_MAKE_INT(iv);
         }
     } else {
         if (!VM_IS_FLOAT(v)) {
-            *top = VM_MAKE_FLOAT(vm_to_num(v));
+            vm->gc_pause++;
+            double nv = vm_to_num_ov(vm, v, 0);
+            vm->gc_pause--;
+            if (vm->has_pending_exc) return VM_JIT_EXC;
+            vm->stack[vm->stack_top - 1] = VM_MAKE_FLOAT(nv);
         }
     }
     return VM_JIT_OK;
@@ -10583,7 +11129,11 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                 }
                 stack = vm->stack; sp = vm->stack_top;
             }
-            double na = vm_to_num(a), nb = vm_to_num(b);
+            double na = 0.0, nb = 0.0;
+            vm->stack_top = sp;
+            int pexc = vm_pair_to_num(vm, a, b, &na, &nb);
+            stack = vm->stack; sp = vm->stack_top;
+            if (pexc) return VM_JIT_EXC;
             if (nb == 0.0) { vm->pending_exc = vm_str("Illegal division by zero"); vm->has_pending_exc = 1; vm->stack_top = sp; return VM_JIT_EXC; }
             J_PUSH(VM_MAKE_FLOAT(na / nb));
         }
@@ -10610,9 +11160,13 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                 }
                 stack = vm->stack; sp = vm->stack_top;
             }
-            int64_t bv = vm_to_int(b);
+            int64_t av = 0, bv = 0;
+            vm->stack_top = sp;
+            int pexc = vm_pair_to_int(vm, a, b, &av, &bv);
+            stack = vm->stack; sp = vm->stack_top;
+            if (pexc) return VM_JIT_EXC;
             if (bv == 0) { vm->pending_exc = vm_str("Illegal modulus zero"); vm->has_pending_exc = 1; vm->stack_top = sp; return VM_JIT_EXC; }
-            int64_t av = vm_to_int(a), r = 0;
+            int64_t r = 0;
             if (!(av == INT64_MIN && bv == -1)) {
                 r = av % bv;
                 if (r != 0 && ((r < 0) != (bv < 0))) r += bv;
@@ -10650,7 +11204,11 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                 res = (op == OP_LT) ? (ia < ib) : (op == OP_LE) ? (ia <= ib) : (op == OP_GT) ? (ia > ib)
                     : (op == OP_GE) ? (ia >= ib) : (op == OP_EQ) ? (ia == ib) : (ia != ib);
             } else {
-                double da = vm_to_num(a), db = vm_to_num(b);
+                double da = 0.0, db = 0.0;
+                vm->stack_top = sp;
+                int pexc = vm_pair_to_num(vm, a, b, &da, &db);
+                stack = vm->stack; sp = vm->stack_top;
+                if (pexc) return VM_JIT_EXC;
                 res = (op == OP_LT) ? (da < db) : (op == OP_LE) ? (da <= db) : (op == OP_GT) ? (da > db)
                     : (op == OP_GE) ? (da >= db) : (op == OP_EQ) ? (da == db) : (da != db);
             }
@@ -10660,7 +11218,25 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
     }
     case OP_BIT_AND: case OP_BIT_OR: case OP_BIT_XOR: {
         VMValue b = J_POP(), a = J_POP();
-        int64_t ia = vm_to_int(a), ib = vm_to_int(b);
+        const char *opstr = (op == OP_BIT_AND) ? "&" : (op == OP_BIT_OR) ? "|" : "^";
+        if (vm_obj_class_name(a) || vm_obj_class_name(b)) {
+            VMValue ov = VM_UNDEF_VAL; vm->stack_top = sp;
+            if (vm_try_bin_overload(vm, opstr, a, b, &ov)) {
+                stack = vm->stack; sp = vm->stack_top;
+                if (vm->has_pending_exc) return VM_JIT_EXC;
+                J_PUSH(ov); break;
+            }
+            stack = vm->stack; sp = vm->stack_top;
+        }
+        int64_t ia = 0, ib = 0;
+        if (VM_IS_PTR(a) || VM_IS_PTR(b)) {
+            vm->stack_top = sp;
+            int pexc = vm_pair_to_int(vm, a, b, &ia, &ib);
+            stack = vm->stack; sp = vm->stack_top;
+            if (pexc) return VM_JIT_EXC;
+        } else {
+            ia = vm_to_int(a); ib = vm_to_int(b);
+        }
         J_PUSH(VM_MAKE_INT(op == OP_BIT_AND ? (ia & ib) : op == OP_BIT_OR ? (ia | ib) : (ia ^ ib)));
         break;
     }
@@ -10670,19 +11246,30 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
         else if (VM_IS_FLOAT(a)) J_PUSH(VM_MAKE_FLOAT(-VM_FLOAT_VAL(a)));
         else {
             if (vm_obj_class_name(a)) {
-                const char *om = vm_find_overload(vm->program, vm_obj_class_name(a), "neg");
-                if (om) {
-                    int fidx = vm_find_method(vm->program, vm_obj_class_name(a), om);
-                    if (fidx >= 0) {
-                        vm->stack_top = sp;
-                        VMValue ov = vm_execute_call(vm, fidx, &a, 1);
-                        stack = vm->stack; sp = vm->stack_top;
-                        if (vm->has_pending_exc) return VM_JIT_EXC;
-                        J_PUSH(ov); break;
-                    }
+                VMValue ov = VM_UNDEF_VAL; vm->stack_top = sp;
+                if (vm_try_un_overload(vm, "neg", a, &ov)) {
+                    stack = vm->stack; sp = vm->stack_top;
+                    if (vm->has_pending_exc) return VM_JIT_EXC;
+                    J_PUSH(ov); break;
                 }
+                stack = vm->stack; sp = vm->stack_top;
             }
-            J_PUSH(vm_is_float_operand(a) ? VM_MAKE_FLOAT(-vm_to_num(a)) : VM_MAKE_INT(-vm_to_int(a)));
+            if (VM_IS_PTR(a)) {
+                vm->stack_top = sp; vm->gc_pause++;
+                if (vm_is_float_operand(a)) {
+                    double nv = vm_to_num_vm(vm, a);
+                    vm->gc_pause--; stack = vm->stack; sp = vm->stack_top;
+                    if (vm->has_pending_exc) return VM_JIT_EXC;
+                    J_PUSH(VM_MAKE_FLOAT(-nv));
+                } else {
+                    int64_t iv = vm_to_int_vm(vm, a);
+                    vm->gc_pause--; stack = vm->stack; sp = vm->stack_top;
+                    if (vm->has_pending_exc) return VM_JIT_EXC;
+                    J_PUSH(VM_MAKE_INT(-iv));
+                }
+            } else {
+                J_PUSH(vm_is_float_operand(a) ? VM_MAKE_FLOAT(-vm_to_num(a)) : VM_MAKE_INT(-vm_to_int(a)));
+            }
         }
         break;
     }
@@ -11095,13 +11682,19 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             stack = vm->stack; sp = vm->stack_top;
             if (vm->has_pending_exc) return VM_JIT_EXC;
         }
-        FILE *out = !VM_IS_UNDEF(vm->default_fh) && VM_IS_PTR(vm->default_fh) &&
-                    VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE
-                    ? ((VMFileHandle*)VM_TO_PTR(vm->default_fh))->fp : stdout;
+        VMFileHandle *out_fh = (!VM_IS_UNDEF(vm->default_fh) && VM_IS_PTR(vm->default_fh) &&
+                                VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE)
+                               ? (VMFileHandle*)VM_TO_PTR(vm->default_fh) : NULL;
+        FILE *out = out_fh ? (FILE*)out_fh->fp : stdout;
         if (out) {
             vm_write_val(out, v, 0);
             if (op == OP_SAY) fputc('\n', out);
             fflush(out);
+            if (__builtin_expect(out_fh && out_fh->is_mem == 2 && VM_IS_PTR(out_fh->mem_sref), 0)) {
+                vm->stack_top = sp;
+                vm_fh_sync_mem_sref(vm, out_fh);
+                if (vm->has_pending_exc) return VM_JIT_EXC;
+            }
         }
         break;
     }
@@ -11581,21 +12174,25 @@ static __attribute__((noinline)) int vm_jit_return_gc_only(VM *vm) {
 }
 
 /* Emit a call to vm_jit_op_step(vm, di), syncing state & checking exc/interp */
-static void jb_emit_step_helper(JitBuf *b, const VMInsn *di, const VMInsn *next_di, int can_bail) {
-    jb_sync_state(b, next_di);
-    jb_mov_rr(b, JR_RDI, JR_RBX);
-    jb_mov_imm64(b, JR_RSI, (uint64_t)(uintptr_t)di);
-    jb_call_c(b, (void *)vm_jit_op_step);
+static void jb_emit_reload_and_ret_check(JitBuf *b) {
     jb_push(b, JR_RAX);
     jb_reload_all(b);
     jb_pop(b, JR_RAX);
     jb_rr(b, 0, 0x85, JR_RAX, JR_RAX); /* test eax, eax */
     uint32_t j_ok = jb_jcc_placeholder(b, 0x84);
-    (void)can_bail;
     /* Return eax (1 = INTERP, 2 = EXC) cleanly */
     jb_pop(b, JR_RBP);
     jb_u8(b, 0xC3);
     jb_patch_here(b, j_ok);
+}
+
+static void jb_emit_step_helper(JitBuf *b, const VMInsn *di, const VMInsn *next_di, int can_bail) {
+    jb_sync_state(b, next_di);
+    jb_mov_rr(b, JR_RDI, JR_RBX);
+    jb_mov_imm64(b, JR_RSI, (uint64_t)(uintptr_t)di);
+    jb_call_c(b, (void *)vm_jit_op_step);
+    (void)can_bail;
+    jb_emit_reload_and_ret_check(b);
 }
 
 /* Emit 50-bit int check on RAX; if fits, tag & push to RAX. Else fall back via helper */
@@ -11884,9 +12481,11 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         }
 
         case OP_CAST_INT:
-        case OP_CAST_NUM: {
+        case OP_CAST_NUM:
+        case OP_CAST_ASSIGN_INT:
+        case OP_CAST_ASSIGN_NUM: {
             jb_sib8(b, 1, 0x8B, JR_RAX, JR_R14, JR_R15, -8);
-            if (op == OP_CAST_INT) {
+            if (op == OP_CAST_INT || op == OP_CAST_ASSIGN_INT) {
                 uint32_t j_not = jb_j_not_int(b, JR_RAX);
                 uint32_t j_done = jb_jmp_placeholder(b);
                 jb_patch_here(b, j_not);
@@ -11894,6 +12493,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
                 jb_mov_rr(b, JR_RDI, JR_RBX);
                 jb_mov_imm64(b, JR_RSI, (uint64_t)(uintptr_t)di);
                 jb_call_c(b, (void *)vm_jit_cast_slow);
+                jb_emit_reload_and_ret_check(b);
                 jb_patch_here(b, j_done);
             } else {
                 jb_mov_rr(b, JR_RCX, JR_RAX);
@@ -11906,6 +12506,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
                 jb_mov_rr(b, JR_RDI, JR_RBX);
                 jb_mov_imm64(b, JR_RSI, (uint64_t)(uintptr_t)di);
                 jb_call_c(b, (void *)vm_jit_cast_slow);
+                jb_emit_reload_and_ret_check(b);
                 jb_patch_here(b, j_ok);
             }
             break;
@@ -12971,6 +13572,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DT(OP_PUSH_I32);
             DT(OP_CAST_INT);
             DT(OP_CAST_NUM);
+            DT(OP_CAST_ASSIGN_INT);
+            DT(OP_CAST_ASSIGN_NUM);
             DT(OP_SUB_LOCAL_I32);
             DT(OP_ADD_LOCAL_I32);
             DT(OP_ADD_LOCALS);
@@ -13219,20 +13822,43 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         DISPATCH();
     }
 
+    CASE(OP_CAST_ASSIGN_INT):
     CASE(OP_CAST_INT): {
         VMValue v = stack[sp - 1];
         if (__builtin_expect(!VM_IS_INT(v), 0)) {
-            if (!VM_IS_PTR(v) || VM_PTR_TYPE(v) != VM_OBJ_INT64) {
+            if (VM_IS_PTR(v)) {
+                if ((di->op != OP_CAST_ASSIGN_INT || vm_obj_class_name(v) == NULL) &&
+                    VM_PTR_TYPE(v) != VM_OBJ_INT64) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm->gc_pause++;
+                    int64_t iv = vm_to_int_ov(vm, v, 0);
+                    vm->gc_pause--;
+                    stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+                    stack[sp - 1] = VM_MAKE_INT(iv);
+                }
+            } else {
                 stack[sp - 1] = VM_MAKE_INT(vm_to_int(v));
             }
         }
         DISPATCH();
     }
 
+    CASE(OP_CAST_ASSIGN_NUM):
     CASE(OP_CAST_NUM): {
         VMValue v = stack[sp - 1];
         if (__builtin_expect(!VM_IS_FLOAT(v), 0)) {
-            stack[sp - 1] = VM_MAKE_FLOAT(vm_to_num(v));
+            if (VM_IS_PTR(v)) {
+                if (di->op != OP_CAST_ASSIGN_NUM || vm_obj_class_name(v) == NULL) {
+                    frame->ip = ip; vm->stack_top = sp;
+                    vm->gc_pause++;
+                    double nv = vm_to_num_ov(vm, v, 0);
+                    vm->gc_pause--;
+                    stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+                    stack[sp - 1] = VM_MAKE_FLOAT(nv);
+                }
+            } else {
+                stack[sp - 1] = VM_MAKE_FLOAT(vm_to_num(v));
+            }
         }
         DISPATCH();
     }
@@ -13898,13 +14524,17 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DISPATCH();
         }
         VM_TRY_BIN_OV("/");
-        double db = vm_to_num(b);
+        double da = 0.0, db = 0.0;
+        frame->ip = ip; vm->stack_top = sp;
+        int pexc = vm_pair_to_num(vm, a, b, &da, &db);
+        stack = vm->stack; RELOAD();
+        if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
         if (db == 0.0) {
             vm_temp_free(&a); vm_temp_free(&b);
             throw_exc = vm_str("Illegal division by zero");
             goto L_vm_throw_exc;
         }
-        SP_PUSH(VM_MAKE_FLOAT(vm_to_num(a) / db));
+        SP_PUSH(VM_MAKE_FLOAT(da / db));
         vm_temp_free(&a); vm_temp_free(&b);
         DISPATCH();
     }
@@ -13925,7 +14555,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DISPATCH();
         }
         VM_TRY_BIN_OV("%");
-        int64_t av = vm_to_int(a), bv = vm_to_int(b);
+        int64_t av = 0, bv = 0;
+        frame->ip = ip; vm->stack_top = sp;
+        int pexc = vm_pair_to_int(vm, a, b, &av, &bv);
+        stack = vm->stack; RELOAD();
+        if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
         if (bv == 0) {
             vm_temp_free(&a); vm_temp_free(&b);
             throw_exc = vm_str("Illegal modulus zero");
@@ -13942,62 +14576,67 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
 
     /* Bitwise operations — fast paths for inline tagged ints */
-    CASE(OP_BIT_AND): {
-        VMValue b = SP_POP(), a = SP_POP();
-        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) & VM_INT_VAL(b)));
-            DISPATCH();
-        }
-        SP_PUSH(VM_MAKE_INT(vm_to_int(a) & vm_to_int(b)));
-        vm_temp_free(&a); vm_temp_free(&b); DISPATCH();
-    }
-    CASE(OP_BIT_OR): {
-        VMValue b = SP_POP(), a = SP_POP();
-        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) | VM_INT_VAL(b)));
-            DISPATCH();
-        }
-        SP_PUSH(VM_MAKE_INT(vm_to_int(a) | vm_to_int(b)));
-        vm_temp_free(&a); vm_temp_free(&b); DISPATCH();
-    }
-    CASE(OP_BIT_XOR): {
-        VMValue b = SP_POP(), a = SP_POP();
-        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) ^ VM_INT_VAL(b)));
-            DISPATCH();
-        }
-        SP_PUSH(VM_MAKE_INT(vm_to_int(a) ^ vm_to_int(b)));
-        vm_temp_free(&a); vm_temp_free(&b); DISPATCH();
-    }
+    #define VM_BIT_BIN_OP(opstr, fast_expr, slow_expr) do { \
+        VMValue b = SP_POP(), a = SP_POP(); \
+        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) { \
+            int64_t lv = VM_INT_VAL(a), rv = VM_INT_VAL(b); \
+            SP_PUSH(VM_MAKE_INT(fast_expr)); \
+            DISPATCH(); \
+        } \
+        VM_TRY_BIN_OV(opstr); \
+        int64_t av = 0, bv = 0; \
+        if (VM_IS_PTR(a) || VM_IS_PTR(b)) { \
+            frame->ip = ip; vm->stack_top = sp; \
+            int pexc = vm_pair_to_int(vm, a, b, &av, &bv); \
+            stack = vm->stack; RELOAD(); \
+            if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); } \
+        } else { \
+            av = vm_to_int(a); bv = vm_to_int(b); \
+        } \
+        SP_PUSH(VM_MAKE_INT(slow_expr)); \
+        vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); \
+    } while (0)
+    CASE(OP_BIT_AND): { VM_BIT_BIN_OP("&",  lv & rv, av & bv); }
+    CASE(OP_BIT_OR):  { VM_BIT_BIN_OP("|",  lv | rv, av | bv); }
+    CASE(OP_BIT_XOR): { VM_BIT_BIN_OP("^",  lv ^ rv, av ^ bv); }
     CASE(OP_BIT_SHL): {
-        VMValue b = SP_POP(), a = SP_POP();
-        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            int64_t sh = VM_INT_VAL(b);
-            SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? 0 : (int64_t)((uint64_t)VM_INT_VAL(a) << (int)sh)));
-            DISPATCH();
-        }
-        int64_t sh = vm_to_int(b);
-        SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? 0 : (int64_t)((uint64_t)vm_to_int(a) << (int)sh)));
-        vm_temp_free(&a); vm_temp_free(&b); DISPATCH();
+        VM_BIT_BIN_OP("<<",
+            (rv < 0 || rv >= 64) ? 0 : (int64_t)((uint64_t)lv << (int)rv),
+            (bv < 0 || bv >= 64) ? 0 : (int64_t)((uint64_t)av << (int)bv));
     }
     CASE(OP_BIT_SHR): {
-        VMValue b = SP_POP(), a = SP_POP();
-        if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            int64_t lv = VM_INT_VAL(a), sh = VM_INT_VAL(b);
-            SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? (lv < 0 ? -1 : 0) : (lv >> (int)sh)));
-            DISPATCH();
-        }
-        int64_t lv = vm_to_int(a), sh = vm_to_int(b);
-        SP_PUSH(VM_MAKE_INT((sh < 0 || sh >= 64) ? (lv < 0 ? -1 : 0) : (lv >> (int)sh)));
-        vm_temp_free(&a); vm_temp_free(&b); DISPATCH();
+        VM_BIT_BIN_OP(">>",
+            (rv < 0 || rv >= 64) ? (lv < 0 ? -1 : 0) : (lv >> (int)rv),
+            (bv < 0 || bv >= 64) ? (av < 0 ? -1 : 0) : (av >> (int)bv));
     }
+    #undef VM_BIT_BIN_OP
     CASE(OP_BIT_NOT): {
         VMValue a = SP_POP();
         if (__builtin_expect(VM_IS_INT(a), 1)) {
             SP_PUSH(VM_MAKE_INT(~VM_INT_VAL(a)));
             DISPATCH();
         }
-        SP_PUSH(VM_MAKE_INT(~vm_to_int(a)));
+        if (__builtin_expect(vm_obj_class_name(a) != NULL, 0)) {
+            VMValue _ov_res = VM_UNDEF_VAL;
+            frame->ip = ip; vm->stack_top = sp;
+            if (vm_try_un_overload(vm, "~", a, &_ov_res)) {
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) { vm_temp_free(&a); VM_CHECK_EXC(); }
+                vm_temp_free(&a);
+                SP_PUSH(_ov_res);
+                DISPATCH();
+            }
+        }
+        int64_t iv;
+        if (VM_IS_PTR(a)) {
+            frame->ip = ip; vm->stack_top = sp; vm->gc_pause++;
+            iv = vm_to_int_vm(vm, a);
+            vm->gc_pause--; stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) { vm_temp_free(&a); VM_CHECK_EXC(); }
+        } else {
+            iv = vm_to_int(a);
+        }
+        SP_PUSH(VM_MAKE_INT(~iv));
         vm_temp_free(&a); DISPATCH();
     }
 
@@ -14019,7 +14658,21 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DISPATCH(); \
         } \
         VM_TRY_BIN_OV(opstr); \
-        int res = (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) ? (VM_ANY_INT_VAL(a) cmpop VM_ANY_INT_VAL(b)) : (vm_to_num(a) cmpop vm_to_num(b)); \
+        int res; \
+        if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) { \
+            res = (VM_ANY_INT_VAL(a) cmpop VM_ANY_INT_VAL(b)); \
+        } else { \
+            double na = 0.0, nb = 0.0; \
+            if (VM_IS_PTR(a) || VM_IS_PTR(b)) { \
+                frame->ip = ip; vm->stack_top = sp; \
+                int pexc = vm_pair_to_num(vm, a, b, &na, &nb); \
+                stack = vm->stack; RELOAD(); \
+                if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); } \
+            } else { \
+                na = vm_to_num(a); nb = vm_to_num(b); \
+            } \
+            res = (na cmpop nb); \
+        } \
         SP_PUSH(VM_MAKE_INT(res)); \
         vm_temp_free(&a); vm_temp_free(&b); \
         DISPATCH(); \
@@ -14046,6 +14699,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             eq = (alen == blen && (alen == 0 || memcmp(ap, bp, alen) == 0));
         } else if (VM_IS_ANY_INT(a) && VM_IS_ANY_INT(b)) {
             eq = (VM_ANY_INT_VAL(a) == VM_ANY_INT_VAL(b));
+        } else if (VM_IS_PTR(a) || VM_IS_PTR(b)) {
+            double na = 0.0, nb = 0.0;
+            frame->ip = ip; vm->stack_top = sp;
+            int pexc = vm_pair_to_num(vm, a, b, &na, &nb);
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
+            eq = (na == nb);
         } else {
             eq = (vm_to_num(a) == vm_to_num(b));
         }
@@ -14156,7 +14816,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             int64_t av = VM_ANY_INT_VAL(a), bv = VM_ANY_INT_VAL(b);
             cmp = av < bv ? -1 : (av > bv ? 1 : 0);
         } else {
-            double av = vm_to_num(a), bv = vm_to_num(b);   /* compare as numbers, not truncated ints */
+            double av = 0.0, bv = 0.0;
+            if (VM_IS_PTR(a) || VM_IS_PTR(b)) {
+                frame->ip = ip; vm->stack_top = sp;
+                int pexc = vm_pair_to_num(vm, a, b, &av, &bv);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
+            } else {
+                av = vm_to_num(a); bv = vm_to_num(b);
+            }
             cmp = av < bv ? -1 : (av > bv ? 1 : 0);
         }
         SP_PUSH(VM_MAKE_INT(cmp));
@@ -14481,13 +15149,20 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 goto L_vm_throw_exc;
             }
         }
+        VMFileHandle *out_fh = NULL;
         FILE *outfp = stdout;
         if (VM_IS_PTR(vm->default_fh) && VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE) {
-            VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(vm->default_fh);
-            outfp = (FILE*)fh->fp;
+            out_fh = (VMFileHandle*)VM_TO_PTR(vm->default_fh);
+            outfp = (FILE*)out_fh->fp;
         }
         vm_write_val(outfp, v, 1);
-        vm_temp_free(&v); DISPATCH();
+        vm_temp_free(&v);
+        if (__builtin_expect(out_fh && out_fh->is_mem == 2 && VM_IS_PTR(out_fh->mem_sref), 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            vm_fh_sync_mem_sref(vm, out_fh);
+            stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+        }
+        DISPATCH();
     }
 
     CASE(OP_PRINT): {
@@ -14501,13 +15176,20 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 goto L_vm_throw_exc;
             }
         }
+        VMFileHandle *out_fh = NULL;
         FILE *outfp = stdout;
         if (VM_IS_PTR(vm->default_fh) && VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE) {
-            VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(vm->default_fh);
-            outfp = (FILE*)fh->fp;
+            out_fh = (VMFileHandle*)VM_TO_PTR(vm->default_fh);
+            outfp = (FILE*)out_fh->fp;
         }
         vm_write_val(outfp, v, 0);
-        vm_temp_free(&v); DISPATCH();
+        vm_temp_free(&v);
+        if (__builtin_expect(out_fh && out_fh->is_mem == 2 && VM_IS_PTR(out_fh->mem_sref), 0)) {
+            frame->ip = ip; vm->stack_top = sp;
+            vm_fh_sync_mem_sref(vm, out_fh);
+            stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+        }
+        DISPATCH();
     }
 
     CASE(OP_SAY_FH): {
@@ -14526,8 +15208,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         if (VM_IS_PTR(fhv) && VM_PTR_TYPE(fhv) == VM_OBJ_FILEHANDLE) {
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(fhv);
             vm_write_val((FILE*)fh->fp, str, 1);
+            vm_val_free(&str);
+            if (__builtin_expect(fh->is_mem == 2 && VM_IS_PTR(fh->mem_sref), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                vm_fh_sync_mem_sref(vm, fh);
+                stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+            }
+        } else {
+            vm_val_free(&str);
         }
-        vm_val_free(&str);
         DISPATCH();
     }
 
@@ -14547,8 +15236,15 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         if (VM_IS_PTR(fhv) && VM_PTR_TYPE(fhv) == VM_OBJ_FILEHANDLE) {
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(fhv);
             vm_write_val((FILE*)fh->fp, str, 0);
+            vm_val_free(&str);
+            if (__builtin_expect(fh->is_mem == 2 && VM_IS_PTR(fh->mem_sref), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                vm_fh_sync_mem_sref(vm, fh);
+                stack = vm->stack; RELOAD(); VM_CHECK_EXC();
+            }
+        } else {
+            vm_val_free(&str);
         }
-        vm_val_free(&str);
         DISPATCH();
     }
 
@@ -14904,7 +15600,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         }
                     }
                 } else {
-                    for (int i = 0; i < sa->size; i++) {
+                    int ssz = sa->size;
+                    for (int i = 0; i < ssz; i++) {
                         vm_array_push(da, vm_val_copy(sa->items[i]));
                     }
                 }
@@ -14954,7 +15651,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                     stack = vm->stack; RELOAD();
                     VM_CHECK_EXC();
                 } else {
-                    for (int i = 0; i < sa->size; i++) {
+                    int ssz = sa->size;
+                    for (int i = 0; i < ssz; i++) {
                         vm_array_push(da, vm_val_copy(sa->items[i]));
                     }
                 }
@@ -16134,7 +16832,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
 
     CASE(OP_STR_REPEAT): {
-        VMValue count = SP_POP(), str = SP_POP();
+        VMValue b = SP_POP(), a = SP_POP();
+        VM_TRY_BIN_OV("x");
+        VMValue str = a, count = b;
         char buf[256];
         const char *s;
         size_t slen;
@@ -17972,13 +18672,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue key = SP_POP(), hval = SP_POP();
         VMHash *h = NULL;
         char *hkey = NULL;
+        size_t hkeylen = 0;
         int existed = 0;
         VMValue saved_val = VM_UNDEF_VAL;
         if (VM_IS_PTR(hval) && VM_PTR_TYPE(hval) == VM_OBJ_HASH) {
             h = VM_AS_HASH(hval);
             char kbuf[256];
-            const char *ks = vm_to_cstr(key, kbuf, sizeof(kbuf));
-            hkey = strdup(ks);
+            const char *ks = vm_bytes_view(key, kbuf, sizeof(kbuf), &hkeylen);
+            hkey = malloc(hkeylen + 1);
+            if (hkeylen > 0) memcpy(hkey, ks, hkeylen);
+            hkey[hkeylen] = '\0';
             if (!VM_IS_UNDEF(h->tied_obj) && vm_obj_class_name(h->tied_obj)) {
                 frame->ip = ip;
                 vm->stack_top = sp;
@@ -18024,8 +18727,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 stack = vm->stack;
                 RELOAD();
             } else {
-                existed = vm_hash_exists(h, ks);
-                saved_val = existed ? vm_val_copy(vm_hash_get(h, ks)) : VM_UNDEF_VAL;
+                existed = vm_hash_exists_n(h, hkey, hkeylen);
+                saved_val = existed ? vm_val_copy(vm_hash_get_n(h, hkey, hkeylen)) : VM_UNDEF_VAL;
             }
         }
         if (vm->global_save_count >= vm->global_save_cap) {
@@ -18036,6 +18739,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         gs->is_hash_elem = 1;
         gs->hash = h;
         gs->hash_key = hkey;
+        gs->hash_keylen = hkeylen;
         gs->existed = existed;
         gs->saved_value = saved_val;
         vm_temp_free(&key);
@@ -18045,6 +18749,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_RESTORE_HASH_ELEM): {
         VMHash *rh = NULL;
         char *rhkey = NULL;
+        size_t rhkeylen = 0;
         int rexisted = 0;
         VMValue rsaved = VM_UNDEF_VAL;
         int found = 0;
@@ -18052,6 +18757,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             if (vm->global_saves[i].is_hash_elem) {
                 rh = vm->global_saves[i].hash;
                 rhkey = vm->global_saves[i].hash_key;
+                rhkeylen = vm->global_saves[i].hash_keylen;
                 rexisted = vm->global_saves[i].existed;
                 rsaved = vm->global_saves[i].saved_value;
                 for (int j = i; j < vm->global_save_count - 1; j++)
@@ -18064,7 +18770,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         if (found) {
             frame->ip = ip;
             vm->stack_top = sp;
-            vm_restore_one_hash_elem(vm, rh, rhkey, rexisted, rsaved, 1);
+            vm_restore_one_hash_elem(vm, rh, rhkey, rhkeylen, rexisted, rsaved, 1);
             stack = vm->stack;
             RELOAD();
             if (__builtin_expect(vm->has_pending_exc, 0)) {
@@ -18096,8 +18802,19 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         if (__builtin_expect(VM_IS_INT(v), 1)) { SP_PUSH(VM_MAKE_INT(-VM_INT_VAL(v))); DISPATCH(); }
         if (__builtin_expect(VM_IS_FLOAT(v), 1)) { SP_PUSH(VM_MAKE_FLOAT(-VM_FLOAT_VAL(v))); DISPATCH(); }
-        if (VM_IS_ANY_INT(v)) SP_PUSH(VM_MAKE_INT((int64_t)(0ULL - (uint64_t)VM_ANY_INT_VAL(v))));
-        else SP_PUSH(VM_MAKE_FLOAT(-vm_to_num(v)));
+        if (VM_IS_ANY_INT(v)) {
+            SP_PUSH(VM_MAKE_INT((int64_t)(0ULL - (uint64_t)VM_ANY_INT_VAL(v))));
+        } else if (VM_IS_PTR(v)) {
+            frame->ip = ip; vm->stack_top = sp;
+            vm->gc_pause++;
+            double nv = vm_to_num_vm(vm, v);
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) { vm_temp_free(&v); VM_CHECK_EXC(); }
+            SP_PUSH(VM_MAKE_FLOAT(-nv));
+        } else {
+            SP_PUSH(VM_MAKE_FLOAT(-vm_to_num(v)));
+        }
         vm_temp_free(&v);
         DISPATCH();
     }
@@ -18156,7 +18873,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_POWER): {
         VMValue b = SP_POP(), a = SP_POP();
         VM_TRY_BIN_OV("**");
-        double r = pow(vm_to_num(a), vm_to_num(b));
+        double na = 0.0, nb = 0.0;
+        if (VM_IS_PTR(a) || VM_IS_PTR(b)) {
+            frame->ip = ip; vm->stack_top = sp;
+            int pexc = vm_pair_to_num(vm, a, b, &na, &nb);
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
+        } else {
+            na = vm_to_num(a); nb = vm_to_num(b);
+        }
+        double r = pow(na, nb);
         SP_PUSH(VM_MAKE_FLOAT(r));
         vm_temp_free(&a); vm_temp_free(&b);
         DISPATCH();
@@ -18387,7 +19113,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_ADD_OV): {
         VMValue b = SP_POP(), a = SP_POP();
         VM_TRY_BIN_OV("+");
-        SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)vm_to_int(a) + (uint64_t)vm_to_int(b))));
+        int64_t ia = 0, ib = 0;
+        if (VM_IS_PTR(a) || VM_IS_PTR(b)) {
+            frame->ip = ip; vm->stack_top = sp;
+            int pexc = vm_pair_to_int(vm, a, b, &ia, &ib);
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(pexc, 0)) { vm_temp_free(&a); vm_temp_free(&b); VM_CHECK_EXC(); }
+        } else {
+            ia = vm_to_int(a); ib = vm_to_int(b);
+        }
+        SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)ia + (uint64_t)ib)));
         vm_temp_free(&a); vm_temp_free(&b);
         DISPATCH();
     }
@@ -18476,9 +19211,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
         /* JIT-compile on first execution */
         if (!__atomic_load_n(&cb->fn, __ATOMIC_ACQUIRE)) {
+            int _prev_safe = vm_worker_enter_safe(vm);
             pthread_mutex_lock(&g_cblock_jit_mutex);
             int jit_fail = (!cb->fn && cblock_jit_compile(cb, vm->program->runtime_include_path, vm->program->cblock_prelude) != 0);
             pthread_mutex_unlock(&g_cblock_jit_mutex);
+            vm_worker_leave_safe(vm, _prev_safe);
             if (jit_fail) {
                 fprintf(stderr, "VM: __C__ block JIT compilation failed\n");
                 DISPATCH();

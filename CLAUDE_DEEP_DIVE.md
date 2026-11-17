@@ -1451,6 +1451,18 @@ The compiler supports Perl-style `use overload` for defining custom operator beh
 ```
 
 **Overload registration** is generated inside `gen_method_wrappers_for_pkg()`, emitting `strada_overload_register()` calls in the OOP init function.
+Registration is an explicit per-operator list of `gen_overload_reg_if(...)` calls
+(bootstrap-safe, no hash iteration) — **a new overloadable operator must be added
+there AND to the binary-dispatch op list in `gen_expression`'s `NODE_BINARY_OP`
+branch AND to `emit_overload_binary_fallback`**; missing the registration line
+makes `strada_overload_binary` silently return NULL (the fallback runs). `x`
+(string repeat, 2026-11) is wired all three ways; `x=` needs nothing extra
+because the parser rewrites it to `$a = $a x n`.
+
+**Compound assignment on typed targets**: the boxed `op=` overload path in
+`CodeGenExpr` (`__ca_res`) coerces the result back to the declared type when the
+target is in `int_vars`/`num_vars`, matching `gen_unboxed_compound_overload` —
+an `int` variable never ends up holding an object.
 
 **Runtime functions** (`strada_runtime.c`):
 - `strada_overload_register(package, op, func)` — register an overload handler
