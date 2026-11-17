@@ -1,4 +1,5 @@
 # EXPECT: ok
+# VM-SKIP: checks DESTROY at the last reference (the VM runs DESTROY at GC time)
 # Stage 5 verification for memory management simplification (Stages 1-4):
 # - Pure struct_size + uint16_t flags (UTF-8, blessed, weakref, DESTROY)
 # - Per-variable __C__ vs closure cell boxing in the same function

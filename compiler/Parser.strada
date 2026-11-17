@@ -1025,6 +1025,82 @@ func parse_hash_key_expr(scalar $parser, int $allow_comma) scalar {
 }
 
 # Primary expressions: literals, variables, parenthesized, etc.
+# Builtins Perl parses as named unary operators (usable without parens).
+func parser_is_named_unary(str $n) int {
+    if ($n eq "delete" || $n eq "exists" || $n eq "defined" || $n eq "keys" || $n eq "values" ||
+        $n eq "each" || $n eq "scalar" || $n eq "shift" || $n eq "pop" || $n eq "ref" ||
+        $n eq "lc" || $n eq "uc" || $n eq "lcfirst" || $n eq "ucfirst" || $n eq "length" ||
+        $n eq "chr" || $n eq "ord" || $n eq "chomp" || $n eq "chop" || $n eq "abs" ||
+        $n eq "int" || $n eq "hex" || $n eq "oct" || $n eq "quotemeta" || $n eq "undef" ||
+        $n eq "size" || $n eq "sqrt" || $n eq "close") {
+        return 1;
+    }
+    return 0;
+}
+
+# True when the token at $pos is `(` whose matching `)` is followed by `=>`
+# (a parenthesized computed key: `("a" . $b) => 1`).
+func parser_paren_is_key(scalar $parser, int $pos) int {
+    my scalar $toks = $parser->{"tokens"};
+    my int $n = $parser->{"token_count"};
+    my int $depth = 0;
+    my int $i = $pos;
+    while ($i < $n) {
+        my str $tt = $toks->[$i]->{"type"};
+        if ($tt eq "LPAREN") { $depth = $depth + 1; }
+        elsif ($tt eq "RPAREN") {
+            $depth = $depth - 1;
+            if ($depth == 0) {
+                if ($i + 1 < $n && $toks->[$i + 1]->{"type"} eq "FAT_ARROW") { return 1; }
+                return 0;
+            }
+        } elsif ($tt eq "EOF") { return 0; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# One entry of an anonymous hash literal: `key => value`, or a parenthesized
+# group of pairs `(a => 1, b => 2)` whose pairs join the hash (Perl lists).
+func parse_anon_hash_entry(scalar $parser, scalar $anon) void {
+    if (parser_check($parser, "LPAREN") && parser_paren_is_key($parser, $parser->{"pos"}) == 0) {
+        parser_advance($parser);
+        while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
+            parse_anon_hash_entry($parser, $anon);
+            if (parser_check($parser, "COMMA")) { parser_advance($parser); }
+            elsif (!parser_check($parser, "RPAREN")) { parser_expect($parser, "RPAREN"); }
+        }
+        parser_expect($parser, "RPAREN");
+        return;
+    }
+    # Key (string, bareword, or variable)
+    my scalar $key_tok = parser_current($parser);
+    my str $key = "";
+    my scalar $key_expr = 0;
+
+    my str $key_next = parser_peek($parser)->{"type"};
+    if (($key_tok->{"type"} eq "STR_LITERAL" || $key_tok->{"type"} eq "IDENT"
+         || $key_tok->{"is_word"}) && $key_next eq "FAT_ARROW") {
+        # Constant key: "name" => v, or any bareword (keywords too,
+        # e.g. default => 1) before =>, as in Perl
+        $key = $key_tok->{"value"};
+        parser_advance($parser);
+    } else {
+        # Computed key, as in Perl: $k => v, "plan_" . $p => v,
+        # lc($name) => v. parse_logical_or stops before `=>`.
+        $key_expr = parse_logical_or($parser);
+    }
+
+    parser_expect($parser, "FAT_ARROW");
+
+    my scalar $value = parse_expression($parser);
+    if ($key_expr) {
+        ast_add_hash_pair_expr($anon, $key_expr, $value);
+    } else {
+        ast_add_hash_pair($anon, $key, $value);
+    }
+}
+
 func parse_primary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
     my str $type = $tok->{"type"};
@@ -1642,33 +1718,8 @@ func parse_primary(scalar $parser) scalar {
         
         # Parse key => value pairs
         while (1) {
-            # Key (string, bareword, or variable)
-            my scalar $key_tok = parser_current($parser);
-            my str $key = "";
-            my scalar $key_expr = 0;
+            parse_anon_hash_entry($parser, $anon);
 
-            my str $key_next = parser_peek($parser)->{"type"};
-            if (($key_tok->{"type"} eq "STR_LITERAL" || $key_tok->{"type"} eq "IDENT"
-                 || $key_tok->{"is_word"}) && $key_next eq "FAT_ARROW") {
-                # Constant key: "name" => v, or any bareword (keywords too,
-                # e.g. default => 1) before =>, as in Perl
-                $key = $key_tok->{"value"};
-                parser_advance($parser);
-            } else {
-                # Computed key, as in Perl: $k => v, "plan_" . $p => v,
-                # lc($name) => v. parse_logical_or stops before `=>`.
-                $key_expr = parse_logical_or($parser);
-            }
-
-            parser_expect($parser, "FAT_ARROW");
-
-            my scalar $value = parse_expression($parser);
-            if ($key_expr) {
-                ast_add_hash_pair_expr($anon, $key_expr, $value);
-            } else {
-                ast_add_hash_pair($anon, $key, $value);
-            }
-            
             if (parser_check($parser, "COMMA")) {
                 parser_advance($parser);
                 if (parser_check($parser, "RBRACE")) {
@@ -2056,6 +2107,23 @@ func parse_primary(scalar $parser) scalar {
             return ast_new_variable($name, "$");
         }
 
+        # Perl named unary operators without parentheses, followed by a
+        # variable or literal: `keys %h`, `delete $h{k}`, `scalar @a`,
+        # `uc "x"`. Perl precedence: the operand takes `+ - . * << >>` but
+        # stops at comparisons, so `keys %h > 2` is keys(%h) > 2 and
+        # `ref $r . "x"` is ref($r . "x").
+        if (parser_is_named_unary($name) == 1 &&
+            (parser_check($parser, "DOLLAR") || parser_check($parser, "AT") || parser_check($parser, "PERCENT") ||
+             parser_check($parser, "BACKSLASH") || parser_check($parser, "STR_LITERAL") ||
+             parser_check($parser, "INTERP_STRING") || parser_check($parser, "INT_LITERAL") ||
+             parser_check($parser, "NUM_LITERAL"))) {
+            my scalar $nu_arg = parse_shift($parser);
+            my scalar $nu_call = ast_new_call($name);
+            ast_set_line($nu_call, $call_line);
+            ast_add_arg($nu_call, $nu_arg);
+            return $nu_call;
+        }
+
         # Bare shift/pop without args: implicitly operate on @_
         if ($name eq "shift" || $name eq "pop") {
             my scalar $bare_call = ast_new_call($name);
@@ -2126,6 +2194,14 @@ func parse_primary(scalar $parser) scalar {
             }
             parser_expect($parser, "RPAREN");
             return $call;
+        }
+        # `scalar @a` / `scalar %h` / `scalar $x` (named unary, no parens)
+        if (parser_check($parser, "AT") || parser_check($parser, "PERCENT") || parser_check($parser, "DOLLAR")) {
+            my scalar $sc_arg = parse_shift($parser);
+            my scalar $sc_call = ast_new_call("scalar");
+            ast_set_line($sc_call, $call_line);
+            ast_add_arg($sc_call, $sc_arg);
+            return $sc_call;
         }
         parser_error($parser, "unexpected TYPE_SCALAR in expression");
     }
@@ -3161,6 +3237,14 @@ func parse_block(scalar $parser) scalar {
 
 # Parse destructuring declaration: my ($a, $b) = expr; or my (int $a, str $b) = expr;
 func parse_destructure_decl(scalar $parser, int $decl_line) scalar {
+    my scalar $dd = parse_destructure_core($parser, $decl_line);
+    parser_expect($parser, "SEMI");
+    return $dd;
+}
+
+# `($a, $b) = expr` after `my`, without the statement terminator (also used
+# by `while (my ($k, $v) = each %h)`)
+func parse_destructure_core(scalar $parser, int $decl_line) scalar {
     parser_expect($parser, "LPAREN");
 
     my array @vars = ();
@@ -3221,7 +3305,6 @@ func parse_destructure_decl(scalar $parser, int $decl_line) scalar {
     parser_expect($parser, "ASSIGN");
 
     my scalar $init = parse_expression($parser);
-    parser_expect($parser, "SEMI");
 
     my scalar $node = ast_new_destructure(\@vars, $var_count, $init, 1);
     ast_set_line($node, $decl_line);
@@ -3518,6 +3601,35 @@ func parse_while_stmt(scalar $parser, str $label) scalar {
     my scalar $wh_tok = parser_current($parser);
     my scalar $while_var_decl = 0;
     my str $while_var_name = "";
+
+    # while (my ($k, $v) = LIST) -- true while the list is non-empty (Perl).
+    # Becomes { my @__wl; while (scalar(@__wl = LIST) > 0) { my ($k, $v) = @__wl; body } }
+    if ($wh_tok->{"type"} eq "MY" && parser_peek($parser)->{"type"} eq "LPAREN") {
+        parser_advance($parser);
+        my scalar $wd = parse_destructure_core($parser, $while_line);
+        parser_expect($parser, "RPAREN");
+        my scalar $wd_body = parse_block($parser);
+        my int $wd_id = $parser->{"while_list_id"} + 1;
+        $parser->{"while_list_id"} = $wd_id;
+        my str $wd_tmp = "__wl" . $wd_id;
+        my scalar $wd_outer = ast_new_block();
+        ast_add_statement($wd_outer, ast_new_var_decl($wd_tmp, TYPE_ARRAY(), "@"));
+        my scalar $wd_cnt = ast_new_call("scalar");
+        ast_add_arg($wd_cnt, ast_new_assign("=", ast_new_variable($wd_tmp, "@"), $wd->{"init"}));
+        my scalar $wd_cond = ast_new_binary_op(">", $wd_cnt, ast_new_int_literal(0));
+        $wd->{"init"} = ast_new_variable($wd_tmp, "@");
+        my array @wd_stmts = ($wd);
+        my scalar $wd_old = $wd_body->{"statements"};
+        my int $wd_i = 0;
+        while ($wd_i < size(@{$wd_old})) { push(@wd_stmts, $wd_old->[$wd_i]); $wd_i = $wd_i + 1; }
+        $wd_body->{"statements"} = \@wd_stmts;
+        $wd_body->{"statement_count"} = $wd_body->{"statement_count"} + 1;
+        my scalar $wd_loop = ast_new_while_stmt($wd_cond, $wd_body, $label);
+        ast_set_line($wd_loop, $while_line);
+        ast_add_statement($wd_outer, $wd_loop);
+        ast_set_line($wd_outer, $while_line);
+        return $wd_outer;
+    }
 
     if ($wh_tok->{"type"} eq "MY") {
         # Parse: my [type] $var = expr

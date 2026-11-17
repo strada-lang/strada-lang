@@ -6,6 +6,10 @@
 #   # EXPECT-STDERR: text     the program must fail and its output contain text
 #   # COMPILE-ERROR: text     `stradac --check` must fail with a message containing text
 # The comment below that line says what used to go wrong.
+#
+# EXPECT tests also run through the bytecode VM (interpreter/strada-interp)
+# and must print the same line, unless the file has a `# VM-SKIP: reason`
+# line among its first comment lines.
 
 for bf_src in "$SCRIPT_DIR"/bugfix_tests/*.strada; do
     [ -f "$bf_src" ] || continue
@@ -58,3 +62,24 @@ for bf_src in "$SCRIPT_DIR"/bugfix_tests/*.strada; do
             ;;
     esac
 done
+
+# Same EXPECT tests through the bytecode VM
+BF_INTERP="$PROJECT_DIR/interpreter/strada-interp"
+if [ -x "$BF_INTERP" ]; then
+    for bf_src in "$SCRIPT_DIR"/bugfix_tests/*.strada; do
+        [ -f "$bf_src" ] || continue
+        bf_head=$(head -1 "$bf_src")
+        case "$bf_head" in "# EXPECT: "*|"# EXPECT:") ;; *) continue ;; esac
+        if head -5 "$bf_src" | grep -q "^# VM-SKIP:"; then continue; fi
+        bf_desc="bugfix-vm: $(basename "$bf_src" .strada)"
+        bf_want="${bf_head#\# EXPECT: }"
+        TOTAL=$((TOTAL + 1))
+        bf_got=$(cd "$PROJECT_DIR" && timeout 30 "$BF_INTERP" "$bf_src" 2>&1)
+        bf_rc=$?
+        if [ $bf_rc -eq 0 ] && [ "$bf_got" == "$bf_want" ]; then
+            PASSED=$((PASSED + 1)); log_pass "$bf_desc"
+        else
+            FAILED=$((FAILED + 1)); log_fail "$bf_desc" "exit $bf_rc; got: $(echo "$bf_got" | head -2 | tr '\n' '|')"
+        fi
+    done
+fi

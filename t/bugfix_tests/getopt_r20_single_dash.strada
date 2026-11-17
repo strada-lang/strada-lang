@@ -1,4 +1,5 @@
 # EXPECT: v=1 verbose=1 output=out.txt color=0 count=5 rem=file1|--x
+# VM-SKIP: re-executes its own binary through argv[0]
 # Audit 20 S2-14: a single-character option name ("v") could not be given as
 # "-v"; it was pushed to the remaining arguments. (Re-executes itself with
 # the arguments to parse.)

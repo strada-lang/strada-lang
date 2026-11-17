@@ -1,0 +1,26 @@
+# EXPECT: y|bc|2,3|3 2|1 undef ARRAY X|3 4|a=1|1 m4,n5,pq3,x1,y2
+# Perl forms the parser rejected: named unary operators without parentheses
+# (`delete $h{k}`, `keys %h`, `scalar @a`, `uc "x"`), `while (my ($k, $v) =
+# each %h)`, and a parenthesized group of pairs inside a hash literal. `$keys %
+# 4` must stay a modulo.
+func main() int {
+    my %h = ("a" => 1, "b" => 2, "c" => 3);
+    my @a = (1, 2, 3);
+    my @out;
+    delete $h{"a"};
+    push(@out, exists $h{"b"} ? "y" : "n");
+    push(@out, join("", sort keys %h));
+    push(@out, join(",", sort { $a <=> $b } values %h));
+    push(@out, scalar(@a) . " " . scalar(keys %h));
+    my $f = shift @a;
+    push(@out, $f . " " . (defined $h{"zz"} ? "def" : "undef") . " " . ref(\@a) . " " . uc "x");
+    my $keys = 7; my $each = 9;
+    push(@out, $keys % 4 . " " . $each % 5);
+    my %g = ("a" => 1);
+    my $n = 0;
+    while (my ($k, $v) = each %g) { push(@out, $k . "=" . $v); $n++; }
+    my $r = { ("x" => 1), "y" => 2, ("p" . "q") => 3, ("m" => 4, ("n" => 5)) };
+    push(@out, $n . " " . join(",", map { $_ . $r->{$_} } sort keys %$r));
+    say(join("|", @out));
+    return 0;
+}

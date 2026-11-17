@@ -1466,6 +1466,18 @@ compiler:
   `Async::Task::send(..., $timeout_ms)` waits with poll(2) outside a task;
   `core::initgroups`, `core::setgroups`, `core::unix_server`/`unix_client`;
   `core::setsockopt` passes a non-numeric value as raw bytes (packed structs).
+- **Perl forms the parser now takes**: named unary operators without
+  parentheses before a variable, `\` or literal (`delete $h{k}`, `exists`,
+  `defined`, `keys %h`, `values`, `each`, `scalar @a`, `shift @a`, `ref`,
+  `lc`/`uc`, `length`, ... -- `parser_is_named_unary`), parsed at Perl's
+  named-unary precedence (`parse_shift`: `keys %h > 2` is keys(%h) > 2); the
+  lexer reads `%` after `keys`/`values`/`each`/`delete`/`exists`/`scalar`/
+  `defined` as a sigil unless the word is itself a variable name (`$keys % 4`).
+  `while (my ($k, $v) = LIST)` loops while the list is non-empty (desugared to
+  a hidden `@__wlN`); a parenthesized group of pairs in a hash literal joins
+  the hash (`parse_anon_hash_entry`), while `(EXPR) => v` stays a computed key.
+  `my $n = keys(%h)` still stores the key array (a Strada idiom the compiler
+  itself uses), not Perl's count.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

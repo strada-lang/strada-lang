@@ -1,4 +1,5 @@
 # EXPECT: nonzero 99 99 3.5 hi
+# VM-SKIP: raw C pointers into a variable (core::int_ptr) exist only in compiled code
 # core::int_ptr($x) returned 0 for a plain int variable (tagged int has no heap
 # box unless promoted through a slot reference).
 func mutate_and_ret() int {

@@ -4793,6 +4793,7 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
     }
     my array @tokens = ();
     my str $prev_type = "";
+    my str $prev_word = "";
     my int $prev_is_word = 0;
     my str $prev2_type = "";
     my str $prev3_type = "";
@@ -4831,7 +4832,16 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
         # Disambiguate PERCENT (hash sigil) vs MOD (modulo operator)
         # If previous token could end a value expression, % is modulo
         if ($cur_type eq "PERCENT") {
-            if (lex_prev_ends_value($prev_type, $prev_is_word, $prev2_type, $last_rbrace_is_expr) == 1) {
+            # `keys %h`, `each %$r`, `delete %h{...}`: after a hash-taking
+            # named operator `%` is the sigil, not modulo
+            my int $pct_hash_op = 0;
+            if ($prev_type eq "TYPE_SCALAR") { $pct_hash_op = 1; }
+            if ($prev_type eq "IDENT" && $prev2_type ne "DOLLAR" && $prev2_type ne "AT" && $prev2_type ne "PERCENT" &&
+                $prev2_type ne "ARROW" && $prev2_type ne "DOUBLE_COLON" && ($prev_word eq "keys" || $prev_word eq "values" || $prev_word eq "each" ||
+                $prev_word eq "delete" || $prev_word eq "exists" || $prev_word eq "scalar" || $prev_word eq "defined")) {
+                $pct_hash_op = 1;
+            }
+            if ($pct_hash_op == 0 && lex_prev_ends_value($prev_type, $prev_is_word, $prev2_type, $last_rbrace_is_expr) == 1) {
                 $token->{"type"} = "MOD";
                 $cur_type = "MOD";
             }
@@ -4847,6 +4857,7 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
         $prev3_type = $prev2_type;
         $prev2_type = $prev_type;
         $prev_type = $cur_type;
+        $prev_word = "" . $token->{"value"};
         $prev_is_word = $cur_is_word;
 
         if ($cur_type eq "EOF") {

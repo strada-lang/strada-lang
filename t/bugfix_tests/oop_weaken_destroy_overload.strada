@@ -1,4 +1,5 @@
 # EXPECT: 3,4 1 2 1 1 2 0 1 1 1 0 30 auto:ping:7 21
+# VM-SKIP: checks DESTROY at the last reference (the VM runs DESTROY at GC time)
 # OOP fixes:
 # - 2-int-attr Moose `try { die($pt); } catch (Point $e) {}`
 # - core::weaken on shared blessed ref running DESTROY once (not twice when weak ref dies)
