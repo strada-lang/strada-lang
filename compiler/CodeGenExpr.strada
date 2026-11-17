@@ -2523,6 +2523,28 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             # string pointer into the "int" variable (type confusion: the
             # variable then printed as the string, and int fast paths read
             # garbage from it).
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1 && $target->{"sigil"} eq "$"
+                && length("" . $cg->{"int_vars"}->{escape_c_keyword($target->{"name"})}) > 0 && is_int_wrap_binop($cg, $rhs) == 1) {
+                # int-declared storage wraps (see emit_int_wrap_binop)
+                emit($cg, "({ StradaValue *__iw_n = ");
+                emit_int_wrap_binop($cg, $rhs);
+                emit($cg, "; StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = __iw_n; strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && expr_is_int_typed($cg, $target) == 1 && $rhs->{"type"} == NODE_STR_LITERAL() && ($rhs->{"has_char_code"} + 0) == 1) {
+                # `$int_var = '(';` stores the character code.
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = STRADA_MAKE_TAGGED_INT(" . c_int64_lit("" . $rhs->{"char_code"}) . "); strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
                 && expr_is_int_typed($cg, $target) == 1 && expr_is_int_typed($cg, $rhs) == 0) {
                 emit($cg, "({ StradaValue *__icv = ");
@@ -3120,7 +3142,14 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 } else {
                     emit($cg, "strada_overload_binary(__ca_old, __ca_rhs, \"" . $ca_ov_op . "\"); ");
                     emit($cg, "if (!__ca_res) { ");
-                    if ($op eq "+=") {
+                    my int $ca_int_tgt = 0;
+                    if ($target->{"sigil"} eq "$" && length("" . $cg->{"int_vars"}->{escape_c_keyword($target->{"name"})}) > 0) { $ca_int_tgt = 1; }
+                    if ($ca_int_tgt == 1 && ($op eq "+=" || $op eq "-=" || $op eq "*=")) {
+                        # int-declared storage is 64-bit: wrap like C, as the
+                        # unboxed int path does.
+                        my str $iop = substr($op, 0, 1);
+                        emit($cg, "__ca_res = strada_new_int_il((int64_t)((uint64_t)strada_to_int(__ca_old) " . $iop . " (uint64_t)strada_to_int(__ca_rhs))); ");
+                    } elsif ($op eq "+=") {
                         emit($cg, "__ca_res = strada_sv_add(__ca_old, __ca_rhs); ");
                     } elsif ($op eq "*=") {
                         emit($cg, "__ca_res = strada_sv_mul(__ca_old, __ca_rhs); ");
@@ -3187,9 +3216,17 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 my str $ca_uvn = escape_c_keyword($target->{"name"});
                 if (is_unboxed_int($cg, $ca_uvn) == 1) {
                     if ($is_void == 0) { emit($cg, "strada_new_int_il("); }
-                    emit($cg, "(" . $ca_uvn . " = (int64_t)((uint64_t)" . $ca_uvn . " + (uint64_t)(");
-                    emit_int_operand($cg, $expr->{"value"});
-                    emit($cg, ")))");
+                    if (expr_is_int_typed($cg, $expr->{"value"}) == 1) {
+                        emit($cg, "(" . $ca_uvn . " = (int64_t)((uint64_t)" . $ca_uvn . " + (uint64_t)(");
+                        emit_int_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    } else {
+                        # `my int $c = 3; $c += 1.5`: compute in num, then
+                        # truncate (the right side used to be truncated first).
+                        emit($cg, "(" . $ca_uvn . " = strada_num_to_i64_sat((double)" . $ca_uvn . " + (");
+                        emit_num_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    }
                     if ($is_void == 0) { emit($cg, ")"); }
                 } else {
                     if ($is_void == 0) { emit($cg, "strada_new_num("); }
@@ -3230,15 +3267,22 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $target);
                 emit($cg, ", __ca_l + __ca_r); })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
-                emit($cg, "({ double __ca_l = strada_to_num(");
-                gen_expression($cg, $target);
-                emit($cg, "); double __ca_r = ");
-                emit_num_operand($cg, $expr->{"value"});
-                emit($cg, "; StradaValue *__old = ");
-                gen_expression($cg, $target);
+                # Exact arithmetic with Perl overflow promotion (IV->UV->NV);
+                # computing in double lost precision above 2^53.
+                my int $ca_rcl = needs_temp_cleanup($cg, $expr->{"value"});
+                emit($cg, "({ StradaValue *__ca_rv = ");
+                gen_expression($cg, $expr->{"value"});
                 emit($cg, "; ");
+                if ($ca_rcl == 1 && cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_push(__ca_rv); "); }
+                emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
-                emit($cg, " = strada_new_num(__ca_l + __ca_r); strada_decref(__old); ");
+                emit($cg, "; StradaValue *__ca_nv = strada_sv_add(__old, __ca_rv); ");
+                if ($ca_rcl == 1) {
+                    if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
+                    else { emit($cg, "strada_decref(__ca_rv); "); }
+                }
+                gen_expression($cg, $target);
+                emit($cg, " = __ca_nv; strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3255,9 +3299,17 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 my str $ca_uvn2 = escape_c_keyword($target->{"name"});
                 if (is_unboxed_int($cg, $ca_uvn2) == 1) {
                     if ($is_void == 0) { emit($cg, "strada_new_int_il("); }
-                    emit($cg, "(" . $ca_uvn2 . " = (int64_t)((uint64_t)" . $ca_uvn2 . " - (uint64_t)(");
-                    emit_int_operand($cg, $expr->{"value"});
-                    emit($cg, ")))");
+                    if (expr_is_int_typed($cg, $expr->{"value"}) == 1) {
+                        emit($cg, "(" . $ca_uvn2 . " = (int64_t)((uint64_t)" . $ca_uvn2 . " - (uint64_t)(");
+                        emit_int_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    } else {
+                        # `my int $c = 3; $c -= 1.5`: compute in num, then
+                        # truncate (the right side used to be truncated first).
+                        emit($cg, "(" . $ca_uvn2 . " = strada_num_to_i64_sat((double)" . $ca_uvn2 . " - (");
+                        emit_num_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    }
                     if ($is_void == 0) { emit($cg, ")"); }
                 } else {
                     if ($is_void == 0) { emit($cg, "strada_new_num("); }
@@ -3297,15 +3349,22 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $target);
                 emit($cg, ", __ca_l - __ca_r); })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
-                emit($cg, "({ double __ca_l = strada_to_num(");
-                gen_expression($cg, $target);
-                emit($cg, "); double __ca_r = ");
-                emit_num_operand($cg, $expr->{"value"});
-                emit($cg, "; StradaValue *__old = ");
-                gen_expression($cg, $target);
+                # Exact arithmetic with Perl overflow promotion (IV->UV->NV);
+                # computing in double lost precision above 2^53.
+                my int $ca_rcl = needs_temp_cleanup($cg, $expr->{"value"});
+                emit($cg, "({ StradaValue *__ca_rv = ");
+                gen_expression($cg, $expr->{"value"});
                 emit($cg, "; ");
+                if ($ca_rcl == 1 && cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_push(__ca_rv); "); }
+                emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
-                emit($cg, " = strada_new_num(__ca_l - __ca_r); strada_decref(__old); ");
+                emit($cg, "; StradaValue *__ca_nv = strada_sv_sub(__old, __ca_rv); ");
+                if ($ca_rcl == 1) {
+                    if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
+                    else { emit($cg, "strada_decref(__ca_rv); "); }
+                }
+                gen_expression($cg, $target);
+                emit($cg, " = __ca_nv; strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3322,9 +3381,17 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 my str $ca_uvn3 = escape_c_keyword($target->{"name"});
                 if (is_unboxed_int($cg, $ca_uvn3) == 1) {
                     if ($is_void == 0) { emit($cg, "strada_new_int_il("); }
-                    emit($cg, "(" . $ca_uvn3 . " = (int64_t)((uint64_t)" . $ca_uvn3 . " * (uint64_t)(");
-                    emit_int_operand($cg, $expr->{"value"});
-                    emit($cg, ")))");
+                    if (expr_is_int_typed($cg, $expr->{"value"}) == 1) {
+                        emit($cg, "(" . $ca_uvn3 . " = (int64_t)((uint64_t)" . $ca_uvn3 . " * (uint64_t)(");
+                        emit_int_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    } else {
+                        # `my int $c = 3; $c *= 1.5`: compute in num, then
+                        # truncate (the right side used to be truncated first).
+                        emit($cg, "(" . $ca_uvn3 . " = strada_num_to_i64_sat((double)" . $ca_uvn3 . " * (");
+                        emit_num_operand($cg, $expr->{"value"});
+                        emit($cg, ")))");
+                    }
                     if ($is_void == 0) { emit($cg, ")"); }
                 } else {
                     if ($is_void == 0) { emit($cg, "strada_new_num("); }
@@ -3365,15 +3432,22 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $target);
                 emit($cg, ", __ca_l * __ca_r); })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
-                emit($cg, "({ double __ca_l = strada_to_num(");
-                gen_expression($cg, $target);
-                emit($cg, "); double __ca_r = ");
-                emit_num_operand($cg, $expr->{"value"});
-                emit($cg, "; StradaValue *__old = ");
-                gen_expression($cg, $target);
+                # Exact arithmetic with Perl overflow promotion (IV->UV->NV);
+                # computing in double lost precision above 2^53.
+                my int $ca_rcl = needs_temp_cleanup($cg, $expr->{"value"});
+                emit($cg, "({ StradaValue *__ca_rv = ");
+                gen_expression($cg, $expr->{"value"});
                 emit($cg, "; ");
+                if ($ca_rcl == 1 && cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_push(__ca_rv); "); }
+                emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
-                emit($cg, " = strada_new_num(__ca_l * __ca_r); strada_decref(__old); ");
+                emit($cg, "; StradaValue *__ca_nv = strada_sv_mul(__old, __ca_rv); ");
+                if ($ca_rcl == 1) {
+                    if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
+                    else { emit($cg, "strada_decref(__ca_rv); "); }
+                }
+                gen_expression($cg, $target);
+                emit($cg, " = __ca_nv; strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3408,6 +3482,21 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, " = strada_num_set_inplace(");
                 gen_expression($cg, $target);
                 emit($cg, ", __nd_a / __nd_b); })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && length("" . $cg->{"int_vars"}->{escape_c_keyword($target->{"name"})}) > 0) {
+                # int-declared target: the quotient's integer part (7 /= 2 is 3;
+                # it used to store 3.5 in an int variable).
+                emit($cg, "({ double __di_a = strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, "); double __di_b = ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "; if (__di_b == 0.0) strada_throw(\"Illegal division by zero\"); StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_int(strada_num_to_i64_sat(__di_a / __di_b)); strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ double __dv_a = strada_to_num(");
                 gen_expression($cg, $target);
@@ -3477,6 +3566,16 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"value"}) == 0) {
                     emit($cg, "__lca_rhs = strada_copy_scalar_il(__lca_rhs); ");
+                }
+                if ($cg->{"cleanup_enabled"} == 1 && $target_type == NODE_VARIABLE() && $target->{"sigil"} eq "$") {
+                    # int/num-declared targets keep canonical values
+                    # (`my int $n = 0; $n ||= "7x"` is 7, not "7x").
+                    my str $lca_cn = escape_c_keyword($target->{"name"});
+                    if (length("" . $cg->{"int_vars"}->{$lca_cn}) > 0 && expr_is_int_typed($cg, $expr->{"value"}) == 0) {
+                        emit($cg, "{ StradaValue *__lca_c = strada_new_int(strada_to_int(__lca_rhs)); strada_decref(__lca_rhs); __lca_rhs = __lca_c; } ");
+                    } elsif (length("" . $cg->{"num_vars"}->{$lca_cn}) > 0) {
+                        emit($cg, "{ StradaValue *__lca_c = strada_new_num(strada_to_num(__lca_rhs)); strada_decref(__lca_rhs); __lca_rhs = __lca_c; } ");
+                    }
                 }
                 if ($cg->{"cleanup_enabled"} == 1) {
                     emit($cg, "StradaValue *__old = ");
@@ -3848,15 +3947,15 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                 if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
                     my int $cseid = $cg->{"tmp_counter"} + 0;
                     $cg->{"tmp_counter"} = $cseid + 1;
-                    emit($cg, "strada_new_int_il(({ int64_t __cse" . $cseid . " = ");
+                    emit($cg, "({ int64_t __cse" . $cseid . " = ");
                     emit_int_operand($cg, $expr->{"left"});
-                    emit($cg, "; (int64_t)((uint64_t)__cse" . $cseid . " + (uint64_t)__cse" . $cseid . "); }))");
+                    emit($cg, "; strada_int_add_ii(__cse" . $cseid . ", __cse" . $cseid . "); })");
                 } else {
-                    emit($cg, "strada_new_int_il((int64_t)((uint64_t)(");
+                    emit($cg, "strada_int_add_ii(");
                     emit_int_operand($cg, $expr->{"left"});
-                    emit($cg, ") + (uint64_t)(");
+                    emit($cg, ", ");
                     emit_int_operand($cg, $expr->{"right"});
-                    emit($cg, ")))");
+                    emit($cg, ")");
                 }
             } else {
                 my int $uid = $cg->{"tmp_counter"} + 0;
@@ -3894,11 +3993,11 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                     emit_int_operand($cg, $expr->{"left"});
                     emit($cg, "; (int64_t)((uint64_t)__cse" . $cseid . " - (uint64_t)__cse" . $cseid . "); }))");
                 } else {
-                    emit($cg, "strada_new_int_il((int64_t)((uint64_t)(");
+                    emit($cg, "strada_int_sub_ii(");
                     emit_int_operand($cg, $expr->{"left"});
-                    emit($cg, ") - (uint64_t)(");
+                    emit($cg, ", ");
                     emit_int_operand($cg, $expr->{"right"});
-                    emit($cg, ")))");
+                    emit($cg, ")");
                 }
             } else {
                 my int $uid = $cg->{"tmp_counter"} + 0;
@@ -3932,15 +4031,15 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                 if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
                     my int $cseid = $cg->{"tmp_counter"} + 0;
                     $cg->{"tmp_counter"} = $cseid + 1;
-                    emit($cg, "strada_new_int_il(({ int64_t __cse" . $cseid . " = ");
+                    emit($cg, "({ int64_t __cse" . $cseid . " = ");
                     emit_int_operand($cg, $expr->{"left"});
-                    emit($cg, "; (int64_t)((uint64_t)__cse" . $cseid . " * (uint64_t)__cse" . $cseid . "); }))");
+                    emit($cg, "; strada_int_mul_ii(__cse" . $cseid . ", __cse" . $cseid . "); })");
                 } else {
-                    emit($cg, "strada_new_int_il((int64_t)((uint64_t)(");
+                    emit($cg, "strada_int_mul_ii(");
                     emit_int_operand($cg, $expr->{"left"});
-                    emit($cg, ") * (uint64_t)(");
+                    emit($cg, ", ");
                     emit_int_operand($cg, $expr->{"right"});
-                    emit($cg, ")))");
+                    emit($cg, ")");
                 }
             } else {
                 my int $uid = $cg->{"tmp_counter"} + 0;
@@ -4011,6 +4110,13 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                 }
                 emit($cg, "__am_r != 0 ? strada_new_int_il(strada_floored_mod(__am_l, __am_r)) : strada_safe_mod(__am_l, __am_r); })");
             }
+        } elsif ($op eq "x" && $expr->{"left"}->{"type"} == NODE_ANON_ARRAY() && $expr->{"left"}->{"is_list"}) {
+            # (LIST) x N: the list repeated N times (it stringified the list).
+            emit($cg, "({ StradaValue *__lr_src = ");
+            gen_expression($cg, $expr->{"left"});
+            emit($cg, "; int64_t __lr_n = ");
+            emit_int_operand($cg, $expr->{"right"});
+            emit($cg, "; StradaValue *__lr_out = strada_new_array(); for (int64_t __lr_i = 0; __lr_i < __lr_n; __lr_i++) strada_av_append_all(__lr_out->value.av, __lr_src); strada_decref(__lr_src); __lr_out; })");
         } elsif ($op eq "x") {
             # String repetition: "ab" x 3
             my int $left_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"left"}) == 1;
@@ -5395,6 +5501,14 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
     if ($t == NODE_VARIABLE() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_ANON_ARRAY() && $elem->{"is_list"} == 1) { return 2; }
     if ($t == NODE_ANON_HASH() && $elem->{"is_empty_list"}) { return 2; }
+    if ($t == NODE_REGEX_MATCH() && ($elem->{"list_ctx"} + 0) == 1) { return 2; }
+    if ($t == NODE_BINARY_OP() && $elem->{"op"} eq "x" && $elem->{"left"}->{"type"} == NODE_ANON_ARRAY() && $elem->{"left"}->{"is_list"}) { return 2; }
+    # Ranges and slices are array values; @{...} / @$r dereferences are
+    # arrays by their sigil (kind 1: append the elements; the caller still
+    # releases an owned deref temp). They used to be pushed as one element
+    # (or, for ranges in a list, lost entirely).
+    if ($t == NODE_RANGE() || $t == NODE_ARRAY_SLICE() || $t == NODE_HASH_SLICE()) { return 2; }
+    if ($t == NODE_DEREF_SCALAR() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) { return 2; }
     if ($t == NODE_CALL()) {
         my str $nm = "" . $elem->{"name"};
@@ -5405,7 +5519,20 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
             || $nm eq "sys::split" || $nm eq "sys::keys" || $nm eq "sys::values" || $nm eq "sys::reverse") {
             return 2;
         }
-        if (resolve_call_return_type($cg, $elem->{"name"}) == TYPE_ARRAY()) { return 2; }
+        my int $crt = resolve_call_return_type($cg, $elem->{"name"});
+        if ($crt == TYPE_ARRAY()) { return 2; }
+        # A runtime builtin (core::unpack, core::readdir, re::captures, ...)
+        # with no declared Strada return type: decided at run time (every
+        # kind-2 consumer checks strada_sv_is_array_or_aref), so a builtin
+        # returning a list flattens and one returning a hashref stays one.
+        if ($crt < 0) {
+            my int $bci = index($nm, "::");
+            if ($bci > 0) {
+                my str $bns = substr($nm, 0, $bci);
+                if ($bns eq "sys" || $bns eq "math" || $bns eq "re" || $bns eq "utf8" || $bns eq "str") { return 2; }
+            }
+            if ($nm eq "captures" || $nm eq "sort" || $nm eq "glob") { return 2; }
+        }
     }
     return 0;
 }
@@ -5417,6 +5544,22 @@ func gen_expression(scalar $cg, scalar $expr) void {
     # Integer literal
     if ($type == NODE_INT_LITERAL()) {
         my str $iv = "" . $expr->{"value"};
+        my int $ilk = 0;
+        if (!$in_extern) { $ilk = int_lit_kind($iv); }
+        if ($ilk == 1) {
+            # Above INT64_MAX: an unsigned (UV) integer, as in Perl.
+            emit($cg, "strada_new_uint(" . $iv . "ULL)");
+            return;
+        }
+        if ($ilk == 2) {
+            # Beyond 2^64-1: a float.
+            if (length($iv) >= 2 && (substr($iv, 0, 2) eq "0x" || substr($iv, 0, 2) eq "0X")) {
+                emit($cg, "strada_new_num(strtod(\"" . $iv . "\", NULL))");
+            } else {
+                emit($cg, "strada_new_num(" . $iv . ".0)");
+            }
+            return;
+        }
         if ($in_extern) {
             emit($cg, $iv);
         } elsif (bytes($iv) < 15) {
@@ -5438,6 +5581,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
     }
     
     # String literal - use byte-level operations for proper UTF-8 handling
+    if ($type == NODE_STR_LITERAL() && $expr->{"is_regex"} && !$in_extern && regex_pattern_has_interp("" . $expr->{"value"}) == 1) {
+        # A /pattern/ value with $var interpolation (split(/$sep/, ...)):
+        # the interpolated pattern string (owned). It was the literal text.
+        gen_regex_interpolated_pattern($cg, "" . $expr->{"value"});
+        return;
+    }
     if ($type == NODE_STR_LITERAL()) {
         # In extern mode, emit raw C string literal; otherwise wrap in
         # STRADA_NEW_STR_LIT so embedded NUL bytes survive the constructor
@@ -5601,6 +5750,47 @@ func gen_expression(scalar $cg, scalar $expr) void {
     if ($type == NODE_BINARY_OP()) { gen_binop_node($cg, $expr); return; }
 
     # Regex match: $str =~ /pattern/flags or $str !~ /pattern/flags
+    if ($type == NODE_REGEX_MATCH() && ($expr->{"list_ctx"} + 0) == 1 && $expr->{"op"} eq "=~") {
+        # List context (Semantic sets list_ctx): the capture groups of the
+        # match, or (1) without groups; with /g every match (its groups, or
+        # the whole match). It yielded the 0/1 match result.
+        my str $rl_pat = "" . $expr->{"pattern"};
+        my str $rl_flags = "" . $expr->{"flags"};
+        my int $rl_global = 0;
+        if (index($rl_flags, "g") >= 0) { $rl_global = 1; }
+        my str $rl_f2 = "";
+        for (my int $rli = 0; $rli < length($rl_flags); $rli = $rli + 1) {
+            my str $rlc = substr($rl_flags, $rli, 1);
+            if ($rlc ne "g") { $rl_f2 = $rl_f2 . $rlc; }
+        }
+        my int $rl_push = cleanup_push_useful($cg);
+        my int $rl_own = 0;
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"target"}) == 1) { $rl_own = 1; }
+        emit($cg, "({ StradaValue *__rl_t = ");
+        gen_expression($cg, $expr->{"target"});
+        emit($cg, "; StradaValue *__rl_s = strada_to_str_sv(__rl_t); ");
+        if ($rl_own == 1) { emit($cg, "strada_decref(__rl_t); "); }
+        if ($rl_push == 1) { emit($cg, "strada_cleanup_push(__rl_s); "); }
+        emit($cg, "const char *__rl_c = (__rl_s && !STRADA_IS_TAGGED_INT(__rl_s) && __rl_s->value.pv) ? __rl_s->value.pv : \"\"; ");
+        my int $rl_interp = regex_pattern_has_interp($rl_pat);
+        if ($rl_interp == 1) {
+            gen_subst_pattern_prelude($cg, $rl_pat);
+        }
+        emit($cg, "strada_regex_set_subject_for_sv(__rl_s); StradaValue *__rl = strada_regex_list(__rl_c, ");
+        if ($rl_interp == 1) { emit($cg, "__subst_pat"); } else { emit($cg, c_str_lit($rl_pat)); }
+        emit($cg, ", ");
+        if (length($rl_f2) > 0) { emit($cg, c_str_lit($rl_f2)); } else { emit($cg, "NULL"); }
+        emit($cg, ", " . $rl_global . "); strada_regex_clear_subject_len(); ");
+        if ($rl_interp == 1) {
+            if ($rl_push == 1) { emit($cg, "strada_cleanup_pop_decref(__subst_pstr); "); }
+            else { emit($cg, "strada_decref(__subst_pstr); "); }
+        }
+        if ($rl_push == 1) { emit($cg, "strada_cleanup_pop_decref(__rl_s); "); }
+        else { emit($cg, "strada_decref(__rl_s); "); }
+        emit($cg, "__rl; })");
+        return;
+    }
+
     if ($type == NODE_REGEX_MATCH()) {
         my str $op = $expr->{"op"};
         my str $pattern = $expr->{"pattern"};
@@ -6099,6 +6289,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($op eq "-") { $ol_op = "neg"; }
             my scalar $ol_ops3 = $cg->{"overloaded_ops"};
             my str $uop_check = "" . $ol_ops3->{$ol_op};
+            # neg is autogenerated from an overloaded "-" (the runtime's
+            # strada_overload_unary falls back to 0 - x).
+            if (length($uop_check) == 0 && $ol_op eq "neg") { $uop_check = "" . $ol_ops3->{"-"}; }
             if (length($uop_check) > 0) {
                 gen_overloaded_unary($cg, $operand, $ol_op);
                 return;
@@ -6132,14 +6325,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $operand);
                 emit($cg, "; ");
                 if ($un_push == 1) { emit($cg, "strada_cleanup_push(__unary_tmp); "); }
-                emit($cg, "StradaValue *__unary_res = strada_new_num(-strada_to_num(__unary_tmp)); ");
+                emit($cg, "StradaValue *__unary_res = strada_negate(__unary_tmp); ");
                 if ($un_push == 1) { emit($cg, "strada_cleanup_pop_decref(__unary_tmp); "); }
                 else { emit($cg, "strada_decref(__unary_tmp); "); }
                 emit($cg, "__unary_res; })");
             } else {
-                emit($cg, "strada_new_num(-strada_to_num(");
+                emit($cg, "strada_negate(");
                 gen_expression($cg, $operand);
-                emit($cg, "))");
+                emit($cg, ")");
             }
         } elsif ($op eq "!") {
             if ($needs_cleanup == 1) {
@@ -6797,6 +6990,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "strada_array_push(__slice_res->value.av, strada_array_get(__slice_src, __sl_i)); ");
                 }
                 emit($cg, "} ");
+            } elsif (array_flatten_kind($cg, $item) > 0) {
+                # @a[@idx]: an array-valued subscript contributes each element.
+                my int $ix_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $item) == 1;
+                emit($cg, "{ StradaValue *__sl_l = ");
+                gen_expression($cg, $item);
+                emit($cg, "; ");
+                if ($ix_cl == 1 && $sl_push == 1) { emit($cg, "strada_cleanup_push(__sl_l); "); }
+                emit($cg, "StradaArray *__sl_la = strada_deref_array(__sl_l); for (size_t __sl_j = 0; __sl_la && __sl_j < __sl_la->size; __sl_j++) { int64_t __sl_x = strada_to_int(__sl_la->elements[__sl_la->head + __sl_j]); ");
+                if ($cg->{"uses_tie"} == 1) {
+                    emit($cg, "strada_array_push_take(__slice_res->value.av, strada_av_fetch_sv(__slice_src_sv, __sl_x)); ");
+                } else {
+                    emit($cg, "strada_array_push(__slice_res->value.av, strada_array_get(__slice_src, __sl_x)); ");
+                }
+                emit($cg, "} ");
+                if ($ix_cl == 1) {
+                    if ($sl_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sl_l); "); }
+                    else { emit($cg, "strada_decref(__sl_l); "); }
+                }
+                emit($cg, "} ");
             } else {
                 if ($cg->{"uses_tie"} == 1) {
                     emit($cg, "strada_array_push_take(__slice_res->value.av, strada_av_fetch_sv(__slice_src_sv, ");
@@ -6856,6 +7068,27 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my int $key_is_literal = 0;
             if ($item->{"type"} == NODE_STR_LITERAL() && str_has_nul($item->{"value"}) == 0) {
                 $key_is_literal = 1;
+            }
+            if ($key_is_literal == 0 && array_flatten_kind($cg, $item) > 0) {
+                # @h{@keys}: an array-valued subscript contributes each element.
+                my int $hk_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $item) == 1;
+                emit($cg, "{ StradaValue *__sl_l = ");
+                gen_expression($cg, $item);
+                emit($cg, "; ");
+                if ($hk_cl == 1 && $hsl_push == 1) { emit($cg, "strada_cleanup_push(__sl_l); "); }
+                emit($cg, "StradaArray *__sl_la = strada_deref_array(__sl_l); for (size_t __sl_j = 0; __sl_la && __sl_j < __sl_la->size; __sl_j++) { StradaValue *__sl_kk = __sl_la->elements[__sl_la->head + __sl_j]; ");
+                if ($cg->{"uses_tie"} == 1) {
+                    emit($cg, "strada_array_push_take(__slice_res->value.av, strada_hv_fetch_owned_sv(__slice_src_sv, __sl_kk)); ");
+                } else {
+                    emit($cg, "strada_array_push(__slice_res->value.av, strada_hash_get_sv(__slice_src, __sl_kk)); ");
+                }
+                emit($cg, "} ");
+                if ($hk_cl == 1) {
+                    if ($hsl_push == 1) { emit($cg, "strada_cleanup_pop_decref(__sl_l); "); }
+                    else { emit($cg, "strada_decref(__sl_l); "); }
+                }
+                emit($cg, "} ");
+                next;
             }
             if ($key_is_literal == 1) {
                 if ($cg->{"uses_tie"} == 1) {
@@ -7211,8 +7444,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             return;
         }
-        gen_expression($cg, $expr->{"object"});
-        emit($cg, "->" . $expr->{"field"});
+        # Not a C struct field: `$obj->name` without parens is a method call
+        # with no arguments (Perl). It emitted the raw C `obj->name`.
+        my scalar $fa_mc = ast_new_method_call($expr, $expr->{"field"});
+        $fa_mc->{"base_object"} = $expr->{"object"};
+        $fa_mc->{"line"} = $expr->{"line"};
+        gen_expression($cg, $fa_mc);
         return;
     }
     
@@ -8175,7 +8412,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $last_stmt->{"expr"});
                 emit($cg, "; ");
                 if ($map_push == 1) { emit($cg, "strada_cleanup_push(__map_elem_" . $map_id . "); "); }
-                emit($cg, "if (strada_sv_is_array_or_aref(__map_elem_" . $map_id . ")) { ");
+                # A list-valued block (list, pair, @array, map/grep/sort,
+                # array call, range, slice) flattens into the result; any
+                # other value is ONE element unless it is an array value at
+                # run time. A reference -- [..], or a scalar holding an
+                # arrayref -- stays one element, as in Perl (Schwartzian
+                # transform: map { [$_, f($_)] } @x).
+                my scalar $mv_expr = $last_stmt->{"expr"};
+                my int $mv_list = 0;
+                if (array_flatten_kind($cg, $mv_expr) > 0) { $mv_list = 1; }
+                if ($mv_expr->{"type"} == NODE_ANON_ARRAY() && $mv_expr->{"is_pair"}) { $mv_list = 1; }
+                if ($mv_list == 1) {
+                    emit($cg, "if (strada_sv_is_array_or_aref(__map_elem_" . $map_id . ")) { ");
+                } else {
+                    emit($cg, "if (__map_elem_" . $map_id . " && !STRADA_IS_TAGGED_INT(__map_elem_" . $map_id . ") && __map_elem_" . $map_id . "->type == STRADA_ARRAY) { ");
+                }
                 emit($cg, "strada_av_append_all(__map_result_" . $map_id . "->value.av, __map_elem_" . $map_id . "); ");
                 if ($map_el_owned == 1) {
                     if ($map_push == 1) { emit($cg, "strada_cleanup_pop_decref(__map_elem_" . $map_id . "); "); }

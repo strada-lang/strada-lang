@@ -629,17 +629,31 @@ func lex_pp_bit_shr(int $a, int $b) int {
         if ($a < 0) { return 0 - 1; }
         return 0;
     }
+    # Arithmetic shift: for a < 0, a >> b is -1 - ((-1 - a) >> b). Bits are
+    # taken from the top with exact powers of two (halving with `/` was a
+    # float division, wrong at and above 2^53).
+    my int $neg = 0;
     my int $r = $a;
-    my int $i = 0;
-    while ($i < $b) {
-        if ($r < 0 && ($r % 2) != 0) {
-            $r = ($r / 2) - 1;
-        } else {
-            $r = $r / 2;
-        }
-        $i = $i + 1;
+    if ($r < 0) { $neg = 1; $r = (0 - 1) - $r; }
+    my array @pw = ();
+    my int $pv = 1;
+    my int $k = 0;
+    while ($k < 63) {
+        push(@pw, $pv);
+        if ($k < 62) { $pv = $pv + $pv; }
+        $k = $k + 1;
     }
-    return $r;
+    my int $out = 0;
+    my int $i = 62;
+    while ($i >= 0) {
+        if ($r >= $pw[$i]) {
+            $r = $r - $pw[$i];
+            if ($i >= $b) { $out = $out + $pw[$i - $b]; }
+        }
+        $i = $i - 1;
+    }
+    if ($neg == 1) { $out = (0 - 1) - $out; }
+    return $out;
 }
 
 # op: 0 = and, 1 = xor, 2 = or
@@ -655,14 +669,26 @@ func lex_pp_bit_op(int $a, int $b, int $op) int {
         $sb = 1;
         $b = ($b + $half63) + $half63;
     }
+    # Low 63 bits, from the top, with exact integer powers of two (the old
+    # loop halved with `/`, a float division, wrong at and above 2^53).
+    my array @pw = ();
+    my int $pv = 1;
+    my int $k = 0;
+    while ($k < 63) {
+        push(@pw, $pv);
+        if ($k < 62) { $pv = $pv + $pv; }
+        $k = $k + 1;
+    }
     my int $res = 0;
-    my int $pow = 1;
-    my int $i = 0;
-    while ($i < 63) {
-        my int $ba = $a % 2;
-        my int $bb = $b % 2;
-        $a = $a / 2;
-        $b = $b / 2;
+    my int $ra = $a;
+    my int $rb = $b;
+    my int $i = 62;
+    while ($i >= 0) {
+        my int $p = $pw[$i];
+        my int $ba = 0;
+        my int $bb = 0;
+        if ($ra >= $p) { $ba = 1; $ra = $ra - $p; }
+        if ($rb >= $p) { $bb = 1; $rb = $rb - $p; }
         my int $br = 0;
         if ($op == 0) {
             if ($ba != 0 && $bb != 0) { $br = 1; }
@@ -671,9 +697,8 @@ func lex_pp_bit_op(int $a, int $b, int $op) int {
         } else {
             if ($ba != 0 || $bb != 0) { $br = 1; }
         }
-        if ($br != 0) { $res = $res + $pow; }
-        if ($i < 62) { $pow = $pow * 2; }
-        $i = $i + 1;
+        if ($br != 0) { $res = $res + $p; }
+        $i = $i - 1;
     }
     my int $sr = 0;
     if ($op == 0) {
@@ -2105,6 +2130,15 @@ func lex_read_u_escape(scalar $lexer) str {
         $hv = $hv * 16 + $hd;
         lex_advance($lexer);
         $hi = $hi + 1;
+    }
+    if ($hi == 0) {
+        # No hex digits: Perl's \u, the next character in upper case
+        # ("\uZ" inserted a NUL byte).
+        if (lex_at_end($lexer)) { return ""; }
+        my int $uc_c = lex_current_code($lexer);
+        if (!(($uc_c >= 'a' && $uc_c <= 'z') || ($uc_c >= 'A' && $uc_c <= 'Z') || ($uc_c >= '0' && $uc_c <= '9') || $uc_c == '_')) { return ""; }
+        lex_advance($lexer);
+        return uc(chr($uc_c));
     }
     # UTF-16 surrogate pair combining: \uD800..\uDBFF followed immediately by \uDC00..\uDFFF
     if ($hv >= 55296 && $hv <= 56319 && $hi == 4) {

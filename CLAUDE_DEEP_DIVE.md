@@ -2588,3 +2588,35 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
 - **Global registry teardown** detaches `strada_global_registry` before
   freeing it, so DESTROY code reading `our` variables during exit sees nothing
   rather than an entry mid-free.
+- **List flattening (M2)**: `array_flatten_kind($cg, $e)` is the single static
+  predicate: 1 = borrowed array (`@var`, `@{...}`), 2 = owned list temp (list
+  literal, range, slices, `x` with a list left side, array-valued calls,
+  namespaced builtins with unknown return type). Consumers append through
+  `emit_list_elem_append($cg, $av_expr, $el, $use_push)` (CodeGenBuiltins),
+  which flattens kind>0 values at run time with `strada_sv_is_array_or_aref`
+  and handles `NODE_SPREAD`. `print`/`say` with several args go through
+  `gen_print_list` -> `strada_print2` / `strada_print_list` (a leading
+  filehandle is detected at run time); printf -> `strada_printf_list`.
+- **Overflow promotion**: value paths of int-typed `+ - *` emit
+  `strada_int_add_ii/_sub_ii/_mul_ii` (header inline, slow path
+  `strada_int_arith_ii`); generic scalars use `strada_sv_add/sub/mul`, which
+  fall to `strada_int_arith_slow` on overflow or when both operands may be
+  exact (INT, UV, integer-looking STR -- `strada_exact_int_of`). Inline C
+  int64 arithmetic (`emit_int_operand`) still wraps, and is what int-declared
+  destinations use (`is_int_wrap_binop` / `emit_int_wrap_binop`). Literals:
+  `int_lit_kind` 1 -> `strada_new_uint(...ULL)`, 2 -> num.
+- **foreach aliasing**: the array foreach path sets `$cg->{"fe_writeback"}`
+  (a C statement storing the loop variable into `__foreach_av_N[__foreach_i_N]`)
+  when the source is `@var`/`@{...}` and `node_writes_var` says the body
+  assigns the variable; it is emitted at the end of the body and by
+  `emit_foreach_writeback` before `next`/`last` (labeled via
+  `label_writeback`). Pre-existing loop variables are saved in
+  `__fe_save_N` / `__fr_save_N` (`__fr_savev_N` for unboxed int/num) and
+  restored after the loop. The loop condition re-reads the array length.
+- **Paren-less method call**: a `NODE_FIELD_ACCESS` that is not a C struct
+  field is generated as a zero-arg `NODE_METHOD_CALL` (base_object = object);
+  `needs_temp_cleanup` therefore treats every FIELD_ACCESS as owned.
+- **Constructor-less `Pkg::new`**: inlined hash construction when the keys are
+  literals; otherwise `strada_generic_new(pkg, args_array)` (consumes the
+  array). Semantic only reports `undefined function 'Pkg::new'` for an odd,
+  spread-free argument count.

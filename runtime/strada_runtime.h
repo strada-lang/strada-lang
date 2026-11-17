@@ -798,14 +798,39 @@ static inline int strada_sv_is_signed_int_val(StradaValue *sv, int64_t *out) {
     return 0;
 }
 
+StradaValue *strada_int_arith_slow(StradaValue *l, StradaValue *r, int op);  /* exact +,-,* with IV->UV->NV promotion */
+/* True when strada_int_arith_slow may give an exact integer: a UV int or a
+ * string (an integer-looking string stays exact, e.g. "9223372036854775807"+0). */
+static inline int strada_sv_maybe_exact(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return 1;
+    return sv && (sv->type == STRADA_INT || sv->type == STRADA_STR);
+}
+
+StradaValue *strada_int_arith_ii(int64_t a, int64_t b, int op);  /* exact int64 op int64 -> IV/UV/NV */
+/* Boxed results of int-typed + - * : promote on overflow instead of
+ * wrapping (4294967296 * 4294967296 was 0). */
+static inline StradaValue* strada_int_add_ii(int64_t a, int64_t b) {
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return strada_int_arith_ii(a, b, '+');
+    return strada_new_int_il(a + b);
+}
+static inline StradaValue* strada_int_sub_ii(int64_t a, int64_t b) {
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return strada_int_arith_ii(a, b, '-');
+    return strada_new_int_il(a - b);
+}
+static inline StradaValue* strada_int_mul_ii(int64_t a, int64_t b) {
+    if (a >= -2147483648LL && a <= 2147483647LL && b >= -2147483648LL && b <= 2147483647LL) return strada_new_int_il(a * b);
+    return strada_int_arith_ii(a, b, '*');
+}
+
 static inline StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
     int64_t a, b;
     if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
         if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
-            return strada_new_num((double)a + (double)b);
+            return strada_int_arith_slow(l, r, '+');
         }
         return strada_new_int_il(a + b);
     }
+    if (strada_sv_maybe_exact(l) && strada_sv_maybe_exact(r)) return strada_int_arith_slow(l, r, '+');
     return strada_new_num(strada_to_num(l) + strada_to_num(r));
 }
 
@@ -813,10 +838,11 @@ static inline StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
     int64_t a, b;
     if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
         if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
-            return strada_new_num((double)a - (double)b);
+            return strada_int_arith_slow(l, r, '-');
         }
         return strada_new_int_il(a - b);
     }
+    if (strada_sv_maybe_exact(l) && strada_sv_maybe_exact(r)) return strada_int_arith_slow(l, r, '-');
     return strada_new_num(strada_to_num(l) - strada_to_num(r));
 }
 
@@ -836,8 +862,9 @@ static inline StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
             int64_t res = neg ? (prod == ((uint64_t)INT64_MAX + 1ULL) ? INT64_MIN : -(int64_t)prod) : (int64_t)prod;
             return strada_new_int_il(res);
         }
-        return strada_new_num((double)a * (double)b);
+        return strada_int_arith_slow(l, r, '*');
     }
+    if (strada_sv_maybe_exact(l) && strada_sv_maybe_exact(r)) return strada_int_arith_slow(l, r, '*');
     return strada_new_num(strada_to_num(l) * strada_to_num(r));
 }
 
@@ -874,6 +901,13 @@ const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* No
 const char* strada_path_buf(StradaValue *sv, char *buf, size_t buflen); /* "" if the path contains a NUL byte */
 const char* strada_path_pv(StradaValue *str_sv);
 StradaValue* strada_autoviv_slot_array(StradaValue **slot); /* push(@$v,..) with $v undef */
+void strada_print2(StradaValue *a, StradaValue *b, int newline);   /* print/say(a, b): a may be a filehandle */
+void strada_print_list(StradaValue *first, StradaValue *rest, int newline);
+void strada_printf_list(StradaValue *all);  /* printf(LIST): optional leading filehandle */
+StradaHash *strada_hash_iter_reset(StradaHash *hv);  /* keys()/values(): reset each() */
+StradaValue *strada_scalar_ctx(StradaValue *sv);   /* scalar(X): count of an array/aref, else X */
+int64_t strada_num_to_i64_sat(double d);  /* NaN -> 0, out of range saturates */
+int64_t strada_str_to_i64(const char *p);
 int strada_to_bool(StradaValue *sv);
 
 /* ===== Memory-management features (compile-time: STRADA_CYCLE_GC / STRADA_ARENA) =====
@@ -1468,6 +1502,7 @@ StradaValue* strada_anon_array_owned(int count, ...);
 StradaValue* strada_array_from_ref(StradaValue *ref); /* Copy array from ref */
 StradaValue* strada_hash_from_ref(StradaValue *ref);  /* Copy hash from ref */
 StradaValue* strada_hash_from_flat_array(StradaValue *arr); /* Convert flat array [k,v,k,v,...] to hash */
+StradaValue *strada_generic_new(const char *pkg, StradaValue *args); /* ctor-less Pkg::new(LIST); consumes args */
 StradaValue* strada_hash_to_flat_array(StradaValue *hash); /* Convert hash to flat array [k,v,k,v,...] */
 
 /* OOP - Blessed references (like Perl's bless) */
@@ -1545,6 +1580,7 @@ void strada_overload_register_method(const char *package, const char *op, const 
 StradaValue* strada_overload_binary(StradaValue *left, StradaValue *right, const char *op);
 StradaValue* strada_overload_unary(StradaValue *operand, const char *op);
 StradaValue* strada_overload_stringify(StradaValue *val);
+StradaValue *strada_negate(StradaValue *sv);  /* unary minus (Perl semantics, non-consuming) */
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);        /* Pack args into array */
@@ -1724,6 +1760,7 @@ StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int 
 StradaArray* strada_regex_capture(const char *str, const char *pattern);
 StradaValue* strada_named_captures(void);
 StradaValue* strada_regex_find_all(const char *str, const char *pattern, const char *flags, int global);
+StradaValue *strada_regex_list(const char *str, const char *pattern, const char *flags, int global); /* match in list context */
 void strada_set_captures_sv(StradaValue *match);
 StradaValue* strada_regex_build_result(const char *src, StradaValue *matches, StradaValue *replacements);
 

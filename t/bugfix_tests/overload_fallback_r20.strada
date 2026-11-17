@@ -1,0 +1,16 @@
+# EXPECT: V(-5)|8
+package V;
+func new($n) { my %h = ("n" => $n); return bless(\%h, "V"); }
+func sub_($a, $b, $r) { my $x = ref($a) ? $a->{"n"} : $a; my $y = ref($b) ? $b->{"n"} : $b; if ($r) { my $t = $x; $x = $y; $y = $t; } return V::new($x - $y); }
+func str_($s) { return "V(" . $s->{"n"} . ")"; }
+use overload "-" => "sub_", '""' => "str_";
+package S;
+func new($n) { my %h = ("n" => $n); return bless(\%h, "S"); }
+func s_($s) { return "" . $s->{"n"}; }
+use overload '""' => "s_";
+package main;
+func main() int {
+    my $v = V::new(5); my $o1 = "" . (-$v);
+    my $o = S::new(7); say($o1 . "|" . ($o + 1));
+    return 0;
+}

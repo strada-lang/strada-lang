@@ -1,0 +1,14 @@
+# EXPECT: visible 1|visible 2
+func main() int {
+    my $out = "";
+#ifdef NOPE
+    say(q(it's));
+#endif
+    $out = $out . "visible 1|";
+#ifdef NOPE
+    say(q(that's));
+#endif
+    $out = $out . "visible 2";
+    say($out);
+    return 0;
+}

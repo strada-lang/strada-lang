@@ -38,6 +38,40 @@ func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) v
             return;
         }
     }
+    # %H2 = %H1 / %{$r}: a copy, not an alias.
+    if ($is_hash_target == 1 && ($it == NODE_VARIABLE() || $it == NODE_DEREF_SCALAR()) && $init->{"sigil"} eq "%") {
+        emit($cg, "({ StradaValue *__ohc = ");
+        gen_expression($cg, $init);
+        emit($cg, "; StradaValue *__ohr = strada_hash_from_ref(__ohc); ");
+        if (needs_temp_cleanup($cg, $init) == 1) { emit($cg, "strada_decref(__ohc); "); }
+        emit($cg, "__ohr; })");
+        return;
+    }
+    if ($is_array_target == 1) {
+        # @A = %H: the flat key/value list.
+        if (($it == NODE_VARIABLE() || $it == NODE_DEREF_SCALAR()) && $init->{"sigil"} eq "%") {
+            emit($cg, "({ StradaValue *__oaf = ");
+            gen_expression($cg, $init);
+            emit($cg, "; StradaValue *__oar = strada_hash_to_flat_array(__oaf); ");
+            if (needs_temp_cleanup($cg, $init) == 1) { emit($cg, "strada_decref(__oaf); "); }
+            emit($cg, "__oar; })");
+            return;
+        }
+        # @A = ("solo") / (42) / ($x) / (\$x): a one-element array (a single
+        # scalar used to be stored as the array itself).
+        if (is_scalar_expr($init) == 1 || ($it == NODE_ANON_HASH() && $init->{"pair_count"} > 0)
+            || $it == NODE_CALL() && resolve_call_return_type($cg, $init->{"name"}) != TYPE_ARRAY() && resolve_call_return_type($cg, $init->{"name"}) > 0) {
+            emit($cg, "({ StradaValue *__o1 = strada_new_array(); ");
+            if (needs_temp_cleanup($cg, $init) == 1) {
+                emit($cg, "strada_array_push_take(__o1->value.av, ");
+            } else {
+                emit($cg, "strada_array_push(__o1->value.av, ");
+            }
+            gen_expression($cg, $init);
+            emit($cg, "); __o1; })");
+            return;
+        }
+    }
     if ($is_array_target == 1 && $it == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
         my int $ogi_cl = needs_temp_cleanup($cg, $init);
         emit($cg, "({ StradaValue *__ogi_src = ");
@@ -323,6 +357,23 @@ func clear_var_type_metadata(scalar $cg, str $c_name) void {
     our_shadow_begin($cg, $c_name);
 }
 
+# next/last leaving an aliasing foreach (see fe_writeback in the foreach
+# codegen): store the loop variable back into its element first. Unlabeled
+# only when the innermost loop IS that foreach (an inner while/for has a
+# different loop_break_depth).
+func emit_foreach_writeback(scalar $cg, str $label) void {
+    my str $wb = "";
+    if (length($label) > 0) {
+        if (defined($cg->{"label_writeback"})) { $wb = "" . $cg->{"label_writeback"}->{$label}; }
+    } elsif (($cg->{"loop_break_depth"} + 0) == ($cg->{"fe_writeback_depth"} + 0)) {
+        $wb = "" . $cg->{"fe_writeback"};
+    }
+    if (length($wb) > 0) {
+        emit_indent($cg);
+        emit($cg, $wb . "\n");
+    }
+}
+
 func emit_foreach_init_zero(scalar $cg, str $var_name, str $fe_our_key, int $fe_tie, int $fe_is_int, int $fe_is_num) void {
     emit_indent($cg);
     if (length($fe_our_key) > 0) {
@@ -545,6 +596,21 @@ func gen_block(scalar $cg, scalar $block) void {
 # the value was coerced — the result is then a fresh OWNED value and the
 # caller must skip its return_needs_incref logic.
 func gen_return_value(scalar $cg, scalar $value) int {
+    # A hash-returning function returning a list (k, v, ...), map, @array,
+    # reverse(%h), ...: build the hash (it used to return the array, so
+    # `my %h = f()` came out empty).
+    if (($cg->{"ret_is_hash"} + 0) == 1 && is_flat_array_for_hash($value) == 1) {
+        if (needs_temp_cleanup($cg, $value) == 0) {
+            emit($cg, "({ StradaValue *__rh = ");
+            gen_expression($cg, $value);
+            emit($cg, "; strada_incref(__rh); strada_hash_from_flat_array(__rh); })");
+        } else {
+            emit($cg, "strada_hash_from_flat_array(");
+            gen_expression($cg, $value);
+            emit($cg, ")");
+        }
+        return 1;
+    }
     if ($cg->{"ret_is_num"} == 1 && is_unboxed_var_node($cg, $value) == 1) {
         my str $rv_unm = escape_c_keyword($value->{"name"});
         if (is_unboxed_int($cg, $rv_unm) == 1) {
@@ -771,7 +837,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "({ StradaValue *__lw = strada_new_array(); strada_array_push_take(__lw->value.av, ");
                     gen_expression($cg, $init);
                     emit($cg, "); __lw; })");
-                } elsif ($init_type == NODE_ANON_ARRAY()) {
+                } elsif ($init_type == NODE_ANON_ARRAY() && !($init->{"in_parens"} && !$init->{"is_list"})) {
                     # Array literal like [1, 2, 3] - generate directly
                     gen_expression($cg, $init);
                 } elsif (is_scalar_expr($init)) {
@@ -905,6 +971,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit($cg, "strada_decref(__ncv); ");
                     }
                     emit($cg, "__ncr; })");
+                } elsif ($var_type == TYPE_INT() && $init->{"type"} == NODE_STR_LITERAL() && ($init->{"has_char_code"} + 0) == 1) {
+                    # `my int $c = '(';` is the character code (as in the
+                    # comparisons '(' already takes part in); int coercion
+                    # of the string gave 0.
+                    emit($cg, " = STRADA_MAKE_TAGGED_INT(" . c_int64_lit("" . $init->{"char_code"}) . ")");
                 } elsif ($var_type == TYPE_INT() && expr_is_int_typed($cg, $init) == 0) {
                     # Int-declared variables hold canonical ints. Previously
                     # `my int $x = $str_scalar` aliased the string pointer
@@ -920,6 +991,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit($cg, "strada_decref(__icv); ");
                     }
                     emit($cg, "__icr; })");
+                } elsif ($var_type == TYPE_INT() && is_int_wrap_binop($cg, $init) == 1) {
+                    # int-declared storage is 64-bit and wraps like C; the
+                    # promoting (IV->UV->NV) value path is for untyped targets.
+                    emit($cg, " = ");
+                    emit_int_wrap_binop($cg, $init);
                 } else {
                 emit($cg, " = ");
                 gen_expression($cg, $init);
@@ -2125,6 +2201,25 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($var_decl && ($cg->{"cand_boxed_vars"}->{$var_name} + 0) == 1) {
                 $fr_box = 1;
             }
+            # A pre-existing loop variable is restored after the loop (Perl).
+            my int $fr_restore = 0;
+            if (!$var_decl && $fe_tie == 0 && (is_unboxed_int($cg, $var_cname) == 1 || is_unboxed_num($cg, $var_cname) == 1)) {
+                $fr_restore = 2;
+                emit_indent($cg);
+                if (is_unboxed_int($cg, $var_cname) == 1) {
+                    emit($cg, "int64_t __fr_savev_" . $foreach_id . " = " . $var_cname . ";\n");
+                } else {
+                    emit($cg, "double __fr_savev_" . $foreach_id . " = " . $var_cname . ";\n");
+                }
+            } elsif (!$var_decl && $fe_tie == 0) {
+                $fr_restore = 1;
+                emit_indent($cg);
+                if (length($fe_our_key) > 0) {
+                    emit($cg, "StradaValue *__fr_save_" . $foreach_id . " = strada_global_get_cstr(" . c_str_lit($fe_our_key) . ");\n");
+                } else {
+                    emit($cg, "StradaValue *__fr_save_" . $foreach_id . " = " . $var_name . "; strada_incref(__fr_save_" . $foreach_id . ");\n");
+                }
+            }
             if (!$var_decl) {
                 $cg->{"known_types"}->{$var_cname} = "";
                 emit_foreach_init_zero($cg, $var_name, $fe_our_key, $fe_tie, $fe_is_int, $fe_is_num);
@@ -2291,6 +2386,18 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "}\n");
 
             restore_block_type_state($cg, $fr_saved_st);
+            if ($fr_restore == 2) {
+                emit_indent($cg);
+                emit($cg, $var_cname . " = __fr_savev_" . $foreach_id . ";\n");
+            }
+            if ($fr_restore == 1) {
+                emit_indent($cg);
+                if (length($fe_our_key) > 0) {
+                    emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", __fr_save_" . $foreach_id . ");\n");
+                } else {
+                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = __fr_save_" . $foreach_id . ";\n");
+                }
+            }
 
             scope_pop($cg);
             dedent($cg);
@@ -2356,9 +2463,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "StradaArray *__foreach_av_" . $foreach_id . " = strada_deref_array(__foreach_arr_" . $foreach_id . ");\n");
 
             emit_indent($cg);
-            emit($cg, "int __foreach_len_" . $foreach_id . " = strada_array_length(__foreach_av_" . $foreach_id . ");\n");
+            emit($cg, "int64_t __foreach_len_" . $foreach_id . " = strada_array_length(__foreach_av_" . $foreach_id . ");\n");
         }
 
+        # A pre-existing loop variable gets its value back after the loop
+        # (Perl localizes it); it used to keep the last element.
+        my int $fe_restore = 0;
+        if (!$var_decl && $fe_tie == 0) {
+            $fe_restore = 1;
+            emit_indent($cg);
+            if (length($fe_our_key) > 0) {
+                emit($cg, "StradaValue *__fe_save_" . $foreach_id . " = strada_global_get_cstr(" . c_str_lit($fe_our_key) . ");\n");
+            } else {
+                emit($cg, "StradaValue *__fe_save_" . $foreach_id . " = " . $var_name . "; strada_incref(__fe_save_" . $foreach_id . ");\n");
+            }
+        }
         if (!$var_decl) {
             $cg->{"known_types"}->{$var_cname} = "";
             emit_foreach_init_zero($cg, $var_name, $fe_our_key, $fe_tie, $fe_is_int, $fe_is_num);
@@ -2385,7 +2504,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($fe_tie == 1) {
             emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < __foreach_len_" . $foreach_id . "; __foreach_i_" . $foreach_id . "++) {\n");
         } else {
-            emit($cg, "for (int __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < __foreach_len_" . $foreach_id . "; __foreach_i_" . $foreach_id . "++) {\n");
+            # The live length: elements removed in the body end the loop early
+            # (the cached length gave extra undef iterations).
+            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < (int64_t)strada_array_length(__foreach_av_" . $foreach_id . "); __foreach_i_" . $foreach_id . "++) {\n");
         }
         indent($cg);
         scope_push($cg);
@@ -2546,6 +2667,31 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"label_redo_depths"}->{$label} = $cg->{"scope_depth"};
         }
 
+        # Aliasing (Perl): when the body may assign the loop variable and the
+        # list is an array, the variable's value is written back into the
+        # element at the end of each iteration and before next/last.
+        my str $fe_wb = "";
+        my int $fe_src_t = $array_expr->{"type"};
+        my int $fe_aliasable = 0;
+        if (($fe_src_t == NODE_VARIABLE() || $fe_src_t == NODE_DEREF_SCALAR()) && $array_expr->{"sigil"} eq "@") { $fe_aliasable = 1; }
+        if ($fe_tie == 0 && $fe_aliasable == 1 && node_writes_var($body, $stmt->{"var_name"}) == 1) {
+            my str $fe_wb_var = $var_name;
+            if ($var_decl && $fe_box == 1) { $fe_wb_var = "(*__cell_" . $var_name . ")"; }
+            if (length($fe_our_key) > 0) {
+                $fe_wb = "{ StradaValue *__fe_wbg = strada_global_get_cstr(" . c_str_lit($fe_our_key) . "); strada_array_set(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ", __fe_wbg); strada_decref(__fe_wbg); } ";
+            } else {
+                $fe_wb = "strada_array_set(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ", " . $fe_wb_var . "); ";
+            }
+        }
+        my str $saved_fe_wb = "" . $cg->{"fe_writeback"};
+        my int $saved_fe_wb_depth = $cg->{"fe_writeback_depth"} + 0;
+        $cg->{"fe_writeback"} = $fe_wb;
+        $cg->{"fe_writeback_depth"} = $cg->{"loop_break_depth"} + 0;
+        if (length($label) > 0) {
+            if (!defined($cg->{"label_writeback"})) { $cg->{"label_writeback"} = {}; }
+            $cg->{"label_writeback"}->{$label} = $fe_wb;
+        }
+
         emit_indent($cg);
         emit($cg, $redo_label . ": __attribute__((unused));\n");
 
@@ -2575,6 +2721,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $i = $i + 1;
         }
         goto_hoist_restore($cg, $fe_saved_goto);
+        if (length($fe_wb) > 0) {
+            emit_indent($cg);
+            emit($cg, $fe_wb . "\n");
+        }
+        $cg->{"fe_writeback"} = $saved_fe_wb;
+        $cg->{"fe_writeback_depth"} = $saved_fe_wb_depth;
+        if (length($label) > 0 && defined($cg->{"label_writeback"})) { $cg->{"label_writeback"}->{$label} = ""; }
 
         scope_pop($cg);
         if ($fe_body_has_local == 1) {
@@ -2603,6 +2756,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "strada_cleanup_pop();\n");
             emit_indent($cg);
             emit($cg, "strada_decref(__foreach_arr_" . $foreach_id . ");\n");
+        }
+        if ($fe_restore == 1) {
+            emit_indent($cg);
+            if (length($fe_our_key) > 0) {
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", __fe_save_" . $foreach_id . ");\n");
+            } else {
+                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = __fe_save_" . $foreach_id . ";\n");
+            }
         }
 
         scope_pop($cg);
@@ -2935,6 +3096,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     # Last (break)
     if ($type == 100) {
         my str $label = $stmt->{"label"};
+        emit_foreach_writeback($cg, $label);
         if (length($label) > 0) {
             my int $target_td = $cg->{"label_try_depths"}->{$label} + 0;
             my int $target_depth = $cg->{"label_depths"}->{$label} + 0;
@@ -2979,6 +3141,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     # Next (continue)
     if ($type == 101) {
         my str $label = $stmt->{"label"};
+        emit_foreach_writeback($cg, $label);
         if (length($label) > 0) {
             my int $target_td = $cg->{"label_try_depths"}->{$label} + 0;
             my int $target_depth = $cg->{"label_next_depths"}->{$label} + 0;
@@ -4356,6 +4519,10 @@ func gen_function(scalar $cg, scalar $fn) void {
         if ($ret_type_id == TYPE_NUM()) {
             $cg->{"ret_is_num"} = 1;
         }
+        $cg->{"ret_is_hash"} = 0;
+        if ($ret_type_id == TYPE_HASH()) {
+            $cg->{"ret_is_hash"} = 1;
+        }
         $cg->{"c_ret_is_sv"} = 0;
         if ($ret_type eq "StradaValue*") {
             $cg->{"c_ret_is_sv"} = 1;
@@ -4555,6 +4722,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"current_func_name"} = "";
         $cg->{"ret_is_int"} = 0;
         $cg->{"ret_is_num"} = 0;
+        $cg->{"ret_is_hash"} = 0;
         $cg->{"c_ret_is_sv"} = 0;
         $cg->{"current_fn_package"} = "";
         $cg->{"func_tracks_depth"} = 0;
@@ -4722,6 +4890,7 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"safe_str_vars"} = {};
     $cg->{"ret_is_int"} = 0;
     $cg->{"ret_is_num"} = 0;
+    $cg->{"ret_is_hash"} = 0;
     $cg->{"current_fn_package"} = $fn->{"package"};
     $cg->{"current_func_name"} = $name;
     $cg->{"loop_break_depth"} = 0;

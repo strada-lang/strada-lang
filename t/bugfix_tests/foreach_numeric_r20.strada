@@ -1,0 +1,41 @@
+# EXPECT: 101,20,30,4|7,14,21|1w,2w,3w|3|keep|G|9|ba AAa b0 aaa|a,b,c,d,e x,y,z,aa,ab|REF SCALAR|18446744073709551614|1.84467440737096e+19|3|18446744073709551615
+our $g = "G";
+func main() int {
+    my @out = ();
+    my @a = (1, 2, 3, 4);
+    foreach my $x (@a) { if ($x == 2) { $x = 20; next; } if ($x == 3) { $x = 30; last; } $x = $x + 100; }
+    push(@out, join(",", @a));
+    my @b = (1, 2, 3);
+    OUTER: foreach my $y (@b) { foreach my $z (1, 2) { if ($z == 2) { $y = $y * 7; next OUTER; } } }
+    push(@out, join(",", @b));
+    my @c = (1, 2, 3);
+    foreach my $v (@c) { my $i = 0; while ($i < 3) { $i++; if ($i == 2) { last; } } $v = $v . "w"; }
+    push(@out, join(",", @c));
+    my @d = (1, 2, 3, 4, 5);
+    my $n = 0;
+    foreach my $e (@d) { $n++; pop(@d); }
+    push(@out, $n);
+    my $item = "keep";
+    foreach $item ("p", "q") { }
+    push(@out, $item);
+    foreach $g ("h") { }
+    push(@out, $g);
+    my int $k = 9;
+    foreach $k (1..3) { }
+    push(@out, $k);
+    my $s = "az"; $s++; my $t = "Zz"; $t++; my $u = "a9"; $u++; my $w = "zz"; $w++;
+    push(@out, $s . " " . $t . " " . $u . " " . $w);
+    push(@out, join(",", "a".."e") . " " . join(",", "x".."ab"));
+    my $r = [1];
+    push(@out, ref(\$r) . " " . ref(\1));
+    my $big = 9223372036854775807;
+    my $c2 = $big; $c2 += $big;
+    push(@out, $c2);
+    push(@out, 4294967296 * 4294967296);
+    my int $q = 7; $q /= 2;
+    push(@out, $q);
+    my $p = 18446744073709551615;
+    push(@out, $p);
+    say(join("|", @out));
+    return 0;
+}

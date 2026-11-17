@@ -1,0 +1,59 @@
+# EXPECT: once:x|1:ARRAY|1:SCALAR|A5:1:solo|A9:1|copy:a|AH:2|h4:a,b|h7:0|rep:1,2,1,2,1,2|z:0,0,0|each:3|del:2,3:1|chomp:k|cnt:3|t5:4
+# Audit 20 M2 list context (batch b): foreach over one scalar runs once,
+# ([1,2]) / (\$x) are one element, our/file-scope 1-element initializers,
+# %H2 = %H1 copies, @A = %H flattens, hash functions build hashes from
+# lists, (LIST) x N, keys() resets each(), delete(@h{...}), chomp(@array),
+# `my $n = () = ...` counts, `return @a` from an int function counts.
+our array @A5 = ("solo");
+our array @A9 = (42);
+our hash %H1 = ("a" => 1);
+our hash %H2 = %H1;
+our array @AH = %H1;
+func h4() hash { return ("a", 1, "b", 2); }
+func h7() hash { return; }
+func three() array { my @r = (1, 2, 3); return @r; }
+func t5() int { my @a = (1, 2, 3, 4); return @a; }
+func main() int {
+    my @o = ();
+    my $s = "x";
+    my str $it = "";
+    foreach my $e ($s) { $it = $it . $e; }
+    push(@o, "once:" . $it);
+    my @b = ([1, 2]);
+    push(@o, size(@b) . ":" . ref($b[0]));
+    my $v = 5;
+    my @c = (\$v);
+    push(@o, size(@c) . ":" . ref($c[0]));
+    push(@A5, "two");
+    push(@o, "A5:" . (size(@A5) - 1) . ":" . $A5[0]);
+    push(@o, "A9:" . size(@A9));
+    $H2{"x"} = 1;
+    push(@o, "copy:" . join(",", sort(keys(%H1))));
+    push(@o, "AH:" . size(@AH));
+    my %k = h4();
+    push(@o, "h4:" . join(",", sort(keys(%k))));
+    my %z = h7();
+    push(@o, "h7:" . size(keys(%z)));
+    my @r = (1, 2) x 3;
+    push(@o, "rep:" . join(",", @r));
+    my @zz = (0) x 3;
+    push(@o, "z:" . join(",", @zz));
+    my %h = ("a" => 1, "b" => 2, "c" => 3);
+    my @first = each(%h);
+    my @ks = keys(%h);
+    my int $n = 0;
+    my @p = each(%h);
+    while (size(@p) > 0) { $n = $n + 1; @p = each(%h); }
+    push(@o, "each:" . $n);
+    my %d = ("a" => 1, "b" => 2, "c" => 3);
+    my @gone = delete(@d{"b", "c"});
+    push(@o, "del:" . join(",", @gone) . ":" . size(keys(%d)));
+    my @lines = ("k\n");
+    chomp(@lines);
+    push(@o, "chomp:" . $lines[0]);
+    my $cnt = () = three();
+    push(@o, "cnt:" . $cnt);
+    push(@o, "t5:" . t5());
+    say(join("|", @o));
+    return 0;
+}

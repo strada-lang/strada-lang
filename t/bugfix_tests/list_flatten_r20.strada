@@ -1,0 +1,50 @@
+# EXPECT: 1,2,3,9|1,2,9|1,2,3,7|0,1,2,3|1 2 8|10,30|1,3|3 ARRAY|a,bb,ccc|2,4,6|2,3|3,2,1|1,2,3,m,n|q|p=q|3,2,1|xy|1:2|a,b,c
+# Audit 20 M2 list context: list literals flatten @$r / slices / ranges,
+# foreach (LIST) flattens, @a[@idx] / @h{@k}, map keeps array refs as single
+# elements (Schwartzian transform), map/grep/sort take the rest of the list
+# in call arguments, push/join/sprintf/reverse flatten array arguments.
+func two() array { my @r = ("m", "n"); return @r; }
+func main() int {
+    my @o = ();
+    my @x = (1, 2, 3);
+    my $r = \@x;
+    push(@o, join(",", (@$r, 9)));
+    push(@o, join(",", (@x[0, 1], 9)));
+    push(@o, join(",", (1..3, 7)));
+    push(@o, join(",", (0, 1..3)));
+    my str $fe = "";
+    foreach my $i (1..2, 8) { $fe = $fe . $i . " "; }
+    push(@o, substr($fe, 0, length($fe) - 1));
+    my @a = (10, 20, 30, 40, 50);
+    my @idx = (0, 2);
+    push(@o, join(",", @a[@idx]));
+    my %h = (a => 1, b => 2, c => 3);
+    my @k = ("a", "c");
+    push(@o, join(",", @h{@k}));
+    my @refs = map { [$_, 1] } @x;
+    push(@o, size(@refs) . " " . ref($refs[0]));
+    my @w = ("ccc", "a", "bb");
+    push(@o, join(",", map { $_->[0] } sort { $a->[1] <=> $b->[1] } map { [$_, length($_)] } @w));
+    push(@o, join(",", map { $_ * 2 } 1, 2, 3));
+    push(@o, join(",", grep { $_ > 1 } 1, 2, 3));
+    push(@o, join(",", sort { $b <=> $a } 1, 3, 2));
+    my @p = (1);
+    my @q = (2, 3);
+    push(@p, @q);
+    push(@p, two());
+    push(@o, join(",", @p));
+    my $s = "q";
+    push(@o, join(",", $s));
+    my @args = ("p", "q");
+    push(@o, sprintf("%s=%s", @args));
+    push(@o, join(",", reverse(1, 2, 3)));
+    my %u = ("x" => 1, "y" => 2);
+    my %inv = reverse(%u);
+    push(@o, $inv{"1"} . $inv{"2"});
+    my @v = (1, 2);
+    push(@o, join(":", core::unpack("CC", core::pack("CC", @v))));
+    $_ = "a b  c";
+    push(@o, join(",", split()));
+    say(join("|", @o));
+    return 0;
+}

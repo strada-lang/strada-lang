@@ -284,6 +284,12 @@ func ast_add_import_call(scalar $program, scalar $call_info) void {
 
 # Add function to program
 func ast_add_function(scalar $program, scalar $fn) void {
+    # An async function returns its future whatever the declared type: a
+    # `void` one got a void prototype (gcc "conflicting types") and its
+    # callers dropped the future.
+    if ($fn->{"type"} == NODE_ASYNC_FUNC() && $fn->{"return_type"} == TYPE_VOID()) {
+        $fn->{"return_type"} = TYPE_SCALAR();
+    }
     my scalar $funcs = $program->{"functions"};
     push($funcs, $fn);
     $program->{"function_count"} = $program->{"function_count"} + 1;
@@ -602,8 +608,16 @@ func ast_new_foreach_stmt(scalar $var_decl, str $var_name, scalar $array_expr, s
     # times. Wrap it so it goes down the ordinary list path.
     if ($array_expr) {
         my int $fe_kind = $array_expr->{"type"};
-        if ($fe_kind == NODE_STR_LITERAL() || $fe_kind == NODE_INT_LITERAL() || $fe_kind == NODE_NUM_LITERAL()) {
+        # Likewise any scalar-shaped expression: `foreach my $x ($s)`,
+        # `($h{k})`, `($a . $b)` iterate once (they iterated zero times).
+        my int $fe_scalar = 0;
+        if ($fe_kind == NODE_STR_LITERAL() || $fe_kind == NODE_INT_LITERAL() || $fe_kind == NODE_NUM_LITERAL()) { $fe_scalar = 1; }
+        if ($fe_kind == NODE_VARIABLE() && $array_expr->{"sigil"} eq "$") { $fe_scalar = 1; }
+        if ($fe_kind == NODE_HASH_ACCESS() || $fe_kind == NODE_SUBSCRIPT() || $fe_kind == NODE_DEREF_HASH() || $fe_kind == NODE_DEREF_ARRAY()) { $fe_scalar = 1; }
+        if ($fe_kind == NODE_BINARY_OP() && $array_expr->{"op"} ne "..") { $fe_scalar = 1; }
+        if ($fe_scalar == 1) {
             my scalar $fe_list = ast_new_anon_array();
+            $fe_list->{"is_list"} = 1;
             ast_add_array_elem($fe_list, $array_expr);
             $array_expr = $fe_list;
         }
@@ -617,7 +631,7 @@ func ast_new_foreach_stmt(scalar $var_decl, str $var_name, scalar $array_expr, s
 # Create return statement
 func ast_new_return_stmt(scalar $value) scalar {
     my scalar $node = ast_new_node(NODE_RETURN_STMT());
-    $node->{"value"} = $value;
+    $node->{"value"} = ast_regex_truth($value);
     return $node;
 }
 
@@ -892,6 +906,7 @@ func ast_new_assign(str $op, scalar $target, scalar $value) scalar {
     $node->{"op"} = $op;
     $node->{"target"} = $target;
     $node->{"value"} = $value;
+    if ($op eq "=") { $node->{"value"} = ast_regex_truth($value); }
     return $node;
 }
 

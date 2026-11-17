@@ -1245,6 +1245,51 @@ compiler:
   into a tied target reads a tied replacement array through `FETCH`. Tied
   `SPLICE` receives the replacement list flattened (`SPLICE($self, $off, $len,
   LIST...)`, as in Perl).
+- **List flattening is decided statically** (`array_flatten_kind` in
+  CodeGenExpr: 1 = `@var`/`@{...}`, 2 = owned list temp checked at run time
+  with `strada_sv_is_array_or_aref`). It covers list literals, ranges, slices,
+  `@a[@idx]`/`@h{@k}`, `push`/`unshift`/`join`/`sprintf`/`printf`/`pack`/
+  `print`/`say` arguments (`emit_list_elem_append`), `reverse(LIST)`, `(LIST) x N`
+  (only for an explicit comma list or `my @a = (x) x N`), and `map` block
+  values (an arrayref value is kept as one element unless it is a list/pair).
+  `qw(...)` and foreach lists are `is_list`.
+- `scalar(X)` is the element count of an array or arrayref (Strada idiom),
+  the key count of a hash, otherwise X (`strada_scalar_ctx`). `%h` in
+  numeric context is its key count; `int($ref)` is the address (as `$ref+0`).
+- List assignment: `($x) = @a` assigns the first element, element targets
+  (`($h{a}, $a[1]) = ...`) work, `my $n = () = LIST` counts, and a
+  non-lvalue target is a parse error.
+- **Integer overflow promotes IV -> UV -> NV** (`+ - * ++ +=`, literals above
+  INT64_MAX are UVs): `strada_int_add_ii`/`_sub_ii`/`_mul_ii` (header inline)
+  and `strada_sv_add/sub/mul` with `strada_int_arith_slow` (exact via
+  __int128, integer-looking strings stay exact). **`int`-declared storage is
+  still int64 and wraps**: an int-typed `+ - *` assigned to an `int` variable
+  goes through `emit_int_wrap_binop`; `/=`, `||=`, `&&=`, `//=` on an `int`
+  variable truncate/coerce. num->int conversion saturates
+  (`strada_num_to_i64_sat`); `int("1e3")` is 1000.
+- Unary minus is `strada_negate` (Perl: ints stay exact, `-"foo"` is "-foo",
+  `-"-foo"` is "+foo"); with an overloaded `-` and no `neg`, `-$obj` is
+  `0 - $obj`. Numeric context of an object with only `""` overloaded numifies
+  the string.
+- **foreach** aliases array elements (the loop variable is written back each
+  iteration and before `next`/`last`, `fe_writeback`), restores a
+  pre-existing loop variable after the loop, and reads the live array length.
+- Perl gaps implemented: magic string `++` ("az"++ is "ba"), string ranges
+  ("a".."e", "x".."ab"), `ref(\$aref)` is "REF".
+- `..` binds looser than `||`/`//` and tighter than `?:` (`parse_range` sits
+  between `parse_ternary` and `parse_logical_or`).
+- A bare `/re/` is a match against `$_` also in grep/map blocks, `my`
+  initializers, `=` assignments and `return`.
+- `$obj->name` without parens is a method call (it was the raw C `obj->name`);
+  `LABEL: { ... }` is a once-loop (`last LABEL` works); `throw EXPR if COND;`;
+  `Pkg::CONST`; enum values in hex/octal; `::f()`/`__PACKAGE__::f()` in
+  package main; untyped `before`/`after` params; `async func ... void`.
+- User functions named like any identifier the runtime/system headers declare
+  are renamed in C (`c_reserved_idents` in CodeGen.strada, generated from
+  `gcc -E` of strada_runtime.h + math.h).
+- `Pkg::new(...)` on a package with no constructor builds a blessed hash
+  (inlined when keys are literals, else `strada_generic_new`); an odd argument
+  count (e.g. the inherited-ctor call `Kid::new("x")`) is a compile error.
 - Assigning to a tied **parameter** (`func f($v) { $v = ...; }` called with a
   tied scalar) STOREs into the caller's tied scalar; rebind with a new `my`.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;

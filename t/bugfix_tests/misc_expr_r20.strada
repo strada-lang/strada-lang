@@ -1,0 +1,47 @@
+# EXPECT: 1,2,3|apple,cat|0|1|0|40|16 17 255 8|14|10|Rex barks|in|x!|hiBare|caught|2|-foo +foo|-9223372036854775807|7
+package Ctr;
+func new() scalar { my %h = ("n" => 40); return bless(\%h, "Ctr"); }
+func count(scalar $self) int { return $self->{"n"}; }
+package Cfg;
+const int LIMIT = 10;
+package Dog;
+has ro str $name = "Rex";
+func bark($self) { return $self->name() . " barks"; }
+before "bark" func($self) { push(@{$self->{"log"}}, "b"); }
+package Bare;
+func hi(scalar $self) str { return "hi" . ref($self); }
+package main;
+enum E { A = 0x10, B, C = 0xFF, D = 010 }
+func helper() int { return 7; }
+func random($a) { return $a . "!"; }
+async func nothing() void { my $z = 1; }
+func main() int {
+    my @o = ();
+    my $n = 0;
+    push(@o, join(",", (1 .. $n || 3)));
+    my @w = ("apple", "bob", "cat");
+    push(@o, join(",", grep { /a/ } @w));
+    foreach (@w) { my $ok = /b/ ? 1 : 0; push(@o, $ok); }
+    my $c = Ctr::new();
+    push(@o, $c->count);
+    push(@o, E::A . " " . E::B . " " . E::C . " " . E::D);
+    push(@o, ::helper() + __PACKAGE__::helper());
+    push(@o, Cfg::LIMIT);
+    my $d = Dog::new();
+    push(@o, $d->bark());
+    my $i = 3;
+    BLK: { push(@o, "in"); last BLK if $i == 3; push(@o, "no"); }
+    push(@o, random("x"));
+    await nothing();
+    my $b = Bare::new();
+    push(@o, $b->hi());
+    my $x = "y";
+    try { throw "t1" if $x eq "y"; push(@o, "no"); } catch ($e) { push(@o, "caught"); }
+    my %h = ("a" => 1, "b" => 2);
+    push(@o, %h + 0);
+    my $neg = -"foo"; push(@o, $neg . " " . -$neg);
+    my $big = 9223372036854775807; my $nb = -$big; push(@o, $nb);
+    my int $q = 0; $q ||= "7x"; push(@o, $q);
+    say(join("|", @o));
+    return 0;
+}

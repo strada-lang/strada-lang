@@ -1,0 +1,27 @@
+# EXPECT: 4|h 4|5|3:1,4|12|12,34|ab,cd|0|a|b|c|40|41|0|Zed
+package Bag;
+has ro str $name (required);
+has ro int $n = 0;
+package main;
+func cnt(scalar ...@a) int { return scalar(@a); }
+func main() int {
+    my @o = ();
+    my %h = ("name" => "h", "n" => 4);
+    push(@o, cnt(%h));
+    my $b = Bag::new(%h); push(@o, $b->name() . " " . $b->n());
+    my @q = (1); push(@q, %h); push(@o, scalar(@q));
+    my @a = (1,2,3,4);
+    my $last = splice(@a, 1, 2); push(@o, $last . ":" . join(",", @a));
+    my $s = "ab12cd34";
+    my ($x, $y) = $s =~ /(\d)(\d)/; push(@o, $x . $y);
+    my @all = $s =~ /(\d+)/g; push(@o, join(",", @all));
+    my @w = $s =~ /[a-z]+/g; push(@o, join(",", @w));
+    my @none = $s =~ /zz/; push(@o, scalar(@none));
+    my $p = "x"; push(@o, join("|", split(/$p/, "axbxc")));
+    my int $c = 0; $c = '('; push(@o, $c);
+    my int $c2 = ')'; push(@o, $c2);
+    my int $big = 4611686018427387904; my int $w2 = 0; $w2 = $big * 4; push(@o, $w2);
+    my $u = "\uzed"; push(@o, $u);
+    say(join("|", @o));
+    return 0;
+}

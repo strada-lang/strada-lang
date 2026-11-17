@@ -1476,6 +1476,28 @@ func sem_is_builtin_namespace(str $ns) int {
     return 0;
 }
 
+# True for an expression whose value is an array (list) in Strada: @var,
+# @{...}, map/grep, or a call to a function declared to return an array.
+func sem_is_array_value(scalar $ctx, scalar $n) int {
+    if (is_valid_node($n) == 0) { return 0; }
+    my int $t = $n->{"type"};
+    if (($t == NODE_VARIABLE() || $t == NODE_DEREF_SCALAR()) && $n->{"sigil"} eq "@") { return 1; }
+    if ($t == NODE_MAP() || $t == NODE_GREP()) { return 1; }
+    if ($t == NODE_CALL()) {
+        my scalar $fi = $ctx->{"functions"}->{$n->{"name"}};
+        if ($fi && $fi->{"is_registered"} == 1 && $fi->{"return_type"} == TYPE_ARRAY()) { return 1; }
+    }
+    return 0;
+}
+
+# scalar(EXPR): the element count of an array value.
+func sem_scalar_of(scalar $n) scalar {
+    my scalar $c = ast_new_call("scalar");
+    ast_add_arg($c, $n);
+    ast_set_line($c, ast_get_line($n));
+    return $c;
+}
+
 func analyze_expression(scalar $ctx, scalar $expr) void {
     if (is_valid_node($expr) == 0) {
         return;
@@ -1788,7 +1810,18 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                         $pkg_is_known = 1;
                     }
                     if ($nfn eq "new" && $pkg_is_known == 1) {
-                        $skip_qual_err = 1;
+                        # A package without a constructor: `Pkg::new(k => v, ...)`
+                        # is inlined as a blessed hash, which needs key/value
+                        # pairs. Anything else (an odd argument count, like the
+                        # inherited-ctor call `Kid::new("x")`) linked against a
+                        # missing Pkg_new.
+                        my int $nw_spread = 0;
+                        for (my int $nwi = 0; $nwi < $arg_count; $nwi = $nwi + 1) {
+                            if ($args->[$nwi]->{"type"} == NODE_SPREAD()) { $nw_spread = 1; }
+                        }
+                        if ($nw_spread == 1 || ($arg_count % 2) == 0) {
+                            $skip_qual_err = 1;
+                        }
                     }
                     # Library/submodule files without main() (e.g. Build.strada
                     # included by pacco.strada) may call sibling packages resolved
@@ -1911,6 +1944,12 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     # Binary operation
     if ($node_type == NODE_BINARY_OP()) {
         my str $bop = $expr->{"op"};
+        # An array in numeric context is its element count (Perl): `@a + 0`,
+        # `@a - 1` used to use the array reference's address.
+        if ($bop eq "+" || $bop eq "-" || $bop eq "*" || $bop eq "/" || $bop eq "%" || $bop eq "**") {
+            if (sem_is_array_value($ctx, $expr->{"left"}) == 1) { $expr->{"left"} = sem_scalar_of($expr->{"left"}); }
+            if (sem_is_array_value($ctx, $expr->{"right"}) == 1) { $expr->{"right"} = sem_scalar_of($expr->{"right"}); }
+        }
         if ($bop eq "==" || $bop eq "!=" || $bop eq "<" || $bop eq "<=" || $bop eq ">" || $bop eq ">=" || $bop eq "<=>") {
             my scalar $bleft = $expr->{"left"};
             my scalar $bright = $expr->{"right"};
@@ -2313,6 +2352,31 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$" && $stmt->{"init"} && $stmt->{"init"}->{"is_empty_list"}) {
             $stmt->{"init"} = ast_new_undef();
         }
+        # `my @a = (0) x 10`: in list context a parenthesized left side of
+        # `x` is a list, repeated.
+        if ($sigil eq "@" && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_BINARY_OP()
+            && $stmt->{"init"}->{"op"} eq "x" && $stmt->{"init"}->{"left"}->{"in_parens"}
+            && !$stmt->{"init"}->{"left"}->{"is_list"}) {
+            my scalar $xl = ast_new_anon_array();
+            $xl->{"is_list"} = 1;
+            ast_add_array_elem($xl, $stmt->{"init"}->{"left"});
+            $stmt->{"init"}->{"left"} = $xl;
+        }
+        # `my int $n = arr()` / `my $n = grep {...} @x`: an array value in
+        # scalar context is its count (it used to store the array reference,
+        # or 0 / the address after int coercion).
+        if ($sigil eq "@" && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_REGEX_MATCH()) {
+            $stmt->{"init"}->{"list_ctx"} = 1;   # my @m = $s =~ /(\d+)/g
+        }
+        if ($sigil eq "$" && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_CALL() && $stmt->{"init"}->{"name"} eq "splice") {
+            $stmt->{"init"}->{"scalar_ctx"} = 1;
+        }
+        if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {
+            my int $iit = $stmt->{"init"}->{"type"};
+            if ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $iit == NODE_GREP() || $iit == NODE_MAP()) {
+                $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
+            }
+        }
 
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
@@ -2534,6 +2598,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Analyze initializer before registering new declaration bindings so
         # `my ($a, $b) = ($b, $a);` resolves RHS against outer scope cleanly.
         my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1 && $init_expr->{"type"} == NODE_REGEX_MATCH()) {
+            $init_expr->{"list_ctx"} = 1;   # my ($a, $b) = $s =~ /(.)(.)/
+        }
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
         }
@@ -2616,6 +2683,14 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
     # Return statement
     if ($node_type == NODE_RETURN_STMT()) {
         my scalar $ret_val = $stmt->{"value"};
+        # A bare `return;` from a hash function returns an empty hash.
+        if (is_valid_node($ret_val) == 0) {
+            my scalar $bcur = $ctx->{"current_func"};
+            if ($bcur && $bcur->{"return_type"} == TYPE_HASH()) {
+                $ret_val = ast_new_anon_hash();
+                $stmt->{"value"} = $ret_val;
+            }
+        }
         # `return ();` - an empty list: an empty hash/array for container
         # returns, nothing for void, undef for scalar returns (it used to
         # return an empty HASH ref).
@@ -2634,6 +2709,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             }
         }
         if (is_valid_node($ret_val) == 1) {
+            # `return @a` from an int/num function returns the count.
+            my scalar $rcur = $ctx->{"current_func"};
+            if ($rcur && ($rcur->{"return_type"} == TYPE_INT() || $rcur->{"return_type"} == TYPE_NUM()) && sem_is_array_value($ctx, $ret_val) == 1) {
+                $ret_val = sem_scalar_of($ret_val);
+                $stmt->{"value"} = $ret_val;
+            }
             analyze_expression($ctx, $ret_val);
             my scalar $cur = $ctx->{"current_func"};
             if ($cur) {

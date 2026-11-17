@@ -1087,6 +1087,43 @@ StradaValue *strada_inc_value(StradaValue *old, int64_t delta) {
         if (delta > 0 && iv >= 0) return strada_new_uint((uint64_t)iv + (uint64_t)delta);
         return strada_new_num((double)iv + (double)delta);
     }
+    /* Perl's magic string increment: "aa"++ is "ab", "Az" -> "Ba", "zz" ->
+     * "aaa", "a9" -> "b0". Applies to ++ on a non-empty string matching
+     * /^[a-zA-Z]*[0-9]*$/ that has at least one letter (all-digit strings
+     * increment numerically, which gives the same text). */
+    if (delta == 1 && old->type == STRADA_STR && old->value.pv && !(old->meta && old->meta->is_tied)) {
+        const char *p = old->value.pv;
+        size_t n = strlen(p);
+        size_t i = 0;
+        int letters = 0;
+        while (i < n && ((p[i] >= 'a' && p[i] <= 'z') || (p[i] >= 'A' && p[i] <= 'Z'))) { i++; letters++; }
+        while (i < n && p[i] >= '0' && p[i] <= '9') i++;
+        if (n > 0 && i == n && letters > 0 && n == STRADA_STR_BYTELEN(old)) {
+            char *buf = malloc(n + 2);
+            if (buf) {
+                memcpy(buf + 1, p, n + 1);
+                size_t k = n;
+                int carry = 1;
+                while (carry && k > 0) {
+                    char c = buf[k];
+                    if (c == 'z') { buf[k] = 'a'; }
+                    else if (c == 'Z') { buf[k] = 'A'; }
+                    else if (c == '9') { buf[k] = '0'; }
+                    else { buf[k] = (char)(c + 1); carry = 0; }
+                    k--;
+                }
+                char *start = buf + 1;
+                if (carry) {
+                    char f = buf[1];
+                    buf[0] = (f == 'a') ? 'a' : (f == 'A') ? 'A' : '1';
+                    start = buf;
+                }
+                StradaValue *r = strada_new_str(start);
+                free(buf);
+                return r;
+            }
+        }
+    }
     return strada_new_num(strada_to_num(old) + (double)delta);
 }
 
@@ -2420,6 +2457,32 @@ void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx) {
 /* Forward declaration — defined in the tie section below. */
 StradaValue *strada_tied_scalar_fetch(StradaValue *sv);
 
+/* double -> int64 without undefined behaviour: NaN is 0, out-of-range
+ * values saturate (1e20 used to become INT64_MIN). */
+int64_t strada_num_to_i64_sat(double d) {
+    if (d != d) return 0;
+    if (d >= 9223372036854775807.0) return INT64_MAX;
+    if (d <= -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)d;
+}
+
+/* Integer value of a string, Perl-style: leading whitespace, sign, digits;
+ * a fraction or exponent makes it numeric first ("1e3" is 1000, it used to
+ * stop at the "e"); out-of-range values saturate. */
+int64_t strada_str_to_i64(const char *p) {
+    const char *q = p;
+    while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\f' || *q == '\v') q++;
+    const char *d = q;
+    if (*d == '+' || *d == '-') d++;
+    while (*d >= '0' && *d <= '9') d++;
+    if (*d == '.' || *d == 'e' || *d == 'E' || ((d == q || d == q + 1) && (*d == 'i' || *d == 'I' || *d == 'n' || *d == 'N'))) {
+        return strada_num_to_i64_sat(strtod(q, NULL));
+    }
+    errno = 0;
+    long long v = strtoll(q, NULL, 10);
+    return (int64_t)v;   /* strtoll already saturates on ERANGE */
+}
+
 static int64_t strada_to_int_d(StradaValue *sv, int depth) {
     if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv);
     if (!sv) return 0;
@@ -2473,13 +2536,26 @@ static int64_t strada_to_int_d(StradaValue *sv, int depth) {
             }
         }
     }
+    /* No "0+" overload but a '""' one: numify the string form (perlovload:
+     * the conversion operators are generated from one another). The object's
+     * address was used instead. */
+    if (__builtin_expect(depth < 8 && SV_BLESSED(sv) != NULL &&
+                         __atomic_load_n(&oop_any_stringify_overloads, __ATOMIC_ACQUIRE), 0)) {
+        StradaValue *sres = strada_overload_stringify(sv);
+        if (sres) {
+            strada_cleanup_push(sres);
+            int64_t r = strada_to_int_d(sres, depth + 1);
+            strada_cleanup_pop_decref(sres);
+            return r;
+        }
+    }
     switch (sv->type) {
         case STRADA_INT:
             return sv->value.iv;
         case STRADA_NUM:
-            return (int64_t)sv->value.nv;
+            return strada_num_to_i64_sat(sv->value.nv);
         case STRADA_STR:
-            return sv->value.pv ? atoll(sv->value.pv) : 0;
+            return sv->value.pv ? strada_str_to_i64(sv->value.pv) : 0;
         case STRADA_ARRAY:
             return (sv->meta && sv->meta->is_tied && sv->meta->tied_obj && depth < 8)
                 ? strada_av_size_sv(sv)
@@ -2489,7 +2565,15 @@ static int64_t strada_to_int_d(StradaValue *sv, int depth) {
                 double d = 0.0;
                 if (strada_overload_numeric_hook(sv, &d)) return (int64_t)d;
             }
-            return 0;
+            /* The address, as in numeric context (int($ref) was 0 while
+             * $ref + 0 was the address, so `my int $id = $obj` lost it). */
+            return sv->value.rv ? (int64_t)(intptr_t)sv->value.rv : 0;
+        case STRADA_HASH:
+            return sv->value.hv ? (int64_t)sv->value.hv->num_entries : 0;
+        case STRADA_CLOSURE:
+            return (int64_t)(intptr_t)sv;
+        case STRADA_CPOINTER:
+            return (int64_t)(intptr_t)sv->value.ptr;
         case STRADA_UNDEF:
         default:
             return 0;
@@ -2619,6 +2703,19 @@ static double strada_to_num_d(StradaValue *sv, int depth) {
             }
         }
     }
+    /* No "0+" overload but a '""' one: numify the string form (perlovload:
+     * the conversion operators are generated from one another). The object's
+     * address was used instead. */
+    if (__builtin_expect(depth < 8 && SV_BLESSED(sv) != NULL &&
+                         __atomic_load_n(&oop_any_stringify_overloads, __ATOMIC_ACQUIRE), 0)) {
+        StradaValue *sres = strada_overload_stringify(sv);
+        if (sres) {
+            strada_cleanup_push(sres);
+            double r = strada_to_num_d(sres, depth + 1);
+            strada_cleanup_pop_decref(sres);
+            return r;
+        }
+    }
     switch (sv->type) {
         case STRADA_INT:
             /* UV-flagged ints reinterpret the bit pattern as unsigned. */
@@ -2634,7 +2731,9 @@ static double strada_to_num_d(StradaValue *sv, int depth) {
                 ? (double)strada_av_size_sv(sv)
                 : (double)strada_array_length(sv->value.av);
         case STRADA_HASH:
-            return sv->value.hv ? 1.0 : 0.0;  /* Hash is truthy if non-null */
+            /* %h in numeric context is its key count (Perl >= 5.26; the VM
+             * agrees). It was 1 for every hash, even an empty one. */
+            return sv->value.hv ? (double)sv->value.hv->num_entries : 0.0;
         case STRADA_REF:
             if (strada_overload_numeric_hook) {
                 double d = 0.0;
@@ -4475,6 +4574,33 @@ StradaValue* strada_nsort(StradaValue *arr) {
 
 /* Create array from range (start..end) */
 StradaValue* strada_range(StradaValue *start, StradaValue *end) {
+    /* Perl's string range: "a".."e", "aa".."ad", "x".."ab": when the start
+     * is a string that does not look like a number, generate it and its
+     * magic increments until the end string is reached or the value gets
+     * longer than the end. (It used to numify both ends: ("a".."e") was (0).) */
+    if (start && !STRADA_IS_TAGGED_INT(start) && start->type == STRADA_STR && start->value.pv &&
+        start->value.pv[0] && !perl_looks_like_number_c(start->value.pv)) {
+        StradaValue *result = strada_new_array();
+        StradaArray *av = result->value.av;
+        StradaValue *esv = strada_to_str_sv(end);
+        strada_cleanup_push(esv);
+        const char *e = (esv && !STRADA_IS_TAGGED_INT(esv) && esv->value.pv) ? esv->value.pv : "";
+        size_t elen = strlen(e);
+        StradaValue *cur = strada_new_str(start->value.pv);
+        for (size_t guard = 0; guard < ((size_t)1 << 26); guard++) {
+            const char *cp = cur->value.pv ? cur->value.pv : "";
+            if (strlen(cp) > elen) break;
+            strada_array_push(av, cur);
+            if (strcmp(cp, e) == 0) break;
+            StradaValue *nx = strada_inc_value(cur, 1);
+            strada_decref(cur);
+            cur = nx;
+            if (STRADA_IS_TAGGED_INT(cur) || cur->type != STRADA_STR) break;
+        }
+        strada_decref(cur);
+        strada_cleanup_pop_decref(esv);
+        return result;
+    }
     int64_t start_val = strada_to_int(start);
     int64_t end_val = strada_to_int(end);
     StradaValue *result = strada_new_array();
@@ -26254,6 +26380,10 @@ const char* strada_reftype(StradaValue *ref) {
      * STRADA_* enum; under different allocator layouts (or stress) it
      * crashes. */
     if (strada_is_slot_ref(ref)) {
+        /* \$x where $x itself holds a reference: Perl calls that "REF". */
+        StradaValue **rslot = (StradaValue **)ref->value.ptr;
+        StradaValue *rv0 = rslot ? *rslot : NULL;
+        if (rv0 && !STRADA_IS_TAGGED_INT(rv0) && rv0->type == STRADA_REF) return "REF";
         return "SCALAR";
     }
 
@@ -27089,6 +27219,15 @@ StradaValue* strada_hash_from_ref(StradaValue *ref) {
     }
 
     return result;
+}
+
+/* Pkg::new(LIST) for a package that has no constructor (no `has`
+ * attributes, no user new) when the call could not be inlined: a hash built
+ * from the key/value list, blessed into the package. Consumes args. */
+StradaValue *strada_generic_new(const char *pkg, StradaValue *args) {
+    StradaValue *h = strada_hash_from_flat_array(args);
+    StradaValue *r = strada_new_ref_take(h, '%');
+    return strada_bless(r, pkg);
 }
 
 StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
@@ -30249,6 +30388,18 @@ StradaValue* strada_overload_unary(StradaValue *operand, const char *op) {
             strada_cleanup_pop();
             strada_decref(args);
             return result;
+        }
+        /* Autogenerated (perlovload): neg as 0 - x, abs as x or neg(x), from
+         * an overloaded "-". Without this the object's address was negated. */
+        if ((strcmp(op, "neg") == 0 || strcmp(op, "abs") == 0) && strada_overload_lookup(obp, "-")) {
+            if (strcmp(op, "abs") == 0 && strada_to_num(operand) >= 0) {
+                strada_incref(operand);
+                return operand;
+            }
+            StradaValue *zero = strada_new_int(0);
+            StradaValue *r = strada_overload_binary(zero, operand, "-");
+            strada_decref(zero);
+            return r;
         }
     }
     return NULL;
@@ -38773,4 +38924,212 @@ StradaValue* strada_autoviv_slot_array(StradaValue **slot) {
     *slot = ref;
     if (old) strada_decref(old);
     return arr;
+}
+
+/* print/say with a leading filehandle or not. In Strada's comma syntax
+ * `say($fh, LIST)` and `say($a, $b)` look alike, so decide at run time: a
+ * FILEHANDLE/SOCKET first value is the destination, anything else is data
+ * printed to stdout. (The two-argument form always took the first value as
+ * the handle -- say("a", "b") printed nothing -- and longer forms printed the
+ * handle itself, as FILEHANDLE(0x...), to stdout.) */
+static int strada_print_target_is_fh(StradaValue *v) {
+    return v && !STRADA_IS_TAGGED_INT(v) && (v->type == STRADA_FILEHANDLE || v->type == STRADA_SOCKET);
+}
+
+void strada_print2(StradaValue *a, StradaValue *b, int newline) {
+    if (strada_print_target_is_fh(a)) {
+        if (newline) strada_say_fh(b, a); else strada_print_fh(b, a);
+        return;
+    }
+    strada_print(a);
+    if (newline) strada_say(b); else strada_print(b);
+}
+
+/* first: the first argument (may be NULL); rest: ARRAY SV of the already
+ * flattened remaining arguments. */
+void strada_print_list(StradaValue *first, StradaValue *rest, int newline) {
+    StradaArray *av = (rest && !STRADA_IS_TAGGED_INT(rest)) ? strada_deref_array(rest) : NULL;
+    size_t n = av ? av->size : 0;
+    if (strada_print_target_is_fh(first)) {
+        for (size_t i = 0; i < n; i++) strada_print_fh(av->elements[av->head + i], first);
+        if (newline) {
+            StradaValue *nl = strada_new_str("\n");
+            strada_cleanup_push(nl);
+            strada_print_fh(nl, first);
+            strada_cleanup_pop_decref(nl);
+        }
+        return;
+    }
+    if (first) strada_print(first);
+    for (size_t i = 0; i < n; i++) strada_print(av->elements[av->head + i]);
+    if (newline) strada_say(NULL);
+}
+
+/* printf(LIST) with the already-flattened arguments: a filehandle first
+ * element is the destination, the next element the format. */
+void strada_printf_list(StradaValue *all) {
+    StradaArray *av = (all && !STRADA_IS_TAGGED_INT(all)) ? strada_deref_array(all) : NULL;
+    size_t n = av ? av->size : 0;
+    if (n == 0) return;
+    StradaValue *fh = NULL;
+    size_t fi = 0;
+    if (strada_print_target_is_fh(av->elements[av->head])) { fh = av->elements[av->head]; fi = 1; }
+    if (fi >= n) return;
+    StradaValue *fmt = av->elements[av->head + fi];
+    StradaValue *rest = strada_new_array();
+    strada_cleanup_push(rest);
+    for (size_t i = fi + 1; i < n; i++) strada_array_push(rest->value.av, av->elements[av->head + i]);
+    StradaValue *out = strada_sprintf_sv_arr(fmt, rest);
+    strada_cleanup_push(out);
+    if (fh) strada_print_fh(out, fh); else { strada_print(out); fflush(stdout); }
+    strada_cleanup_pop_decref(out);
+    strada_cleanup_pop_decref(rest);
+}
+
+/* keys()/values() reset the hash's each() iterator, as in Perl. */
+StradaHash *strada_hash_iter_reset(StradaHash *hv) {
+    if (hv) hv->iter_index = 0;
+    return hv;
+}
+
+/* scalar(EXPR) for a scalar-shaped operand: an array (or array reference --
+ * the long-standing Strada idiom scalar($aref)) gives its element count,
+ * anything else is its own value. Returns an owned value. */
+StradaValue *strada_scalar_ctx(StradaValue *sv) {
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && strada_sv_is_array_or_aref(sv)) {
+        StradaArray *av = strada_deref_array(sv);
+        return strada_new_int(av ? (int64_t)av->size : 0);
+    }
+    if (!sv) return strada_new_undef();
+    strada_incref(sv);
+    return sv;
+}
+
+/* ---- Integer overflow promotion (Perl IV -> UV -> NV) -------------------
+ * strada_sv_add/sub/mul handle int64 operands inline; on overflow, or when
+ * an operand is an unsigned (UV) int or an integer-looking string, they call
+ * this. The exact result is computed in 128 bits and returned as a signed
+ * int if it fits, an unsigned int (STRADA_SVf_UV) if it fits in 0..2^64-1,
+ * and a double otherwise -- never a wrapped value. */
+static int strada_exact_int_of(StradaValue *sv, __int128 *out) {
+    if (STRADA_IS_TAGGED_INT(sv)) { *out = STRADA_TAGGED_INT_VAL(sv); return 1; }
+    if (!sv) return 0;
+    if (sv->meta && (sv->meta->is_tied || sv->meta->has_iv_override || sv->meta->blessed_package)) return 0;
+    if (sv->type == STRADA_INT) {
+        if (sv->flags & STRADA_SVf_UV) *out = (__int128)(uint64_t)sv->value.iv;
+        else *out = sv->value.iv;
+        return 1;
+    }
+    if (sv->type == STRADA_STR && sv->value.pv) {
+        const char *p = sv->value.pv;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        int neg = 0;
+        if (*p == '+' || *p == '-') { neg = (*p == '-'); p++; }
+        if (*p < '0' || *p > '9') return 0;
+        unsigned __int128 v = 0;
+        int nd = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (unsigned)(*p - '0');
+            if (++nd > 20) return 0;
+            p++;
+        }
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p) return 0;
+        if (v > (unsigned __int128)UINT64_MAX) return 0;
+        *out = neg ? -(__int128)v : (__int128)v;
+        return 1;
+    }
+    return 0;
+}
+
+static StradaValue *strada_int128_result(__int128 r) {
+    if (r >= INT64_MIN && r <= INT64_MAX) return strada_new_int((int64_t)r);
+    if (r > 0 && r <= (__int128)UINT64_MAX) return strada_new_uint((uint64_t)r);
+    return strada_new_num((double)r);
+}
+
+/* Unary minus with Perl semantics (non-consuming): integers stay exact
+ * (-INT64_MIN and unsigned values promote), "foo" -> "-foo", "-foo" ->
+ * "+foo", numeric strings negate as numbers. It used to be
+ * strada_new_num(-strada_to_num(x)) for every non-int-typed operand. */
+StradaValue *strada_negate(StradaValue *sv) {
+    if (!sv) return strada_new_int(0);
+    if (STRADA_IS_TAGGED_INT(sv)) return strada_new_int(-STRADA_TAGGED_INT_VAL(sv));
+    if (sv->type == STRADA_INT && !(sv->meta && sv->meta->is_tied) && !SV_BLESSED(sv)) {
+        if (sv->flags & STRADA_SVf_UV) {
+            uint64_t u = (uint64_t)sv->value.iv;
+            if (u == (uint64_t)1 << 63) return strada_new_int(INT64_MIN);
+            return strada_new_num(-(double)u);
+        }
+        if (sv->value.iv == INT64_MIN) return strada_new_num(9223372036854775808.0);
+        return strada_new_int(-sv->value.iv);
+    }
+    if (sv->type == STRADA_STR && sv->value.pv && !(sv->meta && sv->meta->is_tied) && !SV_BLESSED(sv)) {
+        const char *p = sv->value.pv;
+        if ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z') || p[0] == '_') {
+            size_t n = strlen(p);
+            char *b = malloc(n + 2);
+            if (!b) return strada_new_num(-strada_to_num(sv));
+            b[0] = '-'; memcpy(b + 1, p, n + 1);
+            StradaValue *r = strada_new_str(b);
+            free(b);
+            return r;
+        }
+        if ((p[0] == '-' || p[0] == '+') && ((p[1] >= 'a' && p[1] <= 'z') || (p[1] >= 'A' && p[1] <= 'Z') || p[1] == '_')) {
+            StradaValue *r = strada_new_str(p);
+            if (r && !STRADA_IS_TAGGED_INT(r) && r->value.pv) r->value.pv[0] = (p[0] == '-') ? '+' : '-';
+            return r;
+        }
+        __int128 v;
+        if (strada_exact_int_of(sv, &v)) return strada_int128_result(-v);
+    }
+    return strada_new_num(-strada_to_num(sv));
+}
+
+StradaValue *strada_int_arith_slow(StradaValue *l, StradaValue *r, int op) {
+    __int128 a, b;
+    if (strada_exact_int_of(l, &a) && strada_exact_int_of(r, &b)) {
+        if (op == '+') return strada_int128_result(a + b);
+        if (op == '-') return strada_int128_result(a - b);
+        if (op == '*') {
+            /* |a|,|b| < 2^64, so the product fits in 128 bits */
+            return strada_int128_result(a * b);
+        }
+    }
+    double x = strada_to_num(l), y = strada_to_num(r);
+    if (op == '+') return strada_new_num(x + y);
+    if (op == '-') return strada_new_num(x - y);
+    return strada_new_num(x * y);
+}
+
+StradaValue *strada_int_arith_ii(int64_t a, int64_t b, int op) {
+    __int128 x = a, y = b;
+    if (op == '+') return strada_int128_result(x + y);
+    if (op == '-') return strada_int128_result(x - y);
+    return strada_int128_result(x * y);
+}
+
+
+/* A regex match in list context: without /g, the capture groups of the
+ * first match (or (1) when the pattern has none), empty on failure; with /g,
+ * every match's groups, or every whole match. */
+StradaValue *strada_regex_list(const char *str, const char *pattern, const char *flags, int global) {
+    StradaValue *out = strada_new_array();
+    StradaValue *all = strada_regex_find_all(str ? str : "", pattern ? pattern : "", flags, global);
+    StradaArray *mv = (all && !STRADA_IS_TAGGED_INT(all)) ? strada_deref_array(all) : NULL;
+    size_t nm = mv ? strada_array_length(mv) : 0;
+    for (size_t i = 0; i < nm; i++) {
+        StradaValue *m = strada_array_get(mv, (int64_t)i);
+        StradaArray *ma = (m && !STRADA_IS_TAGGED_INT(m)) ? strada_deref_array(m) : NULL;
+        size_t ml = ma ? strada_array_length(ma) : 0;
+        if (ml > 3) {
+            for (size_t k = 3; k < ml; k++) strada_array_push(out->value.av, strada_array_get(ma, (int64_t)k));
+        } else if (global) {
+            if (ml > 2) strada_array_push(out->value.av, strada_array_get(ma, 2));
+        } else {
+            strada_array_push_take(out->value.av, strada_new_int(1));
+        }
+    }
+    if (all) strada_decref(all);
+    return out;
 }

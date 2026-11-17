@@ -95,3 +95,13 @@ P5EOF
     [ "$out" = "6:42" ]
     r20_record $? "S3-12/S3-13 perl5 XS modules + re-init after shutdown" "$out"
 fi
+
+# Bootstrap: $lt/$gt/$eq/$ne/$le/$ge are ordinary variable names (the frozen
+# bootstrap lexed them as the string operators and failed to parse).
+d="$r20_dir/boot_kw"; rm -rf "$d"; mkdir -p "$d"
+printf 'func main() int {\n my int $lt = 1;\n my int $gt = 2;\n my int $eq = 3;\n my int $ne = 4;\n my int $le = 5;\n my int $ge = 6;\n my str $s = "a";\n if ($s lt "b") { say($lt + $gt + $eq + $ne + $le + $ge); }\n return 0;\n}\n' > "$d/kw.strada"
+out=$("$PROJECT_DIR/bootstrap/stradac" "$d/kw.strada" "$d/kw.c" > "$d/boot.log" 2>&1 \
+      && $GCC -o "$d/kw" "$d/kw.c" "$PROJECT_DIR/runtime/strada_runtime.o" -I"$PROJECT_DIR/runtime" -ldl -lm -lpthread ${EXTRA_LDFLAGS:-} > "$d/gcc.log" 2>&1 \
+      && "$d/kw" 2>&1)
+[ "$out" = "21" ]
+r20_record $? "bootstrap accepts \$lt/\$gt/\$eq/\$ne/\$le/\$ge variables" "$out $(cat "$d/boot.log" | grep -i error)"

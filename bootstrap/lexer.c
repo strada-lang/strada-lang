@@ -226,6 +226,16 @@ static Token* read_identifier(Lexer *lex) {
     text[length] = '\0';
     
     TokenType type = lookup_keyword(text);
+    /* Right after a sigil the word is a variable name: $lt, $gt, $eq, @ne
+     * ... are ordinary variables, not the string-comparison operators. */
+    if (start > 0) {
+        char prev = lex->source[start - 1];
+        if ((prev == '$' || prev == '@' || prev == '%') &&
+            (type == TOK_STR_EQ || type == TOK_STR_NE || type == TOK_STR_LT ||
+             type == TOK_STR_GT || type == TOK_STR_LE || type == TOK_STR_GE)) {
+            type = TOK_IDENT;
+        }
+    }
     Token *tok = make_token(type, text, start_line, start_col);
     
     free(text);

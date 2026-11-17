@@ -263,7 +263,8 @@ func parser_is_topic_builtin(str $name) int {
     if ($name eq "chomp" || $name eq "chop" || $name eq "say" || $name eq "print" ||
         $name eq "length" || $name eq "uc" || $name eq "lc" || $name eq "ucfirst" ||
         $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
-        $name eq "chr" || $name eq "ord") {
+        $name eq "chr" || $name eq "ord" || $name eq "int" || $name eq "abs" ||
+        $name eq "quotemeta" || $name eq "core::quotemeta") {
         return 1;
     }
     return 0;
@@ -280,6 +281,25 @@ func parser_at_topic_end(scalar $parser) int {
         return 1;
     }
     return 0;
+}
+
+# The LIST operand of map/grep/sort: like Perl's list operators it takes
+# everything up to the end of the enclosing list, so in
+# `join(",", map { $_ * 2 } 1, 2, 3)` the map gets (1, 2, 3). It used to stop
+# at the first comma and hand the rest to the enclosing call.
+func parse_list_op_operand(scalar $parser) scalar {
+    my scalar $first = parse_unary($parser);
+    if (!parser_check($parser, "COMMA")) { return $first; }
+    my scalar $lst = ast_new_anon_array();
+    $lst->{"is_list"} = 1;
+    ast_add_array_elem($lst, $first);
+    while (parser_check($parser, "COMMA")) {
+        parser_advance($parser);
+        if (parser_check($parser, "RPAREN") || parser_check($parser, "SEMI") ||
+            parser_check($parser, "RBRACE") || parser_check($parser, "RBRACKET")) { last; }
+        ast_add_array_elem($lst, parse_expression($parser));
+    }
+    return $lst;
 }
 
 func parser_check_class_arrow(scalar $parser) int {
@@ -1108,6 +1128,7 @@ func parse_primary(scalar $parser) scalar {
         my scalar $words = $tok->{"words"};
         my int $len = $tok->{"word_count"};
         my scalar $arr_node = ast_new_anon_array();
+        $arr_node->{"is_list"} = 1;   # qw(...) is a list (flattens like (a, b))
         my int $i = 0;
         while ($i < $len) {
             ast_add_array_elem($arr_node, ast_new_str_literal($words->[$i]));
@@ -1154,7 +1175,7 @@ func parse_primary(scalar $parser) scalar {
 
             # Build qualified name using compile-time package
             my str $pkg = $parser->{"current_package"};
-            if (length($pkg) > 0) {
+            if (length($pkg) > 0 && $pkg ne "main") {
                 # Convert Package::Sub to Package_Sub for C function name
                 my str $sanitized = "";
                 my int $i = 0;
@@ -1231,7 +1252,7 @@ func parse_primary(scalar $parser) scalar {
 
         # Build qualified name using compile-time package
         my str $pkg = $parser->{"current_package"};
-        if (length($pkg) > 0) {
+        if (length($pkg) > 0 && $pkg ne "main") {
             # Convert Package::Sub to Package_Sub for C function name
             my str $sanitized = "";
             my int $i = 0;
@@ -1303,7 +1324,7 @@ func parse_primary(scalar $parser) scalar {
 
             # Build qualified name using compile-time package
             my str $pkg = $parser->{"current_package"};
-            if (length($pkg) > 0) {
+            if (length($pkg) > 0 && $pkg ne "main") {
                 # Convert Package::Sub to Package_Sub for C function name
                 my str $sanitized = "";
                 my int $i = 0;
@@ -1723,6 +1744,19 @@ func parse_primary(scalar $parser) scalar {
         
         # Single expression in parens
         parser_expect($parser, "RPAREN");
+        $first->{"in_parens"} = 1;
+        # `($x) = LIST` is a list assignment (first element), not `$x = LIST`
+        # (which in Strada gives the count for an array).
+        if (parser_check($parser, "ASSIGN")) {
+            my int $pt = $first->{"type"};
+            if ($pt == NODE_VARIABLE() || $pt == NODE_SUBSCRIPT() || $pt == NODE_HASH_ACCESS() ||
+                $pt == NODE_DEREF_HASH() || $pt == NODE_DEREF_ARRAY()) {
+                my scalar $one = ast_new_anon_array();
+                $one->{"is_list"} = 1;
+                ast_add_array_elem($one, $first);
+                return $one;
+            }
+        }
         return $first;
     }
     
@@ -1806,6 +1840,8 @@ func parse_primary(scalar $parser) scalar {
         if (!parser_check($parser, "RPAREN")) {
             my scalar $arg = parse_expression($parser);
             ast_add_arg($call, $arg);
+        } else {
+            ast_add_arg($call, ast_new_variable("_", "$"));   # int() is int($_)
         }
         parser_expect($parser, "RPAREN");
         return $call;
@@ -1854,6 +1890,10 @@ func parse_primary(scalar $parser) scalar {
 
             parser_expect($parser, "RPAREN");
 
+            # split(PATTERN) splits $_
+            if ($name eq "split" && $call->{"arg_count"} == 1) {
+                ast_add_arg($call, ast_new_variable("_", "$"));
+            }
             # Builtins that default to $_ when called with no args
             if ($call->{"arg_count"} == 0) {
                 if (parser_is_topic_builtin($name) == 1) {
@@ -1862,6 +1902,11 @@ func parse_primary(scalar $parser) scalar {
                 # shift()/pop() with empty parens default to @_
                 if ($name eq "shift" || $name eq "pop") {
                     ast_add_arg($call, ast_new_variable("_", "@"));
+                }
+                # split() is split(" ", $_)
+                if ($name eq "split") {
+                    ast_add_arg($call, ast_new_str_literal(" "));
+                    ast_add_arg($call, ast_new_variable("_", "$"));
                 }
             }
 
@@ -1966,6 +2011,21 @@ func parse_primary(scalar $parser) scalar {
                 return ast_new_str_literal($name);
             }
 
+            # Pkg::NAME for a `const` declared in a package: consts are C
+            # globals named by their bare name (it emitted an undeclared
+            # `Pkg_NAME` identifier).
+            my int $qc_i = rindex($name, "::");
+            if ($qc_i > 0) {
+                my str $qc_base = substr($name, $qc_i + 2, length($name) - $qc_i - 2);
+                my str $qc_pkg = substr($name, 0, $qc_i);
+                my int $qc_is_enum = 0;
+                if (defined($parser->{"enum_type_names"}) && $parser->{"enum_type_names"}->{$qc_pkg}) { $qc_is_enum = 1; }
+                if ($qc_is_enum == 0 && $parser->{"const_names"}->{$qc_base}) {
+                    my scalar $qc_var = ast_new_variable($qc_base, "$");
+                    ast_set_line($qc_var, $call_line);
+                    return $qc_var;
+                }
+            }
             # Qualified name without parens - treat as constant (e.g., enum value)
             # Create a 0-arg call node, codegen will handle it as a constant
             my scalar $const_ref = ast_new_call($name);
@@ -2114,10 +2174,10 @@ func parse_primary(scalar $parser) scalar {
             # Check if this is a full statement (with ;) or bare expression
             if (parser_check($parser, "SEMI")) {
                 parser_advance($parser);
-                ast_add_statement($block, ast_new_expr_stmt($expr));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
             } elsif (parser_check($parser, "RBRACE")) {
                 # Bare expression at end of block (e.g., map { $_ => 1 })
-                ast_add_statement($block, ast_new_expr_stmt($expr));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
             } else {
                 parser_error($parser, "expected ; or } in map block");
             }
@@ -2125,7 +2185,7 @@ func parse_primary(scalar $parser) scalar {
         parser_expect($parser, "RBRACE");
 
         # Parse the array expression
-        my scalar $array_expr = parse_unary($parser);
+        my scalar $array_expr = parse_list_op_operand($parser);
         my scalar $map_node = ast_new_map($block, $array_expr);
         ast_set_line($map_node, $map_line);
         return $map_node;
@@ -2169,13 +2229,13 @@ func parse_primary(scalar $parser) scalar {
             parser_expect($parser, "RBRACE");
 
             # Parse the array expression
-            my scalar $array_expr = parse_unary($parser);
+            my scalar $array_expr = parse_list_op_operand($parser);
             my scalar $sort_node = ast_new_sort($block, $array_expr);
             ast_set_line($sort_node, $sort_line);
             return $sort_node;
         } else {
             # Default sort (no block) - use empty block
-            my scalar $array_expr = parse_unary($parser);
+            my scalar $array_expr = parse_list_op_operand($parser);
             my scalar $sort_node = ast_new_sort(0, $array_expr);
             ast_set_line($sort_node, $sort_line);
             return $sort_node;
@@ -2205,9 +2265,9 @@ func parse_primary(scalar $parser) scalar {
             my scalar $expr = parse_expression($parser);
             if (parser_check($parser, "SEMI")) {
                 parser_advance($parser);
-                ast_add_statement($block, ast_new_expr_stmt($expr));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
             } elsif (parser_check($parser, "RBRACE")) {
-                ast_add_statement($block, ast_new_expr_stmt($expr));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
             } else {
                 parser_error($parser, "expected ; or } in grep block");
             }
@@ -2215,7 +2275,7 @@ func parse_primary(scalar $parser) scalar {
         parser_expect($parser, "RBRACE");
 
         # Parse the array expression
-        my scalar $array_expr = parse_unary($parser);
+        my scalar $array_expr = parse_list_op_operand($parser);
         my scalar $grep_node = ast_new_grep($block, $array_expr);
         ast_set_line($grep_node, $grep_line);
         return $grep_node;
@@ -2713,12 +2773,14 @@ func parse_shift(scalar $parser) scalar {
 }
 
 # Range: ..
+# Perl precedence: looser than || and //, tighter than ?: (`1 .. $n || 3`
+# is 1 .. ($n || 3)). It used to sit just above the relational operators.
 func parse_range(scalar $parser) scalar {
-    my scalar $left = parse_shift($parser);
+    my scalar $left = parse_logical_or($parser);
 
     if (parser_check($parser, "RANGE")) {
         parser_advance($parser);
-        my scalar $right = parse_shift($parser);
+        my scalar $right = parse_logical_or($parser);
         return ast_new_range($left, $right);
     }
 
@@ -2727,7 +2789,7 @@ func parse_range(scalar $parser) scalar {
 
 # Relational: < > <= >= lt gt le ge
 func parse_relational(scalar $parser) scalar {
-    my scalar $left = parse_range($parser);
+    my scalar $left = parse_shift($parser);
 
     while (1) {
         my scalar $tok = parser_current($parser);
@@ -2736,31 +2798,31 @@ func parse_relational(scalar $parser) scalar {
         if ($type eq "LT" || $type eq "GT" || $type eq "LE" || $type eq "GE") {
             my str $op = $tok->{"value"};
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op($op, $left, $right);
         } elsif ($type eq "STR_LT") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("lt", $left, $right);
         } elsif ($type eq "STR_GT") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("gt", $left, $right);
         } elsif ($type eq "STR_LE") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("le", $left, $right);
         } elsif ($type eq "STR_GE") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("ge", $left, $right);
         } elsif ($type eq "SPACESHIP") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("<=>", $left, $right);
         } elsif ($type eq "STR_CMP") {
             parser_advance($parser);
-            my scalar $right = parse_range($parser);
+            my scalar $right = parse_shift($parser);
             $left = ast_new_binary_op("cmp", $left, $right);
         } else {
             return $left;
@@ -2864,7 +2926,7 @@ func parse_logical_or(scalar $parser) scalar {
 
 # Ternary expression: cond ? true_expr : false_expr
 func parse_ternary(scalar $parser) scalar {
-    my scalar $cond = parse_logical_or($parser);
+    my scalar $cond = parse_range($parser);
 
     if (parser_check($parser, "QUESTION")) {
         parser_advance($parser);
@@ -2904,8 +2966,29 @@ func parse_assignment(scalar $parser) scalar {
         $type eq "BIT_XOR_ASSIGN" || $type eq "LSHIFT_ASSIGN" ||
         $type eq "RSHIFT_ASSIGN") {
         my str $op = $tok->{"value"};
+        my int $as_line = parser_current_line($parser);
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
+        # `() = LIST` (as in `my $n = () = f()`): evaluates LIST in list
+        # context; its value is the element count.
+        if ($op eq "=" && $left->{"is_empty_list"}) {
+            my scalar $cnt_list = ast_new_anon_array();
+            $cnt_list->{"is_list"} = 1;
+            ast_add_array_elem($cnt_list, $right);
+            my scalar $cnt = ast_new_call("scalar");
+            ast_add_arg($cnt, $cnt_list);
+            ast_set_line($cnt, $as_line);
+            return $cnt;
+        }
+        # A target that is not an lvalue is a located Strada error, not a
+        # gcc error on the generated C.
+        my int $asg_t = $left->{"type"};
+        if ($asg_t == NODE_BINARY_OP() || $asg_t == NODE_INT_LITERAL() || $asg_t == NODE_NUM_LITERAL() ||
+            $asg_t == NODE_STR_LITERAL() || $asg_t == NODE_METHOD_CALL() ||
+            ($asg_t == NODE_CALL() && $left->{"name"} ne "substr" && $left->{"name"} ne "local" &&
+             $left->{"is_constant"} != 1)) {
+            parser_error($parser, "cannot assign to this expression (not a variable, element or slice)");
+        }
         return ast_new_assign($op, $left, $right);
     }
 
@@ -3201,7 +3284,7 @@ func parse_var_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = parse_expression($parser);
+        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -3284,7 +3367,7 @@ func parse_our_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = parse_expression($parser);
+        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -3352,7 +3435,7 @@ func parse_local_decl(scalar $parser) scalar {
         # Optional initialization
         if (parser_check($parser, "ASSIGN")) {
             parser_advance($parser);
-            $decl->{"init"} = parse_expression($parser);
+            $decl->{"init"} = ast_regex_truth(parse_expression($parser));
         }
 
         parser_expect($parser, "SEMI");
@@ -3368,7 +3451,7 @@ func parse_local_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = parse_expression($parser);
+        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -3559,6 +3642,7 @@ func parse_for_array_style(scalar $parser, str $label, int $fas_line) scalar {
     my scalar $array_expr = parse_expression($parser);
     if (parser_check($parser, "COMMA")) {
         my scalar $arr = ast_new_anon_array();
+        $arr->{"is_list"} = 1;  # foreach (LIST): flattens like any list
         ast_add_array_elem($arr, $array_expr);
         while (parser_check($parser, "COMMA")) {
             parser_advance($parser);
@@ -3687,6 +3771,7 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
     my scalar $array_expr = parse_expression($parser);
     if (parser_check($parser, "COMMA")) {
         my scalar $arr = ast_new_anon_array();
+        $arr->{"is_list"} = 1;  # foreach (LIST): flattens like any list
         ast_add_array_elem($arr, $array_expr);
         while (parser_check($parser, "COMMA")) {
             parser_advance($parser);
@@ -3839,6 +3924,13 @@ func parse_statement(scalar $parser) scalar {
                 return parse_foreach_stmt($parser, $label);
             } elsif ($loop_type eq "UNTIL") {
                 return parse_until_stmt($parser, $label);
+            } elsif ($loop_type eq "LBRACE") {
+                # LABEL: { ... } is a loop that runs once (Perl): last/next
+                # LABEL leave it. Lowered to a do { } while (0).
+                my scalar $lb_body = parse_block($parser);
+                my scalar $lb_stmt = ast_new_do_while_stmt($lb_body, ast_new_int_literal(0), $label);
+                ast_set_line($lb_stmt, $stmt_line);
+                return $lb_stmt;
             } else {
                 # Standalone label for goto
                 my scalar $label_stmt = ast_new_label($label);
@@ -4078,9 +4170,24 @@ func parse_statement(scalar $parser) scalar {
     if ($type eq "THROW") {
         parser_advance($parser);
         my scalar $expr = parse_expression($parser);
-        parser_expect($parser, "SEMI");
         my scalar $throw_stmt = ast_new_throw($expr);
         ast_set_line($throw_stmt, $stmt_line);
+        # Statement modifier: throw EXPR if/unless COND;
+        if (parser_check($parser, "IF") || parser_check($parser, "UNLESS")) {
+            my int $th_unless = 0;
+            if (parser_check($parser, "UNLESS")) { $th_unless = 1; }
+            parser_advance($parser);
+            my scalar $th_cond = parse_expression($parser);
+            parser_expect($parser, "SEMI");
+            if ($th_unless == 1) { $th_cond = ast_new_unary_op("!", $th_cond); }
+            my scalar $th_block = ast_new_block();
+            $th_block->{"is_modifier_block"} = 1;
+            ast_add_statement($th_block, $throw_stmt);
+            my scalar $th_if = ast_new_if_stmt($th_cond, $th_block);
+            ast_set_line($th_if, $stmt_line);
+            return $th_if;
+        }
+        parser_expect($parser, "SEMI");
         return $throw_stmt;
     }
 
@@ -4247,6 +4354,39 @@ func list_assign_as_destructure(scalar $expr) scalar {
     my scalar $la_elems = $la_target->{"elements"};
     my array @la_vars = ();
     my int $la_i = 0;
+    # Element targets ($h{k}, $a[i], $r->{k}, $r->[i]) or a list of only
+    # scalar lvalues: copy the right side into a temporary array first (so
+    # `($h{a}, $h{b}) = ($h{b}, $h{a})` swaps), then assign each target.
+    # This used to reach gcc as `anon_array = anon_array`.
+    my int $la_elem_targets = 0;
+    my int $la_all_scalar_lv = 1;
+    my int $la_chk = 0;
+    while ($la_chk < $la_n) {
+        my scalar $lc = $la_elems->[$la_chk];
+        my int $lct = $lc->{"type"};
+        if ($lct == NODE_SUBSCRIPT() || $lct == NODE_HASH_ACCESS() || $lct == NODE_DEREF_HASH() || $lct == NODE_DEREF_ARRAY()) {
+            $la_elem_targets = 1;
+        } elsif (!($lct == NODE_VARIABLE() && $lc->{"sigil"} eq "$")) {
+            $la_all_scalar_lv = 0;
+        }
+        $la_chk = $la_chk + 1;
+    }
+    if ($la_elem_targets == 1) {
+        if ($la_all_scalar_lv == 0) { return 0; }
+        # The temp lives in its own block, so one fixed name never collides.
+        my str $tmp_name = "__la_tmp";
+        my scalar $blk = ast_new_block();
+        my scalar $decl = ast_new_var_decl($tmp_name, TYPE_ARRAY(), "@");
+        $decl->{"init"} = ast_regex_truth($expr->{"value"});
+        ast_add_statement($blk, $decl);
+        my int $la_j = 0;
+        while ($la_j < $la_n) {
+            my scalar $src = ast_new_subscript(ast_new_variable($tmp_name, "@"), ast_new_int_literal($la_j));
+            ast_add_statement($blk, ast_new_expr_stmt(ast_new_assign("=", $la_elems->[$la_j], $src)));
+            $la_j = $la_j + 1;
+        }
+        return $blk;
+    }
     while ($la_i < $la_n) {
         my scalar $la_el = $la_elems->[$la_i];
         if ($la_el->{"type"} != NODE_VARIABLE()) { return 0; }
@@ -4676,6 +4816,8 @@ func parse_enum(scalar $parser) scalar {
     parser_expect($parser, "IDENT");
 
     my scalar $en = ast_new_enum($name_tok->{"value"});
+    if (!defined($parser->{"enum_type_names"})) { $parser->{"enum_type_names"} = {}; }
+    $parser->{"enum_type_names"}->{"" . $name_tok->{"value"}} = 1;
     ast_set_line($en, $enum_line);
 
     parser_expect($parser, "LBRACE");
@@ -4700,7 +4842,7 @@ func parse_enum(scalar $parser) scalar {
             my scalar $val_tok = parser_current($parser);
             if (parser_check($parser, "INT_LITERAL")) {
                 parser_advance($parser);
-                $value = str_to_int($val_tok->{"value"});
+                $value = parser_int_lit_value($val_tok->{"value"});
                 if ($is_negative == 1) {
                     $value = 0 - $value;
                 }
@@ -5956,6 +6098,27 @@ func meta_hex_decode(str $h) str {
         $i = $i + 2;
     }
     return sb_to_string($sb);
+}
+
+# Value of an INT_LITERAL token's text: the lexer rewrites octal/binary
+# literals to "0x..." hex, which str_to_int read as 0 (enum E { A = 0x10 }).
+func parser_int_lit_value(str $s) int {
+    if (length($s) > 2 && substr($s, 0, 1) eq "0" && (substr($s, 1, 1) eq "x" || substr($s, 1, 1) eq "X")) {
+        my int $v = 0;
+        my int $i = 2;
+        my int $n = length($s);
+        while ($i < $n) {
+            my int $c = ord(substr($s, $i, 1));
+            my int $d = -1;
+            if ($c >= 48 && $c <= 57) { $d = $c - 48; }
+            elsif ($c >= 97 && $c <= 102) { $d = $c - 87; }
+            elsif ($c >= 65 && $c <= 70) { $d = $c - 55; }
+            if ($d >= 0) { $v = $v * 16 + $d; }
+            $i = $i + 1;
+        }
+        return $v;
+    }
+    return str_to_int($s);
 }
 
 func meta_str_to_int(str $s) int {
@@ -7728,8 +7891,12 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
         if ($fn->{"param_count"} > 0) {
             parser_expect($parser, "COMMA");
         }
-        # Check for variadic spread: scalar ...@name
-        my int $param_type = parse_type($parser);
+        # Check for variadic spread: scalar ...@name. The type is optional:
+        # the sigil gives the default (as for ordinary functions).
+        my int $param_type = TYPE_SCALAR();
+        if (parser_check($parser, "AT")) { $param_type = TYPE_ARRAY(); }
+        elsif (parser_check($parser, "PERCENT")) { $param_type = TYPE_HASH(); }
+        elsif (!parser_check($parser, "DOLLAR")) { $param_type = parse_type($parser); }
         my int $p_is_variadic = 0;
         if (parser_check($parser, "ELLIPSIS")) {
             parser_advance($parser);
