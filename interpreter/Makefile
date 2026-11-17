@@ -42,6 +42,10 @@ CFLAGS += -DHAVE_READLINE $(READLINE_CFLAGS)
 LDFLAGS += $(READLINE_LIBS)
 endif
 
+# c::callback trampolines (libffi is dlopen'd at the first call; no link dependency)
+ifeq ($(HAVE_LIBFFI),1)
+CFLAGS += -DHAVE_LIBFFI $(FFI_CFLAGS)
+endif
 ifeq ($(HAVE_CYCLE_GC),1)
 CFLAGS += -DSTRADA_CYCLE_GC
 endif
@@ -105,7 +109,7 @@ interp_vm.o: vm.c vm.h vm_generic_builtins.inc $(RUNTIME_DIR)/strada_runtime.h
 interp_vm_compiler.o: vm_compiler.c vm_compiler.h vm.h $(RUNTIME_DIR)/strada_runtime.h
 	$(CC) $(CFLAGS) -I. -c vm_compiler.c -o $@
 
-interp_runtime.o: $(RUNTIME_DIR)/strada_runtime.c $(RUNTIME_DIR)/strada_runtime.h
+interp_runtime.o: $(RUNTIME_DIR)/strada_runtime.c $(RUNTIME_DIR)/strada_runtime.h $(wildcard ../config.mk)
 	$(CC) $(CFLAGS) -I. -c $(RUNTIME_DIR)/strada_runtime.c -o $@
 
 strada-interp: $(INTERP_OBJS)

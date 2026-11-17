@@ -72,7 +72,7 @@ def harvest_blocks(src):
 
 def uniform_protos(hdr):
     protos = {}
-    for m in re.finditer(r'^StradaValue\*\s+(strada_[a-z_0-9]+)\(([^)]*)\);', hdr, re.M):
+    for m in re.finditer(r'^StradaValue\s*\*\s*(strada_[a-z_0-9]+)\(([^)]*)\);', hdr, re.M):
         args = m.group(2).strip()
         if args in ("void", ""):
             protos[m.group(1)] = 0

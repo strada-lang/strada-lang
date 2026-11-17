@@ -5,8 +5,11 @@
 use lib "lib";
 use Async::Task;
 func main() int {
+    # a free port: try a few (another test may hold one)
     my int $port = 20000 + (core::getpid() % 20000);
     my scalar $srv = core::socket_server($port);
+    my int $tries = 0;
+    while (!defined($srv) && $tries < 50) { $port = 20000 + (($port + 7919) % 40000); $srv = core::socket_server($port); $tries++; }
     my scalar $cli = core::socket_client("127.0.0.1", $port);
     my scalar $peer = core::socket_accept($srv);
     my str $chunk = "x" x 1048576;

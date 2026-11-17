@@ -569,6 +569,10 @@ enum {
     BUILTIN_SET_PACKAGE,
     BUILTIN_PRINTF,
     BUILTIN_HASH_FLAT,
+    BUILTIN_EXC_TRACE,    /* () -> call stack captured at the latest throw */
+    BUILTIN_CORO_OP,      /* (subop, ...): core::coro_* over the runtime coroutines */
+    BUILTIN_ASYNC_OP,     /* (subop, ...): futures over the runtime pool (see vm.c) */
+    BUILTIN_NUMIFY_EXACT, /* (str) -> exact int / uint64 / double */
     BUILTIN_INCR_VALUE,   /* (v, +1/-1) -> ++/-- of v (magic string ++, IV/UV/NV promotion) */
     BUILTIN_FE_WRITEBACK, /* (array, idx, value): foreach alias write-back while idx is in range */
     BUILTIN_STRUCT_FIELD_STORE, /* (v, kind) -> v as a C struct field stores it (1 int32, 2 num, 3 str[64]) */
@@ -951,6 +955,7 @@ typedef struct {
     size_t str_const_count;
     int local_count;
     int fixed_param_count;
+    int is_async;          /* async func: calls return a future */
     int has_variadic;
     int return_type;
     int int_only;
@@ -1069,6 +1074,7 @@ typedef struct {
                                  * helpers/includes), prepended to every
                                  * function-level block's JIT unit */
     int cblock_jit_all_tried;   /* whole-program __C__ object attempted */
+    char *cblock_link_flags;    /* " -lz -lssl ..." from link_lib, for __C__ JIT objects */
     VMObjHeader *compile_objects; /* compile-time immortal GC objects (e.g., default_val) */
     void **dl_handles;          /* all dlopen'd import_lib handles */
     int dl_handle_count;
@@ -1177,6 +1183,7 @@ typedef struct VM {
     uint64_t gc_runs;            /* core::gc_collections() */
     uint64_t gc_freed_total;     /* core::gc_freed(): objects reclaimed */
     int gc_user_disabled;        /* core::gc_disable(): no automatic runs */
+    char *exc_trace;             /* core::exception_trace(): call stack at the latest throw */
     size_t gc_threshold;
     int gc_pause;
     int has_weakrefs;

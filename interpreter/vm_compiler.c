@@ -1102,7 +1102,8 @@ static void emit_scalar_type_coerce(CompCtx *ctx, int var_type) {
 /* C structs (`struct P { int x; str s; }`) are modelled as hashes of their
  * fields; field stores mimic the C storage (int: 32-bit, num: double,
  * str: at most 63 bytes) as in the compiled backend. */
-static StradaValue *g_vm_structs = NULL;   /* program AST "structs" (borrowed) */
+static StradaValue *g_vm_structs = NULL;
+static char *prog_link_flags_pending = NULL;   /* program AST "structs" (borrowed) */
 
 static StradaValue *vm_struct_def(const char *sname) {
     if (!sname || !sname[0] || !g_vm_structs) return NULL;
@@ -3043,6 +3044,24 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
     switch (type) {
     case NI_INT_LITERAL: {
+        /* a literal above INT64_MAX is a uint64 (or a double past
+         * UINT64_MAX), as in the compiled backend (int_lit_kind) */
+        StradaValue *lv = ast_get(node, "value");
+        if (lv && !STRADA_IS_TAGGED_INT(lv) && lv->type == STRADA_STR && lv->value.pv) {
+            const char *lt = lv->value.pv;
+            size_t ll = strlen(lt);
+            int digits = (ll > 0);
+            for (size_t q = 0; q < ll; q++) if (lt[q] < '0' || lt[q] > '9') digits = 0;
+            if (digits && (ll > 19 || (ll == 19 && strcmp(lt, "9223372036854775807") > 0))) {
+                size_t li = vm_chunk_add_str_const(ctx->chunk, lt);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)li);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_NUMIFY_EXACT);
+                vm_chunk_emit(ctx->chunk, 1);
+                break;
+            }
+        }
         int64_t val = ast_int(node, "value");
         emit_push_int(ctx->chunk, val);
         break;
@@ -3800,7 +3819,12 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_AWAIT: {
+        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+        vm_chunk_emit_i64(ctx->chunk, 7);
         compile_expr(ctx, ast_get(node, "expr"));
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_ASYNC_OP);
+        vm_chunk_emit(ctx->chunk, 2);
         break;
     }
 
@@ -4913,6 +4937,46 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         /* async:: builtins */
         if (strncmp(name, "async::", 7) == 0) {
             const char *fn = name + 7;
+            /* futures over the runtime pool (BUILTIN_ASYNC_OP) */
+            int aop = -1;
+            if (strcmp(fn, "spawn") == 0 && argc == 1) aop = 8;
+            else if (strcmp(fn, "timeout") == 0 && argc == 2) aop = 0;
+            else if (strcmp(fn, "sleep") == 0 && argc == 1) aop = 1;
+            else if (strcmp(fn, "cancelled") == 0 && argc == 0) aop = 2;
+            else if (strcmp(fn, "map") == 0 && (argc == 2 || argc == 3)) aop = 3;
+            else if (strcmp(fn, "cancel") == 0 && argc == 1) aop = 4;
+            else if (strcmp(fn, "is_done") == 0 && argc == 1) aop = 5;
+            else if (strcmp(fn, "is_cancelled") == 0 && argc == 1) aop = 6;
+            else if (strcmp(fn, "await") == 0 && argc == 1) aop = 7;
+            else if (strcmp(fn, "io_wait") == 0 && argc == 3) aop = 9;
+            else if (strcmp(fn, "resolve") == 0 && argc == 1) aop = 10;
+            else if (strcmp(fn, "pool_init") == 0 && argc <= 1) aop = 11;
+            else if (strcmp(fn, "pool_shutdown") == 0 && argc == 0) aop = 12;
+            if (aop >= 0) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, aop);
+                for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_ASYNC_OP);
+                vm_chunk_emit(ctx->chunk, (uint8_t)(argc + 1));
+                break;
+            }
+            const char *rtn = NULL;
+            int rta = 0;
+            if (strcmp(fn, "all") == 0) { rtn = "strada_future_all"; rta = 1; }
+            else if (strcmp(fn, "race") == 0) { rtn = "strada_future_race"; rta = 1; }
+            else if (strcmp(fn, "try_get") == 0) { rtn = "strada_future_try_get"; rta = 1; }
+            else if (strcmp(fn, "select") == 0) { rtn = "strada_channel_select"; rta = 2; }
+            if (rtn && argc <= rta) {
+                int gi = vm_generic_builtin_find_min(rtn, argc);
+                if (gi >= 0) {
+                    for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)(VM_GENERIC_BID_BASE + gi));
+                    vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                    break;
+                }
+            }
             int bid = -1;
             if (strcmp(fn, "channel") == 0) bid = BUILTIN_ASYNC_CHANNEL;
             else if (strcmp(fn, "send") == 0) bid = BUILTIN_ASYNC_SEND;
@@ -4952,6 +5016,20 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "join") == 0) bid = BUILTIN_THREAD_JOIN;
             else if (strcmp(fn, "detach") == 0) bid = BUILTIN_THREAD_DETACH;
             else if (strcmp(fn, "self") == 0) bid = BUILTIN_THREAD_SELF;
+            if (bid < 0) {
+                /* mutex_* / cond_* / tls_*: the runtime's strada_<name> via
+                 * the generic bridge (which marks a blocking call GC-safe) */
+                char tbuf[96];
+                snprintf(tbuf, sizeof(tbuf), "strada_%s", fn);
+                int tgi = vm_generic_builtin_find_min(tbuf, argc);
+                if (tgi >= 0) {
+                    for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)(VM_GENERIC_BID_BASE + tgi));
+                    vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                    break;
+                }
+            }
             if (bid >= 0) {
                 for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
                 vm_chunk_emit(ctx->chunk, OP_BUILTIN);
@@ -5047,17 +5125,62 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, 2);
             break;
         }
-        /* core::coro_yield_io: the VM has no green tasks yet, so code is never
-         * inside one -- 0 makes Async::Task take its blocking fallbacks */
-        if ((strcmp(name, "core::coro_yield_io") == 0 || strcmp(name, "sys::coro_yield_io") == 0)
-            && resolve_vm_func_idx(ctx, name) < 0) {
-            for (int ci = 0; ci < argc; ci++) {
-                compile_expr(ctx, ast_arr_get(args, ci));
-                vm_chunk_emit(ctx->chunk, OP_POP);
+        /* core::coro_*: green tasks on the runtime's coroutines; a task's
+         * VM code runs in its own worker VM (vm_exported_closure_call) */
+        {
+            const char *cn0 = name;
+            if (strncmp(cn0, "core::", 6) == 0) cn0 += 6;
+            else if (strncmp(cn0, "sys::", 5) == 0) cn0 += 5;
+            else cn0 = NULL;
+            int cop = -1;
+            if (cn0 && strncmp(cn0, "coro_", 5) == 0 && resolve_vm_func_idx(ctx, name) < 0) {
+                const char *cs = cn0 + 5;
+                if (strcmp(cs, "create") == 0) cop = 0;
+                else if (strcmp(cs, "resume") == 0) cop = 1;
+                else if (strcmp(cs, "yield_io") == 0) cop = 2;
+                else if (strcmp(cs, "state") == 0) cop = 3;
+                else if (strcmp(cs, "wait_fd") == 0) cop = 4;
+                else if (strcmp(cs, "wait_mask") == 0) cop = 5;
+                else if (strcmp(cs, "wait_timeout") == 0) cop = 6;
+                else if (strcmp(cs, "error") == 0) cop = 7;
+                else if (strcmp(cs, "result") == 0) cop = 8;
+                else if (strcmp(cs, "free") == 0) cop = 9;
             }
-            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-            vm_chunk_emit_i64(ctx->chunk, 0);
+            if (cop >= 0) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, cop);
+                for (int ci = 0; ci < argc; ci++) compile_expr(ctx, ast_arr_get(args, ci));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORO_OP);
+                vm_chunk_emit(ctx->chunk, (uint8_t)(argc + 1));
+                break;
+            }
+        }
+        if ((strcmp(name, "core::exception_trace") == 0 || strcmp(name, "sys::exception_trace") == 0) && argc == 0) {
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_EXC_TRACE);
+            vm_chunk_emit(ctx->chunk, 0);
             break;
+        }
+        /* utf8::normalize(s, form) / c::callback(fn, ret, args) /
+         * c::callback_free(cb): the runtime functions (a VM closure crosses
+         * as an exported closure, so C code can call back into the VM) */
+        {
+            const char *rn = NULL;
+            int ra = 0;
+            if (strcmp(name, "utf8::normalize") == 0 && argc == 2) { rn = "strada_utf8_normalize"; ra = 2; }
+            else if (strcmp(name, "c::callback") == 0 && argc == 3) { rn = "strada_ffi_callback_new"; ra = 3; }
+            else if (strcmp(name, "c::callback_free") == 0 && argc == 1) { rn = "strada_ffi_callback_free"; ra = 1; }
+            if (rn) {
+                int rgi = vm_generic_builtin_find_min(rn, ra);
+                if (rgi >= 0) {
+                    for (int ri = 0; ri < argc; ri++) compile_expr(ctx, ast_arr_get(args, ri));
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)(VM_GENERIC_BID_BASE + rgi));
+                    vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                    break;
+                }
+            }
         }
         /* core::gc_* / spew_fh / *_default_capacity */
         {
@@ -5382,6 +5505,32 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         VMChunk *callee = &ctx->prog->funcs[fidx];
+        if (callee->is_async) {
+            /* calling an async func returns a future: the call runs on the
+             * runtime pool (BUILTIN_ASYNC_OP 8: closure + argument list) */
+            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+            vm_chunk_emit_i64(ctx->chunk, 8);
+            vm_chunk_emit(ctx->chunk, OP_MAKE_CLOSURE);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)fidx);
+            vm_chunk_emit(ctx->chunk, 0);
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, (uint32_t)(argc > 0 ? argc : 1));
+            for (int i = 0; i < argc; i++) {
+                StradaValue *arg = ast_deref(ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_DUP);
+                if (arg && (int)ast_int(arg, "type") == NI_SPREAD) {
+                    compile_list_src(ctx, ast_get(arg, "target"));
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+                } else {
+                    compile_expr(ctx, arg);
+                    vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+                }
+            }
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_ASYNC_OP);
+            vm_chunk_emit(ctx->chunk, 3);
+            break;
+        }
         int need_spread = 0;
         for (int i = 0; i < argc; i++) {
             StradaValue *arg = ast_deref(ast_arr_get(args, i));
@@ -8793,6 +8942,7 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
 
     /* Add parameters as locals, detect variadic */
     chunk->return_type = (int)ast_int(func_node, "return_type");
+    chunk->is_async = ((int)ast_int(func_node, "type") == NI_ASYNC_FUNC);
     int is_synth = (int)ast_int(func_node, "is_synthesized");
     StradaValue *params = ast_get(func_node, "params");
     int param_count = (int)ast_int(func_node, "param_count");
@@ -9394,10 +9544,34 @@ static void vm_sc_pass(StradaValue *v, int depth) {
 
 VMProgram *vm_compile_program(StradaValue *ast) {
     g_vm_structs = ast_get(ast, "structs");
+    /* link_lib "z"; ... : libraries the program's __C__ blocks need */
+    {
+        StradaValue *ll = ast_deref(ast_get(ast, "link_libs"));
+        if (ll && !STRADA_IS_TAGGED_INT(ll) && ll->type == STRADA_ARRAY && ll->value.av->size > 0) {
+            size_t cap = 16, len = 0;
+            char *fl = malloc(cap);
+            fl[0] = 0;
+            for (size_t i = 0; i < ll->value.av->size; i++) {
+                StradaValue *nm = strada_array_get(ll->value.av, (int64_t)i);
+                if (!nm || STRADA_IS_TAGGED_INT(nm) || nm->type != STRADA_STR || !nm->value.pv) continue;
+                const char *n = nm->value.pv;
+                int safe = n[0] != 0;
+                for (const char *c = n; *c; c++)
+                    if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '-' || *c == '.' || *c == '+')) safe = 0;
+                if (!safe) continue;
+                size_t need = len + strlen(n) + 4;
+                if (need >= cap) { cap = need * 2; fl = realloc(fl, cap); }
+                len += (size_t)sprintf(fl + len, " -l%s", n);
+            }
+            prog_link_flags_pending = fl;
+        }
+    }
     g_vm_uses_tie = vm_ast_uses_tie(ast_get(ast, "functions"), 0);
     vm_sc_pass(ast, 0);
     reset_compiler_globals();
     VMProgram *prog = vm_program_new();
+    prog->cblock_link_flags = prog_link_flags_pending;
+    prog_link_flags_pending = NULL;
     VM *saved_vm = NULL;
     vm_gc_set_compiling_prog(prog, &saved_vm);
 
@@ -9473,6 +9647,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
             }
         }
         fc->return_type = (int)ast_int(func, "return_type");
+        fc->is_async = ((int)ast_int(func, "type") == NI_ASYNC_FUNC);
         int is_synth = (int)ast_int(func, "is_synthesized");
         StradaValue *fparams = ast_get(func, "params");
         int fparam_count = (int)ast_int(func, "param_count");

@@ -39113,6 +39113,11 @@ static int coro_ctx_stash(StradaCoro *c, StradaValue **err_out) {
 
 static STRADA_TLS StradaCoro *strada_current_coro = NULL;
 
+/* Is this thread running inside a coroutine (green task)? The bytecode VM
+ * runs a task's VM code in its own worker VM so a suspension never leaves
+ * the main VM's value stack interleaved. */
+int strada_coro_in_task(void) { return strada_current_coro != NULL; }
+
 static void strada_coro_tramp(void) {
     StradaCoro *c = strada_current_coro;
     /* Task isolation: an uncaught throw inside a task must not unwind into

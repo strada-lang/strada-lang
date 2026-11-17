@@ -1281,6 +1281,8 @@ void vm_program_free(VMProgram *p) {
         for (int i = 0; i < p->native_count; i++) free(p->natives[i].name);
         free(p->natives);
     }
+    free(p->cblock_link_flags);
+    p->cblock_link_flags = NULL;
     if (p->cblocks) {
         for (int i = 0; i < p->cblock_count; i++) {
             free(p->cblocks[i].code);
@@ -2021,6 +2023,8 @@ void vm_free(VM *vm) {
     if (__sync_sub_and_fetch(&vm->refcount, 1) > 0) return;
     free(vm->cur_package);
     vm->cur_package = NULL;
+    free(vm->exc_trace);
+    vm->exc_trace = NULL;
     if (!vm->is_worker_vm && vm->program && vm->gc_objects && vm->frame_count == 0 && vm->exec_base == 0 &&
         vm->global_save_count == 0 && vm->gc_pause == 0) {
         for (int pass = 0; pass < 4; pass++) {
@@ -2628,6 +2632,8 @@ static VMValue vm_transliterate(const char *str, const char *from, const char *t
 
 static int vm_has_stringify(VMProgram *prog, VMValue v);
 static VMValue vm_stringify_ov(VM *vm, VMValue v);
+static VMValue vm_from_int128(__int128 r);
+static int vm_exact_int_arith(int op_kind, VMValue a, VMValue b, VMValue *out);
 static int vm_tied_array_find_method(VM *vm, VMValue tied_obj, const char *method);
 static VMValue vm_tied_array_call(VM *vm, VMValue tied_obj, int fidx, VMValue *extra, int extra_argc);
 static VMArray *vm_materialize_array(VM *vm, VMArray *src);
@@ -2635,6 +2641,7 @@ static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_fir
 static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj);
 static int64_t vm_to_int_vm(VM *vm, VMValue v);
 static VMValue vm_stringify_ov(VM *vm, VMValue v);
+static VMValue vm_from_int128(__int128 r);
 static double vm_to_num_vm(VM *vm, VMValue v);
 static int64_t vm_to_int_ov(VM *vm, VMValue v, int depth);
 static double vm_to_num_ov(VM *vm, VMValue v, int depth);
@@ -3914,7 +3921,7 @@ static int cblock_bind_entries(VMCBlock *cbs, int n, void *h) {
  * __cblock_entry_<i>), so file-scope statics in the program-level prelude
  * are shared by every block -- as in the compiled backend, where they are
  * one translation unit. */
-static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, const char *prelude, int quiet) {
+static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, const char *prelude, int quiet, const char *link_flags) {
     char cache_dir[512];
     ensure_cache_dir(cache_dir, sizeof(cache_dir));
 
@@ -3927,6 +3934,9 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     if (prelude) {
         /* prelude participates in the cache key */
         for (const char *pp = prelude; *pp; pp++) hash = hash * 1099511628211ULL ^ (unsigned char)*pp;
+    }
+    if (link_flags) {
+        for (const char *pp = link_flags; *pp; pp++) hash = hash * 1099511628211ULL ^ (unsigned char)*pp;
     }
     char so_path[600];
     snprintf(so_path, sizeof(so_path), "%s/%016llx.so", cache_dir, (unsigned long long)hash);
@@ -3985,8 +3995,8 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     shell_quote_arg(src_path, q_src, sizeof(q_src));
     char cmd[3600];
     snprintf(cmd, sizeof(cmd),
-        "gcc -shared -fPIC -O2 -I%s -o %s %s -w 2>&1",
-        q_inc, q_so, q_src);
+        "gcc -shared -fPIC -O2 -I%s -o %s %s -w%s 2>&1",
+        q_inc, q_so, q_src, link_flags ? link_flags : "");
 
     FILE *proc = popen(cmd, "r");
     if (!proc) {
@@ -4050,11 +4060,11 @@ static int cblock_jit_compile(VMProgram *prog, int idx) {
         int all_unset = 1;
         for (int i = 0; i < prog->cblock_count; i++) if (prog->cblocks[i].fn || prog->cblocks[i].dl_handle) all_unset = 0;
         if (all_unset && prog->cblock_count > 1 &&
-            cblock_jit_compile_n(prog->cblocks, prog->cblock_count, prog->runtime_include_path, prog->cblock_prelude, 1) == 0)
+            cblock_jit_compile_n(prog->cblocks, prog->cblock_count, prog->runtime_include_path, prog->cblock_prelude, 1, prog->cblock_link_flags) == 0)
             return 0;
     }
     if (prog->cblocks[idx].fn) return 0;
-    return cblock_jit_compile_n(&prog->cblocks[idx], 1, prog->runtime_include_path, prog->cblock_prelude, 0);
+    return cblock_jit_compile_n(&prog->cblocks[idx], 1, prog->runtime_include_path, prog->cblock_prelude, 0, prog->cblock_link_flags);
 }
 
 /* ===== VM Execution ===== */
@@ -4959,8 +4969,14 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
     VMExportedClosureCtx *ctx = (VMExportedClosureCtx *)raw;
     if (!ctx || !ctx->vm || !ctx->vcl) return strada_new_undef();
     int use_worker = !(!ctx->vm->is_worker_vm && pthread_equal(pthread_self(), ctx->vm->owner_thread));
+    /* a green task (coroutine) gets its own worker VM: it may suspend in
+     * the middle of its VM code while the main VM keeps running */
+    int coro_worker = 0;
+    if (!use_worker && strada_coro_in_task()) { use_worker = 1; coro_worker = 1; }
     VM *run_vm = use_worker ? vm_new_worker(ctx->vm) : ctx->vm;
-    VM *prev_active = use_worker ? run_vm->saved_active_vm : g_active_vm;
+    /* a coroutine worker shares this OS thread: hand back the VM that was
+     * active when the task started */
+    VM *prev_active = coro_worker ? g_active_vm : (use_worker ? run_vm->saved_active_vm : g_active_vm);
     g_active_vm = run_vm;
     int prev_trap = run_vm->trap_uncaught;
     run_vm->trap_uncaught = 1;
@@ -5005,6 +5021,49 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
         strada_throw_value(out_sv);
     }
     return out_sv;
+}
+
+/* async call / async::spawn: a runtime closure that calls the exported VM
+ * closure with the captured argument list, run by strada_future_new on the
+ * runtime pool (in a worker VM). */
+typedef struct { StradaValue *fn; StradaValue *args; } VMAsyncCallCtx;
+static StradaValue *vm_async_call_cb(void *raw, int argc, StradaValue **argv) {
+    (void)argc; (void)argv;
+    VMAsyncCallCtx *c = (VMAsyncCallCtx *)raw;
+    if (!c || !c->fn) return strada_new_undef();
+    return strada_closure_call_array(c->fn, c->args);
+}
+static void vm_async_call_free(void *raw) {
+    VMAsyncCallCtx *c = (VMAsyncCallCtx *)raw;
+    if (!c) return;
+    if (c->fn) strada_decref(c->fn);
+    if (c->args) strada_decref(c->args);
+    free(c);
+}
+
+/* `local $g` is per green task: while a task is suspended its local values
+ * are taken out (the outer values put back) and reinstated on resume -- the
+ * compiled runtime's coro_local_suspend. dir 0 = suspend (newest first),
+ * 1 = resume (oldest first); each pass swaps global <-> saved value. */
+static void vm_task_locals_swap(VM *vm, int dir) {
+    if (!vm || vm->global_save_count <= 0 || !vm->globals) return;
+    pthread_mutex_t *glk = vm_globals_lock_ptr(vm);
+    if (glk) pthread_mutex_lock(glk);
+    int n = vm->global_save_count;
+    for (int k = 0; k < n; k++) {
+        int i = dir == 0 ? (n - 1 - k) : k;
+        VMGlobalSave *gs = &vm->global_saves[i];
+        if (gs->is_hash_elem || !gs->name) continue;
+        VMValue cur = vm_val_copy(vm_hash_get(vm->globals, gs->name));
+        vm_hash_set(vm->globals, gs->name, gs->saved_value);
+        gs->saved_value = cur;
+    }
+    if (glk) pthread_mutex_unlock(glk);
+}
+
+static StradaValue *vm_channel_send_rt(StradaValue *ch, StradaValue *v) {
+    strada_channel_send(ch, v);
+    return strada_new_undef();
 }
 
 static int vm_resolve_overload_func(VMProgram *prog, const char *class_name, const char *op) {
@@ -6247,6 +6306,68 @@ static __attribute__((noinline)) void vm_slow_store_local(VM *vm, uint16_t slot,
     cur_locals[slot] = newv;
 }
 
+/* Exact integer arithmetic (the runtime's IV -> UV -> NV promotion):
+ * operands that are integers (inline, boxed int64, boxed uint64, undef, or
+ * integer-looking strings) are combined in 128 bits; the result is an int64,
+ * a uint64, or a double when it fits neither. */
+static int vm_exact_int_operand(VMValue v, __int128 *out) {
+    if (VM_IS_UNDEF(v)) { *out = 0; return 1; }
+    if (VM_IS_ANY_INT(v)) { *out = (__int128)VM_ANY_INT_VAL(v); return 1; }
+    if (!VM_IS_PTR(v)) return 0;
+    enum VMObjType t = VM_PTR_TYPE(v);
+    if (t == VM_OBJ_UINT64) { *out = (__int128)VM_AS_UINT64(v)->val; return 1; }
+    if (t == VM_OBJ_STR || t == VM_OBJ_STRBUF) {
+        char b[64];
+        size_t l = 0;
+        const char *p = vm_bytes_view(v, b, sizeof(b), &l);
+        if (!p || l == 0) return 0;
+        if (l > 21) {
+            /* a long all-digit string is still a number (a double) */
+            size_t k = 0;
+            if (p[k] == '+' || p[k] == '-') k++;
+            if (k >= l) return 0;
+            for (; k < l; k++) if (p[k] < '0' || p[k] > '9') return 0;
+            return -1;
+        }
+        size_t i = 0;
+        int neg = 0;
+        while (i < l && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n')) i++;
+        if (i < l && (p[i] == '+' || p[i] == '-')) { neg = (p[i] == '-'); i++; }
+        if (i >= l) return 0;
+        unsigned __int128 acc = 0;
+        size_t d0 = i;
+        while (i < l && p[i] >= '0' && p[i] <= '9') { acc = acc * 10 + (unsigned)(p[i] - '0'); i++; }
+        if (i == d0 || i != l) return 0;
+        if (acc > (unsigned __int128)UINT64_MAX) return -1;   /* integer, but only a double holds it */
+        *out = neg ? -(__int128)acc : (__int128)acc;
+        return 1;
+    }
+    return 0;
+}
+
+static VMValue vm_from_int128(__int128 r) {
+    if (r >= (__int128)INT64_MIN && r <= (__int128)INT64_MAX) return VM_MAKE_INT((int64_t)r);
+    if (r > 0 && r <= (__int128)UINT64_MAX) return vm_box_uint64((uint64_t)r);
+    return VM_MAKE_FLOAT((double)r);
+}
+
+/* op_kind: 0 add, 1 sub, 2 mul. Returns 1 and *out when both are exact. */
+static int vm_exact_int_arith(int op_kind, VMValue a, VMValue b, VMValue *out) {
+    __int128 x = 0, y = 0, r = 0;
+    int ka = vm_exact_int_operand(a, &x), kb = vm_exact_int_operand(b, &y);
+    if (ka == 0 || kb == 0) return 0;
+    if (ka < 0 || kb < 0) {
+        double da = vm_to_num(a), db = vm_to_num(b);
+        *out = VM_MAKE_FLOAT(op_kind == 0 ? da + db : op_kind == 1 ? da - db : da * db);
+        return 1;
+    }
+    if (op_kind == 0) r = x + y;
+    else if (op_kind == 1) r = x - y;
+    else if (__builtin_mul_overflow(x, y, &r)) { *out = VM_MAKE_FLOAT((double)x * (double)y); return 1; }
+    *out = vm_from_int128(r);
+    return 1;
+}
+
 static __attribute__((noinline)) VMValue vm_slow_bin_arith(VM *vm, int op_kind, VMValue a, VMValue b) {
     if (VM_IS_PTR(a) && vm_slow_unwrap_local(vm, &a)) return VM_UNDEF_VAL;
     if (VM_IS_PTR(b)) {
@@ -6264,12 +6385,15 @@ static __attribute__((noinline)) VMValue vm_slow_bin_arith(VM *vm, int op_kind, 
         }
         if (vm->has_pending_exc) return VM_UNDEF_VAL;
     }
+    {
+        VMValue ex = VM_UNDEF_VAL;
+        if (vm_exact_int_arith(op_kind, a, b, &ex)) return ex;
+    }
     if (!vm_is_float_operand(a) && !vm_is_float_operand(b)) {
         int64_t ia = 0, ib = 0;
         if (vm_pair_to_int(vm, a, b, &ia, &ib)) return VM_UNDEF_VAL;
-        uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
-        int64_t r = (op_kind == 0) ? (int64_t)(ua + ub) : (op_kind == 1) ? (int64_t)(ua - ub) : (int64_t)(ua * ub);
-        return VM_MAKE_INT(r);
+        __int128 r = (op_kind == 0) ? (__int128)ia + ib : (op_kind == 1) ? (__int128)ia - ib : (__int128)ia * ib;
+        return vm_from_int128(r);
     }
     double da = 0.0, db = 0.0;
     if (vm_pair_to_num(vm, a, b, &da, &db)) return VM_UNDEF_VAL;
@@ -6307,11 +6431,15 @@ static __attribute__((noinline)) VMValue vm_slow_local_imm_arith(VM *vm, VMValue
         }
         return VM_MAKE_INT(r);
     }
+    {
+        VMValue ex = VM_UNDEF_VAL;
+        if (vm_exact_int_arith(op_kind == 0 ? 1 : 0, a, VM_MAKE_INT((int64_t)imm), &ex)) return ex;
+    }
     if (!vm_is_float_operand(a)) {
         int64_t ia = vm_to_int_vm(vm, a);
         if (vm->has_pending_exc) return VM_UNDEF_VAL;
-        uint64_t ua = (uint64_t)ia, ub = (uint64_t)(int64_t)imm;
-        return VM_MAKE_INT((op_kind == 0) ? (int64_t)(ua - ub) : (int64_t)(ua + ub));
+        __int128 r = (op_kind == 0) ? (__int128)ia - imm : (__int128)ia + imm;
+        return vm_from_int128(r);
     }
     double da = vm_to_num_vm(vm, a);
     if (vm->has_pending_exc) return VM_UNDEF_VAL;
@@ -6491,7 +6619,12 @@ static __attribute__((noinline)) void vm_slow_add_to_local(VM *vm, uint16_t d, V
         }
         if (vm->has_pending_exc) return;
     }
-    if (!vm_is_float_operand(lhs) && !vm_is_float_operand(rhs)) {
+    VMValue ex_out = VM_UNDEF_VAL;
+    if (coerce != 1 && vm_exact_int_arith(is_sub ? 1 : 0, lhs, rhs, &ex_out)) {
+        /* untyped target: IV -> UV -> NV promotion (an int-declared target
+         * keeps int64 wrap-around, as compiled) */
+        out = ex_out;
+    } else if (!vm_is_float_operand(lhs) && !vm_is_float_operand(rhs)) {
         int64_t ia = 0, ib = 0;
         if (vm_pair_to_int(vm, lhs, rhs, &ia, &ib)) return;
         uint64_t ua = (uint64_t)ia, ub = (uint64_t)ib;
@@ -7689,8 +7822,8 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_INCR_VALUE: {
             VMValue iv0 = argc >= 1 ? args[0] : VM_UNDEF_VAL;
             int64_t idelta = argc >= 2 ? vm_to_int(args[1]) : 1;
-            if (VM_IS_INT(iv0)) {
-                SP_PUSH(VM_MAKE_INT(VM_INT_VAL(iv0) + idelta));
+            if (VM_IS_ANY_INT(iv0)) {
+                SP_PUSH(vm_from_int128((__int128)VM_ANY_INT_VAL(iv0) + idelta));
             } else if (VM_IS_FLOAT(iv0)) {
                 SP_PUSH(VM_MAKE_FLOAT(VM_FLOAT_VAL(iv0) + (double)idelta));
             } else {
@@ -7701,6 +7834,112 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 SP_PUSH(inr ? sv_to_vm(inr) : VM_UNDEF_VAL);
                 if (inr) strada_decref(inr);
             }
+            break;
+        }
+        case BUILTIN_NUMIFY_EXACT: {
+            /* a numeric literal too large for int64: uint64 or double */
+            __int128 nx = 0;
+            if (argc >= 1 && vm_exact_int_operand(args[0], &nx) > 0) { SP_PUSH(vm_from_int128(nx)); }
+            else { SP_PUSH(VM_MAKE_FLOAT(argc >= 1 ? vm_to_num(args[0]) : 0.0)); }
+            break;
+        }
+        case BUILTIN_ASYNC_OP: {
+            int64_t aop = argc >= 1 ? vm_to_int(args[0]) : -1;
+            VMValue *aa = args + 1;
+            int an = argc - 1;
+            VMValue a0 = an >= 1 ? aa[0] : VM_UNDEF_VAL;
+            VMValue a1 = an >= 2 ? aa[1] : VM_UNDEF_VAL;
+            VMValue a2 = an >= 3 ? aa[2] : VM_UNDEF_VAL;
+            int a0_future = 0;
+            if (VM_IS_PTR(a0) && VM_PTR_TYPE(a0) == VM_OBJ_NATIVE_SV) {
+                StradaValue *fsv = ((VMNativeSV *)VM_TO_PTR(a0))->sv;
+                a0_future = fsv && !STRADA_IS_TAGGED_INT(fsv) && fsv->type == STRADA_FUTURE;
+            }
+            VMValue avr = VM_UNDEF_VAL;
+            int ath = 0;
+            vm->stack_top = sp;
+            int _aps = vm_worker_enter_safe(vm);
+            switch (aop) {
+            case 8: {
+                /* (closure, args array) -> future on the runtime pool */
+                VMAsyncCallCtx *c = calloc(1, sizeof(VMAsyncCallCtx));
+                c->fn = vm_to_sv(a0);
+                c->args = (an >= 2) ? vm_to_sv(a1) : strada_new_array();
+                StradaValue *cl = strada_custom_closure_new(vm_async_call_cb, vm_async_call_free, c);
+                StradaValue *fut = strada_future_new(cl);   /* takes ownership of cl */
+                avr = fut ? sv_to_vm(fut) : VM_UNDEF_VAL;
+                if (fut) strada_decref(fut);
+                break;
+            }
+            case 0: /* timeout(f, ms) */
+                if (a0_future) ath = vm_c_call_2(vm, strada_async_timeout, a0, a1, &avr, &throw_exc);
+                else avr = vm_val_copy(a0);
+                break;
+            case 1: ath = vm_c_call_1(vm, strada_async_sleep, a0, &avr, &throw_exc); break;
+            case 2: ath = vm_c_call_0(vm, strada_async_cancelled, &avr, &throw_exc); break;
+            case 3: ath = vm_c_call_3(vm, strada_async_map, a0, a1, a2, &avr, &throw_exc); break;
+            case 4:
+                if (a0_future) strada_future_cancel(((VMNativeSV *)VM_TO_PTR(a0))->sv);
+                break;
+            case 5: avr = VM_MAKE_INT(a0_future ? strada_future_is_done(((VMNativeSV *)VM_TO_PTR(a0))->sv) : 1); break;
+            case 6: avr = VM_MAKE_INT(a0_future ? strada_future_is_cancelled(((VMNativeSV *)VM_TO_PTR(a0))->sv) : 0); break;
+            case 7: /* await: a plain (non-future) value awaits to itself */
+                if (a0_future) ath = vm_c_call_1(vm, strada_future_await, a0, &avr, &throw_exc);
+                else avr = vm_val_copy(a0);
+                break;
+            case 9: ath = vm_c_call_3(vm, strada_io_wait_async, a0, a1, a2, &avr, &throw_exc); break;
+            case 10: ath = vm_c_call_1(vm, strada_resolve_async, a0, &avr, &throw_exc); break;
+            case 11: strada_pool_init(an >= 1 ? (int)vm_to_int(a0) : 4); break;
+            case 12: strada_pool_shutdown(); break;
+            default: break;
+            }
+            vm_worker_leave_safe(vm, _aps);
+            stack = vm->stack; RELOAD();
+            if (ath) goto L_builtin_throw_exc;
+            SP_PUSH(avr);
+            break;
+        }
+        case BUILTIN_CORO_OP: {
+            /* core::coro_*: the runtime's coroutines (green tasks) */
+            int64_t cop = argc >= 1 ? vm_to_int(args[0]) : -1;
+            VMValue c0 = argc >= 2 ? args[1] : VM_UNDEF_VAL;
+            VMValue c1 = argc >= 3 ? args[2] : VM_UNDEF_VAL;
+            VMValue c2 = argc >= 4 ? args[3] : VM_UNDEF_VAL;
+            VMValue cres = VM_UNDEF_VAL;
+            int cth = 0;
+            vm->stack_top = sp;
+            int _cps = vm_worker_enter_safe(vm);
+            switch (cop) {
+            case 0: cth = vm_c_call_1(vm, strada_coro_create, c0, &cres, &throw_exc); break;
+            case 1:
+                cth = vm_c_call_1(vm, strada_coro_resume, c0, &cres, &throw_exc);
+                g_active_vm = vm;   /* the task ran in its own VM; we are back */
+                break;
+            case 2: {
+                int in_task = strada_coro_in_task();
+                if (in_task) vm_task_locals_swap(vm, 0);
+                cth = vm_c_call_3(vm, strada_coro_yield_io, c0, c1, c2, &cres, &throw_exc);
+                g_active_vm = vm;   /* resumed: this task's VM is active again */
+                if (in_task) vm_task_locals_swap(vm, 1);
+                break;
+            }
+            case 3: cth = vm_c_call_1(vm, strada_coro_state, c0, &cres, &throw_exc); break;
+            case 4: cth = vm_c_call_1(vm, strada_coro_wait_fd, c0, &cres, &throw_exc); break;
+            case 5: cth = vm_c_call_1(vm, strada_coro_wait_mask, c0, &cres, &throw_exc); break;
+            case 6: cth = vm_c_call_1(vm, strada_coro_wait_timeout, c0, &cres, &throw_exc); break;
+            case 7: cth = vm_c_call_1(vm, strada_coro_error, c0, &cres, &throw_exc); break;
+            case 8: cth = vm_c_call_1(vm, strada_coro_result, c0, &cres, &throw_exc); break;
+            case 9: cth = vm_c_call_1(vm, strada_coro_free, c0, &cres, &throw_exc); break;
+            default: break;
+            }
+            vm_worker_leave_safe(vm, _cps);
+            stack = vm->stack; RELOAD();
+            if (cth) goto L_builtin_throw_exc;
+            SP_PUSH(cres);
+            break;
+        }
+        case BUILTIN_EXC_TRACE: {
+            SP_PUSH(vm->exc_trace ? vm_str(vm->exc_trace) : vm_str(""));
             break;
         }
         case BUILTIN_HASH_FLAT: {
@@ -9331,14 +9570,15 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             break;
         }
         case BUILTIN_ASYNC_SEND: {
-            StradaValue *ch = vm_to_sv(args[0]);
-            StradaValue *val = vm_to_sv(args[1]);
+            /* trapped: sending on a closed channel throws a catchable error */
+            VMValue sres = VM_UNDEF_VAL;
             vm->stack_top = sp;
             int _ps = vm_worker_enter_safe(vm);
-            strada_channel_send(ch, val);
+            int sth = vm_c_call_2(vm, vm_channel_send_rt, args[0], argc >= 2 ? args[1] : VM_UNDEF_VAL, &sres, &throw_exc);
             vm_worker_leave_safe(vm, _ps);
             stack = vm->stack; RELOAD();
-            SP_PUSH(VM_UNDEF_VAL); strada_decref(ch); strada_decref(val);
+            if (sth) goto L_builtin_throw_exc;
+            SP_PUSH(VM_UNDEF_VAL);
             break;
         }
         case BUILTIN_ASYNC_RECV: RT_CALL_1(strada_channel_recv); break;
@@ -14888,7 +15128,12 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t sb = di->b;
         VMValue a = locals[sa], b = locals[sb];
         if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(a) * (uint64_t)VM_INT_VAL(b))));
+            int64_t mr;
+            if (__builtin_expect(!__builtin_mul_overflow(VM_INT_VAL(a), VM_INT_VAL(b), &mr), 1)) {
+                SP_PUSH(VM_MAKE_INT(mr));
+            } else {
+                SP_PUSH(vm_from_int128((__int128)VM_INT_VAL(a) * VM_INT_VAL(b)));
+            }
             DISPATCH();
         }
         if (__builtin_expect(VM_IS_FLOAT(a) && VM_IS_FLOAT(b), 1)) {
@@ -15230,7 +15475,12 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_MUL): {
         VMValue b = SP_POP(), a = SP_POP();
         if (__builtin_expect(VM_BOTH_INT(a, b), 1)) {
-            SP_PUSH(VM_MAKE_INT((int64_t)((uint64_t)VM_INT_VAL(a) * (uint64_t)VM_INT_VAL(b))));
+            int64_t mr;
+            if (__builtin_expect(!__builtin_mul_overflow(VM_INT_VAL(a), VM_INT_VAL(b), &mr), 1)) {
+                SP_PUSH(VM_MAKE_INT(mr));
+            } else {
+                SP_PUSH(vm_from_int128((__int128)VM_INT_VAL(a) * VM_INT_VAL(b)));
+            }
             DISPATCH();
         }
         if (__builtin_expect(VM_IS_FLOAT(a) && VM_IS_FLOAT(b), 1)) {
@@ -16135,7 +16385,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DISPATCH();
         }
         if (VM_IS_ANY_INT(*islot)) {
-            *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(*islot) + 1ULL));
+            *islot = vm_from_int128((__int128)VM_ANY_INT_VAL(*islot) + 1);
+        } else if (VM_IS_PTR(*islot) && VM_PTR_TYPE(*islot) == VM_OBJ_UINT64) {
+            *islot = vm_from_int128((__int128)VM_AS_UINT64(*islot)->val + 1);
         } else if (VM_IS_PTR(*islot) && (VM_PTR_TYPE(*islot) == VM_OBJ_STR || VM_PTR_TYPE(*islot) == VM_OBJ_STRBUF)) {
             /* Perl's magic string increment ("az"++ is "ba") and numeric
              * strings, via the runtime's strada_inc_value */
@@ -16246,7 +16498,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         VMValue old = *islot;
         if (VM_IS_ANY_INT(old)) {
-            *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(old) + 1ULL));
+            *islot = vm_from_int128((__int128)VM_ANY_INT_VAL(old) + 1);
+        } else if (VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_UINT64) {
+            *islot = vm_from_int128((__int128)VM_AS_UINT64(old)->val + 1);
         } else if (VM_IS_PTR(old) && (VM_PTR_TYPE(old) == VM_OBJ_STR || VM_PTR_TYPE(old) == VM_OBJ_STRBUF)) {
             /* magic string ++; the old string moves to the stack */
             StradaValue *isv = vm_to_sv(old);
@@ -19241,6 +19495,28 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     CASE(OP_THROW): {
         throw_exc = SP_POP();
+        /* core::exception_trace(): the frames active at this throw */
+        {
+            size_t tcap = 256, tpos = 0;
+            char *tr = malloc(tcap);
+            if (tr) {
+                tr[0] = 0;
+                for (int ti = (int)vm->frame_count - 1; ti >= 0; ti--) {
+                    VMFrame *tf = &vm->frames[ti];
+                    const char *tn = (tf->chunk && tf->chunk->name) ? tf->chunk->name : "(unknown)";
+                    size_t tl = strlen(tn);
+                    if (tpos + tl + 8 >= tcap) {
+                        tcap = (tpos + tl + 8) * 2;
+                        char *nt = realloc(tr, tcap);
+                        if (!nt) break;
+                        tr = nt;
+                    }
+                    tpos += (size_t)sprintf(tr + tpos, "  at %s\n", tn);
+                }
+                free(vm->exc_trace);
+                vm->exc_trace = tr;
+            }
+        }
         goto L_vm_throw_exc;
     }
 

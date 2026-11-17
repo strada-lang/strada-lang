@@ -2978,6 +2978,7 @@ StradaValue* strada_coro_wait_timeout(StradaValue *handle);
 StradaValue* strada_coro_error(StradaValue *handle);
 StradaValue* strada_coro_result(StradaValue *handle);
 StradaValue* strada_coro_free(StradaValue *handle);
+int strada_coro_in_task(void);                 /* inside a coroutine on this thread */
 StradaValue* strada_mono_ms(void);
 StradaValue* strada_socket_try_connect(StradaValue *host, StradaValue *port);
 StradaValue* strada_socket_connect_check(StradaValue *sock);

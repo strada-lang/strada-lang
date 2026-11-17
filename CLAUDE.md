@@ -664,7 +664,22 @@ and `-$obj` via `-`; tied-hash clear fallback; `release($sref)`; foreach
 aliasing write-back (`vm_node_writes_var`, `BUILTIN_FE_WRITEBACK`) and
 restore of a pre-existing loop variable (skipped in tie programs, like the
 compiled backend's `uses_tie`); magic string ++ (`BUILTIN_INCR_VALUE`, JIT
-slow path); string ranges; `ref(\$ref)` is "REF". `interpreter/Makefile`: the front-end object
+slow path); string ranges; `ref(\$ref)` is "REF". M4 part 4: futures -- an `async func`
+call / `async::spawn` hands an exported closure + argument list to the
+runtime pool (`BUILTIN_ASYNC_OP`; `await`, all/race/timeout/cancel/is_done/
+is_cancelled/sleep/cancelled/map/select/io_wait/resolve/pool_*); `thread::`
+mutex/cond/tls via the bridge; trapped channel send; green tasks on the
+runtime coroutines (`BUILTIN_CORO_OP`): a task's VM code runs in its own
+worker VM (`vm_exported_closure_call` + `strada_coro_in_task()`),
+`g_active_vm` follows resume/yield, and `local` is per task
+(`vm_task_locals_swap`); exact IV/UV/NV integer promotion
+(`vm_exact_int_arith`, `vm_from_int128`, UV literals via
+`BUILTIN_NUMIFY_EXACT`; int-declared targets still wrap);
+`core::exception_trace` (captured at OP_THROW); `c::callback` (interpreter
+built with HAVE_LIBFFI); `utf8::normalize`; `link_lib` libraries are linked
+into __C__ JIT objects (`cblock_link_flags`). VM limits that remain:
+DESTROY runs at GC time, not at the last reference (tracing GC), and raw
+pointers into variables (`core::int_ptr`) are compiled-only. `interpreter/Makefile`: the front-end object
 depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **only string temporaries are owned by the stack** — consume sites must use `vm_temp_free` (freeing a shared container/filehandle/closure is a use-after-free; this was the `defined($fh)` corruption bug).
 
 ## Language Features Reference
