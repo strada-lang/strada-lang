@@ -2922,6 +2922,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             if (et == NI_SPREAD) {
                 compile_expr(ctx, ast_get(elem, "target"));
                 vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
+            } else if (vm_array_flatten_kind(ctx, elem) != 0) {
+                /* [@a, LIST...]: array values flatten (compiled array_flatten_kind) */
+                compile_expr(ctx, elem);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_EXTEND);
             } else {
                 compile_expr(ctx, elem);
                 vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
@@ -3704,7 +3708,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         /* Built-in: hex() */
-        if (strcmp(name, "hex") == 0 && argc == 1) {
+        /* hex()/oct(): a user function of that name takes precedence
+         * (as in the compiled backend) */
+        if (strcmp(name, "hex") == 0 && argc == 1 && resolve_vm_func_idx(ctx, name) < 0) {
             compile_expr(ctx, ast_arr_get(args, 0));
             vm_chunk_emit(ctx->chunk, OP_BUILTIN);
             vm_chunk_emit_u16(ctx->chunk, BUILTIN_HEX);
@@ -3713,7 +3719,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         /* Built-in: oct() */
-        if (strcmp(name, "oct") == 0 && argc == 1) {
+        if (strcmp(name, "oct") == 0 && argc == 1 && resolve_vm_func_idx(ctx, name) < 0) {
             compile_expr(ctx, ast_arr_get(args, 0));
             vm_chunk_emit(ctx->chunk, OP_BUILTIN);
             vm_chunk_emit_u16(ctx->chunk, BUILTIN_OCT);

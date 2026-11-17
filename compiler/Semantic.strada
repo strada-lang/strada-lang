@@ -810,6 +810,7 @@ func get_builtins() scalar {
     $b{"sys::unpack"} = 1;
     $b{"sys::base64_encode"} = 1;
     $b{"sys::base64_decode"} = 1;
+    $b{"sys::oct"} = 1;
 
     # ============================================================
     # math:: ADDITIONAL FUNCTIONS
@@ -1840,6 +1841,15 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                             $is_reg = 1;
                         }
                     }
+                }
+                if ($is_reg == 0 && ($name eq "hex" || $name eq "oct")) {
+                    # Perl builtins hex()/oct(): used when no user function of
+                    # that name exists (a user-defined hex() takes precedence)
+                    $expr->{"name"} = "core::" . $name;
+                    for (my int $hi = 0; $hi < $arg_count; $hi = $hi + 1) {
+                        analyze_expression($ctx, $args->[$hi]);
+                    }
+                    return;
                 }
                 if ($is_reg == 0) {
                     semantic_error($ctx, "undefined function '" . $name . "'", $line);

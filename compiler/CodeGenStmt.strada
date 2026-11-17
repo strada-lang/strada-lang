@@ -1074,7 +1074,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     # only constructors (new, new_*) are known to return an
                     # object of their own class; factories (Pkg::find,
                     # Pkg::prototype) can return subclasses or anything else
-                    if ($dfn eq "new" || index($dfn, "new_") == 0) {
+                    my scalar $dfi = $cg->{"functions"}->{sanitize_name($dpkg . "_" . $dfn)};
+                    my int $d_own = 1;   # no function: the generic constructor blesses into $dpkg
+                    if (defined($dfi)) { $d_own = $dfi->{"ctor_own_class"} + 0; }
+                    if (($dfn eq "new" || index($dfn, "new_") == 0) && $d_own == 1) {
                         $cg->{"known_types"}->{$c_name} = $dpkg;
                     } else {
                         $cg->{"known_types"}->{$c_name} = "";
@@ -4240,7 +4243,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "    /* Register END blocks (run at exit in LIFO order) */\n");
             my int $mei = 0;
             while ($mei < $main_end_count) {
-                emit($cg, "    atexit(__end_" . $mei . ");\n");
+                emit($cg, "    strada_register_end_block(__end_" . $mei . ", 0);\n");
                 $mei = $mei + 1;
             }
             emit($cg, "\n");
@@ -5116,6 +5119,7 @@ func gen_async_function(scalar $cg, scalar $fn) void {
 }
 
 func gen_program(scalar $cg, scalar $program) void {
+    synthesize_default_funcs($program);
     # First pass: register all functions for default parameter handling
     my scalar $funcs = $program->{"functions"};
     my int $i = 0;
@@ -5796,6 +5800,7 @@ func gen_program(scalar $cg, scalar $program) void {
                 $func_info{"is_import_lib"} = 1;
                 $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
                 $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $func_info{"ctor_own_class"} = $fn_info->{"ctor_own_class"} + 0;
                 $cg->{"functions"}->{$fn_name} = \%func_info;
 
                 $fn_idx = $fn_idx + 1;
@@ -5939,6 +5944,7 @@ func gen_program(scalar $cg, scalar $program) void {
                 $func_info{"is_import_object"} = 1;
                 $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
                 $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $func_info{"ctor_own_class"} = $fn_info->{"ctor_own_class"} + 0;
                 $cg->{"functions"}->{$fn_name} = \%func_info;
 
                 $fn_idx = $fn_idx + 1;
@@ -6019,6 +6025,7 @@ func gen_program(scalar $cg, scalar $program) void {
                 $func_info{"is_import_archive"} = 1;
                 $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
                 $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $func_info{"ctor_own_class"} = $fn_info->{"ctor_own_class"} + 0;
                 $cg->{"functions"}->{$fn_name} = \%func_info;
 
                 $fn_idx = $fn_idx + 1;
@@ -6970,6 +6977,25 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
             }
             emit($cg, ":" . c_str_escape($orig_dotted));
 
+            # Field 7: literal default values, one per parameter, comma
+            # separated (see export_default_token); a consumer linking the
+            # artifact applies them at its call sites.
+            my str $dflt_field = "";
+            my int $dj = 0;
+            my int $any_dflt = 0;
+            while ($dj < $param_count) {
+                if ($dj > 0) { $dflt_field = $dflt_field . ","; }
+                my scalar $dparam = $params->[$dj];
+                if ($dparam->{"has_default"} == 1) {
+                    $dflt_field = $dflt_field . export_default_token($dparam->{"default"});
+                    $any_dflt = 1;
+                }
+                $dj = $dj + 1;
+            }
+            if ($any_dflt == 1) {
+                emit($cg, ":" . c_str_escape($dflt_field));
+            }
+
             emit($cg, "\\n");
         }
         $i = $i + 1;
@@ -6983,6 +7009,17 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
     # `mod:NAME` line per modified method name; the consumer blocks
     # devirtualization of that method name globally (same conservative
     # name-keyed rule as has_method_modifier on the host side).
+    # ownctor:NAME for constructors that return their own class
+    my int $oc_i = 0;
+    while ($oc_i < $count) {
+        my scalar $ocf = $funcs->[$oc_i];
+        my str $ocn = "" . $ocf->{"name"};
+        if ($ocn ne "main" && ($ocf->{"type"} + 0) != NODE_EXTERN_FUNC() && ($ocf->{"is_private"} + 0) != 1
+            && cg_skip_for_module($program, $ocf->{"from_use"}) == 0 && fn_ctor_own_class($ocf) == 1) {
+            emit($cg, "ownctor:" . sanitize_name($ocn) . "\\n");
+        }
+        $oc_i = $oc_i + 1;
+    }
     emit($cg, "modinfo:1\\n");
     my scalar $mm_arr = $program->{"method_modifiers"};
     my int $mm_count = $program->{"method_modifier_count"};
@@ -7349,7 +7386,7 @@ func gen_global_constructor(scalar $cg) void {
         emit($cg, "\n    /* Register END blocks (run at exit in LIFO order) */\n");
         my int $lei = 0;
         while ($lei < $lib_end_count) {
-            emit($cg, "    atexit(__end_" . $lei . ");\n");
+            emit($cg, "    strada_register_end_block(__end_" . $lei . ", 1);\n");
             $lei = $lei + 1;
         }
     }
@@ -7574,3 +7611,136 @@ func check_override_signatures(scalar $cg, scalar $program) void {
     }
 }
 
+
+# Encode a parameter default for export metadata field 7: "i<int>",
+# "n<num>", "s<escaped string>", "u" (undef), or "x" for an expression the
+# metadata cannot carry (the consumer then still needs the argument).
+func export_default_token(scalar $d) str {
+    if (!$d) { return "x"; }
+    if (length("" . $d->{"export_dflt_fn"}) > 0) { return "f" . export_meta_escape("" . $d->{"export_dflt_fn"}); }
+    my int $t = $d->{"type"} + 0;
+    if ($t == NODE_INT_LITERAL()) { return "i" . $d->{"value"}; }
+    if ($t == NODE_NUM_LITERAL()) { return "n" . $d->{"value"}; }
+    if ($t == NODE_UNDEF()) { return "u"; }
+    if ($t == NODE_STR_LITERAL() && ($d->{"is_regex"} + 0) == 0) {
+        return "s" . export_meta_escape("" . $d->{"value"});
+    }
+    if ($t == NODE_UNARY_OP() && ("" . $d->{"op"}) eq "-") {
+        my scalar $o = $d->{"operand"};
+        if ($o) {
+            my int $ot = $o->{"type"} + 0;
+            if ($ot == NODE_INT_LITERAL()) { return "i-" . $o->{"value"}; }
+            if ($ot == NODE_NUM_LITERAL()) { return "n-" . $o->{"value"}; }
+        }
+    }
+    return "x";
+}
+
+# %XX-escape the metadata separators (and %, newline, quote, backslash).
+func export_meta_escape(str $s) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($s);
+    while ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if ($c eq "%") { $out = $out . "%25"; }
+        elsif ($c eq ":") { $out = $out . "%3A"; }
+        elsif ($c eq ",") { $out = $out . "%2C"; }
+        elsif ($c eq "|") { $out = $out . "%7C"; }
+        elsif ($c eq "\n") { $out = $out . "%0A"; }
+        elsif ($c eq "\r") { $out = $out . "%0D"; }
+        elsif ($c eq "\"") { $out = $out . "%22"; }
+        elsif ($c eq "\\") { $out = $out . "%5C"; }
+        else { $out = $out . $c; }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+# Library builds (no main): a parameter default that is an expression (not a
+# literal) is compiled into a zero-argument function in the module, and the
+# export metadata names it ("f<function>"), so a consumer linking the
+# artifact can still call with the argument omitted. Defaults that read an
+# earlier parameter stay unexportable ("x").
+func synthesize_default_funcs(scalar $program) void {
+    my scalar $funcs = $program->{"functions"};
+    my int $count = $program->{"function_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        if (("" . $funcs->[$i]->{"name"}) eq "main") { return; }
+        $i = $i + 1;
+    }
+    $i = 0;
+    while ($i < $count) {
+        my scalar $fn = $funcs->[$i];
+        my int $ft = $fn->{"type"} + 0;
+        if ($ft != NODE_EXTERN_FUNC() && ($fn->{"is_private"} + 0) != 1) {
+            my scalar $params = $fn->{"params"};
+            my int $pc = $fn->{"param_count"} + 0;
+            my int $j = 0;
+            while ($j < $pc) {
+                my scalar $p = $params->[$j];
+                if (($p->{"has_default"} + 0) == 1 && export_default_is_literal($p->{"default"}) == 0
+                    && default_refs_params($p->{"default"}, $params, $pc) == 0) {
+                    my str $dname = "" . $fn->{"name"} . "__dflt" . $j;
+                    my scalar $nf = ast_new_function($dname, TYPE_SCALAR());
+                    my scalar $body = ast_new_block();
+                    ast_add_statement($body, ast_new_return_stmt($p->{"default"}));
+                    $nf->{"body"} = $body;
+                    $nf->{"package"} = $fn->{"package"};
+                    if (length("" . $fn->{"bare_name"}) > 0) { $nf->{"bare_name"} = "" . $fn->{"bare_name"} . "__dflt" . $j; }
+                    $nf->{"from_use"} = $fn->{"from_use"};
+                    $nf->{"file"} = $fn->{"file"};
+                    $nf->{"line"} = $fn->{"line"};
+                    push($funcs, $nf);
+                    $program->{"function_count"} = $program->{"function_count"} + 1;
+                    $p->{"default"}->{"export_dflt_fn"} = sanitize_name($dname);
+                }
+                $j = $j + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+}
+
+func export_default_is_literal(scalar $d) int {
+    my str $tok = export_default_token($d);
+    if ($tok eq "x") { return 0; }
+    if (substr($tok, 0, 1) eq "f") { return 0; }
+    return 1;
+}
+
+# 1 if the default expression mentions one of the function's parameters
+func default_refs_params(scalar $n, scalar $params, int $pc) int {
+    return default_refs_params_d($n, $params, $pc, 0);
+}
+
+func default_refs_params_d(scalar $n, scalar $params, int $pc, int $depth) int {
+    if ($depth > 200) { return 1; }
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $k = 0;
+        while ($k < size($n)) {
+            if (default_refs_params_d($n->[$k], $params, $pc, $depth + 1) == 1) { return 1; }
+            $k = $k + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    if (($n->{"type"} + 0) == NODE_VARIABLE()) {
+        my str $vn = "" . $n->{"name"};
+        my int $q = 0;
+        while ($q < $pc) {
+            if (("" . $params->[$q]->{"name"}) eq $vn) { return 1; }
+            $q = $q + 1;
+        }
+    }
+    foreach my str $key (keys(%{$n})) {
+        my scalar $v = $n->{$key};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (default_refs_params_d($v, $params, $pc, $depth + 1) == 1) { return 1; }
+        }
+    }
+    return 0;
+}

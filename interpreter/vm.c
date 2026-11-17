@@ -861,6 +861,9 @@ static void vm_hash_grow(VMHash *h) {
     if (old != h->inline_entries && old != tmp_inline) free(old);
 }
 
+/* Key bytes of a non-UTF-8 string being stored (set around the store by
+ * OP_HASH_SET): the new entry is marked key_bytes. */
+static __thread const char *g_vm_key_bytes_hint = NULL;
 static uint32_t vm_hash_set_nh_slot(VMHash *h, const char *key, size_t keylen, uint32_t hash, VMValue v) {
     if (!h || !key) return UINT32_MAX;
     if ((h->size + h->tombstones) * 4 >= h->capacity * 3) vm_hash_grow(h);
@@ -908,6 +911,7 @@ static uint32_t vm_hash_set_nh_slot(VMHash *h, const char *key, size_t keylen, u
     h->entries[dst].value = v;
     h->entries[dst].hash = hash;
     h->entries[dst].keylen = klen;
+    h->entries[dst].key_bytes = (uint8_t)(key == g_vm_key_bytes_hint);
     h->entries[dst].occupied = 1;
     h->size++;
     return dst;
@@ -1015,17 +1019,20 @@ int vm_hash_exists(VMHash *h, const char *key) {
     return vm_hash_exists_n(h, key, key ? strlen(key) : 0);
 }
 
-static inline VMValue vm_hash_make_key_str(const char *key, size_t len) {
+static inline VMValue vm_hash_make_key_str_b(const char *key, size_t len, int key_bytes) {
     int nonascii = 0;
-    int u8 = (vm_utf8_is_valid_str(key, len, &nonascii) && nonascii);
+    int u8 = (!key_bytes && vm_utf8_is_valid_str(key, len, &nonascii) && nonascii);
     return vm_make_str_flag(key, len, u8);
+}
+static inline VMValue vm_hash_make_key_str(const char *key, size_t len) {
+    return vm_hash_make_key_str_b(key, len, 0);
 }
 
 VMArray *vm_hash_keys(VMHash *h) {
     VMArray *keys = vm_array_new(h->size > 0 ? h->size : 8);
     for (int i = 0; i < h->capacity; i++)
         if (h->entries[i].occupied == 1)
-            vm_array_push(keys, vm_hash_make_key_str(h->entries[i].key, h->entries[i].keylen));
+            vm_array_push(keys, vm_hash_make_key_str_b(h->entries[i].key, h->entries[i].keylen, h->entries[i].key_bytes));
     return keys;
 }
 
@@ -1240,8 +1247,11 @@ const char *vm_program_find_parent(VMProgram *p, const char *class_name) {
 /* MI-aware isa: a class can have MULTIPLE inherit entries (multiple
  * inheritance) — vm_program_find_parent only returns the first, so isa
  * checks must recurse over every parent edge. */
+/* Inheritance walks are bounded by VM_INHERIT_MAX_DEPTH (cycle guard only;
+ * the compiled runtime walks any depth, so this must not be a real limit). */
+#define VM_INHERIT_MAX_DEPTH 4096
 int vm_class_isa(VMProgram *p, const char *cls, const char *target, int depth) {
-    if (!cls || !target || depth > 32) return 0;
+    if (!cls || !target || depth > VM_INHERIT_MAX_DEPTH) return 0;
     if (strcmp(cls, target) == 0) return 1;
     for (int i = 0; i < p->inherit_count; i++) {
         if (strcmp(p->inherits[i].child, cls) == 0 &&
@@ -3101,7 +3111,7 @@ static int vm_find_direct_modwrap(VMProgram *prog, const char *cls, const char *
 }
 
 static int vm_find_super_method(VMProgram *prog, const char *def_pkg, const char *method, int depth) {
-    if (!def_pkg || !def_pkg[0] || depth > 32) return -1;
+    if (!def_pkg || !def_pkg[0] || depth > VM_INHERIT_MAX_DEPTH) return -1;
     for (int i = 0; i < prog->inherit_count; i++) {
         if (strcmp(prog->inherits[i].child, def_pkg) == 0) {
             const char *parent = prog->inherits[i].parent;
@@ -3115,7 +3125,7 @@ static int vm_find_super_method(VMProgram *prog, const char *def_pkg, const char
 }
 
 static int vm_find_method_only(VMProgram *prog, const char *class_name, const char *method, int depth) {
-    if (!class_name || depth > 32) return -1;
+    if (!class_name || depth > VM_INHERIT_MAX_DEPTH) return -1;
     int idx = vm_find_direct_modwrap(prog, class_name, method);
     if (idx >= 0) return idx;
     idx = vm_find_direct_method(prog, class_name, method);
@@ -3158,7 +3168,7 @@ static int vm_find_method_cached(VM *vm, const char *class_name, const char *met
 
 /* Find overload method for operator on given class (walking MRO/inheritance) */
 static const char *vm_find_overload_cls(VMProgram *prog, const char *class_name, const char *op, int depth, const char **owner_cls_out) {
-    if (!class_name || depth > 32) return NULL;
+    if (!class_name || depth > VM_INHERIT_MAX_DEPTH) return NULL;
     for (int i = 0; i < prog->overload_count; i++) {
         if (strcmp(prog->overloads[i].class_name, class_name) == 0 &&
             strcmp(prog->overloads[i].op, op) == 0) {
@@ -5375,7 +5385,7 @@ static VMArray *vm_hash_to_flat_kv(VM *vm, VMHash *h) {
     VMArray *flat = vm_array_new(h->size > 0 ? h->size * 2 : 8);
     for (int i = 0; i < h->capacity; i++) {
         if (h->entries[i].occupied == 1) {
-            vm_array_push(flat, vm_hash_make_key_str(h->entries[i].key, h->entries[i].keylen));
+            vm_array_push(flat, vm_hash_make_key_str_b(h->entries[i].key, h->entries[i].keylen, h->entries[i].key_bytes));
             vm_array_push(flat, vm_val_copy(h->entries[i].value));
         }
     }
@@ -6615,6 +6625,10 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             vm->stack_top = sp; return 0;
         }
 
+#define RT_CALL_0(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_0(vm, (fn), &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
+#define RT_CALL_1(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_1(vm, (fn), args[0], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
+#define RT_CALL_2(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_2(vm, (fn), args[0], args[1], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
+#define RT_CALL_3(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_3(vm, (fn), args[0], args[1], args[2], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
         switch (bid) {
         case BUILTIN_CORE_OPEN: {
             if (argc >= 2) {
@@ -7508,24 +7522,8 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
-        case BUILTIN_HEX: {
-            if (argc >= 1) {
-                char buf[64];
-                size_t len = 0;
-                const char *s = vm_bytes_view(args[0], buf, sizeof(buf), &len);
-                SP_PUSH(VM_MAKE_INT(vm_parse_hex_str(s, len)));
-            } else SP_PUSH(VM_MAKE_INT(0));
-            break;
-        }
-        case BUILTIN_OCT: {
-            if (argc >= 1) {
-                char buf[64];
-                size_t len = 0;
-                const char *s = vm_bytes_view(args[0], buf, sizeof(buf), &len);
-                SP_PUSH(VM_MAKE_INT(vm_parse_oct_str(s, len)));
-            } else SP_PUSH(VM_MAKE_INT(0));
-            break;
-        }
+        case BUILTIN_HEX: { if (argc >= 1) RT_CALL_1(strada_hex) else SP_PUSH(VM_MAKE_INT(0)); break; }   /* shared with compiled code: "x1f", "0x..", "1_0" */
+        case BUILTIN_OCT: { if (argc >= 1) RT_CALL_1(strada_oct) else SP_PUSH(VM_MAKE_INT(0)); break; }   /* shared Perl oct() */
         case BUILTIN_FILE_TEST_D: {
             if (argc >= 1) {
                 char buf[512];
@@ -7881,7 +7879,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                         stack = vm->stack; RELOAD();
                     }
                     VMArray *pair = vm_array_new(2);
-                    vm_array_push(pair, vm_hash_make_key_str(h->entries[h->iter_pos].key, h->entries[h->iter_pos].keylen));
+                    vm_array_push(pair, vm_hash_make_key_str_b(h->entries[h->iter_pos].key, h->entries[h->iter_pos].keylen, h->entries[h->iter_pos].key_bytes));
                     vm_array_push(pair, vm_val_copy(ev));
                     h->iter_pos++;
                     SP_PUSH(VM_MAKE_PTR(pair));
@@ -8384,44 +8382,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             } else SP_PUSH(vm_str(""));
             break;
         }
-        case BUILTIN_CORE_BASE64_DECODE: {
-            if (argc >= 1) {
-                char buf[4096];
-                const char *data = vm_to_cstr(args[0], buf, 4096);
-                size_t dlen = strlen(data);
-                /* Size the output for whole 4-char groups only, with slack, and
-                 * decode full quartets exclusively (loop bound `i + 3 < dlen`).
-                 * The old code used olen=3*dlen/4 with an `i < dlen` loop that
-                 * read data[i+1..i+3] unconditionally — over-reading past `data`
-                 * and over-writing `out` on non-multiple-of-4 / unpadded input. */
-                size_t olen = (dlen / 4) * 3 + 3;
-                unsigned char *out = malloc(olen + 1);
-                if (!out) { SP_PUSH(vm_str("")); break; }
-                size_t j = 0;
-                static const int db64[256] = {
-                    ['A']=0,['B']=1,['C']=2,['D']=3,['E']=4,['F']=5,['G']=6,['H']=7,
-                    ['I']=8,['J']=9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
-                    ['Q']=16,['R']=17,['S']=18,['T']=19,['U']=20,['V']=21,['W']=22,['X']=23,
-                    ['Y']=24,['Z']=25,['a']=26,['b']=27,['c']=28,['d']=29,['e']=30,['f']=31,
-                    ['g']=32,['h']=33,['i']=34,['j']=35,['k']=36,['l']=37,['m']=38,['n']=39,
-                    ['o']=40,['p']=41,['q']=42,['r']=43,['s']=44,['t']=45,['u']=46,['v']=47,
-                    ['w']=48,['x']=49,['y']=50,['z']=51,['0']=52,['1']=53,['2']=54,['3']=55,
-                    ['4']=56,['5']=57,['6']=58,['7']=59,['8']=60,['9']=61,['+']=62,['/']=63,
-                };
-                for (size_t i = 0; i + 3 < dlen; i += 4) {
-                    uint32_t n = (db64[(unsigned char)data[i]] << 18) | (db64[(unsigned char)data[i+1]] << 12);
-                    if (data[i+2] != '=') n |= db64[(unsigned char)data[i+2]] << 6;
-                    if (data[i+3] != '=') n |= db64[(unsigned char)data[i+3]];
-                    out[j++] = (n >> 16) & 0xFF;
-                    if (data[i+2] != '=') out[j++] = (n >> 8) & 0xFF;
-                    if (data[i+3] != '=') out[j++] = n & 0xFF;
-                }
-                out[j] = '\0';
-                SP_PUSH(VM_MAKE_STR_N((char*)out, j));
-                free(out);
-            } else SP_PUSH(vm_str(""));
-            break;
-        }
+        case BUILTIN_CORE_BASE64_DECODE: { if (argc >= 1) RT_CALL_1(strada_base64_decode) else SP_PUSH(vm_str("")); break; }   /* runtime decoder (padding / whitespace rules) */
         case BUILTIN_CORE_QUOTEMETA: {
             if (argc >= 1) {
                 char buf[1024];
@@ -8450,17 +8411,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             } else SP_PUSH(VM_MAKE_INT(0));
             break;
         }
-        case BUILTIN_CORE_FILE_EXT: {
-            if (argc >= 1) {
-                char buf[512];
-                const char *path = vm_to_cstr(args[0], buf, 512);
-                const char *dot = strrchr(path, '.');
-                const char *slash = strrchr(path, '/');
-                if (dot && (!slash || dot > slash)) SP_PUSH(vm_str(dot));
-                else SP_PUSH(vm_str(""));
-            } else SP_PUSH(vm_str(""));
-            break;
-        }
+        case BUILTIN_CORE_FILE_EXT: { if (argc >= 1) RT_CALL_1(strada_file_ext) else SP_PUSH(vm_str("")); break; }
         case BUILTIN_CORE_PATH_JOIN: {
             if (argc <= 0) {
                 SP_PUSH(vm_str(""));
@@ -8589,30 +8540,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             } else SP_PUSH(VM_MAKE_INT(0));
             break;
         }
-        case BUILTIN_CORE_GLOB: {
-            /* Simple glob using the system glob() function */
-            if (argc >= 1) {
-                char buf[512];
-                const char *pattern = vm_to_cstr(args[0], buf, 512);
-                glob_t g;
-                VMArray *result = vm_array_new(16);
-                if (glob(pattern, 0, NULL, &g) == 0) {
-                    for (size_t i = 0; i < g.gl_pathc; i++)
-                        vm_array_push(result, vm_str(g.gl_pathv[i]));
-                    globfree(&g);
-                }
-                SP_PUSH(VM_MAKE_PTR(result));
-            } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
-            break;
-        }
+        case BUILTIN_CORE_GLOB: { if (argc >= 1) RT_CALL_1(strada_glob) else SP_PUSH(VM_MAKE_PTR(vm_array_new(0))); break; }   /* runtime glob: csh brace expansion */
 
         /* ===== Runtime-delegated builtins ===== */
         /* These call the Strada runtime functions (StradaValue*-based) and convert results */
         /* Helper: call a runtime function, convert args via vm_to_sv, result via sv_to_vm */
-#define RT_CALL_0(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_0(vm, (fn), &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
-#define RT_CALL_1(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_1(vm, (fn), args[0], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
-#define RT_CALL_2(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_2(vm, (fn), args[0], args[1], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
-#define RT_CALL_3(fn) { VMValue __vr = VM_UNDEF_VAL; vm->stack_top = sp; int __th = vm_c_call_3(vm, (fn), args[0], args[1], args[2], &__vr, &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(__vr); }
 #define RT_VOID_1(fn) { vm->stack_top = sp; int __th = vm_c_void_1(vm, (fn), args[0], &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(VM_UNDEF_VAL); }
 #define RT_VOID_1_SV(fn) { vm->stack_top = sp; int __th = vm_c_call_1_sv_void(vm, (fn), args[0], &throw_exc); stack = vm->stack; RELOAD(); if (__th) goto L_builtin_throw_exc; SP_PUSH(VM_UNDEF_VAL); }
 
@@ -11669,6 +11601,7 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                     e->key = k; e->key_interned = 0;
                 }
                 e->value = v; e->hash = kh; e->keylen = (uint32_t)kstr->len; e->occupied = 1; h->size++;
+                e->key_bytes = (uint8_t)!kstr->hdr.is_utf8;
             } else {
                 uint32_t hic = (uint32_t)(((uintptr_t)di >> 3) & 63);
                 uint32_t hs = vm->hash_ic[hic].slot;
@@ -15363,6 +15296,17 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm_fh_sync_mem_sref(vm, fh);
                 stack = vm->stack; RELOAD(); VM_CHECK_EXC();
             }
+        } else if (VM_IS_PTR(fhv) && VM_PTR_TYPE(fhv) == VM_OBJ_NATIVE_SV) {
+            /* a runtime handle (socket, runtime filehandle): write through
+             * the runtime so its buffering and ordering rules apply */
+            StradaValue *nfh = ((VMNativeSV*)VM_TO_PTR(fhv))->sv;
+            StradaValue *ssv = vm_to_sv(str);
+            if (nfh && !STRADA_IS_TAGGED_INT(nfh)
+                && (nfh->type == STRADA_SOCKET || nfh->type == STRADA_FILEHANDLE)) {
+                strada_say_fh(ssv, nfh);
+            }
+            strada_decref(ssv);
+            vm_val_free(&str);
         } else {
             vm_val_free(&str);
         }
@@ -15391,6 +15335,17 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 vm_fh_sync_mem_sref(vm, fh);
                 stack = vm->stack; RELOAD(); VM_CHECK_EXC();
             }
+        } else if (VM_IS_PTR(fhv) && VM_PTR_TYPE(fhv) == VM_OBJ_NATIVE_SV) {
+            /* a runtime handle (socket, runtime filehandle): write through
+             * the runtime so its buffering and ordering rules apply */
+            StradaValue *nfh = ((VMNativeSV*)VM_TO_PTR(fhv))->sv;
+            StradaValue *ssv = vm_to_sv(str);
+            if (nfh && !STRADA_IS_TAGGED_INT(nfh)
+                && (nfh->type == STRADA_SOCKET || nfh->type == STRADA_FILEHANDLE)) {
+                strada_print_fh(ssv, nfh);
+            }
+            strada_decref(ssv);
+            vm_val_free(&str);
         } else {
             vm_val_free(&str);
         }
@@ -16461,6 +16416,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 e->value = v;
                 e->hash = kh;
                 e->keylen = (uint32_t)kstr->len;
+                e->key_bytes = (uint8_t)!kstr->hdr.is_utf8;
                 e->occupied = 1;
                 h->size++;
             } else {
@@ -16572,7 +16528,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 uint32_t kh = (kstr->hdr.gc_immortal == 2)
                               ? ((const VMConstString*)((const char*)kstr - offsetof(VMConstString, str)))->hash
                               : vm_hash_fn_n(kstr->data, kstr->len);
+                g_vm_key_bytes_hint = kstr->hdr.is_utf8 ? NULL : kstr->data;
                 vm_hash_set_nh(h, kstr->data, kstr->len, kh, v);
+                g_vm_key_bytes_hint = NULL;
             } else {
                 char buf[64]; size_t klen = 0;
                 const char *ks = vm_bytes_view(key, buf, sizeof(buf), &klen);

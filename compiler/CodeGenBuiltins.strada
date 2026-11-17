@@ -4602,6 +4602,13 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        # oct - Perl oct(): "0x1f" hex, "0b101" binary, "0o17"/"017" octal
+        if ($name eq "sys::oct") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_oct", $args, 1);
+            return 1;
+        }
+
         # ord_byte - binary-safe ord that returns raw byte value 0-255
         # sys::vec_get(SV, OFFSET, BITS) — perl's vec() rvalue form.
         # Reads a BITS-wide field at OFFSET (counted in BITS-wide units)

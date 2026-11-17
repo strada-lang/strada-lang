@@ -2514,6 +2514,15 @@ When adding any new codegen predicate that classifies a function call, either:
 
 ---
 
+## Audit M2h mechanisms (2026-11)
+
+- **Hash key UTF-8 flag**: `StradaHashEntry.key_bytes` (struct padding) marks a key stored from a non-ASCII, non-UTF-8 string. `sv_key_extract_buf` sets the thread-local `strada_key_bytes_hint` to such a key's bytes; each insert sets `key_bytes = (key == hint)`. Readers use `strada_new_str_share_key(&entry)`. VM: `VMHashEntry.key_bytes`, set by `OP_HASH_SET` (`g_vm_key_bytes_hint`) and its two inline-insert fast paths; `vm_hash_make_key_str_b`.
+- **MRO**: `oop_walk_ancestors(name, fn, ud)` is an iterative, cycle-safe DFS with no size limits; `oop_mro(pkg, &arr)` caches the flattened array on the package (generation-validated) and replaced every `mro[64]` buffer; `oop_isa_check` and `strada_method_lookup_package` use it.
+- **END blocks**: `strada_register_end_block(fn, is_library)` keeps two LIFO lists run by one atexit handler: program first, libraries (shared-library constructors) after.
+- **Pool exit**: `StradaThreadPool.active` counts running tasks; `strada_pool_onexit` (glibc `on_exit`) cancels queued tasks, waits `STRADA_EXIT_TASK_WAIT_MS`, and `_exit(status)`s after `fflush(NULL)` if tasks are still running.
+- **Export metadata**: `func:` field 7 = per-parameter default tokens (`i<int>`, `n<num>`, `s<%-escaped>`, `u`, `f<generated fn>`, `x` = not exportable); `synthesize_default_funcs` (library builds) turns expression defaults into `<func>__dflt<N>` functions. `ownctor:NAME` lines mark constructors whose objects are always of their own class (`fn_ctor_own_class`); devirtualization after `Pkg::new` requires it.
+- **VM print to runtime handles**: `OP_PRINT_FH`/`OP_SAY_FH` write `VM_OBJ_NATIVE_SV` sockets/filehandles through `strada_print_fh`/`strada_say_fh`.
+
 ## Cycle Collector & Request Arena (runtime + codegen)
 
 Both are compile-time features in `runtime/strada_runtime.c`, gated by `STRADA_CYCLE_GC` / `STRADA_ARENA` (default on via `./configure`, wired into the runtime compile in `Makefile` and the `strada` wrapper's `build_runtime()`). Both are confined to the runtime — they do **not** change the `StradaValue` struct, so user translation units need no define and the ABI is stable whether or not the features are compiled in.

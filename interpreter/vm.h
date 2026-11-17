@@ -830,6 +830,7 @@ typedef struct {
     uint32_t keylen;     /* cached key length */
     uint8_t occupied;
     uint8_t key_interned; /* 1 if key is owned by root VM key_intern table (never free per-entry) */
+    uint8_t key_bytes;    /* key stored from a non-UTF-8 byte string: keys()/each() keep byte semantics */
 } VMHashEntry;
 
 struct VMHash {

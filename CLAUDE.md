@@ -1353,6 +1353,29 @@ compiler:
   `ucfirst("ß")` "Ss", `lc("İ")` "i\x{307}", `uc("ς")` "Σ", `uc("ı")` "I".
   NFC/NFKC use the UAX #15 composition loop. `sb::to_string`, `quotemeta` and
   literal `s///` keep or gain the UTF-8 flag.
+- **Builtins (M2h)**: pack/unpack support `j J F`, `@`, `<`/`>` on `f d`, the `!`
+  modifier (`x!N`, `X!N`, signed `n! v! N! V!`), `%N` checksums, and `A`
+  strips all trailing whitespace; `pack("u")` has no extra trailer line.
+  `vec` reads numbers through their string form. `core::file_ext` looks at
+  the last path component only; glob brace expansion is left-to-right and
+  `{x}` expands. `setrlimit` takes a hashref. Method resolution / `isa` walk
+  any inheritance depth or width (`oop_walk_ancestors`, cached `oop_mro`;
+  VM `VM_INHERIT_MAX_DEPTH` 4096). Bare `hex()`/`oct()` are builtins unless a
+  user function of that name exists (`strada_oct`: 0x/0b/0o). Array copies and
+  `[@a]` turn holes into undef. `keys`/`each` return a byte-string key without
+  the UTF-8 flag (`StradaHashEntry.key_bytes`, VM `VMHashEntry.key_bytes`).
+  `dumper` prints numbers like stringification. `core::socket_send` flushes
+  earlier `print`s to the socket first; VM `print`/`say` reach runtime
+  sockets. `async::timeout` no longer finishes the future (a later `await`
+  gets the result); `async::is_cancelled` is true once cancel was requested;
+  at exit, unstarted pool tasks are cancelled and running ones get
+  `STRADA_EXIT_TASK_WAIT_MS` (default 1000) before the process exits anyway
+  (status kept, glibc `on_exit`). END blocks: program first, then import_lib
+  libraries (`strada_register_end_block`). Export metadata carries parameter
+  defaults (field 7: literals, or `f<fn>` naming a generated
+  `<func>__dflt<N>` function for expression defaults) and `ownctor:` lines;
+  `Pkg::new` devirtualizes only for constructors that bless into their own
+  class (`fn_ctor_own_class`).
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

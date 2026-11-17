@@ -283,6 +283,7 @@ struct StradaThreadPool {
     pthread_mutex_t queue_mutex;
     pthread_cond_t queue_cond;      /* Workers wait on this */
     pthread_cond_t empty_cond;      /* For shutdown wait */
+    int active;                     /* tasks currently executing (under queue_mutex) */
 };
 #endif /* STRADA_TCC_COMPAT */
 
@@ -609,6 +610,8 @@ typedef struct StradaHashEntry {
     StradaString *key;          /* NULL = free/deleted slot */
     StradaValue *value;
     uint32_t next;              /* free list link (HASH_EMPTY = end) */
+    uint8_t key_bytes;          /* key came from a non-UTF-8 (byte) string: keys()/each() return it
+                                 * without the UTF-8 flag; 0 = flag from the key's content */
 } StradaHashEntry;
 
 /* Hash structure - like Perl's HV */
@@ -1100,6 +1103,7 @@ void strada_vec_set_slot(StradaValue **slot, int64_t offset, int bits, int64_t v
 StradaValue* strada_unpack(const char *fmt, StradaValue *data);  /* Unpack binary string to array */
 StradaValue* strada_base64_encode(StradaValue *sv);  /* Encode string to base64 */
 StradaValue* strada_base64_decode(StradaValue *sv);  /* Decode base64 to string */
+StradaValue* strada_oct(StradaValue *sv);  /* Perl oct(): 0x/0b/0o prefixes, octal default */
 StradaValue* strada_hex(StradaValue *sv);  /* Convert hex string to integer: hex("ff") -> 255 */
 StradaValue* strada_array_copy(StradaValue *src);  /* Deep copy array: new array with incref'd elements */
 char* strada_chomp(const char *str);
@@ -1661,6 +1665,7 @@ StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
 pcre2_code *strada_pcre2_compile_perl(const char *pattern, size_t pat_len, uint32_t options,
                                       int *errcode, PCRE2_SIZE *erroffset);
 #endif
+void strada_register_end_block(void (*fn)(void), int is_library);
 StradaValue* strada_closure_call0(StradaValue *closure);
 StradaValue* strada_closure_call1(StradaValue *closure, StradaValue *a0);
 StradaValue* strada_closure_call2(StradaValue *closure, StradaValue *a0, StradaValue *a1);
@@ -2504,7 +2509,9 @@ static inline void strada_av_append_all(StradaArray *dst, StradaValue *src) {
     StradaArray *av = strada_deref_array(src);
     if (av) {
         for (size_t i = 0; i < av->size; i++) {
-            strada_array_push(dst, av->elements[av->head + i]);
+            StradaValue *el = av->elements[av->head + i];
+            if (el) strada_array_push(dst, el);
+            else strada_array_push_take(dst, strada_new_undef());   /* a hole flattens to undef */
         }
     }
 }

@@ -1,0 +1,30 @@
+# EXPECT: ffffffffffffffff,3ff8000000000000,61627a,0100000002 -1/-2,294,ab| 223a2644600a,0 53,0 66,41 31,5,31,493 [][gz] a1 a2 b1 b2,xyz klen2 h11 Leaf dump
+func hx(str $s) str { my @o = (); my $n = core::byte_length($s); for (my int $i = 0; $i < $n; $i++) { push(@o, sprintf("%02x", core::get_byte($s, $i))); } return join("", @o); }
+package Base;
+func new(scalar $cls) scalar { my %h = (); return bless(\%h, $cls); }
+func name(scalar $self) str { return "Base"; }
+package Leaf;
+extends Base;
+func name(scalar $self) str { return "Leaf"; }
+package main;
+func main() int {
+    my @o = ();
+    push(@o, hx(core::pack("j", -1)) . "," . hx(core::pack("F>", 1.5)) . "," . hx(core::pack("a4\@2a", "abcd", "z")) . "," . hx(core::pack("C x!4 C", 1, 2)));
+    push(@o, join("/", core::unpack("n! v!", core::pack("n v", 65535, 65534))) . "," . join("/", core::unpack("%32C*", "abc")) . "," . join("/", core::unpack("A*", "ab \t\n")) . "|");
+    push(@o, hx(core::pack("u", "hi")) . "," . core::byte_length(core::pack("u", "")));
+    my $n = 5;
+    push(@o, core::vec_get($n, 0, 8) . "," . core::vec_get("ABCD", 4611686018427387904, 32));
+    push(@o, hx(core::base64_decode("Zg")) . "," . hx(core::base64_decode("QQ==QQ==")));
+    push(@o, hex("x1f") . "," . oct("0b101") . "," . oct("0x1f") . "," . oct("755"));
+    push(@o, "[" . core::file_ext("/a/my.dir/README") . "][" . core::file_ext("a/b.tar.gz") . "]");
+    push(@o, join(" ", core::glob("{a,b}{1,2}")) . "," . join(" ", core::glob("x{y}z")));
+    my str $b = core::byte(195) . core::byte(169);
+    my hash %h = (); $h{$b} = 1;
+    my @ks = keys(%h); push(@o, "klen" . length($ks[0]));
+    my array @c = (1, 2, 3); delete($c[1]); my array @d = @c; my $r = [@c];
+    push(@o, "h" . (exists($d[1]) ? 1 : 0) . (exists($r->[1]) ? 1 : 0));
+    my $l = Base::new("Leaf"); push(@o, $l->name());
+    push(@o, core::dumper_str(12345678.9) =~ /12345678\.9/ ? "dump" : "nodump");
+    say(join(" ", @o));
+    return 0;
+}

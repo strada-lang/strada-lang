@@ -1,0 +1,17 @@
+# EXPECT: timeout late c1 cancelled
+async func slow(int $ms, str $v) str { core::usleep($ms * 1000); return $v; }
+func main() int {
+    my @o = ();
+    my $f = slow(200, "late");
+    try { async::timeout($f, 20); push(@o, "no-timeout"); } catch ($e) { push(@o, "timeout"); }
+    push(@o, await $f);
+    my $g = slow(300, "x");
+    core::usleep(30000);
+    async::cancel($g);
+    push(@o, "c" . async::is_cancelled($g));
+    try { await $g; push(@o, "nothrow"); } catch ($e) { push(@o, "cancelled"); }
+    my $ch = async::channel();
+    my $h = async::spawn(fn () { return async::recv($ch); });
+    say(join(" ", @o));
+    return 0;
+}

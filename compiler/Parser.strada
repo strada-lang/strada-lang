@@ -6152,6 +6152,7 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # lines). Without it (an older .so), devirtualization is disabled
     # for the whole library.
     my int $has_mod_info = 0;
+    my hash %ownctor_set = ();
     my array @modified_methods = ();
 
     my array @functions = ();
@@ -6219,6 +6220,10 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                 # use:Module → a Strada module this artifact was compiled
                 # against (its code is NOT in the artifact).
                 push(@use_deps_local, substr($line, 4, length($line) - 4));
+            } elsif (length($line) > 8 && substr($line, 0, 8) eq "ownctor:") {
+                # ownctor:NAME -> this constructor returns an object of its
+                # own class (devirtualization may rely on it)
+                $ownctor_set{substr($line, 8, length($line) - 8)} = 1;
             } elsif (length($line) >= 9 && substr($line, 0, 8) eq "modinfo:") {
                 $has_mod_info = 1;
             } elsif (length($line) > 4 && substr($line, 0, 4) eq "mod:") {
@@ -6333,6 +6338,13 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
         }
     }
 
+    my int $oci = 0;
+    while ($oci < $fn_count) {
+        my scalar $ofi = $functions[$oci];
+        if (($ownctor_set{"" . $ofi->{"name"}} + 0) == 1) { $ofi->{"ctor_own_class"} = 1; }
+        else { $ofi->{"ctor_own_class"} = 0; }
+        $oci = $oci + 1;
+    }
     $lib_info{"functions"} = \@functions;
     $lib_info{"function_count"} = $fn_count;
     $lib_info{"link_libs"} = \@link_libs_local;
@@ -6506,6 +6518,7 @@ func parse_export_line(str $line) scalar {
     my str $param_types_str = "";
     my str $variadic_idx_str = "";
     my str $orig_dotted = "";
+    my str $defaults_str = "";
 
     my str $current = "";
     while ($pos <= $len) {
@@ -6531,6 +6544,9 @@ func parse_export_line(str $line) scalar {
                 # 2026-06 for cross-.so devirtualization; absent in
                 # metadata from older compilers).
                 $orig_dotted = $current;
+            } elsif ($field_num == 7) {
+                # Literal parameter defaults (export_default_token)
+                $defaults_str = $current;
             }
             $current = "";
             $field_num = $field_num + 1;
@@ -6629,9 +6645,75 @@ func parse_export_line(str $line) scalar {
             $ppos = $ppos + 1;
         }
     }
+    if (length($defaults_str) > 0) {
+        my array @dtoks = meta_split($defaults_str, ",");
+        my int $di = 0;
+        while ($di < size(@dtoks) && $di < size(@params)) {
+            my scalar $dnode = import_default_node($dtoks[$di]);
+            if ($dnode) {
+                $params[$di]->{"default"} = $dnode;
+                $params[$di]->{"has_default"} = 1;
+            }
+            $di = $di + 1;
+        }
+    }
     $fn_info{"params"} = \@params;
 
     return \%fn_info;
+}
+
+# Rebuild a parameter default from its metadata token (0 = none)
+func import_default_node(str $tok) scalar {
+    if (length($tok) == 0) { return 0; }
+    my str $k = substr($tok, 0, 1);
+    my str $rest = substr($tok, 1, length($tok) - 1);
+    if ($k eq "u") { return ast_new_undef(); }
+    if ($k eq "f") {
+        # a module-generated function that computes the default
+        return ast_new_call(import_meta_unescape($rest));
+    }
+    if ($k eq "s") { return ast_new_str_literal(import_meta_unescape($rest)); }
+    if ($k eq "i") {
+        my int $neg = 0;
+        if (length($rest) > 0 && substr($rest, 0, 1) eq "-") {
+            $neg = 1;
+            $rest = substr($rest, 1, length($rest) - 1);
+        }
+        my int $iv = str_to_int($rest);
+        if ($neg == 1) { $iv = 0 - $iv; }
+        return ast_new_int_literal($iv);
+    }
+    if ($k eq "n") {
+        my num $nv = 0.0 + $rest;
+        return ast_new_num_literal($nv);
+    }
+    return 0;
+}
+
+func import_meta_unescape(str $s) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($s);
+    while ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if ($c eq "%" && $i + 2 < $n) {
+            my str $hx = substr($s, $i + 1, 2);
+            if ($hx eq "25") { $out = $out . "%"; }
+            elsif ($hx eq "3A") { $out = $out . ":"; }
+            elsif ($hx eq "2C") { $out = $out . ","; }
+            elsif ($hx eq "7C") { $out = $out . "|"; }
+            elsif ($hx eq "0A") { $out = $out . "\n"; }
+            elsif ($hx eq "0D") { $out = $out . "\r"; }
+            elsif ($hx eq "22") { $out = $out . "\""; }
+            elsif ($hx eq "5C") { $out = $out . "\\"; }
+            else { $out = $out . "%" . $hx; }
+            $i = $i + 3;
+        } else {
+            $out = $out . $c;
+            $i = $i + 1;
+        }
+    }
+    return $out;
 }
 
 # Convert string to integer (bootstrap-compatible)
