@@ -1,0 +1,21 @@
+# EXPECT: 5|b,2,c,3|4|4|x=1,y=2,z=3|4 a,1,b,2|2 a,1|4
+# Audit 20 M4: a hash in list context is its key/value pairs (Perl), and
+# `k => v` in a list is two elements. (1, %h) had 2 elements, map over %h
+# ran zero times, (%a, z => 3) lost z, (a => 1, b => 2) was a list of two
+# array refs, and [a => 1] a one-element array.
+func cnt { return scalar(@_); }
+func main() int {
+    my %e = (b => 2, c => 3);
+    my @b = (1, %e);
+    my @d = map { $_ } %e;
+    my %a = (x => 1, y => 2);
+    my %h = (%a, z => 3);
+    my @l = (a => 1, b => 2);
+    my $r = [a => 1];
+    print(scalar(@b) . "|" . join(",", %e) . "|" . scalar(@d) . "|" . cnt(%e) . "|");
+    print(join(",", map { $_ . "=" . $h{$_} } sort(keys(%h))) . "|");
+    print(scalar(@l) . " " . join(",", @l) . "|" . scalar(@$r) . " " . join(",", @$r) . "|");
+    my @c = (); push(@c, %e);
+    say(scalar(@c));
+    return 0;
+}

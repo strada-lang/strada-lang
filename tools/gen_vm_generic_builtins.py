@@ -75,6 +75,30 @@ def main():
                   if (n.startswith("sys::") or n.startswith("math::"))
                   and not n.startswith(EXCLUDE_PREFIXES)
                   and a <= 4 and protos.get(c) == a)
+    # Keep entries of the existing table that are still valid (some were
+    # added from emission patterns the harvester does not recognise).
+    try:
+        prev = open("interpreter/vm_generic_builtins.inc").read()
+        have0 = set(n for n, _, _ in ents)
+        for m in re.finditer(r'\{ "((?:sys|math)::[a-z_0-9]+)", \(void\*\)(strada_[a-z_0-9]+), (\d+) \}', prev):
+            n, c, a = m.group(1), m.group(2), int(m.group(3))
+            if n not in have0 and protos.get(c) == a:
+                ents.append((n, c, a))
+                have0.add(n)
+    except OSError:
+        pass
+    # Bare runtime names (strada_new_undef() ...): older programs call
+    # runtime functions directly and the compiled backend emits a C call.
+    # Any runtime function with a uniform StradaValue* prototype qualifies.
+    have = set(n for n, _, _ in ents)
+    rt_src = open("runtime/strada_runtime.c").read()
+    defined = set(re.findall(r'^StradaValue\s*\*\s*(strada_[a-z_0-9]+)\s*\(', rt_src, re.M))
+    for c, a in protos.items():
+        if c not in defined:
+            continue
+        if a <= 4 and c not in have and not c.startswith(("strada_coro_", "strada_thread_", "strada_async_")):
+            ents.append((c, c, a))
+    ents.sort()
 
     out = []
     out.append("/* Generated: generic runtime-bridged builtins for the VM.")

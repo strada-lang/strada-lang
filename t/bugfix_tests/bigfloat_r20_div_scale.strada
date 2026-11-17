@@ -1,0 +1,21 @@
+# EXPECT: 33|33.33|142.8|285714285714285714285714.28571428571428571428|0.33|1000|1.2|-1|1|0
+# Audit 20 S3-2/S3-3: BigFloat div_precision lost digits when the divisor had
+# more fractional digits than the dividend (10/0.3 at precision 2 gave 33.3),
+# and compare() returned a raw strcmp difference instead of -1/0/1.
+use lib "lib";
+use Math::BigFloat;
+func main() int {
+    my array @o = ();
+    push(@o, BigFloat::new("10")->div_precision(BigFloat::new("0.3"), 0)->to_str());
+    push(@o, BigFloat::new("10")->div_precision(BigFloat::new("0.3"), 2)->to_str());
+    push(@o, BigFloat::new("1")->div_precision(BigFloat::new("0.007"), 1)->to_str());
+    push(@o, BigFloat::new("2")->div(BigFloat::new("0.000000000000000000000007"))->to_str());
+    push(@o, BigFloat::new("1")->div_precision(BigFloat::new("3"), 2)->to_str());
+    push(@o, BigFloat::new("10")->div_precision(BigFloat::new("0.01"), 0)->to_str());
+    push(@o, BigFloat::new("1.2345")->div_precision(BigFloat::new("1"), 1)->to_str());
+    push(@o, BigFloat::new("1")->compare(BigFloat::new("3")));
+    push(@o, BigFloat::new("-1")->compare(BigFloat::new("-3")));
+    push(@o, BigFloat::new("2.50")->compare(BigFloat::new("2.5")));
+    say(join("|", @o));
+    return 0;
+}

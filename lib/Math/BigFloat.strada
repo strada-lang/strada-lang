@@ -33,7 +33,8 @@ static int _bf_cmp(const char *a, const char *b) {
     size_t la = strlen(a);
     size_t lb = strlen(b);
     if (la != lb) return (la > lb) ? 1 : -1;
-    return strcmp(a, b);
+    int c = strcmp(a, b);
+    return (c > 0) - (c < 0);
 }
 
 /* Strip leading zeros from digit string. Caller must free result. */
@@ -702,19 +703,32 @@ func div_precision(scalar $self, scalar $other, int $prec) scalar {
         int64_t precision = strada_to_int(prec);
         if (precision < 0) precision = 0;
 
-        /* Extend a with zeros for precision */
-        char *extended = _bf_pad_right(a_str, (size_t)precision);
-        char *q = extended ? _bf_divmod(extended, b_str, NULL) : NULL;
+        /* value = (ma * 10^-ea) / (mb * 10^-eb). For a quotient with
+           exactly `precision` fractional digits compute
+           floor(ma * 10^k / mb) with k = precision - ea + eb; when k < 0
+           scale the divisor up instead. */
+        int64_t k = precision - strada_to_int(ea) + strada_to_int(eb);
+        char *extended = NULL;
+        char *divisor = NULL;
+        if (k >= 0) {
+            extended = _bf_pad_right(a_str, (size_t)k);
+            divisor = strdup(b_str);
+        } else {
+            extended = strdup(a_str);
+            divisor = _bf_pad_right(b_str, (size_t)(-k));
+        }
+        char *q = (extended && divisor) ? _bf_divmod(extended, divisor, NULL) : NULL;
 
         free(a_str);
         free(b_str);
         free(extended);
+        free(divisor);
         strada_decref(result_m);
         result_m = strada_new_str(q ? q : "0");
         free(q);
     }
 
-    my int $result_e = $ea - $eb + $prec;
+    my int $result_e = $prec;
     my int $result_s = 1;
     if ($self->{"s"} != $other->{"s"} && $result_m ne "0") {
         $result_s = -1;

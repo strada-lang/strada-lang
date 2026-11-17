@@ -1,0 +1,24 @@
+# EXPECT: undef|undef|3 7 1.5|9007199254740993 9007199254740995|9007199254740993 3.5 9223372037000250000|9007199254740993 9007199254740995
+# Audit 20 S3-10/S3-11: List::min/max restarted the scan at an undef element
+# (Perl's List::Util compares undef as 0 and can return it); List::Util
+# min/max/sum/product/minmax accumulated in a num and rounded large integers.
+use lib "lib";
+use List;
+use List::Util;
+func main() int {
+    my array @out = ();
+    push(@out, List::min([5, undef, 7]) // "undef");
+    push(@out, List::max([-5, undef, -7]) // "undef");
+    push(@out, List::min([5, 3, 7]) . " " . List::max([5, 3, 7]) . " " . List::min([2.5, 1.5]));
+    my array @big = (9007199254740993, 9007199254740995);
+    push(@out, List::Util::min(@big) . " " . List::Util::max(@big));
+    my array @z = (9007199254740993, 0);
+    my array @f = (1, 2.5);
+    my array @p = (3037000500, 3037000500);
+    push(@out, List::Util::sum(@z) . " " . List::Util::sum(@f) . " " . List::Util::product(@p));
+    my array @r = (9007199254740995, 9007199254740993);
+    my array @mm = List::Util::minmax(@r);
+    push(@out, $mm[0] . " " . $mm[1]);
+    say(join("|", @out));
+    return 0;
+}

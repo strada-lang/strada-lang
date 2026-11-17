@@ -2098,14 +2098,57 @@ func dump_scalar(scalar $val) str {
     return "\"" . $s . "\"";
 }
 
-# Find closing }} from start position
+# Find closing }} from start position.
+# Quote-aware: a "}}" inside a quoted argument ("..." or '...', with
+# backslash escapes) does not close the tag. A quote only opens a string at
+# the start of an argument (start of tag, or after whitespace / = ( , | :),
+# so an apostrophe inside a word is plain text; it closes only when followed
+# by a token boundary. If the scan finds no closer, or a "{{" appears inside
+# the quote (it was not a string after all), fall back to the first "}}".
 func find_closing(str $template, int $start) int {
     my int $len = length($template);
     my int $i = $start;
+    my str $quote = "";
+    my str $prev = " ";
 
+    while ($i < $len) {
+        my str $ch = substr($template, $i, 1);
+        if (length($quote) > 0) {
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "{" && $i + 1 < $len && substr($template, $i + 1, 1) eq "{") {
+                # A new tag starts inside the "string": the quote was not
+                # an argument delimiter after all.
+                last;
+            }
+            if ($ch eq $quote) {
+                # A closing quote ends the argument only at a token boundary.
+                my str $nx = ($i + 1 < $len) ? substr($template, $i + 1, 1) : " ";
+                if ($nx eq " " || $nx eq "\t" || $nx eq "\n" || $nx eq "\r" ||
+                    $nx eq "}" || $nx eq "|" || $nx eq ")" || $nx eq ",") {
+                    $quote = "";
+                }
+            }
+        } else {
+            if ($ch eq "}" && $i + 1 < $len && substr($template, $i + 1, 1) eq "}") {
+                return $i;
+            }
+            if (($ch eq "\"" || $ch eq "'") &&
+                ($prev eq " " || $prev eq "\t" || $prev eq "\n" || $prev eq "\r" ||
+                 $prev eq "=" || $prev eq "(" || $prev eq "," || $prev eq "|" || $prev eq ":")) {
+                $quote = $ch;
+            }
+        }
+        $prev = $ch;
+        $i = $i + 1;
+    }
+
+    # Unterminated / non-argument quote: plain scan for the first }}
+    $i = $start;
     while ($i + 1 < $len) {
-        my str $two = substr($template, $i, 2);
-        if ($two eq "}}") {
+        if (substr($template, $i, 2) eq "}}") {
             return $i;
         }
         $i = $i + 1;
@@ -2292,6 +2335,15 @@ func find_block_end(str $template, int $start, str $block_type) int {
             return -1;
         }
         $i = $i + $next_brace;
+
+        # Skip comments {{!-- ... --}}: block tags inside a comment do not count
+        if ($i + 4 < $len && substr($template, $i, 4) eq "{{!-") {
+            my int $cend = Forma::find_comment_end($template, $i + 4);
+            if ($cend > 0) {
+                $i = $cend + 4;
+                next;
+            }
+        }
 
         # Check for nested open tag (with boundary check so {{#if doesn't match {{#if_eq)
         if ($i + $open_len < $len) {

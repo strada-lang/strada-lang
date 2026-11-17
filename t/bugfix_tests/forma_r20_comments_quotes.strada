@@ -1,0 +1,20 @@
+# EXPECT: [ABC]|[xyC]|[ABC]|[a}}b|after]|[it's 5]|[ <a href='x'>5</a>]|[ <b class="k">5</b>]
+# Audit 20 S1-14/S1-15: find_block_end counted a {{/if}} inside a
+# {{!-- comment --}} as the block's end, and find_closing ended a tag at a
+# "}}" inside a quoted argument ({{e | default "a}}b"}}).
+use lib "lib";
+use Forma;
+func main() int {
+    my scalar $v = {n => 5, list => ["x", "y"], e => ""};
+    my array @r = ();
+    push(@r, "[" . Forma::render_string("{{#if n}}A{{!-- {{/if}} --}}B{{/if}}C", $v) . "]");
+    push(@r, "[" . Forma::render_string("{{#each list}}{{this}}{{!-- {{/each}} --}}{{/each}}C", $v) . "]");
+    push(@r, "[" . Forma::execute(Forma::compile("{{#if n}}A{{!-- {{/if}} --}}B{{/if}}C"), $v) . "]");
+    push(@r, "[" . Forma::render_string("{{e | default \"a}}b\"}}|after", $v) . "]");
+    push(@r, "[" . Forma::render_string("{{#if n}}it's {{n}}{{/if}}", $v) . "]");
+    # A stray quote inside a tag must not swallow later markup
+    push(@r, "[" . Forma::render_string("{{! it 's }} <a href='x'>{{n}}</a>", $v) . "]");
+    push(@r, "[" . Forma::render_string("{{default e \"}} <b class=\"k\">{{n}}</b>", $v) . "]");
+    say(join("|", @r));
+    return 0;
+}

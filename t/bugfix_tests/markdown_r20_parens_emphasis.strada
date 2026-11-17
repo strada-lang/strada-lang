@@ -1,0 +1,16 @@
+# EXPECT: <p><a href="http://a.com/f(1)">x</a> <img src="w/Foo_(bar).png" alt="i"></p>|<p><strong>a *b</strong> c*</p>|<p><strong><em>bold italic</em></strong> <em>x</em></p>
+# Audit 20 S2-15/S2-16: link/image URLs containing balanced parentheses were
+# cut at the first ")", and overlapping emphasis (**a *b** c*) produced
+# mis-nested <strong>/<em> tags.
+use lib "lib";
+use Markdown;
+func main() int {
+    my array @r = ();
+    push(@r, Markdown::to_html("[x](http://a.com/f(1)) ![i](w/Foo_(bar).png)"));
+    push(@r, Markdown::to_html("**a *b** c*"));
+    push(@r, Markdown::to_html("***bold italic*** *x*"));
+    my str $s = join("|", @r);
+    $s =~ s/\n//g;
+    say($s);
+    return 0;
+}

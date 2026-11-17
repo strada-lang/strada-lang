@@ -94,20 +94,30 @@ func product(scalar $list) scalar {
 }
 
 func min(scalar $list) scalar {
+    # Perl List::Util semantics: an undef element compares as 0 and can be
+    # the result (a "first element seen" flag, not defined($best), decides
+    # where the scan starts).
     my scalar $best;
+    my int $seen = 0;
     foreach my $x (@{$list}) {
-        if (!defined($best) || $x < $best) {
+        if ($seen == 0 || $x < $best) {
             $best = $x;
+            $seen = 1;
         }
     }
     return $best;
 }
 
 func max(scalar $list) scalar {
+    # Perl List::Util semantics: an undef element compares as 0 and can be
+    # the result (a "first element seen" flag, not defined($best), decides
+    # where the scan starts).
     my scalar $best;
+    my int $seen = 0;
     foreach my $x (@{$list}) {
-        if (!defined($best) || $x > $best) {
+        if ($seen == 0 || $x > $best) {
             $best = $x;
+            $seen = 1;
         }
     }
     return $best;

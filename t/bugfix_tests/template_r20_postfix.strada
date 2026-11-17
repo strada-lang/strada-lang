@@ -1,0 +1,21 @@
+# EXPECT: 123|45|ABC|Q|x|i1i2||6||111|12||AB|<2><7><8><F>{<8>}|a#3
+# Audit 20 S1 follow-up: postfix directives FOREACH/FOR, WHILE, WRAPPER, FILTER
+# (after a directive) and IF/UNLESS. In "x = expr POSTFIX ..." x gets the OUTPUT
+# of "expr POSTFIX ..." (TT capture: x = 5 IF 0 sets x to ""). Expected output
+# from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% x FOREACH x = [1,2,3] %]|[% x FOR x IN [4,5] %]|[% 'abc' FILTER upper %]|[% y = 'q' FILTER upper %][% y %]|[% 'x' IF 1 %]|[% \"i\$x\" FOREACH x = [1,2] %]|[% x = 1 %][% x = 5 IF 0 %][% x %]|[% x = 6 IF 1 %][% x %]|[% x = 7 UNLESS 1 %][% x %]|[% x = 0 %][% x = x + 1 FOREACH y = [1,2,3] %][% x %]|[% z = y FOREACH y = [1,2] %][% z %]|[% 'a' WHILE 0 %]|[% x FILTER upper FOREACH x = ['a','b'] %]|[% INCLUDE b x = 2 IF 1 %][% INCLUDE b FOREACH x = [7,8] %][% INCLUDE b x = 'f' FILTER upper %][% INCLUDE b WRAPPER w %][% BLOCK b %]<[% x %]>[% END %][% BLOCK w %]{[% content %]}[% END %]|[% SET q = 'a' IF 1 %][% q %]", {}));
+    push(@out, r("[% i = 0 %][% WHILE i < 3 %][% i = i + 1 %][% END %][% i %]", {}));
+    say(join("#", @out));
+    return 0;
+}

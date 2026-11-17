@@ -642,9 +642,10 @@ static int jp_string(JsonP *p, char **out, size_t *out_len) {
                     break;
                 }
                 default:
-                    /* JSON::PS passes unknown escapes through */
-                    jb_putc(&b, e);
-                    break;
+                    /* RFC 8259 7: only \" \\ \/ \b \f \n \r \t \uXXXX */
+                    jp_set_err("Invalid escape sequence in JSON string", p->pos);
+                    free(b.buf);
+                    return 0;
             }
         } else {
             if ((unsigned char)c < 0x20) {
@@ -808,6 +809,13 @@ static StradaValue* jp_value(JsonP *p, int depth) {
             errno = 0;
             long long iv = strtoll(tmp, NULL, 10);
             if (errno == 0) return strada_new_int((int64_t)iv);
+            /* (INT64_MAX, UINT64_MAX]: an exact unsigned integer (UV), as
+             * encode emits UVs with %llu and Perl's JSON::PP decodes them. */
+            if (tmp[0] != '-') {
+                errno = 0;
+                unsigned long long uv = strtoull(tmp, NULL, 10);
+                if (errno == 0) return strada_new_uint((uint64_t)uv);
+            }
         }
         {
             struct lconv *lc = localeconv();

@@ -895,7 +895,31 @@ func ast_new_undef() scalar {
 }
 
 # Create map expression: map { block } @array
+# map/grep over %h / %$r iterate its key/value pairs (Perl): the input
+# becomes the one-element list (%h), which flattens.
+func ast_hash_list_input(scalar $e) scalar {
+    if (!defined($e)) { return $e; }
+    my int $et = $e->{"type"};
+    # map {...} ("x"): a parenthesized single item is a one-element list
+    if (($e->{"in_parens"} + 0) == 1 && $et != NODE_ANON_ARRAY()) {
+        my scalar $one = ast_new_anon_array();
+        $one->{"is_list"} = 1;
+        ast_add_array_elem($one, $e);
+        if (defined($e->{"line"})) { $one->{"line"} = $e->{"line"}; }
+        return $one;
+    }
+    if (($et == NODE_VARIABLE() || $et == NODE_DEREF_SCALAR()) && ("" . $e->{"sigil"}) eq "%") {
+        my scalar $lst = ast_new_anon_array();
+        $lst->{"is_list"} = 1;
+        ast_add_array_elem($lst, $e);
+        if (defined($e->{"line"})) { $lst->{"line"} = $e->{"line"}; }
+        return $lst;
+    }
+    return $e;
+}
+
 func ast_new_map(scalar $block, scalar $array_expr) scalar {
+    $array_expr = ast_hash_list_input($array_expr);
     my scalar $node = ast_new_node(NODE_MAP());
     $node->{"block"} = $block;
     $node->{"array"} = $array_expr;
@@ -912,6 +936,7 @@ func ast_new_sort(scalar $block, scalar $array_expr) scalar {
 
 # Create grep expression: grep { block } @array
 func ast_new_grep(scalar $block, scalar $array_expr) scalar {
+    $array_expr = ast_hash_list_input($array_expr);
     my scalar $node = ast_new_node(NODE_GREP());
     $node->{"block"} = $block;
     $node->{"array"} = $array_expr;
@@ -1048,6 +1073,14 @@ func ast_add_array_elem(scalar $arr_node, scalar $elem) void {
     # An empty list `()` inside a list contributes nothing: (1, (), 2) has
     # two elements and [()] is empty, as in Perl.
     if ($elem && $elem->{"is_empty_list"}) { return; }
+    # `k => v` in a list is two elements (Perl: => is a comma), so
+    # (a => 1, b => 2) and [a => 1] are flat 4- and 2-element lists.
+    if ($elem && $elem->{"is_pair"}) {
+        my scalar $pe = $elem->{"elements"};
+        ast_add_array_elem($arr_node, $pe->[0]);
+        ast_add_array_elem($arr_node, $pe->[1]);
+        return;
+    }
     my scalar $elems = $arr_node->{"elements"};
     push($elems, $elem);
     $arr_node->{"element_count"} = $arr_node->{"element_count"} + 1;

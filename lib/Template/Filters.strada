@@ -22,9 +22,10 @@ func apply(str $name, scalar $args, str $text, scalar $stash) str {
     if ($name eq "none")     { return $text; }
     # --- dynamic (arg-taking) filters ---
     if ($name eq "repeat")   { return Template::VMethods::str_repeat($text, arg_int($args, 0, 1)); }
-    if ($name eq "replace")  { return re::replace_all($text, arg_str($args, 0, ""), arg_str($args, 1, "")); }
+    # the replace filter inserts its replacement literally ($1, $&, \1 included)
+    if ($name eq "replace")  { return Template::VMethods::rx_substitute($text, arg_str($args, 0, ""), arg_str($args, 1, ""), 1, 0); }
     if ($name eq "remove")   { return re::replace_all($text, arg_str($args, 0, ""), ""); }
-    if ($name eq "format")   { return safe_format(arg_str($args, 0, "%s"), $text); }
+    if ($name eq "format")   { return filter_format(arg_str($args, 0, "%s"), $text); }
     if ($name eq "truncate") { return filter_truncate($text, arg_int($args, 0, 32), arg_str($args, 1, "...")); }
     if ($name eq "indent")   { return filter_indent($text, $args); }
     throw(Template::Exception::make("filter", $name . ": filter not found"));
@@ -46,12 +47,61 @@ func arg_str(scalar $args, int $i, str $def) str {
 }
 
 # ---- truncate / indent -----------------------------------------------------
-# Keep at most $len chars; if longer, cut to ($len - len(suffix)) and append suffix.
+# Keep at most $len chars; if longer, cut to ($len - len(suffix)) and append
+# suffix. As in TT, lengths count an HTML entity (&hellip; &#8230; &#x2026;) as
+# one character, and a suffix longer than $len is itself cut to $len.
 func filter_truncate(str $text, int $len, str $suffix) str {
-    if (length($text) <= $len) { return $text; }
-    my int $keep = $len - length($suffix);
-    if ($keep < 0) { $keep = 0; }
-    return substr($text, 0, $keep) . $suffix;
+    if ($len < 0) { $len = 0; }
+    my int $lchar = visual_length($suffix);
+    if ($len < $lchar) { $suffix = substr($suffix, 0, $len); $lchar = $len; }
+    if (visual_length($text) <= $len) { return $text; }
+    return truncate_visual($text, $len - $lchar) . $suffix;
+}
+func entity_len_at(str $s, int $i) int {
+    my str $rest = substr($s, $i, 40);
+    if (re::match($rest, "^&(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+|#x[0-9a-fA-F]+);") == 1) {
+        my array @c = re::captures();
+        return length("" . $c[0]);
+    }
+    return 0;
+}
+func visual_length(str $s) int {
+    if (index($s, "&") < 0) { return length($s); }
+    my int $n = length($s);
+    my int $i = 0;
+    my int $v = 0;
+    while ($i < $n) {
+        my int $el = (substr($s, $i, 1) eq "&") ? entity_len_at($s, $i) : 0;
+        $i = $i + (($el > 0) ? $el : 1);
+        $v = $v + 1;
+    }
+    return $v;
+}
+func truncate_visual(str $s, int $maxlen) str {
+    my int $n = length($s);
+    my int $i = 0;
+    my int $v = 0;
+    while ($i < $n && $v < $maxlen) {
+        my int $el = (substr($s, $i, 1) eq "&") ? entity_len_at($s, $i) : 0;
+        $i = $i + (($el > 0) ? $el : 1);
+        $v = $v + 1;
+    }
+    return substr($s, 0, $i);
+}
+
+# format: sprintf each line of the text (TT splits on newlines; trailing
+# empty lines are dropped, as by Perl split).
+func filter_format(str $fmt, str $text) str {
+    my array @lines = split("\n", $text);
+    if (size(@lines) == 0) { return ""; }
+    my str $out = "";
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        if ($i > 0) { $out = $out . "\n"; }
+        $out = $out . safe_format($fmt, $lines[$i]);
+        $i = $i + 1;
+    }
+    return $out;
 }
 
 # Prefix every line with $pad: an all-digits arg => that many spaces; else literal.

@@ -566,6 +566,10 @@ enum {
     BUILTIN_CAST_STR,
     BUILTIN_CORE_GET_RECURSION_LIMIT,
     BUILTIN_INHERIT,
+    BUILTIN_SET_PACKAGE,
+    BUILTIN_PRINTF,
+    BUILTIN_HASH_FLAT,
+    BUILTIN_CONTAINER_REPLACE, /* (container, LIST) -> container, contents replaced in place */    /* (HASH) -> new array of key, value, ... */       /* (ARRAY of [fh,] fmt, args) -> printf */  /* set_package(NAME): current package for 1-arg inherit() */
     BUILTIN_CAPTURES,
     BUILTIN_NAMED_CAPTURES,
     BUILTIN_BYTE_INDEX,
@@ -821,7 +825,9 @@ struct VMArray {
     VMValue inline_items[VM_ARRAY_INLINE_CAP];
 };
 
-/* Hash table (open addressing) */
+/* Hash table: entries[] is dense in insertion order (iteration order, as in
+ * the compiled runtime); lookups go through index[]. Code that iterates may
+ * keep scanning [0, capacity) for occupied == 1 (unused slots are 0). */
 #define VM_HASH_INLINE_CAP 4
 typedef struct {
     char *key;
@@ -836,9 +842,18 @@ typedef struct {
 struct VMHash {
     VMObjHeader hdr;
     VMHashEntry *entries;
-    int capacity;
-    int size;
-    int tombstones;
+    int capacity;        /* slots in entries[] (dense, insertion order) */
+    int size;            /* live entries */
+    int tombstones;      /* deleted entries still occupying dense slots */
+    int used;            /* dense slots consumed: [0, used) live or deleted */
+    int32_t *index;      /* open-addressed index -> entry slot (-1 empty);
+                          * NULL for inline (<= VM_HASH_INLINE_CAP) hashes,
+                          * which are scanned linearly */
+    uint32_t index_mask; /* index size - 1 */
+    uint32_t index_fill; /* index slots in use (incl. stale ones) */
+    int32_t free_head;   /* LIFO list of deleted dense slots (linked through
+                          * the dead entry's hash field), -1 = none; reused
+                          * before appending, as in the compiled runtime */
     uint32_t class_id;
     uint32_t class_prog_id;
     uint32_t grow_gen;   /* bumped on grow/delete/reset to invalidate global_ic */
@@ -1039,6 +1054,7 @@ typedef struct {
     char *cblock_prelude;       /* program-level __C__ blocks (file-scope
                                  * helpers/includes), prepended to every
                                  * function-level block's JIT unit */
+    int cblock_jit_all_tried;   /* whole-program __C__ object attempted */
     VMObjHeader *compile_objects; /* compile-time immortal GC objects (e.g., default_val) */
     void **dl_handles;          /* all dlopen'd import_lib handles */
     int dl_handle_count;
@@ -1065,6 +1081,7 @@ typedef struct {
 
 /* VM state */
 typedef struct VM {
+    char *cur_package;       /* set_package(); used by 1-arg inherit() */
     VMValue *stack;
     size_t stack_top;
     size_t stack_cap;

@@ -1,0 +1,23 @@
+# EXPECT: y|y|y|y|y|a-b-c|axbx|y|y
+# Audit 20 M4: regex patterns interpolate $var, ${var}, $h{k} and $a[i] in
+# the VM too (it matched the literal text "$p").
+func main() int {
+    my str $p = "wor";
+    my str $s = "hello world";
+    my %h = ("k" => "ell");
+    my @a = ("zzz", "o w");
+    my @o = ();
+    push(@o, ($s =~ /$p/) ? "y" : "n");
+    push(@o, ($s =~ /${p}ld$/) ? "y" : "n");
+    push(@o, ($s !~ /x$p/) ? "y" : "n");
+    push(@o, ($s =~ /h$h{k}/) ? "y" : "n");
+    push(@o, ($s =~ /l$a[1]/) ? "y" : "n");
+    my $sep = "X";
+    my $t = "aXbXc"; $t =~ s/$sep/-/g; push(@o, $t);
+    my $v = "aXbX"; $v =~ s/$sep/lc($sep)/ge; push(@o, $v);
+    my $pat = "wor\\w+";
+    push(@o, ($s =~ /$pat/) ? "y" : "n");
+    push(@o, ("AB" =~ /$p|b/i) ? "y" : "n");
+    say(join("|", @o));
+    return 0;
+}

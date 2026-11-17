@@ -183,6 +183,15 @@ L<core::fork>, L<core::pipe>, L<core::exec>, L<core::waitpid>
 
 package IPC::Open3;
 
+# Mark a parent-side pipe end close-on-exec (F_SETFD=2, FD_CLOEXEC=1 on
+# Linux and the BSDs/macOS), so children started later -- by another
+# open3/open2 call or anything else that forks+execs -- do not inherit it.
+# Otherwise a second child holds the first child's stdin write end open and
+# the first child never sees EOF.
+private func set_cloexec(int $fd) void {
+    core::fcntl($fd, 2, 1);
+}
+
 # open3 - Run a command with full I/O control
 # Returns a hash with:
 #   pid    - Child process ID
@@ -218,6 +227,9 @@ func open3(str $cmd) hash {
     my array @stdin_pipe = @{$p_in};
     my array @stdout_pipe = @{$p_out};
     my array @stderr_pipe = @{$p_err};
+    set_cloexec($stdin_pipe[1]);
+    set_cloexec($stdout_pipe[0]);
+    set_cloexec($stderr_pipe[0]);
 
     my int $pid = core::fork();
 
@@ -285,6 +297,8 @@ func open2(str $cmd) hash {
     }
     my array @stdin_pipe = @{$p_in};
     my array @stdout_pipe = @{$p_out};
+    set_cloexec($stdin_pipe[1]);
+    set_cloexec($stdout_pipe[0]);
 
     my int $pid = core::fork();
 
@@ -332,6 +346,7 @@ func cmd_output(str $cmd) str {
     if (scalar(@pipe) == 0) {
         return "";
     }
+    set_cloexec($pipe[0]);
 
     my int $pid = core::fork();
 

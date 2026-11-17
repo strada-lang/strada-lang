@@ -267,9 +267,11 @@ version "1.0.0";
 # Aggregation Functions
 # ============================================================
 
-# sum - Return sum of all elements
-func sum(array @list) num {
-    my num $total = 0;
+# sum - Return sum of all elements. The accumulator is a plain scalar so
+# integer sums stay exact (IV -> UV -> NV promotion) instead of being
+# rounded through a double.
+func sum(array @list) scalar {
+    my scalar $total = 0;
     my int $len = scalar(@list);
     for (my int $i = 0; $i < $len; $i++) {
         $total = $total + $list[$i];
@@ -278,30 +280,31 @@ func sum(array @list) num {
 }
 
 # sum0 - Same as sum, explicitly returns 0 for empty list
-func sum0(array @list) num {
+func sum0(array @list) scalar {
     return List::Util::sum(@list);
 }
 
 # product - Return product of all elements
-func product(array @list) num {
+func product(array @list) scalar {
     my int $len = scalar(@list);
     if ($len == 0) {
         return 1;
     }
-    my num $result = 1;
+    my scalar $result = 1;
     for (my int $i = 0; $i < $len; $i++) {
         $result = $result * $list[$i];
     }
     return $result;
 }
 
-# min - Return minimum value
+# min - Return minimum value (the element itself, compared numerically;
+# kept as a scalar so large integers are not rounded through a double)
 func min(array @list) scalar {
     my int $len = scalar(@list);
     if ($len == 0) {
         return undef;
     }
-    my num $min = $list[0];
+    my scalar $min = $list[0];
     for (my int $i = 1; $i < $len; $i++) {
         if ($list[$i] < $min) {
             $min = $list[$i];
@@ -316,7 +319,7 @@ func max(array @list) scalar {
     if ($len == 0) {
         return undef;
     }
-    my num $max = $list[0];
+    my scalar $max = $list[0];
     for (my int $i = 1; $i < $len; $i++) {
         if ($list[$i] > $max) {
             $max = $list[$i];
@@ -341,8 +344,8 @@ func minmax(array @list) array {
     if ($len == 0) {
         return @result;
     }
-    my num $min = $list[0];
-    my num $max = $list[0];
+    my scalar $min = $list[0];
+    my scalar $max = $list[0];
     for (my int $i = 1; $i < $len; $i++) {
         if ($list[$i] < $min) {
             $min = $list[$i];

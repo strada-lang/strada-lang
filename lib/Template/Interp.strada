@@ -49,6 +49,14 @@ func exec_into(scalar $tt, scalar $nodes, scalar $stash, scalar $sb) void {
             exec_use($node, $stash);
         } elsif ($t eq "meta") {
             exec_meta($node, $stash);
+        } elsif ($t eq "capture") {
+            # lval = <directive with postfix>: assign the directive's output
+            my scalar $cb = sb::new();
+            try { exec_into($tt, $node->{"body"}, $stash, $cb); }
+            catch ($ce) { sb::free($cb); throw($ce); }
+            my str $captured = sb::to_string($cb);
+            sb::free($cb);
+            set_path($stash, $node->{"assigns"}->[0]->{"path"}, $captured);
         } elsif ($t eq "try") {
             exec_try($tt, $node, $stash, $sb);
         } elsif ($t eq "throw") {
@@ -88,7 +96,22 @@ func exec_set(scalar $node, scalar $stash, int $is_default) void {
 }
 
 # Assign $value at a dotted path, autovivifying intermediate hashes.
+# Resolve {"dyn"=>name} path elements ($x / a.$k targets) to the current
+# value of the named variable.
+func resolve_path(scalar $stash, scalar $path) scalar {
+    my int $dyn = 0;
+    foreach my scalar $pe (@{$path}) { if (ref($pe) eq "HASH") { $dyn = 1; } }
+    if ($dyn == 0) { return $path; }
+    my array @out = ();
+    foreach my scalar $pe (@{$path}) {
+        if (ref($pe) eq "HASH") { push(@out, Template::Stash::as_text(Template::Stash::get_root($stash, $pe->{"dyn"}))); }
+        else { push(@out, $pe); }
+    }
+    return \@out;
+}
+
 func set_path(scalar $stash, scalar $path, scalar $value) void {
+    $path = resolve_path($stash, $path);
     # Assignments through a private ("_x" / ".x") name are ignored, as in TT.
     foreach my str $pk (@{$path}) {
         if (Template::Stash::is_private($pk) == 1) { return; }
@@ -112,6 +135,7 @@ func set_path(scalar $stash, scalar $path, scalar $value) void {
 
 # Read the current value at a dotted path (for DEFAULT's "is it set?" test).
 func navigate_path(scalar $stash, scalar $path) scalar {
+    $path = resolve_path($stash, $path);
     my scalar $cur = Template::Stash::get_root($stash, $path->[0]);
     my int $i = 1;
     while ($i < size(@{$path}) && defined($cur)) {
@@ -173,6 +197,12 @@ func foreach_no_var(scalar $stash, scalar $item) void {
 func to_iter_list(scalar $v) scalar {
     if (!defined($v)) { my array @e = (); return \@e; }
     if (ref($v) eq "ARRAY") { return $v; }
+    # A plain (unblessed) hash iterates as its key/value pairs sorted by key,
+    # like TT's Template::Iterator ({key => k, value => v} per item).
+    if (ref($v) eq "HASH" && length(blessed($v)) == 0 && !exists(%{$v}, "__plugin__")
+        && !exists(%{$v}, "__tt_exception__") && !exists(%{$v}, "__strval__") && !exists(%{$v}, "__macro__")) {
+        return Template::VMethods::hash_pairs($v);
+    }
     my array @one = ($v);
     return \@one;
 }
@@ -201,7 +231,8 @@ func exec_while(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
     my int $stop = 0;
     while ($stop == 0 && Template::Stash::is_true(Template::Expr::eval_node($node->{"cond"}, $stash)) == 1) {
         $guard = $guard + 1;
-        if ($guard > 100000) { throw(Template::Exception::make("while", "iteration limit exceeded")); }
+        # TT's WHILE failsafe ($Template::Directive::WHILE_MAX = 1000).
+        if ($guard > 1000) { throw(Template::Exception::make("while", "WHILE loop terminated (> 1000 iterations)")); }
         my int $brk = 0;
         try {
             exec_into($tt, $node->{"body"}, $stash, $sb);
@@ -373,6 +404,17 @@ func invoke_macro(scalar $tt, scalar $macro, scalar $argvals, scalar $stash) str
         Template::Stash::set_local($stash, $params->[$i], $v);
         $i = $i + 1;
     }
+    # Named args arrive (as in TT) as one hash appended to the positional args;
+    # the arg after the declared params, if a hash, is merged in as named vars.
+    my int $np = size(@{$params});
+    if (defined($argvals) && $np < size(@{$argvals})) {
+        my scalar $named = $argvals->[$np];
+        if (defined($named) && ref($named) eq "HASH" && length(blessed($named)) == 0) {
+            foreach my str $nk (keys(%{$named})) {
+                if (Template::Stash::is_private($nk) == 0) { Template::Stash::set_local($stash, $nk, $named->{$nk}); }
+            }
+        }
+    }
     my str $out = "";
     try {
         $out = render_nodes($tt, $macro->{"body"}, $stash);
@@ -490,7 +532,7 @@ func register_blocks(scalar $nodes, scalar $table) void {
             my int $j = 0;
             while ($j < size(@{$branches})) { register_blocks($branches->[$j]->{"body"}, $table); $j = $j + 1; }
             if (defined($node->{"else"})) { register_blocks($node->{"else"}, $table); }
-        } elsif ($t eq "foreach" || $t eq "while" || $t eq "filterblock" || $t eq "wrapper" || $t eq "macrodef") {
+        } elsif ($t eq "foreach" || $t eq "while" || $t eq "filterblock" || $t eq "wrapper" || $t eq "macrodef" || $t eq "capture") {
             register_blocks($node->{"body"}, $table);
         } elsif ($t eq "switch") {
             my scalar $cases = $node->{"cases"};

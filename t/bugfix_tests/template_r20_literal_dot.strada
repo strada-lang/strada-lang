@@ -1,0 +1,26 @@
+# EXPECT: ERR#ERR#ERR#ERR#ERR#ERR#ERR#1|2|3
+# Audit 20 S1 follow-up: TT only applies the dot operator to variables, so
+# 'abc'.length, "a".length, 3.length, [1,2].size, {a=>1}.a and (1+2).length are
+# parse errors (as in Perl TT 3.106); x.length on a variable and list.0.1 work.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR"; }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% 'abc'.length %]", {}));
+    push(@out, r("[% \"a\".length %]", {}));
+    push(@out, r("[% 3.length %]", {}));
+    push(@out, r("[% [1,2].size %]", {}));
+    push(@out, r("[% {a=>1}.a %]", {}));
+    push(@out, r("[% (1+2).length %]", {}));
+    push(@out, r("[% IF 'a'.length %]y[% END %]", {}));
+    push(@out, r("[% x = 3 %][% x.length %]|[% l = [[1,2]] %][% l.0.1 %]|[% s = 'abc' %][% s.length %]", {}));
+    say(join("#", @out));
+    return 0;
+}

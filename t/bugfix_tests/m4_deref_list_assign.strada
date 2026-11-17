@@ -1,0 +1,13 @@
+# EXPECT: 0|3|2|q
+# Audit 20 M4: @{$r} = LIST / %{$r} = LIST replace the referenced container
+# in place (the VM did nothing).
+func main() int {
+    my $ar = [1, 2];
+    @$ar = ();
+    my $n0 = scalar(@$ar);
+    @{$ar} = (5, 6, 7);
+    my $hr = { "a" => 1 };
+    %$hr = ("p" => 1, "q" => 2);
+    say($n0 . "|" . scalar(@$ar) . "|" . scalar(keys(%$hr)) . "|" . join(",", grep { $_ eq "q" } keys(%$hr)));
+    return 0;
+}

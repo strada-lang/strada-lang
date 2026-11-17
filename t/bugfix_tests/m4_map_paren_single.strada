@@ -1,0 +1,12 @@
+# EXPECT: 1 ARRAY|2|1
+# Audit 20 M4: map over a parenthesized single item ("p") iterates once (it
+# is a one-element list); a map block whose value is [..] yields one element
+# per item (the VM flattened it).
+func main() int {
+    my @pairs = map { [$_, 1] } ("p");
+    my @a = ("p", "q");
+    my @p2 = map { [$_, 1] } @a;
+    my @g = grep { $_ eq "p" } ("p");
+    say(scalar(@pairs) . " " . ref($pairs[0]) . "|" . scalar(@p2) . "|" . scalar(@g));
+    return 0;
+}

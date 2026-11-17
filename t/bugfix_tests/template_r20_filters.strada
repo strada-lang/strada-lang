@@ -1,0 +1,21 @@
+# EXPECT: ..|...|ab...|abcd&hellip;|a...|abc#<a>/<b>||3.14#$1b|a$&b|\1b|$2b|-a-c-
+# Audit 20 S1-11: filters vs TT: truncate (suffix cut to the length; HTML
+# entities count as one char), format applied per line, and the replace filter
+# inserting its replacement literally. Expected from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% 'abcdefghij' | truncate(2) %]|[% 'abcdefghij' | truncate(3) %]|[% 'abcdefghij' | truncate(5) %]|[% 'abcdefghij' | truncate(5, '&hellip;') %]|[% 'a&amp;bcdefgh' | truncate(4) %]|[% 'abc' | truncate(5) %]", {}));
+    push(@out, r("[% \"a\\nb\\n\" | format('<%s>') %]|[% \"\" | format('<%s>') %]|[% 3.14159 | format('%.2f') %]", {}));
+    push(@out, r("[% 'ab' | replace('(a)', '\$1') %]|[% 'aXb' | replace('X', '\$&') %]|[% 'ab' | replace('(a)', '\\\\1') %]|[% 'ab' | replace('(a)', '\$2') %]|[% 'abbc' | replace('b*', '-') %]", {}));
+    say(join("#", @out));
+    return 0;
+}

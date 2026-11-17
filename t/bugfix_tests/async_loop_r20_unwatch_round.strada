@@ -1,0 +1,27 @@
+# EXPECT: A|done
+# Audit 20 S3-9: Async::Loop dispatched an event round from a snapshot of
+# the fd's subscriptions, so watcher B still fired after watcher A (earlier
+# in the same round) had removed it with unwatch_sub.
+use lib "lib";
+use Async::Loop;
+func main() int {
+    my scalar $loop = Async::Loop::new();
+    my scalar $p = core::pipe();
+    my int $rfd = $p->[0];
+    core::write_fd($p->[1], "x");
+    my scalar $ids = { a => 0, b => 0 };
+    my array @log = ();
+    $ids->{"a"} = $loop->watch($rfd, "r", fn (int $fd, str $m) {
+        push(@log, "A");
+        $loop->unwatch_sub($rfd, $ids->{"b"});
+        $loop->unwatch_sub($rfd, $ids->{"a"});
+    });
+    $ids->{"b"} = $loop->watch($rfd, "r", fn (int $fd, str $m) {
+        push(@log, "B");
+    });
+    $loop->timer_after(50, fn () { $loop->stop(); });
+    $loop->run();
+    push(@log, "done");
+    say(join("|", @log));
+    return 0;
+}

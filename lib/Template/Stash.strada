@@ -130,12 +130,12 @@ func vmethod(str $vtype, scalar $obj, str $key, scalar $args, scalar $stash) sca
     return $v;
 }
 
-# TT truthiness: undef / "" / "0" / empty list / empty hash are false.
+# TT truthiness (Perl's): undef / "" / "0" are false; any reference -- even
+# an empty list or hash -- is true.
 func is_true(scalar $v) int {
     if (!defined($v)) { return 0; }
     my str $r = ref($v);
-    if ($r eq "ARRAY") { return (size(@{$v}) > 0) ? 1 : 0; }
-    if ($r eq "HASH")  { return (size(keys(%{$v})) > 0) ? 1 : 0; }
+    if ($r ne "") { return 1; }
     if (length(blessed($v)) > 0) { return 1; }
     my str $s = "" . $v;
     if ($s eq "" || $s eq "0") { return 0; }

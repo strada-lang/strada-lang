@@ -1,0 +1,18 @@
+# EXPECT: ERR
+# Audit 20 S1 follow-up: TT allows one postfix directive per statement;
+# x FOREACH x = [1,2] IF 1 is a parse error (as in Perl TT 3.106).
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR"; }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% x FOREACH x = [1,2] IF 1 %]", {}));
+    say(join("#", @out));
+    return 0;
+}

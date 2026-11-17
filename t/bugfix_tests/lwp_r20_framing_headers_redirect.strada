@@ -1,0 +1,21 @@
+# EXPECT: hello|val|a b|a=1, b=2|a=1;b=2|ws|http://h/a/target|http://h/frag#x|http://a/b/g|http://a/g|http://a/b/c/d;p?y|http://a/b/c/h|http://a/b/c/d;p?q|http://g/x|
+# Audit 20 S2-1/S2-2/S2-3 (LWP): the body past Content-Length was returned;
+# repeated headers lost earlier values (Set-Cookie a=1 dropped), OWS was left
+# in values, obs-fold lines were dropped, "Name :" was stored as a field;
+# redirects did not remove dot segments and "#frag" resolved to the directory.
+use lib "lib";
+use LWP;
+func main() int {
+    my hash %r = LWP::parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-T:\tval \r\nX-Long: a\r\n  b\r\nContent-Length: 5\r\n\r\nhelloEXTRA");
+    my str $out = $r{"content"} . "|" . $r{"headers"}->{"x-t"} . "|" . $r{"headers"}->{"x-long"} . "|" . $r{"headers"}->{"set-cookie"} . "|" . join(";", @{$r{"headers_multi"}->{"set-cookie"}}) . "|";
+    my hash %bad = LWP::parse_response("HTTP/1.1 200 OK\r\nContent-Length : 2\r\n\r\nhi");
+    $out = $out . ((index($bad{"error"} // "", "whitespace") >= 0) ? "ws" : "nows") . "|";
+    $out = $out . LWP::_resolve_url("http://h/a/b/rel", "../target") . "|";
+    $out = $out . LWP::_resolve_url("http://h/frag", "#x") . "|";
+    my str $base = "http://a/b/c/d;p?q";
+    foreach my str $ref ("../g", "../../../g", "?y", "g/../h", "", "//g/./x") {
+        $out = $out . LWP::_resolve_url($base, $ref) . "|";
+    }
+    say($out);
+    return 0;
+}

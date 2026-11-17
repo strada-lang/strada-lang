@@ -1,0 +1,25 @@
+# EXPECT: -1|1|-1|1|0|1|-1|-1|1|0|0|1|6
+# Audit 20 S3-3/S3-4: BigInt compare() returned a raw strcmp difference
+# (-5, 5) instead of -1/0/1, and mod() took the sign of the dividend
+# (truncating) while Perl's % and Math::BigInt::bmod are floored (sign of the
+# divisor): -7 mod 2 is 1, 7 mod -2 is -1.
+use lib "lib";
+use Math::BigInt;
+func main() int {
+    my array @o = ();
+    push(@o, BigInt::new("0")->compare(BigInt::new("5")));
+    push(@o, BigInt::new("7")->compare(BigInt::new("2")));
+    push(@o, BigInt::new("-7")->compare(BigInt::new("-2")));
+    push(@o, BigInt::new("-2")->compare(BigInt::new("-7")));
+    push(@o, BigInt::new("12")->compare(BigInt::new("12")));
+    push(@o, BigInt::new("-7")->mod(BigInt::new("2"))->to_str());
+    push(@o, BigInt::new("7")->mod(BigInt::new("-2"))->to_str());
+    push(@o, BigInt::new("-7")->mod(BigInt::new("-2"))->to_str());
+    push(@o, BigInt::new("7")->mod(BigInt::new("2"))->to_str());
+    push(@o, BigInt::new("-6")->mod(BigInt::new("3"))->to_str());
+    push(@o, BigInt::new("6")->mod(BigInt::new("-3"))->to_str());
+    push(@o, BigInt::new("-100000000000000000001")->mod(BigInt::new("10"))->to_str() eq "9" ? 1 : 0);
+    push(@o, BigInt::new("-12")->gcd(BigInt::new("18"))->to_str());
+    say(join("|", @o));
+    return 0;
+}

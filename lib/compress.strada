@@ -271,6 +271,18 @@ static StradaValue* compress_inflate_stream(const char *input, size_t input_len,
         out_pos += (size_t)(out_chunk - strm.avail_out);
         if (ret == Z_STREAM_END) {
             if (window_bits == (15 + 16) && (strm.avail_in > 0 || in_pos < input_len)) {
+                /* Another member follows only if the remaining bytes start
+                   with the gzip magic; anything else (zero padding from
+                   tape/block devices, trailing junk) is ignored, as gzip(1)
+                   and IO::Uncompress::Gunzip do. */
+                unsigned char hd[2];
+                size_t got = 0;
+                for (uInt bi = 0; bi < strm.avail_in && got < 2; bi++)
+                    hd[got++] = strm.next_in[bi];
+                for (size_t bi = in_pos; bi < input_len && got < 2; bi++)
+                    hd[got++] = (unsigned char)input[bi];
+                int more = (got == 2 && hd[0] == 0x1f && hd[1] == 0x8b);
+                if (!more) break;
                 if (inflateReset(&strm) != Z_OK) {
                     ok = 0;
                     break;
@@ -350,7 +362,17 @@ func inflate(str $data) str {
         const char *input = NULL;
         StradaValue *owned = compress_extract_bytes(data, &input, &input_len);
         if (input_len > 0) {
-            int wbits_list[2] = { -15, 15 };
+            /* Try the zlib wrapper first when the input starts with a valid
+               zlib header (CM=8, CINFO<=7, header checksum), otherwise raw
+               deflate first. A zlib stream read as raw deflate can look
+               like a truncated raw stream, so failure of the first attempt
+               never stops the second one. */
+            const unsigned char *u = (const unsigned char *)input;
+            int zlib_hdr = (input_len >= 2 && (u[0] & 0x0f) == 8 && (u[0] >> 4) <= 7
+                            && (((unsigned)u[0] << 8) | u[1]) % 31 == 0);
+            int wbits_list[2];
+            wbits_list[0] = zlib_hdr ? 15 : -15;
+            wbits_list[1] = zlib_hdr ? -15 : 15;
             for (int wi = 0; wi < 2; wi++) {
                 int truncated = 0;
                 StradaValue *out = compress_inflate_stream(input, input_len, wbits_list[wi], &truncated);
@@ -359,7 +381,6 @@ func inflate(str $data) str {
                     result = out;
                     break;
                 }
-                if (truncated) break;
             }
         }
         if (owned) strada_decref(owned);

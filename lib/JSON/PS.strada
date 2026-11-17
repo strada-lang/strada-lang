@@ -582,7 +582,10 @@ func parse_str(scalar $p) str {
                 }
                 $result = $result . JSON::PS::cp_to_utf8($cp);
             } else {
-                $result = $result . $escaped;
+                # RFC 8259 7: no other escapes are valid
+                $p->{"err"} = 1;
+                $p->{"err_msg"} = "Invalid escape sequence in JSON string at char " . $p->{"pos"};
+                return "";
             }
         } else {
             if (core::get_byte($ch, 0) < 32) {

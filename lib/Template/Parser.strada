@@ -205,7 +205,10 @@ func parse_include_header(str $src) scalar {
     my str $name_src = substr($s, 0, $pos);
     my str $rest = trim(substr($s, $pos, $n - $pos));
     my scalar $name_node = undef;
-    if ($first eq "\"" || $first eq "'" || $first eq "\$") {
+    if ($first eq "\$") {
+        # INCLUDE $name: the template named by name's value (not "$name" indirection)
+        $name_node = Template::Expr::parse(substr($name_src, 1, length($name_src) - 1));
+    } elsif ($first eq "\"" || $first eq "'") {
         $name_node = Template::Expr::parse($name_src);
     } else {
         my hash %sn = (); $sn{"t"} = "str"; $sn{"v"} = $name_src; $name_node = \%sn;
@@ -419,25 +422,100 @@ func parse_switch(scalar $st, str $expr_src) scalar {
 }
 
 # ---- simple statements -----------------------------------------------------
-# Parse a non-block statement, honoring a trailing IF/UNLESS modifier
-# ([% NEXT IF x %] => an if-node wrapping the base statement).
+# Parse a non-block statement, honoring one trailing postfix directive, as TT:
+#   STMT IF/UNLESS expr, STMT FOREACH/FOR loopvar, STMT WHILE expr,
+#   STMT WRAPPER name, and (after a directive such as INCLUDE) STMT FILTER f.
+# In "lval = rhs POSTFIX ..." the postfix belongs to rhs and lval is assigned the
+# OUTPUT of "rhs POSTFIX ..." (TT's capture): x = 5 IF 0 sets x to "".
 func parse_statement(str $s) scalar {
     my scalar $pm = find_postfix($s);
     if (defined($pm)) {
-        my scalar $base = parse_statement_base(trim($pm->{"head"}));
+        # only one postfix per statement (TT: x FOREACH x = l IF y is an error)
+        my scalar $pm2 = find_postfix("x " . $pm->{"expr"});
+        if (defined($pm2)) { throw(Template::Exception::make("parse", "unexpected token (" . $pm2->{"kw"} . ")")); }
+        my str $head = trim($pm->{"head"});
+        my str $hkw = leading_keyword($head);
+        my str $hbody = ($hkw eq "SET") ? strip_keyword($head, "SET") : $head;
+        my int $eq = ($hkw eq "" || $hkw eq "SET") ? top_assign_pos($hbody) : -1;
+        if ($eq > 0) {
+            my scalar $rbase = parse_statement_base(trim(substr($hbody, $eq + 1, length($hbody) - $eq - 1)));
+            if (!defined($rbase)) { return undef; }
+            my array @cbody = ();
+            push(@cbody, postfix_node($rbase, $pm));
+            my hash %c = (); $c{"t"} = "capture";
+            $c{"assigns"} = Template::Expr::parse_assignments(substr($hbody, 0, $eq) . " = 0");
+            $c{"body"} = \@cbody;
+            return \%c;
+        }
+        my scalar $base = parse_statement_base($head);
         if (!defined($base)) { return undef; }
-        my scalar $cond = Template::Expr::parse($pm->{"expr"});
-        if ($pm->{"kw"} eq "UNLESS") { $cond = negate_expr($cond); }
-        # NB: `my array @x = (call())` flattens a hashref return in Strada — build
-        # the single-element arrays via push to keep exactly one element.
-        my array @body = ();
-        push(@body, $base);
-        my array @branches = ();
-        push(@branches, branch($cond, \@body));
-        my hash %h = (); $h{"t"} = "if"; $h{"branches"} = \@branches; $h{"else"} = undef;
-        return \%h;
+        return postfix_node($base, $pm);
     }
     return parse_statement_base($s);
+}
+
+# Wrap $base in the directive named by the postfix match $pm ({"kw","expr"}).
+func postfix_node(scalar $base, scalar $pm) scalar {
+    my str $kw = $pm->{"kw"};
+    my str $src = $pm->{"expr"};
+    # NB: `my array @x = (call())` flattens a hashref return in Strada — build
+    # the single-element arrays via push to keep exactly one element.
+    my array @body = ();
+    push(@body, $base);
+    my hash %h = ();
+    if ($kw eq "FOREACH" || $kw eq "FOR") {
+        my scalar $hdr = Template::Expr::parse_foreach_header($src);
+        $h{"t"} = "foreach"; $h{"var"} = $hdr->{"var"}; $h{"list"} = $hdr->{"list"}; $h{"body"} = \@body;
+        return \%h;
+    }
+    if ($kw eq "WHILE") {
+        $h{"t"} = "while"; $h{"cond"} = Template::Expr::parse($src); $h{"body"} = \@body;
+        return \%h;
+    }
+    if ($kw eq "FILTER") {
+        my scalar $spec = Template::Expr::parse_filter_spec($src);
+        $h{"t"} = "filterblock"; $h{"name"} = $spec->{"name"}; $h{"args"} = $spec->{"args"}; $h{"body"} = \@body;
+        return \%h;
+    }
+    if ($kw eq "WRAPPER") {
+        my scalar $hdr = parse_include_header($src);
+        $h{"t"} = "wrapper"; $h{"name"} = $hdr->{"name"}; $h{"params"} = $hdr->{"params"}; $h{"body"} = \@body;
+        return \%h;
+    }
+    my scalar $cond = Template::Expr::parse($src);
+    if ($kw eq "UNLESS") { $cond = negate_expr($cond); }
+    my array @branches = ();
+    push(@branches, branch($cond, \@body));
+    $h{"t"} = "if"; $h{"branches"} = \@branches; $h{"else"} = undef;
+    return \%h;
+}
+
+# Position of the first top-level assignment "=" (not ==, !=, <=, >=, =>),
+# outside quotes and brackets, or -1.
+func top_assign_pos(str $src) int {
+    my int $n = length($src);
+    my int $i = 0;
+    my int $depth = 0;
+    my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($src, $i, 1);
+        if (length($q) > 0) {
+            if ($c eq "\\" && $i + 1 < $n) { $i = $i + 2; next; }
+            if ($c eq $q) { $q = ""; }
+            $i = $i + 1; next;
+        }
+        if ($c eq "'" || $c eq "\"") { $q = $c; }
+        elsif ($c eq "(" || $c eq "[" || $c eq "{") { $depth = $depth + 1; }
+        elsif ($c eq ")" || $c eq "]" || $c eq "}") { if ($depth > 0) { $depth = $depth - 1; } }
+        elsif ($c eq "=" && $depth == 0) {
+            my str $prev = ($i > 0) ? substr($src, $i - 1, 1) : "";
+            my str $nxt = ($i + 1 < $n) ? substr($src, $i + 1, 1) : "";
+            if ($nxt ne "=" && $nxt ne ">" && $prev ne "=" && $prev ne "!" && $prev ne "<" && $prev ne ">") { return $i; }
+            if ($nxt eq "=" || $nxt eq ">") { $i = $i + 1; }
+        }
+        $i = $i + 1;
+    }
+    return -1;
 }
 
 func parse_statement_base(str $s) scalar {
@@ -511,11 +589,17 @@ func in_list(scalar $list, str $v) int {
     return 0;
 }
 
-# Find a top-level trailing IF/UNLESS modifier. Returns {"head","kw","expr"} or
+# Find a top-level trailing postfix keyword (IF/UNLESS/FOREACH/FOR/WHILE/WRAPPER,
+# FILTER after a directive). Returns {"head","kw","expr"} or
 # undef. Scans respecting quotes and () [] {} nesting; the keyword must be a
 # standalone word at depth 0 and not at the very start.
 func find_postfix(str $src) scalar {
     my int $n = length($src);
+    my array @kws = ("IF", "UNLESS", "FOREACH", "FOR", "WHILE", "WRAPPER");
+    # FILTER after a plain expression is the expression-level filter operator
+    # (x FILTER upper); after a directive (INCLUDE b FILTER upper) it is postfix.
+    my str $lk = leading_keyword($src);
+    if ($lk ne "" && $lk ne "GET" && $lk ne "SET" && $lk ne "DEFAULT") { push(@kws, "FILTER"); }
     my int $i = 0;
     my int $depth = 0;
     my str $q = "";
@@ -531,8 +615,10 @@ func find_postfix(str $src) scalar {
         if ($c eq "(" || $c eq "[" || $c eq "{") { $depth = $depth + 1; $i = $i + 1; next; }
         if ($c eq ")" || $c eq "]" || $c eq "}") { if ($depth > 0) { $depth = $depth - 1; } $i = $i + 1; next; }
         if ($depth == 0 && $i > 0 && is_boundary(substr($src, $i - 1, 1)) == 1) {
-            my scalar $m = match_kw_at($src, $i, "IF");
-            if (!defined($m)) { $m = match_kw_at($src, $i, "UNLESS"); }
+            my scalar $m = undef;
+            foreach my str $pk (@kws) {
+                if (!defined($m)) { $m = match_kw_at($src, $i, $pk); }
+            }
             if (defined($m)) { return $m; }
         }
         $i = $i + 1;

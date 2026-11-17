@@ -7997,6 +7997,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if (array_flatten_kind($cg, $elems->[$check_i]) > 0) {
                 $has_array_flatten = 1;
             }
+            # %h / %$r in a list contributes its key/value pairs (Perl)
+            if (hash_list_arg($elems->[$check_i])) {
+                $has_array_flatten = 1;
+            }
             $check_i = $check_i + 1;
         }
 
@@ -8009,7 +8013,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             while ($fi < $elem_count) {
                 my scalar $fl_elem = $elems->[$fi];
                 my int $fkind = array_flatten_kind($cg, $fl_elem);
-                if ($fkind == 1) {
+                my scalar $fl_hl = hash_list_arg($fl_elem);
+                if ($fl_hl) {
+                    emit_hash_pairs_append($cg, "__fl_arr->value.av", $fl_hl);
+                } elsif ($fkind == 1) {
                     # @array: push each (handles both untied and tied arrays).
                     my int $fl_src_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fl_elem) == 1;
                     if ($fl_src_cl == 1) {

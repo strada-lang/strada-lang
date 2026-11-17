@@ -1,0 +1,24 @@
+# EXPECT: [9223372036854775808]|[18446744073709551615,-9223372036854775808]|[18446744073709551615]|undef|undef|strict-throw|ps-undef|ok
+# Audit 20 S2-17/S2-18: JSON::decode accepted invalid escapes such as "\q"
+# (decode_strict did not throw), and integers above INT64_MAX decoded to
+# lossy doubles although encode emits them as exact unsigned integers.
+use lib "lib";
+use JSON;
+use JSON::PS;
+func main() int {
+    my array @r = ();
+    my $u = 9223372036854775807;
+    $u++;
+    push(@r, JSON::encode(JSON::decode(JSON::encode([$u]))));
+    push(@r, JSON::encode(JSON::decode("[18446744073709551615,-9223372036854775808]")));
+    push(@r, JSON::PS::encode(JSON::PS::decode("[18446744073709551615]")));
+    my $bs = "\\";
+    push(@r, defined(JSON::decode("\"" . $bs . "q\"")) ? "accepted" : "undef");
+    push(@r, defined(JSON::decode("\"" . $bs . "a\"")) ? "accepted" : "undef");
+    try { JSON::decode_strict("\"" . $bs . "q\""); push(@r, "strict-accepted"); } catch ($e) { push(@r, "strict-throw"); }
+    push(@r, defined(JSON::PS::decode("\"" . $bs . "q\"")) ? "ps-accepted" : "ps-undef");
+    my $ok = JSON::decode("\"a" . $bs . "/b" . $bs . "n" . $bs . "u00e9\"");
+    push(@r, ($ok eq "a/b\n\x{e9}") ? "ok" : "bad");
+    say(join("|", @r));
+    return 0;
+}

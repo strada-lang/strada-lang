@@ -1,0 +1,19 @@
+# EXPECT: nnyyyyyyynyy
+# Audit 20 S1 follow-up: <, >, <=, >= are Perl's numeric operators in TT:
+# both sides numify (leading number, else 0), so 'abc' < 'abd' is false and
+# '10abc' > 9 is true. Expected output from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% 'abc' < 'abd' ? 'y':'n' %][% '10' < '9' ? 'y':'n' %][% '10abc' > 9 ? 'y':'n' %][% a < 1 ? 'y':'n' %][% 'b' >= 'a' ? 'y':'n' %][% 2 <= 10 ? 'y':'n' %][% '1e1' > 9 ? 'y':'n' %][% ' 3 ' > 2 ? 'y':'n' %][% '.5' > 0.4 ? 'y':'n' %][% '0x10' > 1 ? 'y':'n' %][% '-2' < '-1.5' ? 'y':'n' %][% 1.5 >= '1.50' ? 'y':'n' %]", {}));
+    say(join("#", @out));
+    return 0;
+}

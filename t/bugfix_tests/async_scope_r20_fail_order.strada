@@ -1,0 +1,31 @@
+# EXPECT: caught=boom|cancelled=1|prompt=1|results=x,y
+# Audit 20 S3-8: Async::Scope::wait awaited tasks in spawn order, so a
+# failure in a later-spawned task cancelled its siblings only after every
+# earlier task had finished on its own (here: ~2s instead of ~30ms).
+use lib "lib";
+use Async::Scope;
+func main() int {
+    my scalar $s = Async::Scope::new();
+    my scalar $flag = async::atomic(0);
+    $s->spawn(fn () scalar {
+        my int $i = 0;
+        while ($i < 100) {
+            if (async::cancelled()) { async::atomic_store($flag, 1); return "cancelled"; }
+            async::sleep(20);
+            $i++;
+        }
+        return "finished";
+    });
+    $s->spawn(fn () scalar { async::sleep(30); throw "boom"; });
+    my int $t0 = core::mono_ms();
+    my str $caught = "none";
+    try { my array @x = $s->wait(); } catch ($e) { $caught = "" . $e; }
+    my int $prompt = (core::mono_ms() - $t0) < 1000 ? 1 : 0;
+    # Success path: results still come back in spawn order.
+    my scalar $s2 = Async::Scope::new();
+    $s2->spawn(fn () scalar { async::sleep(40); return "x"; });
+    $s2->spawn(fn () scalar { return "y"; });
+    my array @r = $s2->wait();
+    say("caught=" . $caught . "|cancelled=" . async::atomic_load($flag) . "|prompt=" . $prompt . "|results=" . join(",", @r));
+    return 0;
+}

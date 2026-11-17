@@ -1,0 +1,20 @@
+# EXPECT: -a-b-c-|-a-b-c-|-abc
+# Audit 20 S1 follow-up: replace with an empty pattern matches the empty
+# string at every position ("abc" -> "-a-b-c-"), as Perl TT does in a fresh
+# process (Perl reuses the last successful pattern for //, so TT's result can
+# depend on earlier regex use; Strada always uses the empty pattern).
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% v='abc'; v.replace('', '-') %]|[% v | replace('', '-') %]|[% v.replace('', '-', 0) %]", {}));
+    say(join("#", @out));
+    return 0;
+}

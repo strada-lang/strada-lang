@@ -1,0 +1,22 @@
+# EXPECT: ne|eq|ne|y#T|T|T||T#1000#ERR while error - WHILE loop terminated (> 1000 iterations)
+# Audit 20 S1-11: TT's == and != compare as strings ('1.0' == '1' is false);
+# an empty list or hash is true (any reference is); WHILE stops after 1000
+# iterations with a 'while' error. Expected from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% IF a == b %]eq[% ELSE %]ne[% END %]|[% IF a == c %]eq[% ELSE %]ne[% END %]|[% IF a != b %]ne[% END %]|[% 1 == 1.0 ? 'y' : 'n' %]", {"a" => "1.0", "b" => "1", "c" => "1.0"}));
+    push(@out, r("[% IF l %]T[% ELSE %]F[% END %]|[% IF h %]T[% ELSE %]F[% END %]|[% IF [] %]T[% END %]|[% UNLESS {} %]U[% END %]|[% x = []; x ? 'T' : 'F' %]", {"l" => [], "h" => {}}));
+    push(@out, r("[% i = 0; WHILE i < 1000; i = i + 1; END %][% i %]", {}));
+    push(@out, r("[% i = 0; WHILE i < 2000; i = i + 1; END %][% i %]", {}));
+    say(join("#", @out));
+    return 0;
+}

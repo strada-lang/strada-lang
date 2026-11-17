@@ -1947,6 +1947,55 @@ static char* dbi_column_str_len(DbiStatement *sth, int idx, unsigned long *out_l
     }
 }
 
+/* True if the column holds character TEXT that should come back as a
+ * character (UTF-8 flagged) string. SQLite stores TEXT as UTF-8; BLOBs stay
+ * byte strings. Must be called before dbi_column_str_len (sqlite3_column_type
+ * is unreliable after a type conversion). */
+static int dbi_column_is_utf8_text(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh || idx < 0 || idx >= sth->num_columns) return 0;
+#ifdef HAVE_SQLITE3
+    if (sth->dbh->driver == DBI_DRIVER_SQLITE && sth->stmt) {
+        return sqlite3_column_type((sqlite3_stmt*)sth->stmt, idx) == SQLITE_TEXT;
+    }
+#endif
+    return 0;
+}
+
+/* 1 if s[0..len) is well-formed UTF-8 containing at least one non-ASCII
+ * character, 0 otherwise (pure ASCII or invalid bytes). */
+static int dbi_is_nonascii_utf8(const unsigned char *s, unsigned long len) {
+    int hi = 0;
+    unsigned long i = 0;
+    while (i < len) {
+        unsigned char c = s[i];
+        if (c < 0x80) { i++; continue; }
+        hi = 1;
+        unsigned long n;
+        unsigned int cp;
+        if (c >= 0xC2 && c <= 0xDF)      { n = 1; cp = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { n = 2; cp = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { n = 3; cp = c & 0x07; }
+        else return 0;
+        for (unsigned long k = 1; k <= n; k++) {
+            if (i + k >= len || (s[i + k] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (s[i + k] & 0x3F);
+        }
+        if ((n == 2 && cp < 0x800) || (n == 3 && (cp < 0x10000 || cp > 0x10FFFF))
+            || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+        i += n + 1;
+    }
+    return hi;
+}
+
+/* Build a fetched string value; non-ASCII valid UTF-8 text gets SVf_UTF8. */
+static StradaValue *dbi_new_column_sv(const char *str, unsigned long slen, int is_text) {
+    StradaValue *sv = strada_new_str_len(str, slen);
+    if (is_text && dbi_is_nonascii_utf8((const unsigned char *)str, slen)) {
+        STRADA_SET_UTF8_FLAG(sv);
+    }
+    return sv;
+}
+
 static char* dbi_column_str(DbiStatement *sth, int idx) {
     unsigned long unused = 0;
     return dbi_column_str_len(sth, idx, &unused);
@@ -2543,6 +2592,27 @@ func execute(scalar $sth, scalar $params) int {
 
     my int $sth_ptr = $sth->{"_ptr"};
 
+    # Like Perl DBI: the number of bind values must match the placeholders.
+    if (defined($params)) {
+        my int $nbind = scalar($params);
+        my int $count_ok = 1;
+        __C__ {
+            DbiStatement *sc = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+            int have = (int)strada_to_int(nbind);
+            if (sc && sc->dbh && have != sc->num_params) {
+                char ebuf[160];
+                snprintf(ebuf, sizeof(ebuf), "execute called with %d bind variable%s when %d %s needed",
+                         have, have == 1 ? "" : "s", sc->num_params, sc->num_params == 1 ? "is" : "are");
+                strada_decref(count_ok);
+                count_ok = strada_new_int(0);
+                dbi_set_error(sc->dbh, -1, ebuf);   /* throws under RaiseError */
+            }
+        }
+        if ($count_ok == 0) {
+            return -1;
+        }
+    }
+
     __C__ {
         DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
         dbi_clear_bindings(s);
@@ -2632,9 +2702,10 @@ func fetchrow_array(scalar $sth) scalar {
                     num_val = strada_new_num(dbi_column_num(s, idx));
                 } else {
                     unsigned long slen = 0;
+                    int is_text = dbi_column_is_utf8_text(s, idx);
                     char *str = dbi_column_str_len(s, idx, &slen);
                     strada_decref(str_val);
-                    str_val = strada_new_str_len(str, slen);
+                    str_val = dbi_new_column_sv(str, slen, is_text);
                     free(str);
                 }
             }
@@ -2709,9 +2780,10 @@ func fetchrow_hashref(scalar $sth) scalar {
                     num_val = strada_new_num(dbi_column_num(s, idx));
                 } else {
                     unsigned long slen = 0;
+                    int is_text = dbi_column_is_utf8_text(s, idx);
                     char *str = dbi_column_str_len(s, idx, &slen);
                     strada_decref(str_val);
-                    str_val = strada_new_str_len(str, slen);
+                    str_val = dbi_new_column_sv(str, slen, is_text);
                     free(str);
                 }
             }

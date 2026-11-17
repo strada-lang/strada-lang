@@ -25695,7 +25695,8 @@ static StradaValue* strada_join_stringify_elem(StradaValue *el) {
         strada_cleanup_drain_to(cm);
         return part;
     }
-    if (!STRADA_IS_TAGGED_INT(el) && el->type == STRADA_REF && !SV_NEEDS_STR_DISPATCH(el)) {
+    if (!STRADA_IS_TAGGED_INT(el) && (el->type == STRADA_REF || el->type == STRADA_ARRAY || el->type == STRADA_HASH)
+        && !SV_NEEDS_STR_DISPATCH(el)) {
         int cm = strada_cleanup_mark();
         char *s = strada_to_str(el);
         if (s) strada_cleanup_push(strada_cstruct_guard(s));
@@ -25802,7 +25803,9 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
     size_t n = arr->size;
     int any_hook = (sep_sv && !strada_sv_is_hookfree_str_src(sep_sv)) ? 1 : 0;
     for (size_t i = 0; i < n && !any_hook; i++) {
-        if (!strada_sv_is_hookfree_str_src(arr->elements[arr->head + i])) {
+        StradaValue *je = arr->elements[arr->head + i];
+        /* an array element is a reference value here: ARRAY(0x...) (slow path) */
+        if (!strada_sv_is_hookfree_str_src(je) || (je && !STRADA_IS_TAGGED_INT(je) && je->type == STRADA_ARRAY)) {
             any_hook = 1;
         }
     }

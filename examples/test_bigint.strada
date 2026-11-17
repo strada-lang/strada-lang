@@ -118,7 +118,7 @@ func main() int {
     $t1 = BigInt::new("-100");
     $t2 = BigInt::new("3");
     $r = $t1->div($t2);
-    ok($r->to_str() eq "-33", "div negative");
+    ok($r->to_str() eq "-34", "div negative floors (Perl bdiv)");
 
     $t1 = BigInt::new("0");
     $t2 = BigInt::new("5");

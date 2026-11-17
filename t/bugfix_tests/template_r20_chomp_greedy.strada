@@ -1,0 +1,18 @@
+# EXPECT: xfy|ab / c|d//ef
+# Audit 20 S1-6: the '~' chomp flag is TT's CHOMP_GREEDY: it removes all
+# whitespace (newlines included) next to the tag. Expected from Perl TT.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("x  \n[%~ 'f' ~%]\n  y|a \n [%~ 'b' %] \n c|d\n\n[% 'e' ~%]\n\n f", {}));
+    say(join("#", @out));
+    return 0;
+}

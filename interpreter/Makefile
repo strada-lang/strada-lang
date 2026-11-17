@@ -94,7 +94,9 @@ INTERP_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Ofast,$(CFLAGS)) $(INTERP_FRONT_OP
 INTERP_FRONT_OBJ = interp_Combined$(INTERP_FRONT_OPT).o
 INTERP_OBJS = $(INTERP_FRONT_OBJ) interp_vm.o interp_vm_compiler.o interp_runtime.o
 
-$(INTERP_FRONT_OBJ): Combined.c $(RUNTIME_DIR)/strada_runtime.h
+# Combined.c's __C__ blocks (Main.strada) include vm.h / vm_compiler.h, so a
+# VM struct change must rebuild this object too (layout mismatch otherwise).
+$(INTERP_FRONT_OBJ): Combined.c $(RUNTIME_DIR)/strada_runtime.h vm.h vm_compiler.h
 	$(CC) $(INTERP_CFLAGS) -I. -c Combined.c -o $@
 
 interp_vm.o: vm.c vm.h vm_generic_builtins.inc $(RUNTIME_DIR)/strada_runtime.h

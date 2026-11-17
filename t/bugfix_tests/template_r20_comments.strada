@@ -1,0 +1,20 @@
+# EXPECT: 1#1||2|#|i
+# Audit 20 S1-5: '#' starts a line comment inside a directive (an apostrophe
+# in it no longer reads as an unterminated string); the whole tag is a comment
+# only when '#' directly follows the start tag. Expected from Perl TT.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% # whole line comment\nx = 1 # trailing\n%][% x %]", {}));
+    push(@out, r("[% x = 1 # don't\n %][% x %]|[%# whole ' %]|[% y = 2 # trailing %][% y %]|[% z = '#' # c\n %][% z %]|[% IF 1 # c\n %]i[% END # end %]", {}));
+    say(join("#", @out));
+    return 0;
+}

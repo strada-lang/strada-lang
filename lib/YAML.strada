@@ -265,6 +265,24 @@ func hex_val(str $ch) int {
     return -1;
 }
 
+# Value of $n hex digits of $s starting at $start, or -1 if any is missing/invalid
+func hex_digits_val(str $s, int $start, int $n) int {
+    if ($start + $n > length($s)) {
+        return -1;
+    }
+    my int $v = 0;
+    my int $k = 0;
+    while ($k < $n) {
+        my int $h = YAML::hex_val(substr($s, $start + $k, 1));
+        if ($h < 0) {
+            return -1;
+        }
+        $v = $v * 16 + $h;
+        $k = $k + 1;
+    }
+    return $v;
+}
+
 # Process escape sequences in double-quoted strings
 func process_escapes(str $s) str {
     my str $result = "";
@@ -316,6 +334,53 @@ func process_escapes(str $s) str {
                     $result = $result . $ch;
                     $i = $i + 1;
                 }
+            } elsif ($next eq "u" || $next eq "U") {
+                # \uXXXX / \UXXXXXXXX (a \u surrogate pair is combined)
+                my int $nd = ($next eq "u") ? 4 : 8;
+                my int $cp = YAML::hex_digits_val($s, $i + 2, $nd);
+                if ($cp < 0) {
+                    throw "YAML parse error: invalid \\" . $next . " escape in double-quoted string";
+                }
+                $i = $i + 2 + $nd;
+                if ($cp >= 0xD800 && $cp <= 0xDBFF && $i + 5 < $len &&
+                    substr($s, $i, 2) eq "\\u") {
+                    my int $lo = YAML::hex_digits_val($s, $i + 2, 4);
+                    if ($lo >= 0xDC00 && $lo <= 0xDFFF) {
+                        $cp = 0x10000 + ($cp - 0xD800) * 1024 + ($lo - 0xDC00);
+                        $i = $i + 6;
+                    }
+                }
+                if ($cp > 0x10FFFF) {
+                    throw "YAML parse error: invalid \\U escape in double-quoted string";
+                }
+                $result = $result . chr($cp);
+            } elsif ($next eq "N") {
+                $result = $result . chr(0x85);
+                $i = $i + 2;
+            } elsif ($next eq "_") {
+                $result = $result . chr(0xA0);
+                $i = $i + 2;
+            } elsif ($next eq "L") {
+                $result = $result . chr(0x2028);
+                $i = $i + 2;
+            } elsif ($next eq "P") {
+                $result = $result . chr(0x2029);
+                $i = $i + 2;
+            } elsif ($next eq "e") {
+                $result = $result . chr(27);
+                $i = $i + 2;
+            } elsif ($next eq "a") {
+                $result = $result . chr(7);
+                $i = $i + 2;
+            } elsif ($next eq "v") {
+                $result = $result . chr(11);
+                $i = $i + 2;
+            } elsif ($next eq " ") {
+                $result = $result . " ";
+                $i = $i + 2;
+            } elsif ($next eq "\t") {
+                $result = $result . "\t";
+                $i = $i + 2;
             } else {
                 # Unknown escape, keep as-is
                 $result = $result . $ch;
@@ -542,7 +607,8 @@ func parse_value_d(str $s, int $depth) scalar {
     my int $len = length($trimmed);
 
     if ($len == 0) {
-        return "";
+        # An empty node is null (YAML 1.1/1.2), as for "- " sequence entries
+        return undef;
     }
 
     # Check for quoted string
@@ -588,12 +654,85 @@ func parse_value_d(str $s, int $depth) scalar {
     # Check if it looks like a number
     if (YAML::looks_like_num($trimmed)) {
         if (index($trimmed, ".") < 0 && index($trimmed, "e") < 0 && index($trimmed, "E") < 0) {
+            # 19+ digits may not fit int64: numify like Perl (IV -> UV -> NV)
+            # instead of saturating
+            my str $digits = $trimmed;
+            my str $sg = substr($trimmed, 0, 1);
+            if ($sg eq "-" || $sg eq "+") {
+                $digits = substr($trimmed, 1, length($trimmed) - 1);
+            }
+            if (length($digits) >= 19) {
+                return $trimmed + 0;
+            }
             return cast_int($trimmed);
         }
         return $trimmed + 0;
     }
 
     return $trimmed;
+}
+
+# Parse a value that starts on the current line ($s) and may continue as a
+# multi-line plain scalar: following lines indented more than $min_indent are
+# folded in (a line break becomes a space, each blank line a newline), as in
+# YAML 1.1/1.2. Quoted and flow values are parsed as single-line values.
+func parse_value_folded(scalar $state, str $s, int $min_indent) scalar {
+    my str $first = YAML::strip_comment($s);
+    my str $c0 = substr($first, 0, 1);
+    if (length($first) == 0 || $c0 eq "\"" || $c0 eq "'" || $c0 eq "[" || $c0 eq "{" ||
+        length($first) != length(YAML::trim($s))) {
+        # empty, quoted, flow, or the line ended in a comment
+        return YAML::parse_value($s);
+    }
+    my scalar $lines = $state->{"lines"};
+    my int $count = $state->{"count"};
+    my int $p = $state->{"pos"};
+    my str $folded = $first;
+    my int $blanks = 0;
+    my int $more = 0;
+    while ($p < $count) {
+        my str $ln = $lines->[$p];
+        my str $t = YAML::trim($ln);
+        if ($t eq "") {
+            $blanks = $blanks + 1;
+            $p = $p + 1;
+            next;
+        }
+        my int $ind = YAML::get_indent($ln);
+        if ($ind <= $min_indent || substr($t, 0, 1) eq "#") {
+            last;
+        }
+        if ($ind == 0 && (YAML::is_doc_end($ln) == 1 || YAML::is_doc_start($ln) == 1)) {
+            last;
+        }
+        my str $piece = YAML::strip_comment($t);
+        if (YAML::find_mapping_colon($piece) > 0) {
+            # "key: value" is not a continuation; leave it to the caller
+            last;
+        }
+        if ($blanks == 0) {
+            $folded = $folded . " ";
+        } else {
+            my int $b = 0;
+            while ($b < $blanks) {
+                $folded = $folded . "\n";
+                $b = $b + 1;
+            }
+        }
+        $folded = $folded . $piece;
+        $blanks = 0;
+        $more = 1;
+        $p = $p + 1;
+        $state->{"pos"} = $p;
+        if (length($piece) != length($t)) {
+            # a comment ends the scalar
+            last;
+        }
+    }
+    if ($more == 0) {
+        return YAML::parse_value($s);
+    }
+    return $folded;
 }
 
 # Check if a string looks like a number (decimal int/float/scientific)
@@ -862,7 +1001,8 @@ func is_doc_end(str $line) int {
 
 # Main YAML Load function - parse YAML string into Strada data structure
 func Load(str $yaml) scalar {
-    my array @lines = split("\n", $yaml);
+    # limit -1 keeps trailing blank lines (needed by "|+" keep chomping)
+    my array @lines = split("\n", $yaml, -1);
     if (length($yaml) > 0 && substr($yaml, length($yaml) - 1, 1) eq "\n" &&
         size(@lines) > 0 && $lines[size(@lines) - 1] eq "") {
         pop(@lines);
@@ -894,7 +1034,16 @@ func Load(str $yaml) scalar {
         }
     }
 
-    return YAML::parse_block($state, 0);
+    my scalar $doc = YAML::parse_block($state, 0);
+    # Everything up to the end of the document must have been consumed
+    while ($state->{"pos"} < $line_count && YAML::is_empty_or_comment($lines[$state->{"pos"}])) {
+        $state->{"pos"} = $state->{"pos"} + 1;
+    }
+    if ($state->{"pos"} < $line_count && YAML::is_doc_end($lines[$state->{"pos"}]) == 0 &&
+        YAML::is_doc_start($lines[$state->{"pos"}]) == 0) {
+        throw "YAML parse error: unexpected content at line " . ($state->{"pos"} + 1);
+    }
+    return $doc;
 }
 
 # Parse a block of YAML at a given indentation level
@@ -952,9 +1101,10 @@ func parse_block_inner(scalar $state, int $base_indent) scalar {
         return YAML::parse_hash($state, $indent);
     }
 
-    # Simple value
+    # Simple value (a multi-line plain scalar continues on lines indented
+    # at least as far as the block)
     $state->{"pos"} = $state->{"pos"} + 1;
-    return YAML::parse_value($content);
+    return YAML::parse_value_folded($state, $content, $base_indent - 1);
 }
 
 # Parse a hash (key: value pairs)
@@ -988,8 +1138,9 @@ func parse_hash(scalar $state, int $base_indent) scalar {
         # Parse key: value
         my int $colon_pos = YAML::find_mapping_colon($content);
         if ($colon_pos <= 0) {
-            # Not a key-value line, done
-            return $result;
+            # A line at or inside this mapping that is not "key: value"
+            # (continuation lines were already folded into the value)
+            throw "YAML parse error: unexpected content at line " . ($state->{"pos"} + 1);
         }
 
         my str $key = YAML::unquote_key(substr($content, 0, $colon_pos));
@@ -1006,7 +1157,7 @@ func parse_hash(scalar $state, int $base_indent) scalar {
             if (YAML::is_block_scalar_spec($after_colon) == 1) {
                 $result->{$key} = YAML::parse_block_scalar($state, $indent, $after_colon);
             } else {
-                $result->{$key} = YAML::parse_value($after_colon);
+                $result->{$key} = YAML::parse_value_folded($state, $after_colon, $indent);
             }
         } else {
             # Value might be on next lines (nested structure)
@@ -1025,10 +1176,10 @@ func parse_hash(scalar $state, int $base_indent) scalar {
                     $result->{$key} = YAML::parse_block($state, $next_indent);
                 } else {
                     # Empty value
-                    $result->{$key} = "";
+                    $result->{$key} = undef;
                 }
             } else {
-                $result->{$key} = "";
+                $result->{$key} = undef;
             }
         }
     }
@@ -1069,17 +1220,31 @@ func parse_array(scalar $state, int $base_indent) scalar {
             return $result;
         }
 
-        # Get content after -
+        # Get content after - (and the column it starts at)
         my str $after_dash = "";
+        my int $key_col = $indent + 2;
         if (length($content) > 1) {
             $after_dash = substr($content, 1, length($content) - 1);
-            if (length($after_dash) > 0 && substr($after_dash, 0, 1) eq " ") {
-                $after_dash = substr($after_dash, 1, length($after_dash) - 1);
+            my int $ws = 0;
+            while ($ws < length($after_dash) && (substr($after_dash, $ws, 1) eq " " || substr($after_dash, $ws, 1) eq "\t")) {
+                $ws = $ws + 1;
             }
+            $key_col = $indent + 1 + $ws;
+            $after_dash = substr($after_dash, $ws, length($after_dash) - $ws);
         }
         $after_dash = YAML::strip_comment($after_dash);
 
         $state->{"pos"} = $state->{"pos"} + 1;
+
+        if (substr($after_dash, 0, 2) eq "- " || $after_dash eq "-") {
+            # Compact nested sequence ("- - x"): the entry is a block sequence
+            # whose first item sits on this line at column $key_col
+            $state->{"pos"} = $state->{"pos"} - 1;
+            my str $raw_line = $lines->[$state->{"pos"}];
+            $lines->[$state->{"pos"}] = YAML::make_indent($key_col) . substr($raw_line, $key_col, length($raw_line) - $key_col);
+            push($result, YAML::parse_block($state, $key_col));
+            next;
+        }
 
         if (length($after_dash) > 0) {
             # Check if after dash is an inline hash or a mapping entry (colon followed by space/tab/EOL outside quotes)
@@ -1099,9 +1264,9 @@ func parse_array(scalar $state, int $base_indent) scalar {
 
                 if (length($val_str) > 0) {
                     if (YAML::is_block_scalar_spec($val_str) == 1) {
-                        $item->{$key} = YAML::parse_block_scalar($state, $indent + 2, $val_str);
+                        $item->{$key} = YAML::parse_block_scalar($state, $key_col, $val_str);
                     } else {
-                        $item->{$key} = YAML::parse_value($val_str);
+                        $item->{$key} = YAML::parse_value_folded($state, $val_str, $key_col);
                     }
                 } else {
                     my int $look = $state->{"pos"};
@@ -1116,10 +1281,10 @@ func parse_array(scalar $state, int $base_indent) scalar {
                             $state->{"pos"} = $look;
                             $item->{$key} = YAML::parse_block($state, $sub_indent);
                         } else {
-                            $item->{$key} = "";
+                            $item->{$key} = undef;
                         }
                     } else {
-                        $item->{$key} = "";
+                        $item->{$key} = undef;
                     }
                 }
 
@@ -1149,7 +1314,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
                                     if (YAML::is_block_scalar_spec($next_val_str) == 1) {
                                         $item->{$next_key} = YAML::parse_block_scalar($state, $next_indent, $next_val_str);
                                     } else {
-                                        $item->{$next_key} = YAML::parse_value($next_val_str);
+                                        $item->{$next_key} = YAML::parse_value_folded($state, $next_val_str, $next_indent);
                                     }
                                 } else {
                                     # Check for nested structure
@@ -1163,10 +1328,10 @@ func parse_array(scalar $state, int $base_indent) scalar {
                                         if ($sub_indent > $next_indent || ($sub_indent == $next_indent && (substr($sub_trim, 0, 2) eq "- " || $sub_trim eq "-"))) {
                                             $item->{$next_key} = YAML::parse_block($state, $sub_indent);
                                         } else {
-                                            $item->{$next_key} = "";
+                                            $item->{$next_key} = undef;
                                         }
                                     } else {
-                                        $item->{$next_key} = "";
+                                        $item->{$next_key} = undef;
                                     }
                                 }
                             } else {
@@ -1181,7 +1346,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
                 push($result, YAML::parse_block_scalar($state, $indent, $after_dash));
             } else {
                 # Simple value
-                push($result, YAML::parse_value($after_dash));
+                push($result, YAML::parse_value_folded($state, $after_dash, $indent));
             }
         } else {
             # Check next line for nested content
@@ -1208,7 +1373,7 @@ func parse_array(scalar $state, int $base_indent) scalar {
 }
 
 # Internal: read raw block scalar text along with leading/trailing blank metadata
-private func _read_block_scalar_raw(scalar $state, int $base_indent) hash {
+private func _read_block_scalar_raw(scalar $state, int $base_indent, int $explicit_indent) hash {
     my str $result = "";
     my scalar $lines = $state->{"lines"};
     my int $count = $state->{"count"};
@@ -1248,6 +1413,12 @@ private func _read_block_scalar_raw(scalar $state, int $base_indent) hash {
         # Set block indent on first content line
         if ($block_indent < 0) {
             $block_indent = $indent;
+            if ($explicit_indent > 0) {
+                if ($indent < $explicit_indent) {
+                    throw "YAML parse error: block scalar line indented less than block indent";
+                }
+                $block_indent = $explicit_indent;
+            }
             my int $lb = 0;
             while ($lb < $leading_blanks) {
                 $result = $result . "\n";
@@ -1290,9 +1461,38 @@ func clean_block_spec(str $s) str {
     return YAML::trim(YAML::strip_comment($s));
 }
 
-func is_block_scalar_spec(str $s) int {
+# Block scalar header: "|" or ">" then an optional indentation indicator
+# (1-9) and an optional chomping indicator (+/-), in either order.
+# Returns [chomp, explicit_indent] (indent 0 = auto-detect) or undef.
+func parse_block_header(str $s) scalar {
     my str $c = YAML::clean_block_spec($s);
-    if ($c eq "|" || $c eq "|-" || $c eq "|+" || $c eq ">" || $c eq ">-" || $c eq ">+") {
+    my int $len = length($c);
+    if ($len == 0 || $len > 3) {
+        return undef;
+    }
+    my str $style = substr($c, 0, 1);
+    if ($style ne "|" && $style ne ">") {
+        return undef;
+    }
+    my str $chomp = "";
+    my int $ind = 0;
+    my int $i = 1;
+    while ($i < $len) {
+        my str $ch = substr($c, $i, 1);
+        if (($ch eq "+" || $ch eq "-") && $chomp eq "") {
+            $chomp = $ch;
+        } elsif ($ch ge "1" && $ch le "9" && $ind == 0) {
+            $ind = ord($ch) - 48;
+        } else {
+            return undef;
+        }
+        $i = $i + 1;
+    }
+    return [$chomp, $ind];
+}
+
+func is_block_scalar_spec(str $s) int {
+    if (defined(YAML::parse_block_header($s))) {
         return 1;
     }
     return 0;
@@ -1301,8 +1501,17 @@ func is_block_scalar_spec(str $s) int {
 func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
     $spec = YAML::clean_block_spec($spec);
     my int $is_folded = (substr($spec, 0, 1) eq ">") ? 1 : 0;
-    my str $chomp = (length($spec) >= 2) ? substr($spec, 1, 1) : "";
-    my hash %info = YAML::_read_block_scalar_raw($state, $base_indent);
+    my scalar $hdr = YAML::parse_block_header($spec);
+    if (!defined($hdr)) {
+        throw "YAML parse error: invalid block scalar header '" . $spec . "'";
+    }
+    my str $chomp = $hdr->[0];
+    my int $explicit = 0;
+    if ($hdr->[1] > 0) {
+        # Indentation indicator: content indent relative to the parent node
+        $explicit = (($base_indent >= 0) ? $base_indent : 0) + $hdr->[1];
+    }
+    my hash %info = YAML::_read_block_scalar_raw($state, $base_indent, $explicit);
     my int $has_content = $info{"has_content"};
     if ($has_content == 0) {
         if ($chomp eq "+") {
@@ -1324,18 +1533,41 @@ func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
         my str $folded = "";
         my int $n = size(@lines);
         my int $li = 0;
-        my int $prev_blank = 1;
+        my int $blanks = 0;
+        my int $seen = 0;
+        my int $prev_more = 0;
         while ($li < $n) {
             my str $ln = $lines[$li];
             if (length($ln) == 0) {
-                $folded = $folded . "\n";
-                $prev_blank = 1;
+                $blanks = $blanks + 1;
             } else {
-                if ($li > 0 && $prev_blank == 0) {
+                # Lines indented more than the block (starting with
+                # whitespace) are not folded: their line breaks are kept
+                my str $lc0 = substr($ln, 0, 1);
+                my int $more = ($lc0 eq " " || $lc0 eq "\t") ? 1 : 0;
+                if ($seen == 0) {
+                    my int $b0 = 0;
+                    while ($b0 < $blanks) {
+                        $folded = $folded . "\n";
+                        $b0 = $b0 + 1;
+                    }
+                } elsif ($blanks == 0 && $more == 0 && $prev_more == 0) {
                     $folded = $folded . " ";
+                } else {
+                    my int $nb = $blanks;
+                    if ($more == 1 || $prev_more == 1) {
+                        $nb = $nb + 1;
+                    }
+                    my int $b1 = 0;
+                    while ($b1 < $nb) {
+                        $folded = $folded . "\n";
+                        $b1 = $b1 + 1;
+                    }
                 }
                 $folded = $folded . $ln;
-                $prev_blank = 0;
+                $blanks = 0;
+                $seen = 1;
+                $prev_more = $more;
             }
             $li = $li + 1;
         }
@@ -1398,10 +1630,17 @@ func dump_value_d(scalar $value_in, int $indent, int $depth) str {
     my str $rtype = ref($value);
 
     if ($rtype eq "HASH") {
+        if ($depth == 0 && size(keys($value)) == 0) {
+            # Empty top-level mapping: flow form so it loads back as {}
+            return "{}\n";
+        }
         return YAML::dump_hash_d($value, $indent, $depth);
     }
 
     if ($rtype eq "ARRAY") {
+        if ($depth == 0 && size($value) == 0) {
+            return "[]\n";
+        }
         return YAML::dump_array_d($value, $indent, $depth);
     }
 

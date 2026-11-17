@@ -1,0 +1,21 @@
+# EXPECT: Y|Y|A|Y|Y|y||5|6|a|3#B|B
+# Audit 20 S1 follow-up: a bare $x / ${expr} is the variable NAMED by the value
+# (TT), also as an assignment target ($x = 5, hh.$k = 3, DEFAULT $x) and as a
+# FOREACH list; "$x" interpolation and INCLUDE $name still use the value.
+# Expected output from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% x = 'y'; y = 'Y'; n = 'h'; h = {a=>'A'} %][% \$x %]|[% \${x} %]|[% \$n.a %]|[% \${'y'} %]|[% \${\"\$x\"} %]|[% \"\$x\" %]|[% \$nope %]|[% x = 'y' %][% \$x = 5 %][% y %]|[% SET \$x = 6 %][% y %]|[% l = ['a'] %][% k = 'l' %][% FOREACH i IN \$k %][% i %][% END %]|[% hh = {} %][% kk = 'q' %][% hh.\$kk = 3 %][% hh.q %]", {}));
+    push(@out, r("[% BLOCK b %]B[% END %][% f = 'b' %][% INCLUDE \$f %]|[% INCLUDE \"\$f\" %]", {}));
+    say(join("#", @out));
+    return 0;
+}

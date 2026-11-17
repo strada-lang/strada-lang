@@ -1,0 +1,22 @@
+# EXPECT: a  x|by|  z|p  q|r  s|t /u/ v#w|x
+# Audit 20 S1 follow-up: the '-' chomp flag (CHOMP_ONE) removes whitespace
+# only up to and including one newline: [%- removes trailing blanks plus the
+# newline before them (or the blanks alone if they are all the text), -%]
+# removes leading blanks plus a newline; neither touches blanks with no
+# newline. Expected output from Perl TT 3.106 (newlines shown as /).
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("a  [%- 'x' %]|b\n  [%- 'y' %]|  [%- 'z' %]|[% 'p' -%]  q|[% 'r' -%]  \n  s|t \n\n [%- 'u' -%] \n\n v", {}));
+    push(@out, r("  [%- 'w' %]|x", {}));
+    say(join("#", @out));
+    return 0;
+}

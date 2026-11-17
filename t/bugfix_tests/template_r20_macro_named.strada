@@ -1,0 +1,23 @@
+# EXPECT: a=1,b=2,c=C;a=1,b=3,c=;a=1,b=2,c=D;a=1,b=2,c=E;#1C
+# Audit 20 S1-8: named MACRO args. As in TT, name=value args are collected into
+# one hash appended after the positional args; the arg after the declared
+# params, if a hash, is merged in as variables (named args override). Note TT
+# binds that hash to a declared param when fewer positionals are given
+# (m(b=2, a=1) on m(a, b) makes a the hash) -- not exercised here.
+# Expected output from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% MACRO m(a, b) BLOCK %]a=[% a %],b=[% b %],c=[% c %];[% END %][% m(1, 2, c='C') %][% m(1,2,b=3) %][% m(1, 2, c=>'D') %][% m(1, 2, 'c' = 'E') %]", {}));
+    push(@out, r("[% MACRO n(a) BLOCK %][% a %][% c %][% END %][% n(1, c='C') %]", {}));
+    say(join("#", @out));
+    return 0;
+}

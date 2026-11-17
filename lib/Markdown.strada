@@ -52,6 +52,26 @@ private func is_alnum_char(str $ch) int {
     return 0;
 }
 
+# True if the tags inserted by earlier emphasis passes are balanced within $s
+# (the text is HTML-escaped before emphasis, so every "<" is an inserted tag).
+# A delimiter pair whose content is unbalanced would cross a tag boundary.
+private func emph_tags_balanced(str $s) int {
+    my int $depth = 0;
+    my int $p = index($s, "<");
+    while ($p >= 0) {
+        if (substr($s, $p + 1, 1) eq "/") {
+            $depth = $depth - 1;
+            if ($depth < 0) {
+                return 0;
+            }
+        } else {
+            $depth = $depth + 1;
+        }
+        $p = index($s, "<", $p + 1);
+    }
+    return ($depth == 0) ? 1 : 0;
+}
+
 private func apply_delim_emph(str $text, str $delim, int $dlen, str $tag, int $word_boundary) str {
     my str $result = $text;
     my str $dch = substr($delim, 0, 1);
@@ -99,11 +119,12 @@ private func apply_delim_emph(str $text, str $delim, int $dlen, str $tag, int $w
                 $search_end = $c_run_end;
                 next;
             }
-            if ($run_len == 3) {
-                $end = $c_run_end - 2;
-            } else {
-                $end = $cand;
+            my int $cand_end = ($run_len == 3) ? $c_run_end - 2 : $cand;
+            if (::emph_tags_balanced(substr($result, $start + $dlen, $cand_end - $start - $dlen)) == 0) {
+                $search_end = $c_run_end;
+                next;
             }
+            $end = $cand_end;
             last;
         }
         if ($end < 0) {
@@ -148,6 +169,32 @@ private func restore_tokens(str $s, str $pfx, str $sfx, scalar $toks) str {
         $ti = $ti - 1;
     }
     return $res;
+}
+
+# Find the ")" closing a link/image destination that opens at $open_paren:
+# balanced nested parentheses are part of the URL, and a backslash escapes
+# the next character. Returns -1 when there is no matching ")".
+private func find_link_close_paren(str $s, int $open_paren) int {
+    my int $len = length($s);
+    my int $depth = 0;
+    my int $i = $open_paren + 1;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "\\") {
+            $i = $i + 2;
+            next;
+        }
+        if ($ch eq "(") {
+            $depth = $depth + 1;
+        } elsif ($ch eq ")") {
+            if ($depth == 0) {
+                return $i;
+            }
+            $depth = $depth - 1;
+        }
+        $i = $i + 1;
+    }
+    return 0 - 1;
 }
 
 # Process inline formatting (code, images, links, bold, italic)
@@ -198,7 +245,7 @@ private func process_inline(str $line) str {
             $search_pos = $bang + 2;
             next;
         }
-        my int $close_paren = index($result, ")", $open_paren + 1);
+        my int $close_paren = ::find_link_close_paren($result, $open_paren);
         if ($close_paren < 0) {
             $search_pos = $bang + 2;
             next;
@@ -230,7 +277,7 @@ private func process_inline(str $line) str {
             $search_pos = $open_bracket + 1;
             next;
         }
-        my int $close_paren = index($result, ")", $open_paren + 1);
+        my int $close_paren = ::find_link_close_paren($result, $open_paren);
         if ($close_paren < 0) {
             $search_pos = $open_bracket + 1;
             next;

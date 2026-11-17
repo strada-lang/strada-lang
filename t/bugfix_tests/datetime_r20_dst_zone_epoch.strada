@@ -1,0 +1,24 @@
+# EXPECT: -0400|-0500|1730615400|1|1730615400|1705294800|1705339800|1704067200|1704067200 %s|1730615400|2024-01-15 10:00
+# Audit 20 S2-11/S2-12/S2-13: an ambiguous local time (the repeated hour at
+# the end of DST) formatted with the DST offset and clone() moved it by an
+# hour; parse() ignored a %z offset; format("%s") on a UTC DateTime returned
+# a local-time epoch (strftime mktime()s the tm).
+use lib "lib";
+use DateTime;
+func main() int {
+    core::setenv("TZ", "EST5EDT,M3.2.0,M11.1.0");
+    my $a = DateTime::from_epoch(1730611800);   # 01:30 EDT
+    my $b = DateTime::from_epoch(1730615400);   # 01:30 EST (same wall time)
+    my $c = DateTime::clone($b);
+    my $d = DateTime::add_days($b, 0);
+    my $p = DateTime::parse("2024-01-15T10:00:00+0500", "%Y-%m-%dT%H:%M:%S%z");
+    my $q = DateTime::parse("2024-01-15T10:00:00-0730", "%Y-%m-%dT%H:%M:%S%z");
+    my $u = DateTime::make_utc(2024, 1, 1, 0, 0, 0);
+    my $l = DateTime::parse("2024-01-15 10:00", "%Y-%m-%d %H:%M");
+    say(DateTime::format($a, "%z") . "|" . DateTime::format($b, "%z") . "|"
+        . DateTime::epoch($c) . "|" . DateTime::is_equal($b, $c) . "|"
+        . DateTime::epoch($d) . "|" . DateTime::epoch($p) . "|" . DateTime::epoch($q) . "|"
+        . DateTime::format($u, "%s") . "|" . DateTime::format($u, "%s %%s") . "|"
+        . DateTime::format($b, "%s") . "|" . DateTime::format($l, "%Y-%m-%d %H:%M"));
+    return 0;
+}

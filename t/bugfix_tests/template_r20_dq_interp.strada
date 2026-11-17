@@ -1,0 +1,21 @@
+# EXPECT: xY|xYz|v=B!|prepost#a$x|a b|yy|Y|[A]#one
+# Audit 20 S1-2: double-quoted strings interpolate $var, ${var} and $a.b.c
+# (also in INCLUDE "name$n"); \$ is a literal $ and a lone $ is dropped.
+# Expected output from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% y = 'Y'; \"x\$y\" %]|[% \"x\${y}z\" %]|[% h = {a=>{b=>'B'}}; \"v=\$h.a.b!\" %]|[% \"pre\${nothing}post\" %]", {}));
+    push(@out, r("[% x = 'y' %][% \"a\\\$x\" %]|[% \"a\$ b\" %]|[% \"\$x\$x\" %]|[% \"\${ x }\" | upper %]|[% a = 'A'; b = \"[\$a]\" %][% b %]", {}));
+    push(@out, r("[% BLOCK b1 %]one[% END %][% n = 1 %][% INCLUDE \"b\$n\" %]", {}));
+    say(join("#", @out));
+    return 0;
+}

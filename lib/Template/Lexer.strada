@@ -11,14 +11,13 @@ package Template::Lexer;
 func is_ws(str $ch) int {
     return ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") ? 1 : 0;
 }
-func is_inline_ws(str $ch) int { return ($ch eq " " || $ch eq "\t") ? 1 : 0; }
 
 # Chomp flag char -> level (0 none, 1 one+newline, 2 collapse-to-space, 3 greedy),
-# or -1 if $ch is not a chomp flag.
+# or -1 if $ch is not a chomp flag. "~" is TT's CHOMP_GREEDY (all whitespace).
 func flag_level(str $ch) int {
     if ($ch eq "+") { return 0; }
     if ($ch eq "-") { return 1; }
-    if ($ch eq "~") { return 2; }
+    if ($ch eq "~") { return 3; }
     return -1;
 }
 
@@ -31,14 +30,18 @@ func pre_chomp(str $text, int $level) str {
     if ($e == $n) { return $text; }                    # no trailing whitespace
     if ($level == 3) { return substr($text, 0, $e); }  # greedy: drop it all
     if ($level == 2) { return substr($text, 0, $e) . " "; }  # collapse to one space
-    # level 1 (ONE): drop trailing inline ws + a single newline (LF or CRLF)
+    # level 1 (ONE), TT's s/(\r?\n|^)[^\S\n]*\z//m: drop the trailing
+    # non-newline whitespace together with the newline before it; with no
+    # newline, only when the whole text is such whitespace.
     my int $j = $n;
-    while ($j > 0 && is_inline_ws(substr($text, $j - 1, 1)) == 1) { $j = $j - 1; }
+    while ($j > 0 && is_ws(substr($text, $j - 1, 1)) == 1 && substr($text, $j - 1, 1) ne "\n") { $j = $j - 1; }
     if ($j > 0 && substr($text, $j - 1, 1) eq "\n") {
         $j = $j - 1;
         if ($j > 0 && substr($text, $j - 1, 1) eq "\r") { $j = $j - 1; }
+        return substr($text, 0, $j);
     }
-    return substr($text, 0, $j);
+    if ($j == 0) { return ""; }
+    return $text;
 }
 
 # Trim leading whitespace from $text per post-chomp $level.
@@ -50,15 +53,12 @@ func post_chomp(str $text, int $level) str {
     if ($s == 0) { return $text; }                     # no leading whitespace
     if ($level == 3) { return substr($text, $s, $n - $s); }
     if ($level == 2) { return " " . substr($text, $s, $n - $s); }
-    # level 1 (ONE): drop leading inline ws + a single newline (LF or CRLF)
+    # level 1 (ONE), TT's s/^([^\S\n]*\n)//: non-newline whitespace up to and
+    # including the first newline; nothing if no newline follows.
     my int $j = 0;
-    while ($j < $n && is_inline_ws(substr($text, $j, 1)) == 1) { $j = $j + 1; }
-    if ($j < $n && substr($text, $j, 1) eq "\r" && $j + 1 < $n && substr($text, $j + 1, 1) eq "\n") {
-        $j = $j + 2;
-    } elsif ($j < $n && substr($text, $j, 1) eq "\n") {
-        $j = $j + 1;
-    }
-    return substr($text, $j, $n - $j);
+    while ($j < $n && is_ws(substr($text, $j, 1)) == 1 && substr($text, $j, 1) ne "\n") { $j = $j + 1; }
+    if ($j < $n && substr($text, $j, 1) eq "\n") { return substr($text, $j + 1, $n - $j - 1); }
+    return $text;
 }
 
 # Tokenize $template into a chunk list. $pre_def/$post_def are the config
@@ -95,17 +95,11 @@ func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $po
         if (length($pending_text) > 0) { push(@chunks, text_chunk($pending_text)); }
         $pending_text = "";
 
-        # find the end tag (skip quoted string literals in non-comment directives)
-        my int $chk = $after;
-        while ($chk < $n) {
-            my str $wc = substr($template, $chk, 1);
-            if ($wc eq " " || $wc eq "\t" || $wc eq "\r" || $wc eq "\n") {
-                $chk = $chk + 1;
-            } else {
-                last;
-            }
-        }
-        my int $is_cmt = ($chk < $n && substr($template, $chk, 1) eq "#") ? 1 : 0;
+        # find the end tag (skip quoted string literals and "#" line comments
+        # in non-comment directives). As in TT, the whole tag is a comment only
+        # when "#" immediately follows the start tag; otherwise "#" starts a
+        # comment running to the end of the line (or the end tag).
+        my int $is_cmt = ($ts + $slen < $n && substr($template, $ts + $slen, 1) eq "#") ? 1 : 0;
         my int $te = -1;
         if ($is_cmt == 1) {
             $te = index_from($template, $end_tag, $after);
@@ -135,6 +129,11 @@ func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $po
                     }
                     next;
                 }
+                if ($sc eq "#") {
+                    while ($si < $n && substr($template, $si, 1) ne "\n"
+                           && substr($template, $si, $elen) ne $end_tag) { $si = $si + 1; }
+                    next;
+                }
                 if (substr($template, $si, $elen) eq $end_tag) {
                     $te = $si;
                     last;
@@ -155,14 +154,12 @@ func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $po
         my int $qlev = flag_level($qflag);
         if ($qlev >= 0) { $post = $qlev; $inner_end = $te - 1; }
 
-        my str $src = trim(substr($template, $after, $inner_end - $after));
         $pending_post = $post;
 
-        # comment ([%# ... %]) -> drop; otherwise a directive
-        if (length($src) > 0 && substr($src, 0, 1) eq "#") {
-            # nothing emitted
-        } else {
-            push(@chunks, dir_chunk($src));
+        # comment ([%# ... %]) -> drop; otherwise a directive (minus # comments)
+        if ($is_cmt == 0) {
+            my str $src = trim(strip_comments(substr($template, $after, $inner_end - $after)));
+            if (length($src) > 0) { push(@chunks, dir_chunk($src)); }
         }
         $i = $te + $elen;
     }
@@ -171,6 +168,30 @@ func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $po
     if ($pending_post >= 0) { $pending_text = post_chomp($pending_text, $pending_post); }
     if (length($pending_text) > 0) { push(@chunks, text_chunk($pending_text)); }
     return \@chunks;
+}
+
+# Remove "#" line comments (outside quoted strings) from a directive body.
+func strip_comments(str $s) str {
+    if (index($s, "#") < 0) { return $s; }
+    my int $n = length($s);
+    my str $out = "";
+    my int $i = 0;
+    my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if (length($q) > 0) {
+            if ($c eq "\\" && $i + 1 < $n) { $out = $out . substr($s, $i, 2); $i = $i + 2; next; }
+            if ($c eq $q) { $q = ""; }
+            $out = $out . $c; $i = $i + 1; next;
+        }
+        if ($c eq "'" || $c eq "\"") { $q = $c; $out = $out . $c; $i = $i + 1; next; }
+        if ($c eq "#") {
+            while ($i < $n && substr($s, $i, 1) ne "\n") { $i = $i + 1; }
+            next;
+        }
+        $out = $out . $c; $i = $i + 1;
+    }
+    return $out;
 }
 
 func text_chunk(str $s) scalar { my hash %h = (); $h{"k"} = "text"; $h{"s"} = $s; return \%h; }

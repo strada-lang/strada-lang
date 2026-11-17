@@ -251,11 +251,14 @@ test_output_contains "lib/Nesso/test_nesso.strada" "test_nesso" "PASS: All Nesso
 test_output_contains "lib/Nesso/test_nesso_sqli.strada" "test_nesso_sqli" "PASS: All Nesso SQLi tests passed" "Nesso SQLi guard"
 # Test: DBI::quote (native escaper) + DBI::quote_identifier
 test_output_contains "lib/dbi/test_dbi_quote.strada" "test_dbi_quote" "PASS: All DBI quote tests passed" "DBI quote/quote_identifier"
+# Test: SQLite TEXT fetched UTF-8 flagged; wrong bind-value count fails (audit 20 S1-19/S1-20)
+test_output_contains "lib/dbi/test_dbi_r20_utf8_bind.strada" "test_dbi_r20_utf8_bind" "PASS: DBI r20 UTF-8 fetch and bind count" "DBI UTF-8 fetch + bind count"
 EXTRA_LDFLAGS="$SAVED_EXTRA_LDFLAGS"
 else
 test_skip "Nesso ORM" "SQLite (libsqlite3-dev) not installed"
 test_skip "Nesso SQLi guard" "SQLite (libsqlite3-dev) not installed"
 test_skip "DBI quote/quote_identifier" "SQLite (libsqlite3-dev) not installed"
+test_skip "DBI UTF-8 fetch + bind count" "SQLite (libsqlite3-dev) not installed"
 fi
 
 # Test: Nested use statements (modules that use other modules)

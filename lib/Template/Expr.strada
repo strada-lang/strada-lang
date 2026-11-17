@@ -29,6 +29,7 @@ func scan_string(str $src, int $i, str $q) scalar {
     my str $out = "";
     my int $j = $i + 1;
     my int $closed = 0;
+    my array @parts = ();
     while ($j < $n) {
         my str $c = substr($src, $j, 1);
         if ($c eq "\\" && $j + 1 < $n) {
@@ -53,6 +54,25 @@ func scan_string(str $src, int $i, str $q) scalar {
             next;
         }
         if ($c eq $q) { $j = $j + 1; $closed = 1; last; }
+        if ($c eq "\$" && $q eq "\"") {
+            # TT interpolation in double-quoted strings: ${ expr } or $a.b.c
+            # (the name is [\w.]+). A lone "$" is dropped, as in TT.
+            my int $k = $j + 1;
+            my str $vsrc = "";
+            if ($k < $n && substr($src, $k, 1) eq "{") {
+                my int $close = index($src, "}", $k);
+                if ($close > $k) { $vsrc = substr($src, $k + 1, $close - $k - 1); $k = $close + 1; }
+            } else {
+                while ($k < $n && (is_id_part(substr($src, $k, 1)) == 1 || substr($src, $k, 1) eq ".")) { $k = $k + 1; }
+                $vsrc = substr($src, $j + 1, $k - $j - 1);
+            }
+            if (length(trim($vsrc)) > 0) {
+                if (length($out) > 0) { push(@parts, interp_part("str", $out)); $out = ""; }
+                push(@parts, interp_part("var", $vsrc));
+            }
+            $j = $k;
+            next;
+        }
         $out = $out . $c;
         $j = $j + 1;
     }
@@ -60,8 +80,13 @@ func scan_string(str $src, int $i, str $q) scalar {
         throw(Template::Exception::make("parse", "unterminated string literal"));
     }
     my hash %r = (); $r{"val"} = $out; $r{"next"} = $j; $r{"q"} = $q;
+    if (size(@parts) > 0) {
+        if (length($out) > 0) { push(@parts, interp_part("str", $out)); }
+        $r{"parts"} = \@parts;
+    }
     return \%r;
 }
+func interp_part(str $k, str $v) scalar { my hash %h = (); $h{"k"} = $k; $h{"v"} = $v; return \%h; }
 
 func lex(str $src) scalar {
     my array @toks = ();
@@ -73,10 +98,13 @@ func lex(str $src) scalar {
 
         if (is_digit($c) == 1) {
             my int $j = $i;
+            # after a dot (l.0.1) a number is an index: no fraction part
+            my int $after_dot = 0;
+            if (size(@toks) > 0 && $toks[size(@toks) - 1]->{"t"} eq "punc" && ("" . $toks[size(@toks) - 1]->{"v"}) eq ".") { $after_dot = 1; }
             while ($j < $n) {
                 my str $d = substr($src, $j, 1);
                 if (is_digit($d) == 1) { $j = $j + 1; next; }
-                if ($d eq "." && $j + 1 < $n && substr($src, $j + 1, 1) ne ".") { $j = $j + 1; next; }
+                if ($after_dot == 0 && $d eq "." && $j + 1 < $n && is_digit(substr($src, $j + 1, 1)) == 1) { $j = $j + 1; next; }
                 last;
             }
             push(@toks, tok("num", numify(substr($src, $i, $j - $i))));
@@ -84,13 +112,20 @@ func lex(str $src) scalar {
         }
         if ($c eq "'" || $c eq "\"") {
             my scalar $r = scan_string($src, $i, $c);
-            push(@toks, tok("str", $r->{"val"}));
+            if (defined($r->{"parts"})) { push(@toks, tok("istr", $r->{"parts"})); }
+            else { push(@toks, tok("str", $r->{"val"})); }
             $i = $r->{"next"}; next;
         }
         if ($c eq "$") {                       # $ident -> variable (sigil stripped)
+            if ($i + 1 < $n && substr($src, $i + 1, 1) eq "{") {
+                push(@toks, tok("punc", "\${"));     # ${ expr }
+                $i = $i + 2; next;
+            }
             my int $j = $i + 1;
             while ($j < $n && is_id_part(substr($src, $j, 1)) == 1) { $j = $j + 1; }
-            push(@toks, tok("ident", substr($src, $i + 1, $j - $i - 1)));
+            my scalar $dt = tok("ident", substr($src, $i + 1, $j - $i - 1));
+            $dt->{"dollar"} = 1;                 # obj.$var: key is var's value
+            push(@toks, $dt);
             $i = $j; next;
         }
         if (is_id_start($c) == 1) {
@@ -192,12 +227,15 @@ func parse_assignments(str $src) scalar {
     while (cur($st)->{"t"} ne "eof") {
         my scalar $t = cur($st);
         if ($t->{"t"} ne "ident") { adv($st); next; }
-        my array @path = ("" . $t->{"v"});
+        # A $name element ($x = 1, a.$k = 1) names the variable/key held in
+        # name: it is kept as {"dyn"=>name} and resolved when the SET runs.
+        my array @path = ();
+        push(@path, path_elem($t));
         adv($st);
         while (is_punc($st, ".") == 1) {
             adv($st);
             my scalar $k = cur($st);
-            if ($k->{"t"} eq "ident" || $k->{"t"} eq "num") { push(@path, "" . $k->{"v"}); adv($st); }
+            if ($k->{"t"} eq "ident" || $k->{"t"} eq "num") { push(@path, path_elem($k)); adv($st); }
             else { last; }
         }
         if (is_punc($st, "=") == 1) { adv($st); }
@@ -207,6 +245,11 @@ func parse_assignments(str $src) scalar {
         if (is_punc($st, ",") == 1) { adv($st); }
     }
     return \@out;
+}
+
+func path_elem(scalar $t) scalar {
+    if (($t->{"dollar"} // 0) == 1) { my hash %d = (); $d{"dyn"} = "" . $t->{"v"}; return \%d; }
+    return "" . $t->{"v"};
 }
 
 # True if the (token-level) source contains a top-level "=" assignment — used to
@@ -219,7 +262,7 @@ func has_assignment(str $src) int {
         my scalar $t = $toks->[$i];
         if ($t->{"t"} eq "punc") {
             my str $v = "" . $t->{"v"};
-            if ($v eq "(" || $v eq "[" || $v eq "{") { $depth = $depth + 1; }
+            if ($v eq "(" || $v eq "[" || $v eq "{" || $v eq "\${") { $depth = $depth + 1; }
             elsif ($v eq ")" || $v eq "]" || $v eq "}") { if ($depth > 0) { $depth = $depth - 1; } }
             elsif ($v eq "=" && $depth == 0) { return 1; }
         }
@@ -290,9 +333,17 @@ func parse_unary(scalar $st) scalar {
 }
 
 func parse_postfix(scalar $st) scalar {
+    my scalar $t0 = cur($st);
+    my str $t0t = "" . $t0->{"t"};
+    my str $t0v = "" . $t0->{"v"};
+    # TT only allows the dot operator on variables: 'abc'.length, 3.size,
+    # [1,2].size, {}.size and (expr).x are parse errors there.
+    my int $literal = ($t0t eq "num" || $t0t eq "str" || $t0t eq "istr"
+        || ($t0t eq "punc" && ($t0v eq "(" || $t0v eq "[" || $t0v eq "{"))) ? 1 : 0;
     my scalar $node = parse_primary($st);
     while (1 == 1) {
         if (is_punc($st, ".") == 1) {
+            if ($literal == 1) { throw(Template::Exception::make("parse", "unexpected token (.)")); }
             adv($st);
             if (is_punc($st, "[") == 1) {
                 adv($st);
@@ -308,10 +359,28 @@ func parse_postfix(scalar $st) scalar {
                 $node = mk_idx($node, $k);
                 next;
             }
+            if (is_punc($st, "\${") == 1) {             # obj.${ expr }
+                adv($st);
+                my scalar $k = parse_ternary($st);
+                if (is_punc($st, "}") == 1) { adv($st); }
+                $node = mk_idx($node, $k);
+                next;
+            }
             my scalar $kt = cur($st);
             my str $key = "";
+            if ($kt->{"t"} eq "ident" && ($kt->{"dollar"} // 0) == 1) {   # obj.$var
+                adv($st);
+                my hash %kv = (); $kv{"t"} = "var"; $kv{"name"} = "" . $kt->{"v"};
+                $node = mk_idx($node, \%kv);
+                next;
+            }
             if ($kt->{"t"} eq "ident") { $key = "" . $kt->{"v"}; adv($st); }
             elsif ($kt->{"t"} eq "num") { $key = "" . $kt->{"v"}; adv($st); }
+            elsif ($kt->{"t"} eq "op" && ("" . $kt->{"v"}) eq "-"
+                   && $st->{"toks"}->[$st->{"pos"} + 1]->{"t"} eq "num") {   # list.-1
+                adv($st);
+                $key = "-" . cur($st)->{"v"}; adv($st);
+            }
             else { last; }
             my scalar $args = undef;
             if (is_punc($st, "(") == 1) { $args = parse_args($st); }
@@ -331,6 +400,7 @@ func parse_postfix(scalar $st) scalar {
     return $node;
 }
 
+func dynvar(scalar $e) scalar { my hash %h = (); $h{"t"} = "dynvar"; $h{"expr"} = $e; return \%h; }
 func mk_idx(scalar $obj, scalar $key) scalar {
     my hash %h = (); $h{"t"} = "idx"; $h{"obj"} = $obj; $h{"key"} = $key; return \%h;
 }
@@ -340,10 +410,29 @@ func parse_args(scalar $st) scalar {
     adv($st);                                          # consume "("
     my array @args = ();
     if (is_punc($st, ")") == 1) { adv($st); return \@args; }
+    # Named args (name = expr / name => expr) are collected, as in TT, into one
+    # hash appended after the positional args.
+    my array @named = ();
     while (1 == 1) {
-        push(@args, parse_ternary($st));
+        my scalar $t = cur($st);
+        my scalar $t1 = $st->{"toks"}->[$st->{"pos"} + 1];
+        if (($t->{"t"} eq "ident" || $t->{"t"} eq "str") && defined($t1) && $t1->{"t"} eq "punc"
+            && (("" . $t1->{"v"}) eq "=" || ("" . $t1->{"v"}) eq "=>")) {
+            adv($st); adv($st);
+            my hash %kk = (); $kk{"t"} = "str"; $kk{"v"} = "" . $t->{"v"};
+            my array @pair = ();
+            push(@pair, \%kk);
+            push(@pair, parse_ternary($st));
+            push(@named, \@pair);
+        } else {
+            push(@args, parse_ternary($st));
+        }
         if (is_punc($st, ",") == 1) { adv($st); next; }
         break;
+    }
+    if (size(@named) > 0) {
+        my hash %nh = (); $nh{"t"} = "hash"; $nh{"pairs"} = \@named; $nh{"named"} = 1;
+        push(@args, \%nh);
     }
     if (is_punc($st, ")") == 1) { adv($st); }
     return \@args;
@@ -353,7 +442,27 @@ func parse_primary(scalar $st) scalar {
     my scalar $t = cur($st);
     if ($t->{"t"} eq "num") { adv($st); my hash %h = (); $h{"t"} = "num"; $h{"v"} = $t->{"v"}; return \%h; }
     if ($t->{"t"} eq "str") { adv($st); my hash %h = (); $h{"t"} = "str"; $h{"v"} = $t->{"v"}; return \%h; }
-    if ($t->{"t"} eq "ident") { adv($st); my hash %h = (); $h{"t"} = "var"; $h{"name"} = "" . $t->{"v"}; return \%h; }
+    if ($t->{"t"} eq "istr") {                          # interpolated "..." string
+        adv($st);
+        my array @pn = ();
+        foreach my scalar $p (@{$t->{"v"}}) {
+            if ($p->{"k"} eq "str") { my hash %sn = (); $sn{"t"} = "str"; $sn{"v"} = $p->{"v"}; push(@pn, \%sn); }
+            else { push(@pn, parse_ternary(st_new(lex($p->{"v"})))); }
+        }
+        my hash %h = (); $h{"t"} = "interp"; $h{"parts"} = \@pn; return \%h;
+    }
+    if ($t->{"t"} eq "ident") {
+        adv($st);
+        my hash %h = (); $h{"t"} = "var"; $h{"name"} = "" . $t->{"v"};
+        if (($t->{"dollar"} // 0) == 1) { return dynvar(\%h); }   # $x: the variable named by x
+        return \%h;
+    }
+    if (is_punc($st, "\${") == 1) {                    # ${ expr }: the variable named by expr
+        adv($st);
+        my scalar $e = parse_ternary($st);
+        if (is_punc($st, "}") == 1) { adv($st); }
+        return dynvar($e);
+    }
     if (is_punc($st, "(") == 1) {
         adv($st);
         my scalar $e = parse_ternary($st);
@@ -411,11 +520,29 @@ func eval_node(scalar $node, scalar $stash) scalar {
         }
         return $v;
     }
+    if ($t eq "dynvar") {
+        my str $dn = Template::Stash::as_text(eval_node($node->{"expr"}, $stash));
+        my scalar $v = Template::Stash::get_root($stash, $dn);
+        if (!defined($v) && Template::Stash::is_strict($stash) == 1) {
+            throw(Template::Exception::make("var.undef", "undefined variable: " . $dn));
+        }
+        return $v;
+    }
     if ($t eq "list") {
+        my scalar $items = $node->{"items"};
+        # [a..b] is the range itself (TT), not a one-element list holding it.
+        if (size(@{$items}) == 1 && $items->[0]->{"t"} eq "binop" && $items->[0]->{"op"} eq "..") {
+            return eval_node($items->[0], $stash);
+        }
         my array @out = ();
         my int $i = 0;
-        while ($i < size(@{$node->{"items"}})) { push(@out, eval_node($node->{"items"}->[$i], $stash)); $i = $i + 1; }
+        while ($i < size(@{$items})) { push(@out, eval_node($items->[$i], $stash)); $i = $i + 1; }
         return \@out;
+    }
+    if ($t eq "interp") {
+        my str $out = "";
+        foreach my scalar $p (@{$node->{"parts"}}) { $out = $out . Template::Stash::as_text(eval_node($p, $stash)); }
+        return $out;
     }
     if ($t eq "hash") {
         my hash %h = ();
@@ -472,22 +599,6 @@ func eval_num(scalar $node, scalar $stash) num {
     return ("" . $v) + 0.0;
 }
 
-func looks_num(scalar $v) int {
-    if (!defined($v)) { return 0; }
-    if (ref($v) ne "") { return 0; }
-    return re::match("" . $v, "^-?[0-9]+(\\.[0-9]+)?$");
-}
-
-# TT-style smart comparison: numeric if both operands look numeric, else string.
-func cmp_vals(scalar $l, scalar $r) int {
-    if (looks_num($l) == 1 && looks_num($r) == 1) {
-        my num $a = ("" . $l) + 0.0; my num $b = ("" . $r) + 0.0;
-        if ($a < $b) { return -1; } if ($a > $b) { return 1; } return 0;
-    }
-    my str $a = Template::Stash::as_text($l); my str $b = Template::Stash::as_text($r);
-    if ($a lt $b) { return -1; } if ($a gt $b) { return 1; } return 0;
-}
-
 func eval_binop(str $op, scalar $lhs, scalar $rhs, scalar $stash) scalar {
     if ($op eq "&&" || $op eq "and") {
         my scalar $l = eval_node($lhs, $stash);
@@ -509,12 +620,14 @@ func eval_binop(str $op, scalar $lhs, scalar $rhs, scalar $stash) scalar {
         while ($k <= $b) { push(@out, $k); $k = $k + 1; }
         return \@out;
     }
-    if ($op eq "==") { return tt_bool(cmp_vals($l, $r) == 0); }
-    if ($op eq "!=") { return tt_bool(cmp_vals($l, $r) != 0); }
-    if ($op eq "<")  { return tt_bool(cmp_vals($l, $r) < 0); }
-    if ($op eq ">")  { return tt_bool(cmp_vals($l, $r) > 0); }
-    if ($op eq "<=") { return tt_bool(cmp_vals($l, $r) <= 0); }
-    if ($op eq ">=") { return tt_bool(cmp_vals($l, $r) >= 0); }
+    # TT's == and != are string comparisons (Perl eq/ne): '1.0' == '1' is false.
+    if ($op eq "==") { return tt_bool((Template::Stash::as_text($l) eq Template::Stash::as_text($r)) ? 1 : 0); }
+    if ($op eq "!=") { return tt_bool((Template::Stash::as_text($l) ne Template::Stash::as_text($r)) ? 1 : 0); }
+    # <, >, <=, >= are Perl's numeric operators in TT ('abc' < 'abd' is 0 < 0).
+    if ($op eq "<")  { return tt_bool((perl_num($l) < perl_num($r)) ? 1 : 0); }
+    if ($op eq ">")  { return tt_bool((perl_num($l) > perl_num($r)) ? 1 : 0); }
+    if ($op eq "<=") { return tt_bool((perl_num($l) <= perl_num($r)) ? 1 : 0); }
+    if ($op eq ">=") { return tt_bool((perl_num($l) >= perl_num($r)) ? 1 : 0); }
     my num $a = ("" . (defined($l) ? $l : 0)) + 0.0;
     my num $b = ("" . (defined($r) ? $r : 0)) + 0.0;
     if ($op eq "+") { return num_result($a + $b); }
@@ -524,6 +637,17 @@ func eval_binop(str $op, scalar $lhs, scalar $rhs, scalar $stash) scalar {
     if ($op eq "div") { if ($b == 0.0) { throw(Template::Exception::make("undef", "division by zero")); } return int_of($a / $b); }
     if ($op eq "%" || $op eq "mod") { my int $ib = int_of($b); if ($ib == 0) { throw(Template::Exception::make("undef", "division by zero")); } return (int_of($a)) % $ib; }
     return undef;
+}
+
+# Perl numification: the leading decimal number of the string ("10abc" -> 10,
+# " 3 " -> 3, ".5" -> 0.5, "abc"/"0x10"/undef -> 0). A reference is non-zero.
+func perl_num(scalar $v) num {
+    if (!defined($v)) { return 0.0; }
+    if (ref($v) ne "") { return 1.0; }
+    my str $s = "" . $v;
+    if (re::match($s, "^\\s*([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)") == 0) { return 0.0; }
+    my array @c = re::captures();
+    return ("" . $c[1]) + 0.0;
 }
 
 # TT booleans: true renders as "1", false as the empty string (Perl's ==/!=/etc).

@@ -1,0 +1,18 @@
+# EXPECT: a=1;b=2;c=3;|a=1;b=2;c=3;||123
+# Audit 20 S1-4: FOREACH over a hash iterates its key/value pairs sorted by
+# key (p.key / p.value), like TT's Template::Iterator. Expected from Perl TT.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% FOREACH p IN h %][% p.key %]=[% p.value %];[% END %]|[% FOREACH h %][% key %]=[% value %];[% END %]|[% FOREACH p IN e %]x[% END %]|[% FOREACH p IN h %][% loop.count %][% END %]", {"h" => {"b" => 2, "a" => 1, "c" => 3}, "e" => {}}));
+    say(join("#", @out));
+    return 0;
+}

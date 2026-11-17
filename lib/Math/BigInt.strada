@@ -27,7 +27,8 @@ static int _bi_cmp(const char *a, const char *b) {
     size_t la = strlen(a);
     size_t lb = strlen(b);
     if (la != lb) return (la > lb) ? 1 : -1;
-    return strcmp(a, b);
+    int c = strcmp(a, b);
+    return (c > 0) - (c < 0);
 }
 
 /* Strip leading zeros from digit string. Caller must free result. */
@@ -485,15 +486,28 @@ func div(scalar $self, scalar $other) scalar {
     }
 
     my str $rv = "";
+    my str $remv = "";
     __C__ {
         char *a_str = strada_to_str(va);
         char *b_str = strada_to_str(vb);
-        char *q = _bi_divmod(a_str, b_str, NULL);
+        char *rem = NULL;
+        char *q = _bi_divmod(a_str, b_str, &rem);
         free(a_str);
         free(b_str);
         strada_decref(rv);
         rv = strada_new_str(q);
         free(q);
+        strada_decref(remv);
+        remv = strada_new_str(rem ? rem : "0");
+        free(rem);
+    }
+    # Floored division (Perl's Math::BigInt::bdiv): with operand signs that
+    # differ and a nonzero remainder, the quotient rounds toward -inf, so
+    # a == q*b + r holds with the floored mod().
+    if ($self->{"s"} != $other->{"s"} && $remv ne "0") {
+        my scalar $one = BigInt::new("1");
+        my scalar $qm = BigInt::new($rv);
+        $rv = $qm->add($one)->{"v"};
     }
 
     my int $rs = 1;
@@ -528,10 +542,26 @@ func mod(scalar $self, scalar $other) scalar {
         free(rem);
     }
 
-    $r{"s"} = $self->{"s"};
+    # Floored modulo (Perl's % and Math::BigInt::bmod): a nonzero result
+    # takes the sign of the divisor.
     if ($rv eq "0") {
         $r{"s"} = 1;
+        $r{"v"} = "0";
+        return bless(\%r, "BigInt");
     }
+    if ($self->{"s"} != $other->{"s"}) {
+        __C__ {
+            char *b_str = strada_to_str(vb);
+            char *r_str = strada_to_str(rv);
+            char *d = _bi_sub(b_str, r_str);
+            free(b_str);
+            free(r_str);
+            strada_decref(rv);
+            rv = strada_new_str(d);
+            free(d);
+        }
+    }
+    $r{"s"} = $other->{"s"};
     $r{"v"} = $rv;
     return bless(\%r, "BigInt");
 }

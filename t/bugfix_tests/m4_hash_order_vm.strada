@@ -1,0 +1,14 @@
+# EXPECT: z,a,m,b,y|m,a,b,y|b,2|name,age,email
+# Audit 20 M4: hashes iterate in insertion order and a deleted slot is reused
+# first (LIFO) -- the VM iterated in bucket order.
+func main() int {
+    my %h = ();
+    foreach my str $k ("z", "a", "m", "b", "y") { $h{$k} = 1; }
+    my str $o1 = join(",", keys(%h));
+    delete($h{"m"}); delete($h{"z"});
+    $h{"m"} = 1;
+    my %e = ("a" => 1); delete($e{"a"}); $e{"b"} = 2;
+    my $r = { name => "A", age => 3, email => "e" };
+    say($o1 . "|" . join(",", keys(%h)) . "|" . join(",", %e) . "|" . join(",", keys(%$r)));
+    return 0;
+}

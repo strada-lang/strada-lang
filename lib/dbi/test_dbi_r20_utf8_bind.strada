@@ -1,0 +1,35 @@
+# Audit 20 S1-19/S1-20: SQLite TEXT columns came back without the UTF-8 flag
+# (length/uc/substr worked on bytes), and a wrong number of bind values was
+# silently accepted (extra ones ignored, missing ones bound as NULL).
+# Needs SQLite; registered in t/t_core.sh under the SQLite gate.
+use lib "lib";
+use DBI;
+func main() int {
+    my array @r = ();
+    my scalar $dbh = DBI::connect_attrs("dbi:SQLite::memory:", "", "", {"PrintError" => 0});
+    DBI::do_sql($dbh, "CREATE TABLE t (name TEXT, n INTEGER, b BLOB)");
+    DBI::exec($dbh, "INSERT INTO t VALUES (?, ?, CAST(? AS BLOB))", ["héllo", 1, "h\x{e9}"]);
+    my str $out = DBI::selectcol($dbh, "SELECT name FROM t", []);
+    my str $blob = DBI::selectcol($dbh, "SELECT b FROM t", []);
+    push(@r, "len=" . length($out) . " sub=" . substr($out, 0, 2) . " uc=" . uc($out) . " blob_len=" . length($blob));
+    my int $extra = DBI::exec($dbh, "INSERT INTO t (name, n) VALUES (?, ?)", ["a", 2, "EXTRA"]);
+    my int $few = DBI::exec($dbh, "INSERT INTO t (name, n) VALUES (?, ?)", ["b"]);
+    push(@r, "extra=" . $extra . " few=" . $few . " rows=" . DBI::selectcol($dbh, "SELECT count(*) FROM t", []));
+    DBI::set_raise_error($dbh, 1);
+    try {
+        DBI::exec($dbh, "INSERT INTO t (name, n) VALUES (?, ?)", ["c", 3, 4]);
+        push(@r, "throw=none");
+    } catch ($e) {
+        push(@r, "throw=" . $e);
+    }
+    my str $got = join("|", @r);
+    my str $want = "len=5 sub=hé uc=HÉLLO blob_len=3|extra=-1 few=-1 rows=1|throw=execute called with 3 bind variables when 2 are needed";
+    say($got);
+    if ($got eq $want) {
+        say("PASS: DBI r20 UTF-8 fetch and bind count");
+        return 0;
+    }
+    say("FAIL: expected " . $want);
+    return 1;
+    return 0;
+}

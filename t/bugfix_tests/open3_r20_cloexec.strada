@@ -1,0 +1,25 @@
+# EXPECT: a=[from-a]|b=[from-b]|c=[from-c]
+# Audit 20 S3-7: open3/open2 left the parent's pipe ends inheritable, so a
+# second child kept the first child's stdin write end open: closing it in
+# the parent never gave the first child EOF and reading its stdout hung.
+use lib "lib";
+use IPC::Open3;
+func main() int {
+    my hash %a = IPC::Open3::open3("cat");
+    my hash %b = IPC::Open3::open3("cat");
+    my hash %c = IPC::Open3::open2("cat");
+    core::write_fd($a{"stdin"}, "from-a");
+    core::close_fd($a{"stdin"});
+    my str $oa = core::slurp_fd($a{"stdout"});
+    core::write_fd($c{"stdin"}, "from-c");
+    core::close_fd($c{"stdin"});
+    my str $oc = core::slurp_fd($c{"stdout"});
+    core::write_fd($b{"stdin"}, "from-b");
+    core::close_fd($b{"stdin"});
+    my str $ob = core::slurp_fd($b{"stdout"});
+    core::waitpid($a{"pid"}, 0);
+    core::waitpid($b{"pid"}, 0);
+    core::waitpid($c{"pid"}, 0);
+    say("a=[" . $oa . "]|b=[" . $ob . "]|c=[" . $oc . "]");
+    return 0;
+}

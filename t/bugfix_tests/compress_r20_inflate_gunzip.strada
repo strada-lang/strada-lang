@@ -1,0 +1,36 @@
+# EXPECT: 12|3601682f398ac6d50e81a1ec|hello zlib|abc|abc|abc|ab|
+# Audit 20 S3-5/S3-6: compress::inflate tried raw deflate first and gave up
+# when a valid zlib stream happened to look like a truncated raw stream
+# (returned ""); gunzip returned "" when the gzip data was followed by zero
+# padding or other non-gzip trailing bytes (now ignored, as gzip(1) does).
+use lib "lib";
+use compress;
+func hexval(str $c) int { return index("0123456789abcdef", $c); }
+func unhex(str $h) str {
+    my str $o = "";
+    for (my int $i = 0; $i < length($h); $i += 2) {
+        $o = $o . core::byte(hexval(substr($h, $i, 1)) * 16 + hexval(substr($h, $i + 1, 1)));
+    }
+    return $o;
+}
+func tohex(str $s) str {
+    my str $o = "";
+    for (my int $i = 0; $i < core::byte_length($s); $i++) { $o = $o . sprintf("%02x", core::get_byte($s, $i)); }
+    return $o;
+}
+func main() int {
+    my array @o = ();
+    # zlib.compress(bytes.fromhex("3601682f398ac6d50e81a1ec"))
+    my str $z = compress::inflate(unhex("789c3363ccd0b7ec3a7695af71e11b001a9a0549"));
+    push(@o, core::byte_length($z));
+    push(@o, tohex($z));
+    push(@o, compress::inflate(unhex("789ccb48cdc9c957a8cac94c0200159503e6")));
+    my str $g = compress::gzip("abc");
+    push(@o, compress::gunzip($g . core::byte(0) . core::byte(0) . core::byte(0) . core::byte(0)));
+    push(@o, compress::gunzip($g . "XYZ"));
+    push(@o, compress::inflate(compress::deflate("abc")));
+    push(@o, compress::gunzip(compress::gzip("a") . compress::gzip("b")));
+    push(@o, compress::gunzip(substr($g, 0, core::byte_length($g) - 4)));
+    say(join("|", @o));
+    return 0;
+}

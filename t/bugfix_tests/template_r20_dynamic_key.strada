@@ -1,0 +1,20 @@
+# EXPECT: b|v|v|Z|Z|b|#b|1
+# Audit 20 S1-3: obj.$var and obj.${var} use the variable's value as the key
+# or index (they used the literal name), and list.-1 indexes from the end.
+# Expected output from Perl TT 3.106.
+use lib "lib";
+use Template;
+func r(str $tpl, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    my str $o = "";
+    try { $o = $tt->process_string($tpl, $vars); }
+    catch ($e) { $o = "ERR " . (Template::Exception::is_exception($e) ? Template::Exception::as_string($e) : ("" . $e)); }
+    return str::replace($o, "\n", "/");
+}
+func main() int {
+    my array @out = ();
+    push(@out, r("[% l.\$i %]|[% h.\$key %]|[% h.\${key} %]|[% hh.\$key.z %]|[% hh.\${key}.z %]|[% l.-1 %]|[% l.-3 %]", {"l" => ["a", "b"], "i" => 1, "h" => {"k" => "v"}, "hh" => {"k" => {"z" => "Z"}}, "key" => "k"}));
+    push(@out, r("[% i = 1; m = ['a','b']; m.\$i %]|[% m.\$i.length %]", {}));
+    say(join("#", @out));
+    return 0;
+}

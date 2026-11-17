@@ -145,8 +145,54 @@ Returns human-readable relative time (e.g., "2 hours ago").
 
 __C__ {
 #include <time.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* mktime() for a local wall-clock time. When the time is ambiguous (it
+ * occurs twice at the end of DST) mktime picks one occurrence; dst_hint
+ * (0 or 1, -1 = no preference) selects the other one when it names it. */
+static time_t dt_mktime_hint(struct tm *tm_in, int dst_hint) {
+    struct tm want = *tm_in;
+    struct tm a = want;
+    a.tm_isdst = -1;
+    tzset();
+    time_t t = mktime(&a);
+    if (dst_hint == 0 || dst_hint == 1) {
+        if (t != (time_t)-1 && a.tm_isdst >= 0 && a.tm_isdst != dst_hint) {
+            struct tm b = want;
+            b.tm_isdst = dst_hint;
+            time_t t2 = mktime(&b);
+            if (t2 != (time_t)-1 && t2 != t && b.tm_isdst == dst_hint &&
+                b.tm_year == a.tm_year && b.tm_mon == a.tm_mon && b.tm_mday == a.tm_mday &&
+                b.tm_hour == a.tm_hour && b.tm_min == a.tm_min && b.tm_sec == a.tm_sec) {
+                *tm_in = b;
+                return t2;
+            }
+        }
+    }
+    *tm_in = a;
+    return t;
+}
+
+/* Replace each %s conversion (not %%s) in fmt with the epoch value. */
+static char *dt_subst_epoch(const char *fmt, long long ep) {
+    char num[32];
+    snprintf(num, sizeof num, "%lld", ep);
+    size_t nl = strlen(num), fl = strlen(fmt);
+    char *out = (char *)malloc(fl * (nl + 1) + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < fl; i++) {
+        if (fmt[i] == '%' && i + 1 < fl) {
+            if (fmt[i + 1] == 's') { memcpy(out + o, num, nl); o += nl; i++; continue; }
+            out[o++] = fmt[i]; out[o++] = fmt[i + 1]; i++; continue;
+        }
+        out[o++] = fmt[i];
+    }
+    out[o] = '\0';
+    return out;
+}
 }
 
 func _is_utc(scalar $dt) int {
@@ -159,7 +205,14 @@ func _is_utc(scalar $dt) int {
 
 # Create a DateTime hash from components (local time)
 func make(int $year, int $month, int $day, int $hour, int $minute, int $second) scalar {
+    return DateTime::_make_local($year, $month, $day, $hour, $minute, $second, -1);
+}
+
+# make() with a DST hint (0/1, -1 = none) that picks the occurrence of an
+# ambiguous wall-clock time (the repeated hour when DST ends).
+func _make_local(int $year, int $month, int $day, int $hour, int $minute, int $second, int $dst_hint) scalar {
     my hash %dt = ();
+    my int $isdst = -1;
     my int $ny = $year;
     my int $nm = $month;
     my int $nd = $day;
@@ -176,8 +229,9 @@ func make(int $year, int $month, int $day, int $hour, int $minute, int $second) 
         tm_val.tm_hour = strada_to_int(hour);
         tm_val.tm_min = strada_to_int(minute);
         tm_val.tm_sec = strada_to_int(second);
-        tm_val.tm_isdst = -1;
-        time_t t = mktime(&tm_val);
+        time_t t = dt_mktime_hint(&tm_val, (int)strada_to_int(dst_hint));
+        strada_decref(isdst);
+        isdst = strada_new_int(tm_val.tm_isdst);
         strada_decref(epoch);
         epoch = strada_new_int((int64_t)t);
         strada_decref(ny);
@@ -201,6 +255,7 @@ func make(int $year, int $month, int $day, int $hour, int $minute, int $second) 
     $dt{"minute"} = $nmin;
     $dt{"second"} = $ns;
     $dt{"epoch"} = $epoch;
+    $dt{"isdst"} = $isdst;
 
     return \%dt;
 }
@@ -258,7 +313,11 @@ func _make_like(scalar $src, int $year, int $month, int $day, int $hour, int $mi
     if (DateTime::_is_utc($src) == 1) {
         return DateTime::make_utc($year, $month, $day, $hour, $minute, $second);
     }
-    return DateTime::make($year, $month, $day, $hour, $minute, $second);
+    my int $hint = -1;
+    if (defined($src) && exists(%{$src}, "isdst") && defined($src->{"isdst"})) {
+        $hint = $src->{"isdst"};
+    }
+    return DateTime::_make_local($year, $month, $day, $hour, $minute, $second, $hint);
 }
 
 # Get current local time
@@ -270,11 +329,15 @@ func now() scalar {
     my int $hour = 0;
     my int $minute = 0;
     my int $second = 0;
+    my int $isdst = -1;
 
     __C__ {
         time_t t = time(NULL);
         struct tm tm_buf = {0};
+        tzset();
         struct tm *tm_val = localtime_r(&t, &tm_buf);
+        strada_decref(isdst);
+        isdst = strada_new_int(tm_val ? tm_val->tm_isdst : -1);
 
         strada_decref(epoch);
         epoch = strada_new_int((int64_t)t);
@@ -303,6 +366,7 @@ func now() scalar {
     $dt{"second"} = $second;
     $dt{"epoch"} = $epoch;
 
+    $dt{"isdst"} = $isdst;
     return \%dt;
 }
 
@@ -360,12 +424,16 @@ func from_epoch(int $timestamp) scalar {
     my int $hour = 0;
     my int $minute = 0;
     my int $second = 0;
+    my int $isdst = -1;
 
     my int $ok = 1;
     __C__ {
         time_t t = (time_t)strada_to_int(timestamp);
         struct tm tm_buf = {0};
+        tzset();
         struct tm *tm_val = localtime_r(&t, &tm_buf);
+        strada_decref(isdst);
+        isdst = strada_new_int(tm_val ? tm_val->tm_isdst : -1);
 
         if (!tm_val) {
             strada_decref(ok);
@@ -396,6 +464,7 @@ func from_epoch(int $timestamp) scalar {
     $dt{"second"} = $second;
     $dt{"epoch"} = $timestamp;
 
+    $dt{"isdst"} = $isdst;
     return \%dt;
 }
 
@@ -456,6 +525,8 @@ func parse(str $input, str $fmt) scalar {
     my int $minute = 0;
     my int $second = 0;
     my int $success = 0;
+    my int $has_zone = 0;
+    my int $zepoch = 0;
 
     __C__ {
         char *input_str = strada_to_str(input);
@@ -481,6 +552,27 @@ func parse(str $input, str $fmt) scalar {
             minute = strada_new_int(tm_val.tm_min);
             strada_decref(second);
             second = strada_new_int(tm_val.tm_sec);
+            /* %z (numeric UTC offset) fills tm_gmtoff: the parsed fields are
+             * wall-clock time at that offset, not local time. */
+            int zone = 0;
+            for (const char *f = fmt_str; *f; f++) {
+                if (*f == '%' && f[1]) {
+                    f++;
+                    while (*f == 'E' || *f == 'O') f++;
+                    if (*f == 'z') zone = 1;
+                    if (!*f) break;
+                }
+            }
+            if (zone) {
+                struct tm u = tm_val;
+                long off = (long)tm_val.tm_gmtoff;
+                u.tm_isdst = 0;
+                time_t t = timegm(&u);
+                strada_decref(has_zone);
+                has_zone = strada_new_int(1);
+                strada_decref(zepoch);
+                zepoch = strada_new_int((int64_t)t - (int64_t)off);
+            }
         }
 
         free(input_str);
@@ -489,6 +581,9 @@ func parse(str $input, str $fmt) scalar {
 
     if ($success == 0) {
         return undef;
+    }
+    if ($has_zone == 1) {
+        return DateTime::from_epoch($zepoch);
     }
 
     return DateTime::make($year, $month, $day, $hour, $minute, $second);
@@ -507,10 +602,21 @@ func format(scalar $dt, str $fmt) str {
     my int $minute = $dt->{"minute"};
     my int $second = $dt->{"second"};
     my int $is_utc = DateTime::_is_utc($dt);
+    my int $has_epoch = 0;
+    my int $ep = 0;
+    if (exists(%{$dt}, "epoch") && defined($dt->{"epoch"})) {
+        $has_epoch = 1;
+        $ep = $dt->{"epoch"};
+    }
+    my int $dst_hint = -1;
+    if (exists(%{$dt}, "isdst") && defined($dt->{"isdst"})) {
+        $dst_hint = $dt->{"isdst"};
+    }
     my str $result = "";
 
     __C__ {
-        char *fmt_str = strada_to_str(fmt);
+        char *fmt_str0 = strada_to_str(fmt);
+        char *fmt_str = fmt_str0;
 
         struct tm tm_val = {0};
         tm_val.tm_year = strada_to_int(year) - 1900;
@@ -524,8 +630,40 @@ func format(scalar $dt, str $fmt) str {
             time_t t = timegm(&tm_val);
             gmtime_r(&t, &tm_val);
         } else {
-            tm_val.tm_isdst = -1;
-            mktime(&tm_val);  // Normalize and fill in wday, yday, tz
+            /* Prefer the stored instant: rebuilding from the fields alone
+             * cannot tell the two occurrences of a repeated (DST-end) hour
+             * apart. Fall back to the fields if they were changed by hand. */
+            struct tm want = tm_val;
+            int used_epoch = 0;
+            if (strada_to_int(has_epoch)) {
+                time_t te = (time_t)strada_to_int(ep);
+                struct tm lt;
+                tzset();
+                if (localtime_r(&te, &lt) &&
+                    lt.tm_year == want.tm_year && lt.tm_mon == want.tm_mon &&
+                    lt.tm_mday == want.tm_mday && lt.tm_hour == want.tm_hour &&
+                    lt.tm_min == want.tm_min && lt.tm_sec == want.tm_sec) {
+                    tm_val = lt;
+                    used_epoch = 1;
+                }
+            }
+            if (!used_epoch) {
+                dt_mktime_hint(&tm_val, (int)strada_to_int(dst_hint));
+            }
+        }
+        /* %s: strftime would mktime() the tm (reading a UTC tm as local
+         * time), so substitute the instant ourselves. */
+        if (fmt_str && strstr(fmt_str, "%s")) {
+            time_t inst;
+            if (strada_to_int(is_utc)) {
+                struct tm u = tm_val;
+                inst = timegm(&u);
+            } else {
+                struct tm l = tm_val;   /* tm_isdst is already resolved */
+                inst = mktime(&l);
+            }
+            char *sub = dt_subst_epoch(fmt_str, (long long)inst);
+            if (sub) fmt_str = sub;
         }
 
         strada_decref(result);
@@ -560,7 +698,8 @@ func format(scalar $dt, str $fmt) str {
             }
         }
 
-        free(fmt_str);
+        if (fmt_str != fmt_str0) free(fmt_str);
+        free(fmt_str0);
     }
 
     return $result;
@@ -1111,6 +1250,6 @@ func to_string(scalar $dt) str {
 # Clone a DateTime
 func clone(scalar $dt) scalar {
     if (!defined($dt)) { return undef; }
-    return DateTime::_make_like($dt, $dt->{"year"}, $dt->{"month"}, $dt->{"day"},
-                                $dt->{"hour"}, $dt->{"minute"}, $dt->{"second"});
+    my hash %copy = %{$dt};
+    return \%copy;
 }

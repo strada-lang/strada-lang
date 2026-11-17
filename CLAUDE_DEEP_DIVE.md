@@ -2663,3 +2663,24 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
   literals; otherwise `strada_generic_new(pkg, args_array)` (consumes the
   array). Semantic only reports `undefined function 'Pkg::new'` for an odd,
   spread-free argument count.
+- **Hashes and pairs in lists (Audit 20 M4)**: `ast_add_array_elem` splices
+  an `is_pair` node (`k => v`) into two elements, so every list literal sees
+  `=>` as a comma. The `NODE_ANON_ARRAY` builder treats `hash_list_arg`
+  elements (`%h`, `%$r`, `...%h`) as flattening and appends their pairs with
+  `emit_hash_pairs_append`; `ast_new_map`/`ast_new_grep` pass the input
+  through `ast_hash_list_input` (a `%` input or a parenthesized single item
+  becomes a one-element list). The VM mirrors this with `compile_list_src`
+  (emits `BUILTIN_HASH_FLAT` for a `%` source before `OP_ARRAY_EXTEND`),
+  `vm_list_has_flatten` (hash init from a list with flattening elements
+  builds the flat list, then `BUILTIN_HASH_SHALLOW_COPY`), and
+  `vm_map_value_kind` (a map block yielding `[..]`/`{..}`/`\X` pushes one
+  element; the VM cannot tell an array from an array ref at run time).
+- **VM hash layout (Audit 20 M4)**: `VMHash.entries` is dense in insertion
+  order; `index[]` (power of two, >= 2x capacity, -1 empty) maps hash ->
+  entry slot; inline hashes (capacity 4) have no index and are scanned.
+  Deleted entries stay as `occupied == 2`, linked LIFO through their `hash`
+  field from `free_head`, and are refilled first -- the compiled runtime's
+  policy, so `keys` orders agree. Stale index slots are counted in
+  `index_fill`; the index is rebuilt before it passes 3/4. Fast paths use
+  `vm_hash_probe_first` (NULL = the key is absent) and
+  `vm_hash_append_slot`; the x86 JIT first probe reads `index[hash & mask]`.

@@ -48,13 +48,13 @@ func scalar_vm(scalar $val, str $key, scalar $args) scalar {
     if ($key eq "html")    { return html_escape($s); }
     if ($key eq "xml")     { return xml_escape($s); }
     if ($key eq "repeat")  { return str_repeat($s, arg_int($args, 0, 1)); }
-    if ($key eq "replace") { return re::replace_all($s, arg_str($args, 0, ""), arg_str($args, 1, "")); }
+    if ($key eq "replace") { return text_replace($s, arg_str($args, 0, ""), arg_str($args, 1, ""), (argc($args) >= 3) ? is_true_arg(arg($args, 2)) : 1); }
     if ($key eq "remove")  { return re::replace_all($s, arg_str($args, 0, ""), ""); }
     if ($key eq "search")  { return (re::match($s, arg_str($args, 0, "")) == 1) ? 1 : ""; }
     if ($key eq "match")   { return scalar_match($s, $args); }
     if ($key eq "split")   { return scalar_split($s, $args); }
     if ($key eq "substr")  { return scalar_substr($s, $args); }
-    if ($key eq "chunk")   { return str_chunk($s, arg_int($args, 0, 1)); }
+    if ($key eq "chunk")   { return str_chunk($s, arg_int($args, 0, 1)); }   # 0 -> 1, <0 from the end
     if ($key eq "list")    { my array @l = ($val); return \@l; }
     if ($key eq "hash")    { my hash %h = (); $h{"value"} = $val; return \%h; }
     return undef;
@@ -89,9 +89,20 @@ func str_repeat(str $s, int $n) str {
     return $o;
 }
 func str_chunk(str $s, int $size) scalar {
-    if ($size <= 0) { $size = 1; }
+    if ($size == 0) { $size = 1; }
     my array @out = ();
     my int $n = length($s);
+    if ($size < 0) {
+        # TT: negative size chunks from the end (the short chunk comes first).
+        $size = 0 - $size;
+        my int $e = $n;
+        while ($e > 0) {
+            my int $b = ($e - $size >= 0) ? ($e - $size) : 0;
+            unshift(@out, substr($s, $b, $e - $b));
+            $e = $b;
+        }
+        return \@out;
+    }
     my int $i = 0;
     while ($i < $n) {
         my int $l = ($i + $size <= $n) ? $size : ($n - $i);
@@ -100,28 +111,53 @@ func str_chunk(str $s, int $size) scalar {
     }
     return \@out;
 }
+# Perl substr() offset/length semantics (TT calls substr directly): negative
+# offset counts from the end, negative length leaves that many chars off the
+# end; a range entirely outside the string yields "" (undef in Perl).
 func scalar_substr(str $s, scalar $args) str {
     my int $n = length($s);
-    my int $off = arg_int($args, 0, 0);
-    if ($off < 0) { $off = $n + $off; }
-    if ($off < 0) { $off = 0; }
-    if ($off > $n) { return ""; }
-    my int $len = (argc($args) >= 2) ? arg_int($args, 1, 0) : ($n - $off);
-    if ($len < 0) { $len = 0; }
-    if ($off + $len > $n) { $len = $n - $off; }
-    return substr($s, $off, $len);
+    my int $p1 = arg_int($args, 0, 0);
+    if ($p1 < 0) { $p1 = $n + $p1; }
+    my int $p2 = $n;
+    if (argc($args) >= 2 && defined(arg($args, 1))) {
+        my int $len = arg_int($args, 1, 0);
+        $p2 = ($len < 0) ? ($n + $len) : ($p1 + $len);
+    }
+    if ($p2 < 0) {
+        if ($p1 < 0) { return ""; }
+        $p2 = 0;
+    } elsif ($p1 < 0) {
+        $p1 = 0;
+    }
+    if ($p1 > $n) { return ""; }
+    if ($p2 < $p1) { $p2 = $p1; }
+    if ($p2 > $n) { $p2 = $n; }
+    return substr($s, $p1, $p2 - $p1);
 }
 func scalar_split(str $s, scalar $args) scalar {
     my str $pat = (argc($args) >= 1) ? arg_str($args, 0, "") : " ";
-    my array @parts = split($pat, $s);
+    my int $limit = arg_int($args, 1, 0);      # Perl split LIMIT (0 = no limit)
+    my array @parts = split($pat, $s, $limit);
     return \@parts;
 }
 # Non-global match: capture groups as a list, or [1] when the pattern matched
 # with no groups, or "" on no match. re::match performs the match and stores the
 # captures; re::captures() (no args) reads them ([0]=full match, [1..]=groups).
-# (Global match is a documented P3 TODO.)
+# match(pat, 1) is a global match (Perl list-context //g): every match's groups,
+# or every whole match when the pattern has no groups.
 func scalar_match(str $s, scalar $args) scalar {
     my str $pat = arg_str($args, 0, "");
+    if (argc($args) >= 2 && is_true_arg(arg($args, 1)) == 1) {
+        my scalar $ms = rx_scan($s, $pat, 1);
+        my array @all = ();
+        foreach my scalar $m (@{$ms}) {
+            my scalar $g = $m->{"groups"};
+            if (size(@{$g}) == 0) { push(@all, $m->{"text"}); }
+            else { foreach my scalar $gv (@{$g}) { push(@all, $gv); } }
+        }
+        if (size(@all) == 0) { return ""; }
+        return \@all;
+    }
     if (re::match($s, $pat) == 0) { return ""; }
     my array @caps = re::captures();
     if (size(@caps) <= 1) { my array @one = (1); return \@one; }
@@ -136,7 +172,15 @@ func list_vm(scalar $val, str $key, scalar $args) scalar {
     my int $n = size(@{$val});
     if ($key eq "size")    { return $n; }
     if ($key eq "max")     { return $n - 1; }
-    if ($key eq "defined") { return 1; }
+    if ($key eq "defined") {
+        # list.defined(n): is element n defined (non-numeric n -> false)
+        if (argc($args) == 0) { return 1; }
+        my str $ds = arg_str($args, 0, "");
+        if (re::match($ds, "^\\s*-?[0-9]+\\s*$") == 0) { return ""; }
+        my int $di = $ds + 0;
+        if ($di < 0) { $di = $n + $di; }
+        return ($di >= 0 && $di < $n && defined($val->[$di])) ? 1 : "";
+    }
     if ($key eq "list")    { return $val; }
     if ($key eq "first") {
         if (argc($args) == 0) { return ($n > 0) ? $val->[0] : undef; }
@@ -167,11 +211,14 @@ func list_vm(scalar $val, str $key, scalar $args) scalar {
     if ($key eq "merge")   { return list_merge($val, $args); }
     if ($key eq "slice")   { return list_slice_range($val, arg_int($args, 0, 0), (argc($args) >= 2) ? arg_int($args, 1, $n - 1) : ($n - 1)); }
     if ($key eq "item")    { my int $i = arg_int($args, 0, 0); if ($i < 0) { $i = $n + $i; } return ($i >= 0 && $i < $n) ? $val->[$i] : undef; }
-    if ($key eq "hash")    { return list_to_hash($val); }
-    if ($key eq "push")    { my int $i = 0; while ($i < argc($args)) { push(@{$val}, arg($args, $i)); $i = $i + 1; } return $val; }
+    if ($key eq "hash")    { return (argc($args) >= 1) ? list_to_index_hash($val, arg_int($args, 0, 0)) : list_to_hash($val); }
+    if ($key eq "import")  { foreach my scalar $e (@{list_merge_items($args)}) { push(@{$val}, $e); } return $val; }
+    if ($key eq "splice")  { return list_splice($val, $args); }
+    # push/unshift return "" (TT) so [% list.push(x) %] prints nothing.
+    if ($key eq "push")    { my int $i = 0; while ($i < argc($args)) { push(@{$val}, arg($args, $i)); $i = $i + 1; } return ""; }
     if ($key eq "pop")     { return ($n > 0) ? pop(@{$val}) : undef; }
     if ($key eq "shift")   { return ($n > 0) ? shift(@{$val}) : undef; }
-    if ($key eq "unshift") { my int $i = argc($args) - 1; while ($i >= 0) { unshift(@{$val}, arg($args, $i)); $i = $i - 1; } return $val; }
+    if ($key eq "unshift") { my int $i = argc($args) - 1; while ($i >= 0) { unshift(@{$val}, arg($args, $i)); $i = $i - 1; } return ""; }
     return undef;
 }
 
@@ -219,16 +266,67 @@ func list_grep(scalar $val, str $pat) scalar {
     }
     return \@out;
 }
-func list_merge(scalar $val, scalar $args) scalar {
-    my array @out = @{$val};
+# merge/import: the defined elements of every list argument (TT ignores
+# non-list arguments).
+func list_merge_items(scalar $args) scalar {
+    my array @out = ();
     my int $i = 0;
     while ($i < argc($args)) {
         my scalar $a = arg($args, $i);
-        if (defined($a) && ref($a) eq "ARRAY") { foreach my scalar $e (@{$a}) { push(@out, $e); } }
-        elsif (defined($a)) { push(@out, $a); }
+        if (defined($a) && ref($a) eq "ARRAY") { foreach my scalar $e (@{$a}) { if (defined($e)) { push(@out, $e); } } }
         $i = $i + 1;
     }
     return \@out;
+}
+func list_merge(scalar $val, scalar $args) scalar {
+    my array @out = @{$val};
+    foreach my scalar $e (@{list_merge_items($args)}) { push(@out, $e); }
+    return \@out;
+}
+# list.splice(offset, length, replacement...): Perl splice on the list; returns
+# the removed elements. A single list argument supplies the replacement items.
+func list_splice(scalar $val, scalar $args) scalar {
+    my int $n = size(@{$val});
+    my int $off = arg_int($args, 0, 0);
+    if ($off < 0) { $off = $n + $off; }
+    if ($off < 0) { $off = 0; }
+    if ($off > $n) { $off = $n; }
+    my int $len = $n - $off;
+    if (argc($args) >= 2 && defined(arg($args, 1))) {
+        $len = arg_int($args, 1, 0);
+        if ($len < 0) { $len = $n - $off + $len; if ($len < 0) { $len = 0; } }
+        if ($off + $len > $n) { $len = $n - $off; }
+    }
+    my array @rep = ();
+    if (argc($args) == 3 && defined(arg($args, 2)) && ref(arg($args, 2)) eq "ARRAY") {
+        @rep = @{arg($args, 2)};
+    } else {
+        my int $i = 2;
+        while ($i < argc($args)) { push(@rep, arg($args, $i)); $i = $i + 1; }
+    }
+    my array @removed = ();
+    my array @rest = ();
+    my int $k = 0;
+    while ($k < $n) {
+        if ($k < $off) { push(@rest, $val->[$k]); }
+        elsif ($k < $off + $len) { push(@removed, $val->[$k]); }
+        $k = $k + 1;
+    }
+    my array @tail = ();
+    $k = $off + $len;
+    while ($k < $n) { push(@tail, $val->[$k]); $k = $k + 1; }
+    while (size(@{$val}) > 0) { pop(@{$val}); }   # (not `@{$val} = ()`: a no-op under the VM)
+    foreach my scalar $e (@rest) { push(@{$val}, $e); }
+    foreach my scalar $e (@rep) { push(@{$val}, $e); }
+    foreach my scalar $e (@tail) { push(@{$val}, $e); }
+    return \@removed;
+}
+# list.hash(n): {n => first, n+1 => second, ...}
+func list_to_index_hash(scalar $val, int $base) scalar {
+    my hash %h = ();
+    my int $i = 0;
+    while ($i < size(@{$val})) { $h{"" . ($base + $i)} = $val->[$i]; $i = $i + 1; }
+    return \%h;
 }
 # list.hash: pair up elements as key=>value (TT: [3,1,2] -> {3=>1, 2=>undef}).
 func list_to_hash(scalar $val) scalar {
@@ -271,13 +369,28 @@ func hash_vm(scalar $val, str $key, scalar $args) scalar {
     if ($key eq "each")    { return hash_items($val); }
     if ($key eq "items")   { return hash_items($val); }
     if ($key eq "pairs")   { return hash_pairs($val); }
-    if ($key eq "list")    { return hash_pairs($val); }
+    if ($key eq "list")    {                 # hash.list('keys'|'values'|'each'), else pairs
+        my str $what = arg_str($args, 0, "");
+        if ($what eq "keys")   { my array @ks = keys(%{$val}); return \@ks; }
+        if ($what eq "values") { return hash_values($val); }
+        if ($what eq "each")   { return hash_items($val); }
+        return hash_pairs($val);
+    }
+    if ($key eq "import")  {                 # merge another hash in; prints nothing
+        my scalar $imp = arg($args, 0);
+        if (defined($imp) && ref($imp) eq "HASH") { foreach my str $ik (keys(%{$imp})) { $val->{$ik} = $imp->{$ik}; } }
+        return "";
+    }
     if ($key eq "sort")    { return hash_sort($val, 0); }
     if ($key eq "nsort")   { return hash_sort($val, 1); }
     if ($key eq "item")    { my str $k = arg_str($args, 0, ""); return exists(%{$val}, $k) ? $val->{$k} : undef; }
     if ($key eq "defined") { my str $k = arg_str($args, 0, ""); return (exists(%{$val}, $k) && defined($val->{$k})) ? 1 : ""; }
     if ($key eq "exists")  { my str $k = arg_str($args, 0, ""); return exists(%{$val}, $k) ? 1 : ""; }
-    if ($key eq "delete")  { my str $k = arg_str($args, 0, ""); my scalar $v = $val->{$k}; delete(%{$val}, $k); return $v; }
+    if ($key eq "delete")  {                 # deletes every named key; prints nothing (TT)
+        my int $i = 0;
+        while ($i < argc($args)) { delete(%{$val}, arg_str($args, $i, "")); $i = $i + 1; }
+        return "";
+    }
     return undef;
 }
 
@@ -317,3 +430,193 @@ func hash_sort(scalar $val, int $numeric) scalar {
     }
     return $sorted;
 }
+
+# Perl truthiness of an evaluated arg (for flag args like replace's global).
+func is_true_arg(scalar $v) int {
+    if (!defined($v)) { return 0; }
+    my str $t = "" . $v;
+    return ($t eq "" || $t eq "0") ? 0 : 1;
+}
+
+# ---- regex scanning (match positions without the runtime's replacement syntax)
+# rx_scan($s, $pat, $global) -> arrayref of {"start","end","text","groups"=>[..]}
+# (offsets in characters; unset groups are ""). Works by letting the regex engine wrap every match
+# in marker characters (one replace pass, so anchors/lookbehinds see the whole
+# subject), then reading the marked string back.
+func rx_ngroups(str $pat) int {
+    my int $n = length($pat);
+    my int $i = 0;
+    my int $cnt = 0;
+    my int $in_class = 0;
+    while ($i < $n) {
+        my str $c = substr($pat, $i, 1);
+        if ($c eq "\\") { $i = $i + 2; next; }
+        if ($in_class == 1) { if ($c eq "]") { $in_class = 0; } $i = $i + 1; next; }
+        if ($c eq "[") { $in_class = 1; if ($i + 1 < $n && substr($pat, $i + 1, 1) eq "]") { $i = $i + 1; } $i = $i + 1; next; }
+        if ($c eq "(") {
+            if ($i + 1 < $n && substr($pat, $i + 1, 1) eq "?") {
+                my str $nx = ($i + 2 < $n) ? substr($pat, $i + 2, 1) : "";
+                my str $nx2 = ($i + 3 < $n) ? substr($pat, $i + 3, 1) : "";
+                if ($nx eq "P" && $nx2 eq "<") { $cnt = $cnt + 1; }
+                elsif ($nx eq "'") { $cnt = $cnt + 1; }
+                elsif ($nx eq "<" && $nx2 ne "=" && $nx2 ne "!") { $cnt = $cnt + 1; }
+            } elsif ($i + 1 < $n && substr($pat, $i + 1, 1) eq "*") {
+                # (*VERB) -- not a group
+            } else {
+                $cnt = $cnt + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return $cnt;
+}
+# Three distinct marker characters that do not occur in $s (ASCII control
+# characters first, then the Unicode private-use area), or undef.
+func rx_markers(str $s) scalar {
+    my array @m = ();
+    my int $cp = 1;
+    while (size(@m) < 3 && $cp <= 0xF8FF) {
+        if ($cp == 32) { $cp = 0xE000; }
+        if ($cp != 9 && $cp != 10 && $cp != 13) {
+            my str $ch = chr($cp);
+            if (index($s, $ch) < 0) { push(@m, $ch); }
+        }
+        $cp = $cp + 1;
+    }
+    if (size(@m) < 3) { return undef; }
+    return \@m;
+}
+func rx_scan(str $s, str $pat, int $global) scalar {
+    my scalar $mk = rx_markers($s);
+    if (!defined($mk)) { return rx_scan_slow($s, $pat, $global); }
+    my str $mo = $mk->[0]; my str $mc = $mk->[1]; my str $ms = $mk->[2];
+    my int $ng = rx_ngroups($pat);
+    my str $rep = $mo . '${0}';
+    my int $g = 1;
+    while ($g <= $ng) { $rep = $rep . $ms . '${' . $g . '}'; $g = $g + 1; }
+    $rep = $rep . $mc;
+    my str $marked = ($global == 1) ? re::replace_all($s, "(?:" . $pat . ")", $rep)
+                                    : re::replace($s, "(?:" . $pat . ")", $rep);
+    my array @out = ();
+    my int $pos = 0;            # offset in the original string
+    my int $i = 0;
+    my int $n = length($marked);
+    while ($i < $n) {
+        my int $o = index($marked, $mo, $i);
+        if ($o < 0) { last; }
+        $pos = $pos + ($o - $i);
+        my int $c = index($marked, $mc, $o);
+        my array @f = split($ms, substr($marked, $o + 1, $c - $o - 1), -1);
+        my hash %m = ();
+        my str $text = (size(@f) > 0) ? ("" . $f[0]) : "";
+        $m{"start"} = $pos;
+        $m{"end"} = $pos + length($text);
+        $m{"text"} = $text;
+        my array @groups = ();
+        my int $k = 1;
+        while ($k <= $ng) { push(@groups, ($k < size(@f)) ? ("" . $f[$k]) : ""); $k = $k + 1; }
+        $m{"groups"} = \@groups;
+        push(@out, \%m);
+        $pos = $pos + length($text);
+        $i = $c + 1;
+    }
+    return \@out;
+}
+
+# Marker-free scan, used only when $s contains every candidate marker: find
+# each match's text with an unanchored search from the current position, then
+# its start as the first position where the pattern matches anchored (\K keeps
+# the group numbering). Quadratic, but exact apart from Perl's retry of a
+# non-empty match at the position of an empty one.
+func rx_skip(int $q) str {
+    if ($q <= 0) { return "^"; }
+    my int $k = $q / 65535;
+    my int $r = $q % 65535;
+    my str $o = "^(?s:";
+    if ($k > 0) { $o = $o . "(?:.{65535}){" . $k . "}"; }
+    return $o . ".{" . $r . "})";
+}
+func rx_scan_slow(str $s, str $pat, int $global) scalar {
+    my int $ng = rx_ngroups($pat);
+    my int $n = length($s);
+    my array @out = ();
+    my int $pos = 0;
+    while ($pos <= $n) {
+        if (re::match($s, rx_skip($pos) . "(?s:.*?)\\K(?:" . $pat . ")") == 0) { last; }
+        my array @c0 = re::captures();
+        my str $text = defined($c0[0]) ? ("" . $c0[0]) : "";
+        my int $q = $pos;
+        my int $found = -1;
+        my array @caps = ();
+        while ($q <= $n && $found < 0) {
+            if (substr($s, $q, length($text)) eq $text
+                && re::match($s, rx_skip($q) . "\\K(?:" . $pat . ")") == 1) {
+                @caps = re::captures();
+                $found = $q;
+            }
+            $q = $q + 1;
+        }
+        if ($found < 0) { last; }
+        $text = defined($caps[0]) ? ("" . $caps[0]) : "";
+        my array @groups = ();
+        my int $k = 1;
+        while ($k <= $ng) { push(@groups, ($k < size(@caps) && defined($caps[$k])) ? ("" . $caps[$k]) : ""); $k = $k + 1; }
+        my hash %m = ();
+        $m{"start"} = $found; $m{"end"} = $found + length($text); $m{"text"} = $text; $m{"groups"} = \@groups;
+        push(@out, \%m);
+        if ($global == 0) { last; }
+        $pos = $found + length($text);
+        if (length($text) == 0) { $pos = $pos + 1; }
+    }
+    return \@out;
+}
+
+# Rebuild $s with each match (from rx_scan) replaced by $fn-style expansion.
+# $expand=1 applies TT's vmethod expansion of $N (and \\ / \$ escapes) in
+# $replace; otherwise $replace is inserted literally. TT skips an empty match
+# that starts where the previous match ended.
+func rx_substitute(str $s, str $pat, str $replace, int $global, int $expand) str {
+    my scalar $ms = rx_scan($s, $pat, $global);
+    my str $out = "";
+    my int $last = 0;
+    my int $prev_end = -1;
+    foreach my scalar $m (@{$ms}) {
+        my int $st = $m->{"start"};
+        my int $en = $m->{"end"};
+        $out = $out . substr($s, $last, $st - $last);
+        if (!($st == $en && $st == $prev_end)) {
+            $out = $out . (($expand == 1) ? expand_backrefs($replace, $m->{"groups"}) : $replace);
+        }
+        $prev_end = $en;
+        $last = $en;
+    }
+    return $out . substr($s, $last, length($s) - $last);
+}
+func expand_backrefs(str $r, scalar $groups) str {
+    my str $out = "";
+    my int $n = length($r);
+    my int $i = 0;
+    while ($i < $n) {
+        my str $c = substr($r, $i, 1);
+        if ($c eq "\\" && $i + 1 < $n && (substr($r, $i + 1, 1) eq "\\" || substr($r, $i + 1, 1) eq "\$")) {
+            $out = $out . substr($r, $i + 1, 1); $i = $i + 2; next;
+        }
+        if ($c eq "\$" && $i + 1 < $n && substr($r, $i + 1, 1) ge "0" && substr($r, $i + 1, 1) le "9") {
+            my int $j = $i + 1;
+            while ($j < $n && substr($r, $j, 1) ge "0" && substr($r, $j, 1) le "9") { $j = $j + 1; }
+            my int $num = substr($r, $i + 1, $j - $i - 1) + 0;
+            if ($num >= 1 && $num <= size(@{$groups})) { $out = $out . $groups->[$num - 1]; }
+            $i = $j; next;
+        }
+        $out = $out . $c; $i = $i + 1;
+    }
+    return $out;
+}
+
+# TT's text.replace(pattern, replacement, global=1): only $N backreferences
+# are expanded (and only when the replacement contains one); $& and \1 stay
+# literal; a group that did not match (or does not exist) expands to "".
+func text_replace(str $s, str $pat, str $replace, int $global) str {
+    return rx_substitute($s, $pat, $replace, $global, (re::match($replace, "\\$[0-9]") == 1) ? 1 : 0);
+}
+

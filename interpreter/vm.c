@@ -275,6 +275,8 @@ static void vm_gc_free_one(VM *pool_vm, VMObjHeader *hdr) {
             }
             if (h->entries != h->inline_entries) free(h->entries);
         }
+        free(h->index);
+        h->index = NULL;
         free(h->class_name);
         break;
     }
@@ -434,7 +436,9 @@ static inline int64_t vm_to_int(VMValue v) {
         case VM_OBJ_UINT64: return (int64_t)VM_AS_UINT64(v)->val;
         case VM_OBJ_STR: return atoll(VM_AS_STR(v)->data);
         case VM_OBJ_STRBUF: return VM_AS_STRBUF(v)->data ? atoll(VM_AS_STRBUF(v)->data) : 0;
-        case VM_OBJ_ARRAY: return VM_AS_ARRAY(v)->size;
+        /* a reference's numeric value is its address (as compiled code) */
+        case VM_OBJ_ARRAY: return (int64_t)(intptr_t)VM_TO_PTR(v);
+        case VM_OBJ_HASH: return (int64_t)(intptr_t)VM_TO_PTR(v);
         case VM_OBJ_NATIVE_SV: return strada_to_int(((VMNativeSV*)VM_TO_PTR(v))->sv);
         default: break;
         }
@@ -457,7 +461,7 @@ static inline double vm_to_num(VMValue v) {
         case VM_OBJ_UINT64: return (double)VM_AS_UINT64(v)->val;
         case VM_OBJ_STR: return vm_perl_atof(VM_AS_STR(v)->data);
         case VM_OBJ_STRBUF: return VM_AS_STRBUF(v)->data ? vm_perl_atof(VM_AS_STRBUF(v)->data) : 0.0;
-        case VM_OBJ_ARRAY: return (double)VM_AS_ARRAY(v)->size;
+        case VM_OBJ_ARRAY:
         case VM_OBJ_HASH:
         case VM_OBJ_CLOSURE:
         case VM_OBJ_FILEHANDLE:
@@ -506,14 +510,12 @@ static inline int vm_to_bool(VMValue v) {
             return st->len > 0 && !(st->len == 1 && st->data[0] == '0');
         }
         case VM_OBJ_STRBUF: { VMStrBuf *sb = VM_AS_STRBUF(v); return sb->len > 0 && !(sb->len == 1 && sb->data[0] == '0'); }
-        case VM_OBJ_ARRAY: {
-            VMArray *a = VM_AS_ARRAY(v);
-            return a->class_name != NULL || a->size > 0;
-        }
-        case VM_OBJ_HASH: {
-            VMHash *h = VM_AS_HASH(v);
-            return h->class_name != NULL || h->size > 0;
-        }
+        /* An array/hash value in scalar context is a reference (the
+         * compiler turns @a / %h in truth context into their counts), and a
+         * reference is always true (Perl), also to an empty container. */
+        case VM_OBJ_ARRAY:
+        case VM_OBJ_HASH:
+            return 1;
         case VM_OBJ_WEAKREF: return vm_to_bool(VM_AS_WEAKREF(v)->target);
         default: return 1;
         }
@@ -546,7 +548,7 @@ static const char *vm_to_cstr(VMValue v, char *buf, size_t bufsz) {
         if (a->class_name) {
             snprintf(buf, bufsz, "%s=ARRAY(0x%lx)", a->class_name, (unsigned long)(uintptr_t)a);
         } else {
-            snprintf(buf, bufsz, "%d", a->size);
+            snprintf(buf, bufsz, "ARRAY(0x%lx)", (unsigned long)(uintptr_t)a);
         }
         return buf;
     }
@@ -791,6 +793,33 @@ static inline void key_free_entry(VMHashEntry *e) {
 static int vm_utf8_is_valid_str(const char *s, size_t len, int *out_nonascii);
 static inline VMValue vm_make_str_flag(const char *s, size_t len, int is_utf8);
 
+/* Rebuild index[] from the dense entries (NULL for inline-size hashes). */
+static void vm_hash_index_build(VMHash *h) {
+    if (h->capacity <= VM_HASH_INLINE_CAP) {
+        free(h->index);
+        h->index = NULL;
+        h->index_mask = 0;
+        return;
+    }
+    uint32_t isz = 8;
+    while (isz < (uint32_t)h->capacity * 2) isz <<= 1;
+    if (!h->index || h->index_mask + 1 != isz) {
+        free(h->index);
+        h->index = malloc((size_t)isz * sizeof(int32_t));
+        if (!h->index) { fprintf(stderr, "VM: out of memory\n"); exit(1); }
+        h->index_mask = isz - 1;
+    }
+    memset(h->index, 0xff, (size_t)isz * sizeof(int32_t));
+    h->index_fill = 0;
+    for (int i = 0; i < h->used; i++) {
+        if (h->entries[i].occupied != 1) continue;
+        uint32_t ix = h->entries[i].hash & h->index_mask;
+        while (h->index[ix] >= 0) ix = (ix + 1) & h->index_mask;
+        h->index[ix] = i;
+        h->index_fill++;
+    }
+}
+
 VMHash *vm_hash_new(int cap) {
     int c = VM_HASH_INLINE_CAP;
     if (cap > VM_HASH_INLINE_CAP) {
@@ -800,6 +829,11 @@ VMHash *vm_hash_new(int cap) {
     h->capacity = c;
     h->size = 0;
     h->tombstones = 0;
+    h->used = 0;
+    h->index = NULL;
+    h->index_mask = 0;
+    h->index_fill = 0;
+    h->free_head = -1;
     h->class_id = 0;
     h->class_prog_id = 0;
     h->grow_gen = 0;
@@ -815,6 +849,7 @@ VMHash *vm_hash_new(int cap) {
         h->inline_entries[3].occupied = 0;
     } else {
         h->entries = calloc((size_t)c, sizeof(VMHashEntry));
+        vm_hash_index_build(h);
     }
     return h;
 }
@@ -828,37 +863,115 @@ void vm_hash_free(VMHash *h) {
         }
     }
     if (h->entries != h->inline_entries) free(h->entries);
+    free(h->index);
     if (h->class_name) free(h->class_name);
     free(h);
 }
 
+/* Empty a hash whose keys/values the caller already released. */
+static void vm_hash_reset_storage(VMHash *h) {
+    memset(h->entries, 0, (size_t)h->capacity * sizeof(VMHashEntry));
+    h->size = 0;
+    h->used = 0;
+    h->tombstones = 0;
+    h->free_head = -1;
+    h->index_fill = 0;
+    h->iter_pos = 0;
+    h->grow_gen++;
+    if (h->index) memset(h->index, 0xff, (size_t)(h->index_mask + 1) * sizeof(int32_t));
+}
+
+/* Make room for one more entry: compact out deleted slots (order kept) or
+ * double the capacity. */
 static void vm_hash_grow(VMHash *h) {
     int old_cap = h->capacity;
     VMHashEntry *old = h->entries;
-    VMHashEntry tmp_inline[VM_HASH_INLINE_CAP];
     int new_cap = (h->size * 2 < old_cap) ? old_cap : (old_cap * 2);
-    h->capacity = new_cap;
     h->grow_gen++;
-    if (new_cap == old_cap && old == h->inline_entries) {
-        memcpy(tmp_inline, old, sizeof(tmp_inline));
-        old = tmp_inline;
-        memset(h->inline_entries, 0, sizeof(h->inline_entries));
-    } else {
-        h->entries = calloc((size_t)h->capacity, sizeof(VMHashEntry));
-        if (!h->entries) { fprintf(stderr, "VM: out of memory\n"); exit(1); }
-    }
-    h->size = 0;
-    h->tombstones = 0;
-    uint32_t mask = (uint32_t)(h->capacity - 1);
-    for (int i = 0; i < old_cap; i++) {
-        if (old[i].occupied == 1) {
-            uint32_t idx = old[i].hash & mask;
-            while (h->entries[idx].occupied == 1) idx = (idx + 1) & mask;
-            h->entries[idx] = old[i];
-            h->size++;
+    if (new_cap == old_cap) {
+        int j = 0;
+        for (int i = 0; i < h->used; i++) {
+            if (old[i].occupied == 1) {
+                if (j != i) old[j] = old[i];
+                j++;
+            }
         }
+        if (j < old_cap) memset(&old[j], 0, (size_t)(old_cap - j) * sizeof(VMHashEntry));
+        h->used = j;
+    } else {
+        VMHashEntry *ne = calloc((size_t)new_cap, sizeof(VMHashEntry));
+        if (!ne) { fprintf(stderr, "VM: out of memory\n"); exit(1); }
+        int j = 0;
+        for (int i = 0; i < h->used; i++) {
+            if (old[i].occupied == 1) ne[j++] = old[i];
+        }
+        h->entries = ne;
+        h->capacity = new_cap;
+        h->used = j;
+        if (old != h->inline_entries) free(old);
     }
-    if (old != h->inline_entries && old != tmp_inline) free(old);
+    h->tombstones = 0;
+    h->free_head = -1;
+    vm_hash_index_build(h);
+}
+
+/* Entry slot of KEY, or -1. */
+static int32_t vm_hash_slot_idx_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash) {
+    if (!h || !key) return -1;
+    uint32_t klen = (uint32_t)keylen;
+    if (!h->index) {
+        for (int i = 0; i < h->used; i++) {
+            VMHashEntry *e = &h->entries[i];
+            if (e->occupied == 1 && e->hash == hash && e->keylen == klen && memcmp(e->key, key, klen) == 0)
+                return i;
+        }
+        return -1;
+    }
+    uint32_t mask = h->index_mask;
+    uint32_t ix = hash & mask;
+    for (;;) {
+        int32_t ei = h->index[ix];
+        if (ei < 0) return -1;
+        VMHashEntry *e = &h->entries[ei];
+        if (e->occupied == 1 && e->hash == hash && e->keylen == klen && memcmp(e->key, key, klen) == 0)
+            return ei;
+        ix = (ix + 1) & mask;
+    }
+}
+
+/* Entry at the key's first index position, or NULL when that position is
+ * empty -- which proves the key is absent (fast paths). */
+static inline VMHashEntry *vm_hash_probe_first(VMHash *h, uint32_t kh) {
+    if (h->index) {
+        int32_t ix = h->index[kh & h->index_mask];
+        return ix >= 0 ? &h->entries[ix] : NULL;
+    }
+    return h->used > 0 ? &h->entries[0] : NULL;
+}
+
+/* Claim the next dense slot for a key known to be absent and index it. The
+ * caller fills key/value/hash/keylen/occupied and bumps size. */
+static VMHashEntry *vm_hash_append_slot(VMHash *h, uint32_t hash) {
+    int32_t dst;
+    if (h->free_head >= 0) {
+        dst = h->free_head;
+        h->free_head = (int32_t)h->entries[dst].hash;
+        h->tombstones--;
+    } else {
+        if (h->used >= h->capacity) vm_hash_grow(h);
+        dst = h->used++;
+    }
+    if (h->index) {
+        /* reused slots leave stale index entries behind: rebuild before
+         * the index gets crowded (the new entry is indexed by the rebuild
+         * only once it is occupied, so index it here after rebuilding) */
+        if ((h->index_fill + 1) * 4 > (h->index_mask + 1) * 3) vm_hash_index_build(h);
+        uint32_t ix = hash & h->index_mask;
+        while (h->index[ix] >= 0) ix = (ix + 1) & h->index_mask;
+        h->index[ix] = dst;
+        h->index_fill++;
+    }
+    return &h->entries[dst];
 }
 
 /* Key bytes of a non-UTF-8 string being stored (set around the store by
@@ -866,55 +979,32 @@ static void vm_hash_grow(VMHash *h) {
 static __thread const char *g_vm_key_bytes_hint = NULL;
 static uint32_t vm_hash_set_nh_slot(VMHash *h, const char *key, size_t keylen, uint32_t hash, VMValue v) {
     if (!h || !key) return UINT32_MAX;
-    if ((h->size + h->tombstones) * 4 >= h->capacity * 3) vm_hash_grow(h);
     uint32_t klen = (uint32_t)keylen;
-    uint32_t mask = (uint32_t)(h->capacity - 1);
-    uint32_t idx = hash & mask;
-    uint32_t first_tomb = UINT32_MAX;
-    uint32_t dst = UINT32_MAX;
-    for (int probes = 0; probes < h->capacity; probes++) {
-        uint8_t occ = h->entries[idx].occupied;
-        if (occ == 0) {
-            dst = (first_tomb != UINT32_MAX) ? first_tomb : idx;
-            break;
-        }
-        if (occ == 2) {
-            if (first_tomb == UINT32_MAX) first_tomb = idx;
-        } else if (h->entries[idx].hash == hash && h->entries[idx].keylen == klen &&
-                   memcmp(h->entries[idx].key, key, klen) == 0) {
-            vm_val_free(&h->entries[idx].value);
-            h->entries[idx].value = v;
-            return idx;
-        }
-        idx = (idx + 1) & mask;
+    int32_t found = vm_hash_slot_idx_nh(h, key, keylen, hash);
+    if (found >= 0) {
+        vm_val_free(&h->entries[found].value);
+        h->entries[found].value = v;
+        return (uint32_t)found;
     }
-    if (dst == UINT32_MAX) {
-        if (first_tomb != UINT32_MAX) {
-            dst = first_tomb;
-        } else {
-            vm_hash_grow(h);
-            return vm_hash_set_nh_slot(h, key, keylen, hash, v);
-        }
-    }
-    if (h->entries[dst].occupied == 2) h->tombstones--;
+    VMHashEntry *e = vm_hash_append_slot(h, hash);
     const char *ikey = vm_intern_hash_key(g_active_vm, key, klen, hash);
     if (ikey) {
-        h->entries[dst].key = (char *)ikey;
-        h->entries[dst].key_interned = 1;
+        e->key = (char *)ikey;
+        e->key_interned = 1;
     } else {
         char *k = malloc((size_t)klen + 1);
         if (klen > 0) memcpy(k, key, klen);
         k[klen] = '\0';
-        h->entries[dst].key = k;
-        h->entries[dst].key_interned = 0;
+        e->key = k;
+        e->key_interned = 0;
     }
-    h->entries[dst].value = v;
-    h->entries[dst].hash = hash;
-    h->entries[dst].keylen = klen;
-    h->entries[dst].key_bytes = (uint8_t)(key == g_vm_key_bytes_hint);
-    h->entries[dst].occupied = 1;
+    e->value = v;
+    e->hash = hash;
+    e->keylen = klen;
+    e->key_bytes = (uint8_t)(key == g_vm_key_bytes_hint);
+    e->occupied = 1;
     h->size++;
-    return dst;
+    return (uint32_t)(e - h->entries);
 }
 
 static void vm_hash_set_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash, VMValue v) {
@@ -928,21 +1018,6 @@ static void vm_hash_set_n(VMHash *h, const char *key, size_t keylen, VMValue v) 
 
 void vm_hash_set(VMHash *h, const char *key, VMValue v) {
     vm_hash_set_n(h, key, key ? strlen(key) : 0, v);
-}
-
-static int32_t vm_hash_slot_idx_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash) {
-    if (!h || !key) return -1;
-    uint32_t klen = (uint32_t)keylen;
-    uint32_t mask = (uint32_t)(h->capacity - 1);
-    uint32_t idx = hash & mask;
-    for (int probes = 0; probes < h->capacity; probes++) {
-        if (h->entries[idx].occupied == 0) return -1;
-        if (h->entries[idx].occupied == 1 && h->entries[idx].hash == hash &&
-            h->entries[idx].keylen == klen && memcmp(h->entries[idx].key, key, klen) == 0)
-            return (int32_t)idx;
-        idx = (idx + 1) & mask;
-    }
-    return -1;
 }
 
 static VMValue *vm_hash_slot_ptr_nh(VMHash *h, const char *key, size_t keylen, uint32_t hash) {
@@ -974,28 +1049,30 @@ VMValue vm_hash_get(VMHash *h, const char *key) {
 static VMValue vm_hash_delete_ret_n(VMHash *h, const char *key, size_t keylen) {
     if (!h || !key) return VM_UNDEF_VAL;
     uint32_t klen = (uint32_t)keylen;
-    uint32_t hash = vm_hash_fn_n(key, klen);
-    uint32_t mask = (uint32_t)(h->capacity - 1);
-    uint32_t idx = hash & mask;
-    for (int probes = 0; probes < h->capacity; probes++) {
-        if (h->entries[idx].occupied == 0) return VM_UNDEF_VAL;
-        if (h->entries[idx].occupied == 1 && h->entries[idx].hash == hash &&
-            h->entries[idx].keylen == klen && memcmp(h->entries[idx].key, key, klen) == 0) {
-            VMValue old = h->entries[idx].value;
-            if (VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_WEAKREF) old = VM_AS_WEAKREF(old)->target;
-            key_free_entry(&h->entries[idx]);
-            h->entries[idx].key = NULL;
-            h->entries[idx].key_interned = 0;
-            h->entries[idx].value = VM_UNDEF_VAL;
-            h->entries[idx].occupied = 2;
-            h->size--;
-            h->tombstones++;
-            h->grow_gen++;
-            return old;
-        }
-        idx = (idx + 1) & mask;
+    int32_t idx = vm_hash_slot_idx_nh(h, key, keylen, vm_hash_fn_n(key, klen));
+    if (idx < 0) return VM_UNDEF_VAL;
+    VMValue old = h->entries[idx].value;
+    if (VM_IS_PTR(old) && VM_PTR_TYPE(old) == VM_OBJ_WEAKREF) old = VM_AS_WEAKREF(old)->target;
+    key_free_entry(&h->entries[idx]);
+    h->entries[idx].key = NULL;
+    h->entries[idx].key_interned = 0;
+    h->entries[idx].value = VM_UNDEF_VAL;
+    h->entries[idx].occupied = 2;   /* the index slot stays as a tombstone */
+    h->entries[idx].hash = (uint32_t)h->free_head;
+    h->free_head = idx;
+    h->size--;
+    h->tombstones++;
+    h->grow_gen++;
+    if (h->size == 0) {
+        /* emptied: drop the deleted slots so the next insert starts fresh */
+        memset(h->entries, 0, (size_t)h->used * sizeof(VMHashEntry));
+        h->used = 0;
+        h->tombstones = 0;
+        h->free_head = -1;
+        h->index_fill = 0;
+        if (h->index) memset(h->index, 0xff, (size_t)(h->index_mask + 1) * sizeof(int32_t));
     }
-    return VM_UNDEF_VAL;
+    return old;
 }
 
 VMValue vm_hash_delete_ret(VMHash *h, const char *key) {
@@ -1925,6 +2002,8 @@ static void vm_pools_free_all(VM *vm) {
 void vm_free(VM *vm) {
     if (!vm) return;
     if (__sync_sub_and_fetch(&vm->refcount, 1) > 0) return;
+    free(vm->cur_package);
+    vm->cur_package = NULL;
     if (!vm->is_worker_vm && vm->program && vm->gc_objects && vm->frame_count == 0 && vm->exec_base == 0 &&
         vm->global_save_count == 0 && vm->gc_pause == 0) {
         for (int pass = 0; pass < 4; pass++) {
@@ -3790,14 +3869,34 @@ static void shell_quote_arg(const char *src, char *dst, size_t dstsz) {
     dst[di] = '\0';
 }
 
-static int cblock_jit_compile(VMCBlock *cb, const char *runtime_inc, const char *prelude) {
+static int cblock_bind_entries(VMCBlock *cbs, int n, void *h) {
+    void (*fns[n > 0 ? n : 1])(void**);
+    for (int bi = 0; bi < n; bi++) {
+        char nm[48];
+        snprintf(nm, sizeof(nm), "__cblock_entry_%d", bi);
+        fns[bi] = (void (*)(void**))dlsym(h, nm);
+        if (!fns[bi]) return -1;
+    }
+    /* one handle owner (cbs[0]); vm_program_free dlcloses non-NULL handles */
+    cbs[0].dl_handle = h;
+    for (int bi = 0; bi < n; bi++) __atomic_store_n(&cbs[bi].fn, fns[bi], __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* Compile N __C__ blocks into ONE shared object (entry points
+ * __cblock_entry_<i>), so file-scope statics in the program-level prelude
+ * are shared by every block -- as in the compiled backend, where they are
+ * one translation unit. */
+static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, const char *prelude, int quiet) {
     char cache_dir[512];
     ensure_cache_dir(cache_dir, sizeof(cache_dir));
 
     /* Run eviction once per process */
     if (!eviction_done) { cache_evict_stale(cache_dir); eviction_done = 1; }
 
-    uint64_t hash = cblock_hash(cb->code, cb->var_names, cb->var_count);
+    uint64_t hash = 14695981039346656037ULL ^ (uint64_t)n;
+    for (int bi = 0; bi < n; bi++)
+        hash = hash * 1099511628211ULL ^ cblock_hash(cbs[bi].code, cbs[bi].var_names, cbs[bi].var_count);
     if (prelude) {
         /* prelude participates in the cache key */
         for (const char *pp = prelude; *pp; pp++) hash = hash * 1099511628211ULL ^ (unsigned char)*pp;
@@ -3808,12 +3907,10 @@ static int cblock_jit_compile(VMCBlock *cb, const char *runtime_inc, const char 
     /* Check cache */
     struct stat st;
     if (stat(so_path, &st) == 0 && st.st_size > 0) {
-        cb->dl_handle = dlopen(so_path, RTLD_NOW);
-        if (cb->dl_handle) {
-            cb->fn = (void (*)(void**))dlsym(cb->dl_handle, "__cblock_entry");
-            if (cb->fn) return 0; /* cache hit */
-            dlclose(cb->dl_handle);
-            cb->dl_handle = NULL;
+        void *h = dlopen(so_path, RTLD_NOW);
+        if (h) {
+            if (cblock_bind_entries(cbs, n, h) == 0) return 0; /* cache hit */
+            dlclose(h);
         }
         /* Cache corrupt — recompile */
     }
@@ -3836,18 +3933,21 @@ static int cblock_jit_compile(VMCBlock *cb, const char *runtime_inc, const char 
     if (prelude && prelude[0]) {
         fprintf(f, "/* program-level __C__ blocks (file-scope helpers) */\n%s\n", prelude);
     }
-    fprintf(f, "void __cblock_entry(StradaValue **__vars) {\n");
-    /* Declare local variables from the __vars array */
-    for (int i = 0; i < cb->var_count; i++) {
-        fprintf(f, "    StradaValue *%s = __vars[%d];\n", cb->var_names[i], i);
+    for (int bi = 0; bi < n; bi++) {
+        VMCBlock *cb = &cbs[bi];
+        fprintf(f, "void __cblock_entry_%d(StradaValue **__vars) {\n", bi);
+        /* Declare local variables from the __vars array */
+        for (int i = 0; i < cb->var_count; i++) {
+            fprintf(f, "    StradaValue *%s = __vars[%d];\n", cb->var_names[i], i);
+        }
+        fprintf(f, "\n    /* User code */\n");
+        fprintf(f, "{\n%s\n}\n", cb->code);
+        fprintf(f, "\n    /* Copy back modified variables */\n");
+        for (int i = 0; i < cb->var_count; i++) {
+            fprintf(f, "    __vars[%d] = %s;\n", i, cb->var_names[i]);
+        }
+        fprintf(f, "}\n");
     }
-    fprintf(f, "\n    /* User code */\n");
-    fprintf(f, "%s\n", cb->code);
-    fprintf(f, "\n    /* Copy back modified variables */\n");
-    for (int i = 0; i < cb->var_count; i++) {
-        fprintf(f, "    __vars[%d] = %s;\n", i, cb->var_names[i]);
-    }
-    fprintf(f, "}\n");
     fclose(f);
 
     /* Compile to shared library with shell-quoted arguments */
@@ -3874,7 +3974,7 @@ static int cblock_jit_compile(VMCBlock *cb, const char *runtime_inc, const char 
     unlink(src_path); /* clean up source */
 
     if (rc != 0) {
-        fprintf(stderr, "__C__ JIT: compilation failed:\n%s", errbuf);
+        if (!quiet) fprintf(stderr, "__C__ JIT: compilation failed:\n%s", errbuf);
         unlink(tmp_so); rmdir(tmpdir);
         return -1;
     }
@@ -3901,19 +4001,33 @@ static int cblock_jit_compile(VMCBlock *cb, const char *runtime_inc, const char 
     rmdir(tmpdir);
 
     /* Load the compiled .so */
-    cb->dl_handle = dlopen(load_path, RTLD_NOW);
-    if (!cb->dl_handle) {
-        fprintf(stderr, "__C__ JIT: dlopen failed: %s\n", dlerror());
+    void *h = dlopen(load_path, RTLD_NOW);
+    if (!h) {
+        if (!quiet) fprintf(stderr, "__C__ JIT: dlopen failed: %s\n", dlerror());
         return -1;
     }
-    cb->fn = (void (*)(void**))dlsym(cb->dl_handle, "__cblock_entry");
-    if (!cb->fn) {
-        fprintf(stderr, "__C__ JIT: dlsym failed: %s\n", dlerror());
-        dlclose(cb->dl_handle);
-        cb->dl_handle = NULL;
+    if (cblock_bind_entries(cbs, n, h) != 0) {
+        if (!quiet) fprintf(stderr, "__C__ JIT: dlsym failed: %s\n", dlerror());
+        dlclose(h);
         return -1;
     }
     return 0;
+}
+
+/* JIT the program's __C__ blocks: all of them into one object (shared
+ * statics); if that fails, fall back to compiling just the requested block
+ * alone (an unrelated broken block must not disable the others). */
+static int cblock_jit_compile(VMProgram *prog, int idx) {
+    if (!prog->cblock_jit_all_tried) {
+        prog->cblock_jit_all_tried = 1;
+        int all_unset = 1;
+        for (int i = 0; i < prog->cblock_count; i++) if (prog->cblocks[i].fn || prog->cblocks[i].dl_handle) all_unset = 0;
+        if (all_unset && prog->cblock_count > 1 &&
+            cblock_jit_compile_n(prog->cblocks, prog->cblock_count, prog->runtime_include_path, prog->cblock_prelude, 1) == 0)
+            return 0;
+    }
+    if (prog->cblocks[idx].fn) return 0;
+    return cblock_jit_compile_n(&prog->cblocks[idx], 1, prog->runtime_include_path, prog->cblock_prelude, 0);
 }
 
 /* ===== VM Execution ===== */
@@ -7241,12 +7355,96 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             SP_PUSH(VM_MAKE_PTR(nh));
             break;
         }
+        case BUILTIN_HASH_FLAT: {
+            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH) {
+                vm->stack_top = sp;
+                vm->gc_pause++;
+                VMArray *fl = vm_hash_to_flat_kv(vm, VM_AS_HASH(args[0]));
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+                SP_PUSH(fl ? VM_MAKE_PTR(fl) : VM_MAKE_PTR(vm_array_new(0)));
+            } else if (argc >= 1 && !VM_IS_UNDEF(args[0])) {
+                SP_PUSH(vm_val_copy(args[0]));
+            } else {
+                SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+            }
+            break;
+        }
+        case BUILTIN_PRINTF: {
+            /* args[0]: the flattened argument list. A filehandle (VM or
+             * runtime socket/handle) first is the destination. */
+            VMArray *pa = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            if (!pa || pa->size == 0) { SP_PUSH(VM_UNDEF_VAL); break; }
+            int pstart = 0;
+            VMFileHandle *pfh = NULL;
+            StradaValue *pnfh = NULL;
+            FILE *pfp = stdout;
+            if (VM_IS_PTR(vm->default_fh) && VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE) {
+                pfh = (VMFileHandle*)VM_TO_PTR(vm->default_fh);
+                pfp = (FILE*)pfh->fp;
+            }
+            VMValue pfirst = pa->items[0];
+            if (pa->size >= 2 && VM_IS_PTR(pfirst) && VM_PTR_TYPE(pfirst) == VM_OBJ_FILEHANDLE) {
+                pfh = (VMFileHandle*)VM_TO_PTR(pfirst);
+                pfp = (FILE*)pfh->fp;
+                pstart = 1;
+            } else if (pa->size >= 2 && VM_IS_PTR(pfirst) && VM_PTR_TYPE(pfirst) == VM_OBJ_NATIVE_SV) {
+                StradaValue *nsv = ((VMNativeSV*)VM_TO_PTR(pfirst))->sv;
+                if (nsv && !STRADA_IS_TAGGED_INT(nsv) && (nsv->type == STRADA_SOCKET || nsv->type == STRADA_FILEHANDLE)) {
+                    pnfh = nsv;
+                    pstart = 1;
+                    pfh = NULL;
+                }
+            }
+            vm->stack_top = sp;
+            vm->gc_pause++;
+            VMValue pres = vm_sprintf(vm, pa->size - pstart, pa->items + pstart);
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_builtin_throw_exc;
+            }
+            if (pnfh) {
+                StradaValue *psv = vm_to_sv(pres);
+                strada_print_fh(psv, pnfh);
+                strada_decref(psv);
+            } else if (pfp) {
+                vm_write_val(pfp, pres, 0);
+            }
+            vm_val_free(&pres);
+            if (pfh && pfh->is_mem == 2 && VM_IS_PTR(pfh->mem_sref)) {
+                vm->stack_top = sp;
+                vm_fh_sync_mem_sref(vm, pfh);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_builtin_throw_exc;
+                }
+            }
+            SP_PUSH(VM_MAKE_INT(1));
+            break;
+        }
+        case BUILTIN_SET_PACKAGE: {
+            char spbuf[256];
+            const char *spn = vm_to_cstr(args[0], spbuf, sizeof(spbuf));
+            free(vm->cur_package);
+            vm->cur_package = strdup(spn ? spn : "main");
+            SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
         case BUILTIN_INHERIT: {
-            /* Runtime inherit(child, parent) — append an inheritance edge */
-            if (argc >= 2) {
+            /* Runtime inherit(child, parent) — append an inheritance edge;
+             * inherit(parent) uses the package from set_package() */
+            if (argc >= 1) {
                 char cbuf[128], pbuf[128];
-                const char *child = vm_to_cstr(args[0], cbuf, 128);
-                const char *parent = vm_to_cstr(args[1], pbuf, 128);
+                const char *child = (argc >= 2) ? vm_to_cstr(args[0], cbuf, 128)
+                                                : (vm->cur_package ? vm->cur_package : "main");
+                const char *parent = vm_to_cstr(args[argc >= 2 ? 1 : 0], pbuf, 128);
                 VMProgram *p = vm->program;
                 p->inherits = realloc(p->inherits, (p->inherit_count + 1) * sizeof(VMInherit));
                 p->inherits[p->inherit_count].child = strdup(child);
@@ -9018,6 +9216,58 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             SP_PUSH(VM_MAKE_PTR(sr_pair));
             break;
         }
+        case BUILTIN_CONTAINER_REPLACE: {
+            /* @{EXPR} = LIST / %{EXPR} = LIST: replace the referenced
+             * container's contents in place (tied containers: CLEAR+STORE,
+             * as BUILTIN_TIE_ASSIGN). */
+            if (argc < 2) { SP_PUSH(argc ? args[0] : VM_UNDEF_VAL); break; }
+            VMValue rt = args[0], rv = args[1];
+            int r_arr = VM_IS_PTR(rt) && VM_PTR_TYPE(rt) == VM_OBJ_ARRAY && VM_IS_UNDEF(VM_AS_ARRAY(rt)->tied_obj);
+            int r_hash = VM_IS_PTR(rt) && VM_PTR_TYPE(rt) == VM_OBJ_HASH && VM_IS_UNDEF(VM_AS_HASH(rt)->tied_obj);
+            if (!r_arr && !r_hash) goto L_builtin_tie_assign;
+            vm->stack_top = sp;
+            vm->gc_pause++;
+            /* snapshot the source first: it may alias the target */
+            VMArray *src = NULL;
+            if (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_HASH) {
+                src = vm_hash_to_flat_kv(vm, VM_AS_HASH(rv));
+            } else if (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY) {
+                VMArray *sa = VM_AS_ARRAY(rv);
+                src = vm_array_new(sa->size > 0 ? sa->size : 1);
+                for (int i = 0; i < sa->size; i++) vm_array_push(src, vm_val_copy(sa->items[i]));
+            } else {
+                src = vm_array_new(1);
+                if (!VM_IS_UNDEF(rv)) vm_array_push(src, vm_val_copy(rv));
+            }
+            if (r_arr) {
+                VMArray *ta = VM_AS_ARRAY(rt);
+                for (int i = 0; i < ta->size; i++) vm_val_free(&ta->items[i]);
+                ta->size = 0;
+                if (ta->holes) { free(ta->holes); ta->holes = NULL; }
+                for (int i = 0; src && i < src->size; i++) vm_array_push(ta, vm_val_copy(src->items[i]));
+            } else {
+                VMHash *th = VM_AS_HASH(rt);
+                for (int i = 0; i < th->capacity; i++) {
+                    if (th->entries[i].occupied == 1) {
+                        key_free_entry(&th->entries[i]);
+                        vm_val_free(&th->entries[i].value);
+                    }
+                }
+                vm_hash_reset_storage(th);
+                for (int i = 0; src && i < src->size; i += 2) {
+                    char kb[256];
+                    size_t kl = 0;
+                    const char *kp = vm_bytes_view(src->items[i], kb, sizeof(kb), &kl);
+                    VMValue val = (i + 1 < src->size) ? vm_val_copy(src->items[i + 1]) : VM_UNDEF_VAL;
+                    vm_hash_set_n(th, kp ? kp : "", kp ? kl : 0, val);
+                }
+            }
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            SP_PUSH(rt);
+            break;
+        }
+        L_builtin_tie_assign:
         case BUILTIN_TIE_ASSIGN: {
             /* @a = LIST / %h = LIST on a tied container (Perl): CLEAR, then
              * STORE each element / pair; the tie stays, and the result (what
@@ -11524,9 +11774,9 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             }
             VMString *kstr = VM_AS_STR(chunk->str_const_vals[kidx]);
             uint32_t kh = ((const VMConstString*)((const char*)kstr - offsetof(VMConstString, str)))->hash;
-            VMHashEntry *e = &h->entries[kh & (uint32_t)(h->capacity - 1)];
+            VMHashEntry *e = vm_hash_probe_first(h, kh);
             VMValue r;
-            if (__builtin_expect(e->occupied == 1 && e->hash == kh && e->keylen == kstr->len &&
+            if (__builtin_expect(e && e->occupied == 1 && e->hash == kh && e->keylen == kstr->len &&
                                  memcmp(e->key, kstr->data, kstr->len) == 0, 1)) {
                 r = e->value;
             } else {
@@ -11574,12 +11824,13 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
             }
             VMString *kstr = VM_AS_STR(chunk->str_const_vals[kidx]);
             uint32_t kh = ((const VMConstString*)((const char*)kstr - offsetof(VMConstString, str)))->hash;
-            VMHashEntry *e = &h->entries[kh & (uint32_t)(h->capacity - 1)];
-            if (__builtin_expect(e->occupied == 1 && e->hash == kh && e->keylen == kstr->len &&
+            VMHashEntry *e = vm_hash_probe_first(h, kh);
+            if (__builtin_expect(e && e->occupied == 1 && e->hash == kh && e->keylen == kstr->len &&
                                  memcmp(e->key, kstr->data, kstr->len) == 0, 1)) {
                 e->value = v;
-            } else if (__builtin_expect(e->occupied == 0 && h->size * 4 < h->capacity * 3 &&
+            } else if (__builtin_expect(!e && (h->free_head >= 0 || h->used < h->capacity) &&
                                         !vm->is_worker_vm && !vm->workers_head, 1)) {
+                e = vm_hash_append_slot(h, kh);
                 uint32_t pid = vm->program->prog_id;
                 uint32_t cidx = (uint32_t)(((uintptr_t)kstr >> 4) & 127);
                 const char *ikey = NULL;
@@ -12332,12 +12583,23 @@ static int jb_emit_hash_primary_probe(JitBuf *b, const VMInsn *di, VMChunk *c, i
     fails[nf++] = jb_jcc_placeholder(b, 0x85);
     jb_mem(b, 1, 0x83, 7, JR_RAX, (int32_t)offsetof(VMHash, tied_obj)); jb_u8(b, 0);
     fails[nf++] = jb_jcc_placeholder(b, 0x85);
-    jb_mem(b, 0, 0x8B, JR_RCX, JR_RAX, (int32_t)offsetof(VMHash, capacity));
-    jb_rr(b, 0, 0x85, JR_RCX, JR_RCX);
-    fails[nf++] = jb_jcc_placeholder(b, 0x8E); /* jle */
-    jb_alu_ri32(b, 5, JR_RCX, 1); /* cap - 1 */
-    jb_mov_imm32(b, JR_RDX, khash);
-    jb_rr(b, 0, 0x21, JR_RDX, JR_RCX); /* and ecx, edx -> slot */
+    /* slot = index ? index[khash & index_mask] : 0 (inline hashes are
+     * scanned linearly; slot 0 is the first-probe guess) */
+    jb_mem(b, 1, 0x8B, JR_RDX, JR_RAX, (int32_t)offsetof(VMHash, index)); /* mov rdx, [rax+index] */
+    jb_rr(b, 1, 0x85, JR_RDX, JR_RDX);
+    uint32_t j_small = jb_jcc_placeholder(b, 0x84); /* jz small */
+    jb_mem(b, 0, 0x8B, JR_RCX, JR_RAX, (int32_t)offsetof(VMHash, index_mask)); /* mov ecx, [rax+mask] */
+    jb_mov_imm32(b, JR_RSI, khash);
+    jb_rr(b, 0, 0x21, JR_RSI, JR_RCX); /* and ecx, esi */
+    jb_shift_ri8(b, 1, 4, JR_RCX, 2); /* shl rcx, 2 */
+    jb_rr(b, 1, 0x01, JR_RDX, JR_RCX); /* add rcx, rdx */
+    jb_mem(b, 1, 0x63, JR_RCX, JR_RCX, 0); /* movsxd rcx, dword [rcx] */
+    jb_rr(b, 1, 0x85, JR_RCX, JR_RCX);
+    fails[nf++] = jb_jcc_placeholder(b, 0x88); /* js: empty index slot */
+    uint32_t j_have = jb_jmp_placeholder(b);
+    jb_patch_here(b, j_small);
+    jb_rr(b, 0, 0x31, JR_RCX, JR_RCX); /* xor ecx, ecx */
+    jb_patch_here(b, j_have);
     jb_shift_ri8(b, 1, 4, JR_RCX, 5); /* shl rcx, 5 */
     jb_mem(b, 1, 0x8B, JR_RAX, JR_RAX, (int32_t)offsetof(VMHash, entries));
     jb_rr(b, 1, 0x01, JR_RAX, JR_RCX); /* add rcx, rax -> VMHashEntry* e */
@@ -16323,9 +16585,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             }
             VMString *kstr = VM_AS_STR(chunk->str_const_vals[kidx]);
             uint32_t kh = ((const VMConstString*)((const char*)kstr - offsetof(VMConstString, str)))->hash;
-            VMHashEntry *e = &h->entries[kh & (uint32_t)(h->capacity - 1)];
+            VMHashEntry *e = vm_hash_probe_first(h, kh);
             VMValue r;
-            if (__builtin_expect(e->occupied == 1 && e->hash == kh &&
+            if (__builtin_expect(e && e->occupied == 1 && e->hash == kh &&
                                  e->keylen == kstr->len &&
                                  memcmp(e->key, kstr->data, kstr->len) == 0, 1)) {
                 r = e->value;
@@ -16382,13 +16644,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             }
             VMString *kstr = VM_AS_STR(chunk->str_const_vals[kidx]);
             uint32_t kh = ((const VMConstString*)((const char*)kstr - offsetof(VMConstString, str)))->hash;
-            VMHashEntry *e = &h->entries[kh & (uint32_t)(h->capacity - 1)];
-            if (__builtin_expect(e->occupied == 1 && e->hash == kh &&
+            VMHashEntry *e = vm_hash_probe_first(h, kh);
+            if (__builtin_expect(e && e->occupied == 1 && e->hash == kh &&
                                  e->keylen == kstr->len &&
                                  memcmp(e->key, kstr->data, kstr->len) == 0, 1)) {
                 e->value = v;
-            } else if (__builtin_expect(e->occupied == 0 && h->size * 4 < h->capacity * 3 &&
+            } else if (__builtin_expect(!e && (h->free_head >= 0 || h->used < h->capacity) &&
                                         !vm->is_worker_vm && !vm->workers_head, 1)) {
+                e = vm_hash_append_slot(h, kh);
                 uint32_t pid = vm->program->prog_id;
                 uint32_t cidx = (uint32_t)(((uintptr_t)kstr >> 4) & 127);
                 const char *ikey = NULL;
@@ -18431,26 +18694,51 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t pat_idx = di->a;
         uint8_t flags = di->flags;
         (void)flags;
+        VMValue pat_val = VM_UNDEF_VAL;
+        char pbuf[256];
+        const char *pattern;
+        size_t plen = 0;
+        if (pat_idx == 0xFFFF) {
+            /* interpolated pattern built at run time (on top of the subject) */
+            pat_val = SP_POP();
+            if (__builtin_expect(vm_has_stringify(vm->program, pat_val), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                pat_val = vm_stringify_ov(vm, pat_val);
+                stack = vm->stack; RELOAD();
+            }
+            pattern = vm_bytes_view(pat_val, pbuf, sizeof(pbuf), &plen);
+        } else {
+            pattern = chunk->str_consts[pat_idx];
+            plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
+        }
         VMValue str_val = SP_POP();
         char buf[256];
         size_t slen = 0;
         const char *s = vm_bytes_view(str_val, buf, sizeof(buf), &slen);
-        const char *pattern = chunk->str_consts[pat_idx];
-        size_t plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
         int result = vm_regex_match_len_u8(vm, s, slen, vm_is_utf8(str_val), pattern, plen);
         SP_PUSH(VM_MAKE_INT(result));
         vm_val_free(&str_val);
+        vm_temp_free(&pat_val);
         DISPATCH();
     }
 
     CASE(OP_REGEX_FIND): {
         uint16_t pat_idx = di->a;
+        VMValue fpat_val = VM_UNDEF_VAL;
+        if (pat_idx == 0xFFFF) fpat_val = SP_POP();
         VMValue pos_val = SP_POP(), str_val = SP_POP();
         char fbuf[4096];
         size_t slen = 0;
         const char *s = vm_bytes_view(str_val, fbuf, sizeof(fbuf), &slen);
-        const char *pattern = chunk->str_consts[pat_idx];
-        size_t plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
+        char fpbuf[256];
+        const char *pattern;
+        size_t plen = 0;
+        if (pat_idx == 0xFFFF) {
+            pattern = vm_bytes_view(fpat_val, fpbuf, sizeof(fpbuf), &plen);
+        } else {
+            pattern = chunk->str_consts[pat_idx];
+            plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
+        }
         size_t mstart = 0, mend = 0;
         int64_t start = vm_to_int(pos_val);
         if (start < 0) start = 0;
@@ -18461,6 +18749,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             SP_PUSH(VM_MAKE_INT(-1));
             SP_PUSH(VM_MAKE_INT(-1));
         }
+        vm_temp_free(&fpat_val);
         vm_temp_free(&str_val);
         DISPATCH();
     }
@@ -18469,15 +18758,31 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         uint16_t pat_idx = di->a;
         uint8_t flags = di->flags;
         (void)flags;
+        VMValue pat_val = VM_UNDEF_VAL;
+        char pbuf[256];
+        const char *pattern;
+        size_t plen = 0;
+        if (pat_idx == 0xFFFF) {
+            /* interpolated pattern built at run time (on top of the subject) */
+            pat_val = SP_POP();
+            if (__builtin_expect(vm_has_stringify(vm->program, pat_val), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                pat_val = vm_stringify_ov(vm, pat_val);
+                stack = vm->stack; RELOAD();
+            }
+            pattern = vm_bytes_view(pat_val, pbuf, sizeof(pbuf), &plen);
+        } else {
+            pattern = chunk->str_consts[pat_idx];
+            plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
+        }
         VMValue str_val = SP_POP();
         char buf[256];
         size_t slen = 0;
         const char *s = vm_bytes_view(str_val, buf, sizeof(buf), &slen);
-        const char *pattern = chunk->str_consts[pat_idx];
-        size_t plen = chunk->str_const_lens ? chunk->str_const_lens[pat_idx] : strlen(pattern);
         int result = vm_regex_match_len_u8(vm, s, slen, vm_is_utf8(str_val), pattern, plen);
         SP_PUSH(VM_MAKE_INT(!result));
         vm_val_free(&str_val);
+        vm_temp_free(&pat_val);
         DISPATCH();
     }
 
@@ -19315,7 +19620,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         if (!__atomic_load_n(&cb->fn, __ATOMIC_ACQUIRE)) {
             int _prev_safe = vm_worker_enter_safe(vm);
             pthread_mutex_lock(&g_cblock_jit_mutex);
-            int jit_fail = (!cb->fn && cblock_jit_compile(cb, vm->program->runtime_include_path, vm->program->cblock_prelude) != 0);
+            int jit_fail = (!cb->fn && cblock_jit_compile(vm->program, idx) != 0);
             pthread_mutex_unlock(&g_cblock_jit_mutex);
             vm_worker_leave_safe(vm, _prev_safe);
             if (jit_fail) {
@@ -19429,10 +19734,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                         vm_val_free(&vh->entries[k].value);
                     }
                 }
-                memset(vh->entries, 0, (size_t)vh->capacity * sizeof(VMHashEntry));
-                vh->size = 0;
-                vh->iter_pos = 0;
-                vh->grow_gen++;
+                vm_hash_reset_storage(vh);
                 if (shv && shv->entries) {
                     for (size_t k = 0; k < shv->next_slot; k++) {
                         if (!shv->entries[k].key) continue;

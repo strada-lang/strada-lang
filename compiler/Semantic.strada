@@ -1574,6 +1574,15 @@ func sem_is_array_value(scalar $ctx, scalar $n) int {
     return 0;
 }
 
+# An array value (see sem_is_array_value) or a hash variable (%h, %{...}).
+func sem_is_container_value(scalar $ctx, scalar $n) int {
+    if (sem_is_array_value($ctx, $n) == 1) { return 1; }
+    if (is_valid_node($n) == 0) { return 0; }
+    my int $t = $n->{"type"};
+    if (($t == NODE_VARIABLE() || $t == NODE_DEREF_SCALAR()) && $n->{"sigil"} eq "%") { return 1; }
+    return 0;
+}
+
 # scalar(EXPR): the element count of an array value.
 func sem_scalar_of(scalar $n) scalar {
     my scalar $c = ast_new_call("scalar");
@@ -2096,9 +2105,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my str $bop = $expr->{"op"};
         # An array in numeric context is its element count (Perl): `@a + 0`,
         # `@a - 1` used to use the array reference's address.
-        if ($bop eq "+" || $bop eq "-" || $bop eq "*" || $bop eq "/" || $bop eq "%" || $bop eq "**") {
-            if (sem_is_array_value($ctx, $expr->{"left"}) == 1) { $expr->{"left"} = sem_scalar_of($expr->{"left"}); }
-            if (sem_is_array_value($ctx, $expr->{"right"}) == 1) { $expr->{"right"} = sem_scalar_of($expr->{"right"}); }
+        # Same for comparisons and string operators, and a hash gives its key
+        # count (`@a == 3`, `%h + 0`, `"n=" . @a`): an @a/%h variable holds a
+        # reference internally, so without this the address was compared.
+        if ($bop eq "+" || $bop eq "-" || $bop eq "*" || $bop eq "/" || $bop eq "%" || $bop eq "**"
+            || $bop eq "==" || $bop eq "!=" || $bop eq "<" || $bop eq "<=" || $bop eq ">" || $bop eq ">=" || $bop eq "<=>"
+            || $bop eq "." || $bop eq "eq" || $bop eq "ne" || $bop eq "lt" || $bop eq "gt" || $bop eq "le" || $bop eq "ge" || $bop eq "cmp") {
+            if (sem_is_container_value($ctx, $expr->{"left"}) == 1) { $expr->{"left"} = sem_scalar_of($expr->{"left"}); }
+            if (sem_is_container_value($ctx, $expr->{"right"}) == 1) { $expr->{"right"} = sem_scalar_of($expr->{"right"}); }
         }
         if ($bop eq "==" || $bop eq "!=" || $bop eq "<" || $bop eq "<=" || $bop eq ">" || $bop eq ">=" || $bop eq "<=>") {
             my scalar $bleft = $expr->{"left"};

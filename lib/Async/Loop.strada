@@ -130,6 +130,10 @@ func unwatch_sub(scalar $self, scalar $sock_or_fd, int $id) void {
     foreach my scalar $sub (@{$w->{"subs"}}) {
         if ($sub->{"id"} != $id) {
             push(@keep, $sub);
+        } else {
+            # run() dispatches from a snapshot of the subscription list;
+            # the flag keeps a sub removed mid-round from still firing.
+            $sub->{"dead"} = 1;
         }
     }
     if (size(@keep) == 0) {
@@ -151,6 +155,9 @@ func unwatch(scalar $self, scalar $sock_or_fd) void {
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
     if (defined($watchers->{$fd})) {
+        foreach my scalar $sub (@{$watchers->{$fd}->{"subs"}}) {
+            $sub->{"dead"} = 1;
+        }
         core::epoll_del($self->{"epfd"}, $fd);
         delete($watchers->{$fd});
     }
@@ -294,6 +301,7 @@ func run(scalar $self) void {
                 }
                 foreach my scalar $sub (@snapshot) {
                     if ($self->{"epfd"} < 0) { last; }
+                    if (defined($sub->{"dead"})) { next; }
                     if (mask_match($sub->{"mask"}, $mask)) {
                         my scalar $cb = $sub->{"cb"};
                         $cb->($fd, $mask);

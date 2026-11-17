@@ -85,32 +85,58 @@ func wait(scalar $self) array {
     my scalar $futures = $self->{"futures"};
     my int $n = $self->{"count"};
     my array @results;
+    my array @settled;
     my scalar $first_error;
     my int $failed = 0;
-
+    my int $remaining = $n;
     my int $i = 0;
     while ($i < $n) {
-        if ($failed == 0) {
-            try {
-                my scalar $r = await $futures->[$i];
-                push(@results, $r);
-            } catch ($e) {
-                $failed = 1;
-                $first_error = $e;
-                # Cancel every remaining sibling, then fall through to
-                # the drain loop below.
-                cancel_all($self);
-            }
-        } else {
-            # Drain: wait for the sibling to settle; swallow its
-            # cancellation/error (the first failure wins).
-            try {
-                my scalar $ignored = await $futures->[$i];
-            } catch ($e2) { }
-        }
+        push(@settled, 0);
+        push(@results, undef);
         $i = $i + 1;
     }
-
+    # Settle tasks in COMPLETION order, not spawn order: a failure in a
+    # later-spawned task must cancel its siblings as soon as it happens,
+    # not only after every earlier-spawned task has finished on its own.
+    # (Polled with a short back-off, like async::race; is_done never
+    # blocks, and await on a done future returns or rethrows at once.)
+    my int $pause = 50;
+    while ($remaining > 0) {
+        my int $progress = 0;
+        $i = 0;
+        while ($i < $n) {
+            if ($settled[$i] == 0 && async::is_done($futures->[$i])) {
+                $settled[$i] = 1;
+                $remaining = $remaining - 1;
+                $progress = 1;
+                try {
+                    my scalar $r = await $futures->[$i];
+                    if ($failed == 0) {
+                        $results[$i] = $r;
+                    }
+                } catch ($e) {
+                    # The first failure wins; later ones (including the
+                    # cancellations it triggers) are swallowed.
+                    if ($failed == 0) {
+                        $failed = 1;
+                        $first_error = $e;
+                        cancel_all($self);
+                    }
+                }
+            }
+            $i = $i + 1;
+        }
+        if ($remaining > 0) {
+            if ($progress == 1) {
+                $pause = 50;
+            } else {
+                core::usleep($pause);
+                if ($pause < 2000) {
+                    $pause = $pause * 2;
+                }
+            }
+        }
+    }
     if ($failed == 1) {
         throw $first_error;
     }

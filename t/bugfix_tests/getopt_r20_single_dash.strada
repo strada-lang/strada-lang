@@ -1,0 +1,18 @@
+# EXPECT: v=1 verbose=1 output=out.txt color=0 count=5 rem=file1|--x
+# Audit 20 S2-14: a single-character option name ("v") could not be given as
+# "-v"; it was pushed to the remaining arguments. (Re-executes itself with
+# the arguments to parse.)
+use lib "lib";
+use Getopt::Long;
+func main(int $argc, array @argv) int {
+    if ($argc == 1) {
+        my array @cmd = ($argv[0], "--verbose", "-o", "out.txt", "--count=5", "-v", "--no-color", "file1", "--", "--x");
+        return core::system_argv($cmd[0], @cmd);
+    }
+    my hash %opts = ();
+    $opts{"verbose"} = "0"; $opts{"output"} = ""; $opts{"count"} = "1"; $opts{"v"} = "0"; $opts{"color"} = "1";
+    my array @specs = ("verbose", "output|o=s", "count=i", "v", "color!");
+    Getopt::Long::GetOptions(@specs, %opts);
+    say("v=" . $opts{"v"} . " verbose=" . $opts{"verbose"} . " output=" . $opts{"output"} . " color=" . $opts{"color"} . " count=" . $opts{"count"} . " rem=" . join("|", Getopt::Long::remaining()));
+    return 0;
+}
