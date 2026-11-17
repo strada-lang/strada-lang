@@ -876,6 +876,17 @@ StradaValue *cb = strada_closure_new((void*)&__anon_func_0, 0, 0, NULL);
 - Without this, closures with no return would return garbage (undefined C behavior)
 - This prevents segfaults when `strada_closure_call()` result is decremented
 
+**Closure call entry points (2026-11)**: `$f->(a, b)` with 0-4 non-spread
+arguments compiles to `strada_closure_call0..4(fn, a0, ...)`. When the closure
+is an ordinary one whose `param_count` equals the argument count (not variadic,
+not a `\&fn` wrapper, not void) these call `func_ptr(captures, args...)`
+directly; everything else falls back to `strada_closure_call_argv`. Codegen
+(`NODE_CLOSURE_CALL` in CodeGenExpr, `emit_closure_call_n`) also drops the
+mortal copy of the callee when it is a plain frame local
+(`closure_callee_is_frame_local`) that no argument assigns, and, when
+`cleanup_push_useful` is 0 (no try in the program), releases owned argument
+temporaries with a direct decref instead of a tmps mark/free scope.
+
 ```strada
 # Strada - closure with captured variables
 my int $multiplier = 2;
@@ -2499,7 +2510,7 @@ When adding any new codegen predicate that classifies a function call, either:
 Both are compile-time features in `runtime/strada_runtime.c`, gated by `STRADA_CYCLE_GC` / `STRADA_ARENA` (default on via `./configure`, wired into the runtime compile in `Makefile` and the `strada` wrapper's `build_runtime()`). Both are confined to the runtime — they do **not** change the `StradaValue` struct, so user translation units need no define and the ABI is stable whether or not the features are compiled in.
 
 **Cycle collector** — Bacon–Rajan synchronous trial deletion:
-- Colour/buffered state lives in a side table keyed by pointer (`cc_tab`), not in `StradaValue`.
+- Colour lives in three spare `flags` bits (`STRADA_SVf_CC_COLOR_MASK`, bits 11-13; BLACK = 0 outside a collection). A buffered root has `STRADA_SVf_CC_BUFFERED` set and its index in `cc_roots` stored in `struct_size` (unused by the cyclic container types), so buffering and `cc_forget` are O(1): a freed candidate's slot is NULLed, or popped when it is the last. There is no side table (it used to be a pointer-keyed hash, `cc_tab`, which cost 9-12% of allocation-heavy benchmarks). A collection skips NULL slots, clears `BUFFERED` from surviving roots before freeing anything, and leaves every survivor BLACK. `strada_decref` tests the `BUFFERED` bit and the type inline before calling `cc_possible_root`.
 - The only hot-path hook is in the out-of-line `strada_decref` survive branch (`new_rc > 0`): `cc_possible_root(sv)` buffers `ARRAY`/`HASH`/`REF` candidates and **pins** them (raw incref) so they can't be freed underneath the collector. Drop-to-zero is unchanged.
 - `cc_collect()` runs MarkGray → Scan → CollectRoots; `cc_each_child` enumerates strong children (filtered by `cc_collectable`, which excludes tagged ints, immortals, and arena-owned values). `cc_free_shell` frees a white node's own storage without decref'ing children (those are reclaimed by recursion). `Scan` discounts the pin via `buffered ? 1 : 0`.
 - Triggers: candidate threshold (`cc_threshold`, default 10000) and an `atexit` final sweep.

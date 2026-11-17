@@ -1690,10 +1690,9 @@ static size_t        cc_threshold  = 10000;   /* current (adaptive) trigger */
 static size_t        cc_threshold_base = 10000;
 #define CC_THRESHOLD_MAX ((size_t)1 << 20)
 /* Buffered-candidate flag (STRADA_SVf_CC_BUFFERED in sv->flags) keeps the
- * per-decref "already buffered?" check as a cheap bit test instead of a
- * side-table hash probe. Invariant: bit set <=> the value sits in cc_roots
- * with a live PURPLE side-table entry. Cleared by cc_forget, pre-mark pass of
- * a collection, and strada_value_alloc's flags reset on pool reuse. */
+ * per-decref "already buffered?" check a bit test. Invariant: bit set <=> the
+ * value sits in cc_roots at index sv->struct_size. Cleared by cc_forget (which
+ * drops the slot), by a collection, and by strada_value_alloc on reuse. */
 static int           cc_collecting = 0;        /* reentrancy guard while collecting */
 static unsigned long cc_collections_count = 0;
 static unsigned long cc_freed_count = 0;
@@ -1819,7 +1818,8 @@ void strada_decref(StradaValue *sv) {
         }
     }
 #ifdef STRADA_CYCLE_GC
-    else if (new_rc > 0 && cc_enabled && !cc_self_collecting) {
+    else if (new_rc > 0 && cc_enabled && !(sv->flags & STRADA_SVf_CC_BUFFERED)
+             && cc_is_cyclic_type((StradaType)sv->type) && !cc_self_collecting) {
         cc_possible_root(sv);
     }
 #endif
@@ -17241,7 +17241,7 @@ void strada_free_value(StradaValue *sv) {
 #ifdef STRADA_CYCLE_GC
     /* Only skip cc_forget when THIS thread is running cc_collect_phases:
      * other mutator threads freeing buffered candidates while a collector is
-     * waiting in cc_stw must still mark the entry CC_FREED under cc_stw_mutex,
+     * waiting in cc_stw must still drop their cc_roots slot under cc_stw_mutex,
      * otherwise the collector wakes and walks a freed root pointer. */
     if (!did_forget_weak && !cc_self_collecting
         && (sv->type == STRADA_ARRAY || sv->type == STRADA_HASH || sv->type == STRADA_REF
@@ -17606,13 +17606,12 @@ void strada_free_hash(StradaHash *hv) {
 #define CC_GRAY   1   /* possible cycle member, being scanned                 */
 #define CC_WHITE  2   /* member of a garbage cycle                            */
 #define CC_PURPLE 3   /* possible root of a cycle (buffered candidate)        */
-#define CC_FREED  4   /* candidate that was freed by the normal refcount path;
-                       * its cc_roots pointer is stale — the collector skips it */
 
-typedef struct { StradaValue *key; unsigned char color; unsigned char buffered; } CCEnt;
-static CCEnt   *cc_tab = NULL;       /* pointer -> {color,buffered} side table */
-static size_t   cc_tab_cap = 0;      /* power of two; 0 == empty               */
-static size_t   cc_tab_used = 0;
+/* Colour lives in three spare flag bits (STRADA_SVf_CC_COLOR_MASK); a buffered
+ * root's index in cc_roots lives in struct_size (unused by the cyclic container
+ * types) while STRADA_SVf_CC_BUFFERED is set, so forgetting a freed candidate is
+ * O(1) (its slot is NULLed, or popped when it is the last). Collection resets
+ * every surviving node to BLACK (0), so no table or wipe is needed. */
 static StradaValue **cc_roots = NULL;
 static size_t   cc_roots_len = 0, cc_roots_cap = 0;
 static int      cc_atexit_registered = 0;
@@ -17629,47 +17628,23 @@ static inline int cc_collectable(StradaValue *t) {
     return t && !STRADA_IS_TAGGED_INT(t) && !STRADA_SV_IS_NONRC(t) && !ARENA_OWNS(t);
 }
 
-static size_t cc_hash_ptr(StradaValue *p) {
-    uintptr_t x = (uintptr_t)p;
-    x ^= x >> 16; x *= (uintptr_t)0x9E3779B97F4A7C15ULL; x ^= x >> 13;
-    return (size_t)x;
+static inline unsigned char cc_color_get(StradaValue *sv) {
+    return (unsigned char)((sv->flags & STRADA_SVf_CC_COLOR_MASK) >> STRADA_SVf_CC_COLOR_SHIFT);
 }
-static void cc_tab_grow(void) {
-    size_t ncap = cc_tab_cap ? cc_tab_cap * 2 : 1024;
-    CCEnt *nt = (CCEnt*)calloc(ncap, sizeof(CCEnt));
-    if (!nt) return;  /* OOM: keep old table; lookups still work, just denser */
-    size_t m = ncap - 1;
-    for (size_t i = 0; i < cc_tab_cap; i++) {
-        if (cc_tab[i].key) {
-            size_t j = cc_hash_ptr(cc_tab[i].key) & m;
-            while (nt[j].key) j = (j + 1) & m;
-            nt[j] = cc_tab[i];
-        }
-    }
-    free(cc_tab); cc_tab = nt; cc_tab_cap = ncap;
+static inline void cc_color_set(StradaValue *sv, unsigned char c) {
+    sv->flags = (uint16_t)((sv->flags & ~STRADA_SVf_CC_COLOR_MASK) | ((uint16_t)c << STRADA_SVf_CC_COLOR_SHIFT));
 }
-/* Find (add==0) or find-or-insert (add==1). Returns NULL if absent (find) or OOM. */
-static CCEnt *cc_tab_slot(StradaValue *sv, int add) {
-    if (!cc_tab_cap) { if (!add) return NULL; cc_tab_grow(); if (!cc_tab_cap) return NULL; }
-    if (add && (cc_tab_used + 1) * 10 >= cc_tab_cap * 7) cc_tab_grow();
-    size_t m = cc_tab_cap - 1, j = cc_hash_ptr(sv) & m;
-    while (cc_tab[j].key) { if (cc_tab[j].key == sv) return &cc_tab[j]; j = (j + 1) & m; }
-    if (!add) return NULL;
-    cc_tab[j].key = sv; cc_tab[j].color = CC_BLACK; cc_tab[j].buffered = 0; cc_tab_used++;
-    return &cc_tab[j];
-}
-static unsigned char cc_color_get(StradaValue *sv) { CCEnt *e = cc_tab_slot(sv, 0); return e ? e->color : CC_BLACK; }
-static void cc_color_set(StradaValue *sv, unsigned char c) { CCEnt *e = cc_tab_slot(sv, 1); if (e) e->color = c; }
-static int cc_buffered_get(StradaValue *sv) { CCEnt *e = cc_tab_slot(sv, 0); return e ? e->buffered : 0; }
 
-static void cc_roots_push(StradaValue *sv) {
+static int cc_roots_push(StradaValue *sv) {
     if (cc_roots_len == cc_roots_cap) {
         size_t n = cc_roots_cap ? cc_roots_cap * 2 : 1024;
         StradaValue **p = (StradaValue**)realloc(cc_roots, n * sizeof(StradaValue*));
-        if (!p) return;  /* OOM: drop candidate (leak-safe) */
+        if (!p) return 0;  /* OOM: drop candidate (leak-safe) */
         cc_roots = p; cc_roots_cap = n;
     }
+    sv->struct_size = cc_roots_len;
     cc_roots[cc_roots_len++] = sv;
+    return 1;
 }
 
 typedef void (*cc_visit)(StradaValue *child);
@@ -17677,12 +17652,9 @@ typedef void (*cc_visit)(StradaValue *child);
  * collectable (heap, non-tagged, non-immortal) children only. The set yielded
  * is identical across all phases, which keeps the trial-deletion RC arithmetic
  * balanced. Tied containers / weak & slot REFs are treated as leaves. */
-/* During CollectWhite a child may ALREADY be freed (a node shared between two
- * garbage containers, collected via the first parent). cc_collectable() would
- * dereference it (use-after-free). In that phase, filter children by the
- * side-table colour instead — cc_color_get is keyed on the pointer value and
- * never dereferences the object; only WHITE nodes are still alive & pending
- * free. Other phases run before any free, so cc_collectable() is safe there. */
+/* CollectWhite filters children by colour: only WHITE nodes are garbage still
+ * pending. No node is freed until every white root has been walked (the frees
+ * run afterwards, from cc_black_work), so reading the child's flags is safe. */
 static inline int cc_child_visit(StradaValue *c, int collectwhite) {
     if (!c || STRADA_IS_TAGGED_INT(c)) return 0;
     if (collectwhite) return cc_color_get(c) == CC_WHITE;
@@ -18265,7 +18237,9 @@ static void cc_free_shell(StradaValue *sv) {
 }
 
 static void cc_collectwhite_enqueue(StradaValue *s) {
-    if (cc_color_get(s) == CC_WHITE && !cc_buffered_get(s)) {
+    /* A white child that is itself a still-pending root is collected when
+     * the CollectRoots loop reaches it. */
+    if (cc_color_get(s) == CC_WHITE && !(s->flags & STRADA_SVf_CC_BUFFERED)) {
         cc_color_set(s, CC_BLACK);          /* mark first: prevents double free */
         cc_work_push(s);
     }
@@ -18366,31 +18340,21 @@ static CCDeferred cc_collect_phases(void) {
     memset(&cc_deferred, 0, sizeof(cc_deferred));
     cc_self_collecting = 1;   /* our own decrefs (freeing nodes) must not park/relock */
     unsigned long freed_before = cc_freed_count;
-    /* Clear the buffered bit on every still-live root BEFORE anything can
-     * be freed (mark/scan free nothing; CollectRoots does). The table is
-     * wiped below, so without this pass surviving candidates would carry a
-     * stale bit and never re-buffer. Must not run later: a root freed by
-     * an earlier cc_collectwhite in the same pass is a dangling pointer.
-     * FREED entries are already-freed objects — never dereferenced. */
-    for (size_t i = 0; i < cc_roots_len; i++) {
-        CCEnt *e = cc_tab_slot(cc_roots[i], 0);
-        if (e && e->color != CC_FREED) {
-            __atomic_and_fetch(&cc_roots[i]->flags, (uint16_t)~STRADA_SVf_CC_BUFFERED, __ATOMIC_RELAXED);
-        }
-    }
+    /* NULL slots are candidates freed by the normal refcount path (cc_forget). */
     for (size_t i = 0; i < cc_roots_len; i++) {                       /* MarkRoots */
         StradaValue *s = cc_roots[i];
-        if (cc_color_get(s) == CC_PURPLE) cc_markgray(s);
+        if (s && cc_color_get(s) == CC_PURPLE) cc_markgray(s);
     }
-    for (size_t i = 0; i < cc_roots_len; i++) cc_scan(cc_roots[i]);   /* ScanRoots */
+    for (size_t i = 0; i < cc_roots_len; i++)                         /* ScanRoots */
+        if (cc_roots[i]) cc_scan(cc_roots[i]);
     cc_black_work_len = 0;
     int cc_has_destroy = 0;
     int check_destroy = (cc_destroy_depth < 4);
     for (size_t i = 0; i < cc_roots_len; i++) {                       /* CollectRoots */
         StradaValue *s = cc_roots[i];
-        CCEnt *e = cc_tab_slot(s, 0);
-        if (e && e->color == CC_WHITE) {
-            e->buffered = 0;
+        if (s && cc_color_get(s) == CC_WHITE) {
+            s->flags &= (uint16_t)~STRADA_SVf_CC_BUFFERED;
+            cc_roots[i] = NULL;
             cc_collectwhite_enqueue(s);
             while (cc_work_len > 0) {
                 StradaValue *cur = cc_work[--cc_work_len];
@@ -18400,6 +18364,15 @@ static CCDeferred cc_collect_phases(void) {
                     cc_has_destroy = 1;
                 }
             }
+        }
+    }
+    /* Surviving roots leave the buffer (their colour is BLACK again after
+     * Scan). Must run before any cc_free_shell: only live roots remain. */
+    for (size_t i = 0; i < cc_roots_len; i++) {
+        StradaValue *s = cc_roots[i];
+        if (s) {
+            __atomic_and_fetch(&s->flags, (uint16_t)~(STRADA_SVf_CC_BUFFERED | STRADA_SVf_CC_COLOR_MASK), __ATOMIC_RELAXED);
+            s->struct_size = 0;
         }
     }
     if (!cc_has_destroy) {
@@ -18429,8 +18402,6 @@ static CCDeferred cc_collect_phases(void) {
     }
     cc_black_work_len = 0;
     cc_roots_len = 0;
-    if (cc_tab_cap) memset(cc_tab, 0, cc_tab_cap * sizeof(CCEnt));
-    cc_tab_used = 0;
     cc_collections_count++;
     /* Adaptive trigger (see cc_threshold): fruitless collections back off
      * exponentially; a fruitful one snaps back to the base. */
@@ -18487,7 +18458,6 @@ static void cc_atexit(void) {
     cc_collect();                              /* final sweep of outstanding cycles */
     cc_enabled = 0;
     free(cc_roots); cc_roots = NULL; cc_roots_cap = cc_roots_len = 0;
-    free(cc_tab);   cc_tab = NULL;   cc_tab_cap = cc_tab_used = 0;
     free(cc_work); cc_work = NULL; cc_work_cap = cc_work_len = 0;
     free(cc_black_work); cc_black_work = NULL; cc_black_work_cap = cc_black_work_len = 0;
 }
@@ -18502,17 +18472,13 @@ static int cc_possible_root_buf(StradaValue *sv) {
     if (__atomic_load_n(&sv->flags, __ATOMIC_ACQUIRE) & STRADA_SVf_CC_BUFFERED) return 0;
     int lk = strada_threading_active && !cc_self_collecting;
     if (lk) pthread_mutex_lock(&cc_stw_mutex);
-    CCEnt *e = cc_tab_slot(sv, 1);
     int do_collect = 0;
-    if (e) {
-        e->color = CC_PURPLE;          /* (re)mark as a live candidate */
-        if (!e->buffered) {
-            e->buffered = 1;
-            __atomic_or_fetch(&sv->flags, STRADA_SVf_CC_BUFFERED, __ATOMIC_RELEASE);
-            cc_roots_push(sv);
-            if (!cc_atexit_registered) { cc_atexit_registered = 1; atexit(cc_atexit); }
-            do_collect = (cc_roots_len >= cc_threshold);
-        }
+    if (!(sv->flags & STRADA_SVf_CC_BUFFERED) && cc_roots_push(sv)) {
+        uint16_t f = (uint16_t)((sv->flags & ~STRADA_SVf_CC_COLOR_MASK)
+                                | STRADA_SVf_CC_BUFFERED | ((uint16_t)CC_PURPLE << STRADA_SVf_CC_COLOR_SHIFT));
+        __atomic_store_n(&sv->flags, f, __ATOMIC_RELEASE);
+        if (!cc_atexit_registered) { cc_atexit_registered = 1; atexit(cc_atexit); }
+        do_collect = (cc_roots_len >= cc_threshold);
     }
     if (lk) pthread_mutex_unlock(&cc_stw_mutex);
     return do_collect;
@@ -18527,9 +18493,22 @@ static void cc_forget(StradaValue *sv) {
     int lk = strada_threading_active && !cc_self_collecting;
     if (lk) pthread_mutex_lock(&cc_stw_mutex);
     if (__atomic_load_n(&sv->flags, __ATOMIC_RELAXED) & STRADA_SVf_CC_BUFFERED) {
-        __atomic_and_fetch(&sv->flags, (uint16_t)~STRADA_SVf_CC_BUFFERED, __ATOMIC_RELEASE);
-        CCEnt *e = cc_tab_slot(sv, 0);
-        if (e) { e->color = CC_FREED; e->buffered = 0; }
+        size_t idx = sv->struct_size;
+        if (!(idx < cc_roots_len && cc_roots[idx] == sv)) {
+            /* struct_size clobbered by an in-place rewrite: find the slot. */
+            idx = cc_roots_len;
+            for (size_t i = cc_roots_len; i-- > 0; ) if (cc_roots[i] == sv) { idx = i; break; }
+        }
+        if (idx < cc_roots_len) {
+            if (idx + 1 == cc_roots_len) {
+                cc_roots_len--;
+                while (cc_roots_len > 0 && !cc_roots[cc_roots_len - 1]) cc_roots_len--;
+            } else {
+                cc_roots[idx] = NULL;
+            }
+        }
+        sv->struct_size = 0;
+        __atomic_and_fetch(&sv->flags, (uint16_t)~(STRADA_SVf_CC_BUFFERED | STRADA_SVf_CC_COLOR_MASK), __ATOMIC_RELEASE);
     }
     if (lk) pthread_mutex_unlock(&cc_stw_mutex);
 }
@@ -20243,6 +20222,61 @@ StradaValue* strada_closure_call(StradaValue *closure, int argc, ...) {
         free(argv);
     }
     return res;
+}
+
+/* Fixed-arity closure calls (codegen emits these for 0-4 plain arguments).
+ * The common case -- an ordinary closure whose parameter count matches the
+ * call -- calls the generated function directly: no varargs, no argv copy, no
+ * padding. Anything else goes through strada_closure_call_argv. */
+#define STRADA_CL_FAST(closure, n) \
+    (closure && !STRADA_IS_TAGGED_INT(closure) && (closure)->type == STRADA_CLOSURE \
+     && (closure)->value.ptr && ((StradaClosure *)(closure)->value.ptr)->param_count == (n) \
+     && !((StradaClosure *)(closure)->value.ptr)->is_variadic \
+     && !((StradaClosure *)(closure)->value.ptr)->is_func_ref \
+     && !((StradaClosure *)(closure)->value.ptr)->is_void \
+     && ((StradaClosure *)(closure)->value.ptr)->func_ptr)
+#define STRADA_CL_ARG(a) ((a) ? (a) : strada_undef_static())
+StradaValue* strada_closure_call0(StradaValue *closure) {
+    if (STRADA_CL_FAST(closure, 0)) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        return ((StradaValue *(*)(StradaValue ***))cl->func_ptr)(cl->captures);
+    }
+    return strada_closure_call_argv(closure, 0, NULL);
+}
+StradaValue* strada_closure_call1(StradaValue *closure, StradaValue *a0) {
+    if (STRADA_CL_FAST(closure, 1)) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        return ((StradaValue *(*)(StradaValue ***, StradaValue *))cl->func_ptr)(cl->captures, STRADA_CL_ARG(a0));
+    }
+    StradaValue *argv[1] = { a0 };
+    return strada_closure_call_argv(closure, 1, argv);
+}
+StradaValue* strada_closure_call2(StradaValue *closure, StradaValue *a0, StradaValue *a1) {
+    if (STRADA_CL_FAST(closure, 2)) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        return ((StradaValue *(*)(StradaValue ***, StradaValue *, StradaValue *))cl->func_ptr)(
+            cl->captures, STRADA_CL_ARG(a0), STRADA_CL_ARG(a1));
+    }
+    StradaValue *argv[2] = { a0, a1 };
+    return strada_closure_call_argv(closure, 2, argv);
+}
+StradaValue* strada_closure_call3(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2) {
+    if (STRADA_CL_FAST(closure, 3)) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        return ((StradaValue *(*)(StradaValue ***, StradaValue *, StradaValue *, StradaValue *))cl->func_ptr)(
+            cl->captures, STRADA_CL_ARG(a0), STRADA_CL_ARG(a1), STRADA_CL_ARG(a2));
+    }
+    StradaValue *argv[3] = { a0, a1, a2 };
+    return strada_closure_call_argv(closure, 3, argv);
+}
+StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3) {
+    if (STRADA_CL_FAST(closure, 4)) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        return ((StradaValue *(*)(StradaValue ***, StradaValue *, StradaValue *, StradaValue *, StradaValue *))cl->func_ptr)(
+            cl->captures, STRADA_CL_ARG(a0), STRADA_CL_ARG(a1), STRADA_CL_ARG(a2), STRADA_CL_ARG(a3));
+    }
+    StradaValue *argv[4] = { a0, a1, a2, a3 };
+    return strada_closure_call_argv(closure, 4, argv);
 }
 
 /* Call closure with args from a StradaValue array */

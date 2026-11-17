@@ -1,0 +1,54 @@
+# EXPECT: 3;ab;u;7;x+y;v;1,2,3;9;5;new;8;12;1;2;6;cyc=1
+package P;
+has rw int $x = 0;
+func sq(scalar $self) int { return $self->x() * $self->x(); }
+func both(scalar $self) int { return $self->x() + $self->x(); }
+package main;
+func plain2(scalar $a, scalar $b) scalar { return $a . "+" . $b; }
+func varf(scalar ...@r) scalar { return join(",", @r); }
+func main() int {
+    my array @o = ();
+    my scalar $add = fn ($a, $b) { return $a + $b; };
+    push(@o, $add->(1, 2));
+    my scalar $cat = fn ($a, $b) { return $a . $b; };
+    push(@o, $cat->("a", "b"));
+    # fewer args than params: missing ones are undef
+    my scalar $miss = fn ($a, $b) { return defined($b) ? "d" : "u"; };
+    push(@o, $miss->(1));
+    # more args than params: extras dropped
+    my scalar $one = fn ($a) { return $a; };
+    push(@o, $one->(7, 8));
+    my scalar $ref = \&plain2;
+    push(@o, $ref->("x", "y"));
+    my scalar $vd = fn ($a) void { my $z = $a; };
+    my scalar $vr = $vd->(1);
+    push(@o, defined($vr) ? "d" : "v");
+    my scalar $vf = \&varf;
+    push(@o, $vf->(1, 2, 3));
+    # argument reassigns the callee variable: the old closure is called
+    my scalar $f = fn ($n) { return $n + 8; };
+    push(@o, $f->(($f = fn ($n) { return 0; }) ? 1 : 1));
+    push(@o, 5);
+    push(@o, defined($f->(1)) && $f->(1) == 0 ? "new" : "old");
+    # owned temporaries as arguments
+    my hash %h = ("k" => 4);
+    push(@o, $add->($h{"k"}, $h{"k"}));
+    my scalar $p = P::new("x", 3);
+    push(@o, $p->sq() + $p->x());
+    push(@o, $p->x() - 2);
+    push(@o, $p->both() - 4);
+    push(@o, $p->both());
+    # cycle collector: root freed before a collection, cycles still reclaimed
+    my int $i = 0;
+    while ($i < 30000) {
+        my scalar $a = {};
+        my scalar $b = { "a" => $a };
+        $a->{"b"} = $b;
+        my scalar $keep = $a;
+        $i++;
+    }
+    core::gc_collect();
+    push(@o, "cyc=" . (core::gc_freed() > 0 ? 1 : 0));
+    say(join(";", @o));
+    return 0;
+}

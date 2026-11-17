@@ -9319,17 +9319,18 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
             emit($cg, "strada_tmps_free(" . $cl_tm . "); __cl_res2; })");
         } elsif ($needs_arg_cleanup == 1 || $callee_cleanup == 1 || ($cg->{"cleanup_enabled"} == 1 && $arg_count > 0 && $cl_any_imp == 1)) {
-            my str $cl_tm2 = next_tmps_var($cg);
-            emit($cg, "({ size_t " . $cl_tm2 . " = strada_tmps_mark(); StradaValue *__cl_fn = ");
             my int $cl_fn_copy = 0;
             if ($callee_cleanup == 0 && $cg->{"cleanup_enabled"} == 1 && $cl_args_imp == 1 && expr_is_always_tagged_int($cg, $expr->{"closure"}) == 0) {
                 $cl_fn_copy = 1;
+                # A plain local of this function can only change while the
+                # arguments are evaluated if an argument assigns it.
+                if (closure_callee_is_frame_local($cg, $expr->{"closure"}) == 1
+                    && node_writes_var($args, "" . $expr->{"closure"}->{"name"}) == 0) {
+                    $cl_fn_copy = 0;
+                }
             }
-            if ($callee_cleanup == 1) { emit($cg, "strada_mortal("); }
-            elsif ($cl_fn_copy == 1) { emit($cg, "strada_mortal_copy("); }
-            gen_expression($cg, $expr->{"closure"});
-            if ($callee_cleanup == 1 || $cl_fn_copy == 1) { emit($cg, ")"); }
-            emit($cg, "; ");
+            my array @ca_mos = ();
+            my int $any_mo2 = 0;
             my int $ca = 0;
             while ($ca < $arg_count) {
                 my int $ca_mo = 0;
@@ -9338,24 +9339,71 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         $ca_mo = 1;
                     } elsif ($cl_later[$ca] == 1) {
                         $ca_mo = 2;
+                        $any_mo2 = 1;
                     }
                 }
+                push(@ca_mos, $ca_mo);
+                $ca = $ca + 1;
+            }
+            # Without a try anywhere a throw ends the program, so owned
+            # temporaries can be released directly after the call instead
+            # of through a mortal (tmps) scope.
+            my int $use_tmps = 1;
+            if (cleanup_push_useful($cg) == 0 && $any_mo2 == 0 && $cl_fn_copy == 0) {
+                $use_tmps = 0;
+            }
+            my str $cl_tm2 = "";
+            if ($use_tmps == 1) {
+                $cl_tm2 = next_tmps_var($cg);
+                emit($cg, "({ size_t " . $cl_tm2 . " = strada_tmps_mark(); StradaValue *__cl_fn = ");
+            } else {
+                emit($cg, "({ StradaValue *__cl_fn = ");
+            }
+            if ($use_tmps == 1 && $callee_cleanup == 1) { emit($cg, "strada_mortal("); }
+            elsif ($cl_fn_copy == 1) { emit($cg, "strada_mortal_copy("); }
+            gen_expression($cg, $expr->{"closure"});
+            if (($use_tmps == 1 && $callee_cleanup == 1) || $cl_fn_copy == 1) { emit($cg, ")"); }
+            emit($cg, "; ");
+            $ca = 0;
+            while ($ca < $arg_count) {
+                my int $ca_mo = $ca_mos[$ca];
                 emit($cg, "StradaValue *__cla" . $ca . " = ");
-                if ($ca_mo == 1) { emit($cg, "strada_mortal("); }
+                if ($use_tmps == 1 && $ca_mo == 1) { emit($cg, "strada_mortal("); }
                 elsif ($ca_mo == 2) { emit($cg, "strada_mortal_copy("); }
                 gen_expression($cg, $args->[$ca]);
-                if ($ca_mo > 0) { emit($cg, ")"); }
+                if (($use_tmps == 1 && $ca_mo == 1) || $ca_mo == 2) { emit($cg, ")"); }
                 emit($cg, "; ");
                 $ca = $ca + 1;
             }
-            emit($cg, "StradaValue *__clres = strada_closure_call(__cl_fn, " . $arg_count);
-            $ca = 0;
-            while ($ca < $arg_count) {
-                emit($cg, ", __cla" . $ca);
-                $ca = $ca + 1;
+            emit($cg, "StradaValue *__clres = ");
+            emit_closure_call_n($cg, "__cl_fn", $arg_count, "__cla");
+            emit($cg, "; ");
+            if ($use_tmps == 1) {
+                emit($cg, "strada_tmps_free(" . $cl_tm2 . "); ");
+            } else {
+                $ca = 0;
+                while ($ca < $arg_count) {
+                    if ($ca_mos[$ca] == 1) { emit($cg, "strada_decref(__cla" . $ca . "); "); }
+                    $ca = $ca + 1;
+                }
+                if ($callee_cleanup == 1) { emit($cg, "strada_decref(__cl_fn); "); }
             }
-            emit($cg, "); ");
-            emit($cg, "strada_tmps_free(" . $cl_tm2 . "); __clres; })");
+            emit($cg, "__clres; })");
+        } elsif ($arg_count <= 4) {
+            # Pure arguments, nothing to release: evaluate in order into
+            # locals and call the fixed-arity entry point.
+            emit($cg, "({ StradaValue *__cl_fn = ");
+            gen_expression($cg, $expr->{"closure"});
+            emit($cg, "; ");
+            my int $i = 0;
+            while ($i < $arg_count) {
+                emit($cg, "StradaValue *__cla" . $i . " = ");
+                gen_expression($cg, $args->[$i]);
+                emit($cg, "; ");
+                $i = $i + 1;
+            }
+            emit_closure_call_n($cg, "__cl_fn", $arg_count, "__cla");
+            emit($cg, "; })");
         } else {
             emit($cg, "strada_closure_call(");
             gen_expression($cg, $expr->{"closure"});
@@ -9539,4 +9587,37 @@ func emit_container_replace(scalar $cg, scalar $target, str $k) void {
     emit($cg, " = __new_" . $k . "; strada_decref(__old_" . $k . "); ");
     if ($cg->{"uses_tie"} == 1) { emit($cg, "} "); }
     emit($cg, "__new_" . $k . "; })");
+}
+
+# Emit a closure call on C expression $fn with arguments named $prefix0..N-1:
+# the fixed-arity strada_closure_callN entry point for up to 4 arguments,
+# the varargs strada_closure_call otherwise.
+func emit_closure_call_n(scalar $cg, str $fn, int $n, str $prefix) void {
+    if ($n <= 4) {
+        emit($cg, "strada_closure_call" . $n . "(" . $fn);
+    } else {
+        emit($cg, "strada_closure_call(" . $fn . ", " . $n);
+    }
+    my int $i = 0;
+    while ($i < $n) {
+        emit($cg, ", " . $prefix . $i);
+        $i = $i + 1;
+    }
+    emit($cg, ")");
+}
+
+# 1 if $node is a scalar variable stored in a plain C local of the function
+# being generated: not an `our` global, not a closure capture, not boxed
+# into a cell. Code outside this frame cannot reassign such a variable.
+func closure_callee_is_frame_local(scalar $cg, scalar $node) int {
+    if (!$node) { return 0; }
+    if (($node->{"type"} + 0) != NODE_VARIABLE()) { return 0; }
+    if (("" . $node->{"sigil"}) ne "$") { return 0; }
+    if ($cg->{"uses_tie"} == 1) { return 0; }
+    if ($cg->{"in_anon_func"} == 1) { return 0; }
+    my str $vc = escape_c_keyword("" . $node->{"name"});
+    if (length("" . $cg->{"our_vars"}->{$vc}) > 0) { return 0; }
+    if (($cg->{"func_locals_seen"}->{$vc} + 0) != 1) { return 0; }
+    if (($cg->{"active_boxed_vars"}->{$vc} + 0) == 1) { return 0; }
+    return 1;
 }

@@ -158,6 +158,10 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 #define STRADA_SVf_CC_BUFFERED  ((uint16_t)(1u << 8))  /* Cycle GC purple root buffer membership */
 #define STRADA_SVf_SLOT_REF     ((uint16_t)(1u << 9))  /* STRADA_REF: stack StradaValue** slot reference */
 #define STRADA_SVf_CELL_REF     ((uint16_t)(1u << 10)) /* STRADA_REF: closure cell StradaValue** reference */
+/* bits 11-13: cycle-collector colour (BLACK=0 outside a collection); while
+ * STRADA_SVf_CC_BUFFERED is set, struct_size holds the value's cc_roots index. */
+#define STRADA_SVf_CC_COLOR_SHIFT 11
+#define STRADA_SVf_CC_COLOR_MASK ((uint16_t)(7u << 11))
 #define STRADA_SVf_STR_MASK     ((uint16_t)(STRADA_SVf_ASCII | STRADA_SVf_UTF8))
 
 /* Live arena SVs (STRADA_SVf_ARENA alone) remain refcounted while the arena is active
@@ -1650,6 +1654,11 @@ StradaValue* strada_closure_new(void *func, int params, int captures, StradaValu
 StradaValue* strada_closure_new_shared(void *func, int params, int captures, StradaValue ***cap_array, unsigned char *is_static);
 StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_void, int fixed_params);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
+StradaValue* strada_closure_call0(StradaValue *closure);
+StradaValue* strada_closure_call1(StradaValue *closure, StradaValue *a0);
+StradaValue* strada_closure_call2(StradaValue *closure, StradaValue *a0, StradaValue *a1);
+StradaValue* strada_closure_call3(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2);
+StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 typedef StradaValue* (*StradaCustomClosureCallFn)(void *ctx, int argc, StradaValue **argv);

@@ -1487,7 +1487,9 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
     if ($t == NODE_NUM_LITERAL()) { return 1; }
     if ($t == NODE_STR_LITERAL()) { return 1; }
     if ($t == NODE_METHOD_CALL()) {
-        # Only zero-arg inline-accessor method calls on $self are safe.
+        # Only zero-arg inline-accessor method calls on $self are safe
+        # (and not with overloading: coercing the value can run user code).
+        if ($cg->{"has_overloads"} == 1) { return 0; }
         if ($node->{"arg_count"} != 0) { return 0; }
         if (receiver_is_current_self($cg, $node) == 0) { return 0; }
         if (length(is_inline_accessor($cg, $node->{"method"})) == 0) { return 0; }
