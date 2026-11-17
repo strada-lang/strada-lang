@@ -7562,6 +7562,10 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::setreuid"} = 1;
     $owned_set{"sys::setregid"} = 1;
     $owned_set{"sys::setsockopt"} = 1;
+    $owned_set{"sys::unix_server"} = 1;
+    $owned_set{"sys::unix_client"} = 1;
+    $owned_set{"sys::initgroups"} = 1;
+    $owned_set{"sys::setgroups"} = 1;
     $owned_set{"sys::getsockopt"} = 1;
     $owned_set{"sys::shutdown"} = 1;
     $owned_set{"sys::inet_pton"} = 1;

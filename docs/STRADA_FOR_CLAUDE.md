@@ -991,7 +991,7 @@ Built-in namespaces that don't need importing:
 | `c::` | Low-level: `c::alloc`, `c::free`, `c::is_null`, ... |
 | `utf8::` | `utf8::is_utf8`, `utf8::valid`, `utf8::downgrade`, ... |
 | `usb::` | USB device access (libusb required) |
-| `ssl::` | TLS/SSL sockets: `ssl::connect`, `ssl::read`, `ssl::write`; `ssl::set_timeout` / `ssl::set_default_timeout` bound waits on non-blocking connections (default 5000 ms) |
+| `ssl::` | TLS/SSL sockets: `ssl::connect`, `ssl::read`, `ssl::write`; `ssl::set_timeout` / `ssl::set_default_timeout` bound waits on non-blocking connections (default 5000 ms). Servers: `ssl::server($port, $cert, $key[, $backlog])` (IPv4 wildcard) and `ssl::server_host($host, $port, $cert, $key[, $backlog])` (host-aware: `""`/`"*"`/`"::"` dual-stack, same rules as `core::socket_server_host`); backlog 0 = SOMAXCONN. Non-blocking serving: `ssl::try_accept_fd` + `ssl::attach_server_fd`, `ssl::handshake_step`, `ssl::try_read`/`ssl::try_write`, `ssl::want`, `ssl::fd` |
 
 `core::` examples:
 
@@ -1234,6 +1234,10 @@ For Moose-style `rw` setters to support chaining you'd write a custom setter tha
 - **`scalar(keys(%h))` for size.** Just `keys %h` in scalar context gives the count, but the explicit form is clearer and the compiler optimizes it to a single hash-size call.
 - **Empty `@{$ref}` is `undef`-able.** If `$ref` is undef, `@{$ref}` is an empty list (autoviv'd in lvalue context, empty otherwise).
 - **`split` regex:** the first arg is a regex pattern; metacharacters need escaping. `split(/,/, $csv)` — yes; `split(/./, $s)` matches *any* character — usually you want `split(/\./, $s)`. Perl rules apply: trailing empty fields are dropped (`split(",", "a,b,,")` → 2 fields; empty input → empty list), `" "` is awk mode, and a negative limit keeps trailing empties.
+- **`"\xc3"` is a character, not a byte.** In a string literal `\xHH` is the code point U+00HH (two bytes of UTF-8 for 0x80-0xFF). Build binary data (protocol frames, sockets, files) with `core::byte(n)` / `core::pack`, not `"\x.."` or `chr()`.
+- **`split` takes a regex even when you pass a string.** `split(".", "1.2.3.4")` splits on every character and returns nothing (all fields empty); write `split("\\.", ...)` or `split(/\./, ...)`.
+- **`index`/`substr`/`length` count characters for UTF-8 text but bytes for byte strings** (socket input, `core::byte` data). Use `core::byte_length` / `core::byte_substr` when you mean bytes.
+- **`print` goes to stdout, which is block-buffered when redirected.** Log lines can sit unflushed until exit; log errors with `print(STDERR, ...)` / `warn`, or call `core::autoflush(STDOUT, 1)`.
 - **`core::waitpid` returns the raw wait status, not the pid** (a child that exits with code 3 gives 768; the exit code is `$status >> 8`). Under WNOHANG it returns 0 while the child runs. To find out which child exited (respawn loops), use `core::wait()`, which returns the pid.
 
 ---

@@ -1,0 +1,34 @@
+# EXPECT: unix=ping|rcvtimeo=ok|initgroups=-1|setgroups=-1|groups=ok
+# Cannoli report #6: no AF_UNIX sockets, no initgroups/setgroups, and
+# setsockopt only took an int (SO_RCVTIMEO's timeval could not be set).
+func main() int {
+    my @o = ();
+    my str $path = "/tmp/strada_unix_" . core::getpid() . ".sock";
+    core::unlink($path);
+    my scalar $srv = core::unix_server($path);
+    my scalar $cli = core::unix_client($path);
+    my scalar $peer = core::socket_accept($srv);
+    core::socket_send($cli, "ping\n");
+    core::socket_flush($cli);
+    my str $got = "" . core::socket_recv($peer, 64);
+    push(@o, "unix=" . substr($got, 0, 4));
+    # SO_RCVTIMEO (SOL_SOCKET=1, SO_RCVTIMEO=20 on Linux) as a packed timeval
+    my int $t0 = core::mono_ms();
+    my int $rc = core::setsockopt($peer, 1, 20, core::pack("qq", 0, 200000));
+    my scalar $none = core::socket_recv($peer, 64);
+    my int $dt = core::mono_ms() - $t0;
+    push(@o, "rcvtimeo=" . (($rc == 0 && $dt >= 150 && $dt < 2000) ? "ok" : "bad rc=" . $rc . " dt=" . $dt));
+    core::socket_close($cli);
+    core::socket_close($peer);
+    core::socket_close($srv);
+    core::unlink($path);
+    # without root both fail with EPERM; with root they would succeed
+    my int $ig = core::initgroups("nobody", 65534);
+    my int $sg = core::setgroups([65534]);
+    push(@o, "initgroups=" . (core::getuid() == 0 ? -1 : $ig));
+    push(@o, "setgroups=" . (core::getuid() == 0 ? -1 : $sg));
+    my scalar $g = core::getgroups();
+    push(@o, "groups=" . (scalar(@$g) >= 0 ? "ok" : "bad"));
+    say(join("|", @o));
+    return 0;
+}

@@ -1428,6 +1428,16 @@ compiler:
   value dies catchably: "Can't use an undefined value as a subroutine
   reference" (undef) / "Not a CODE reference" (`strada_not_code_call`; VM
   `L_do_op_call_closure`). It used to return undef silently.
+- **Cannoli report fixes (2026-11-17)**: the inline call-entry paths
+  (`strada_stack_push_il`/`strada_depth_push_il`) and `strada_epoll_wait` are
+  signal dispatch points (handlers used to never run under Async::Loop);
+  calls in a file without `main()` to functions only the host defines get
+  `extern StradaValue* Pkg_f();` (Semantic `host_extern`, emitted by the
+  auto-extern path) -- `--shared` plugins calling host functions crashed;
+  `ssl::server(..., $backlog)` / `ssl::server_host($host, ...)`;
+  `Async::Task::send(..., $timeout_ms)` waits with poll(2) outside a task;
+  `core::initgroups`, `core::setgroups`, `core::unix_server`/`unix_client`;
+  `core::setsockopt` passes a non-numeric value as raw bytes (packed structs).
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

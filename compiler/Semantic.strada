@@ -719,6 +719,10 @@ func get_builtins() scalar {
 
     # sys:: Additional socket operations
     $b{"sys::setsockopt"} = 1;
+    $b{"sys::unix_server"} = 1;
+    $b{"sys::unix_client"} = 1;
+    $b{"sys::initgroups"} = 1;
+    $b{"sys::setgroups"} = 1;
     $b{"sys::getsockopt"} = 1;
     $b{"sys::shutdown"} = 1;
     $b{"sys::getpeername"} = 1;
@@ -1987,6 +1991,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     # by the host program.
                     if ($ctx->{"has_main"} != 1 && $pkg_is_known == 0) {
                         $skip_qual_err = 1;
+                        # resolved by the host at link/load time: codegen must
+                        # declare it (`extern StradaValue* Pkg_f();`), or C
+                        # assumes `int` and truncates the returned pointer
+                        # (crashed --shared plugins calling host functions)
+                        my str $hx_blobs = "" . $ctx->{"c_blocks_str"};
+                        if (length($hx_blobs) == 0 || index($hx_blobs, $all_us_name) < 0) {
+                            $expr->{"host_extern"} = 1;
+                        }
                     }
                 }
                 if (sem_is_builtin_namespace($first_ns) == 0 && $ctx->{"module_only_mode"} != 1 && $skip_qual_err == 0) {

@@ -585,8 +585,10 @@ func connect_insecure(str $host, int $port) int {
     return connect_impl($host, $port, 0);
 }
 
-# Create an SSL server socket
-func server(int $port, str $cert_file, str $key_file) int {
+# Create an SSL server socket. $backlog is the listen queue length
+# (0 = SOMAXCONN, the system maximum; it used to be fixed at 10, which made a
+# busy server drop or delay connections before any worker saw them).
+func server(int $port, str $cert_file, str $key_file, int $backlog = 0) int {
     my str $cert_s = "" . $cert_file;
     my str $key_s = "" . $key_file;
     my int $result = 0;
@@ -643,7 +645,7 @@ func server(int $port, str $cert_file, str $key_file) int {
                         close(conn->socket_fd);
                         SSL_CTX_free(conn->ctx);
                         free(conn);
-                    } else if (listen(conn->socket_fd, 10) < 0) {
+                    } else if (listen(conn->socket_fd, strada_to_int(backlog) > 0 ? (int)strada_to_int(backlog) : SOMAXCONN) < 0) {
                         close(conn->socket_fd);
                         SSL_CTX_free(conn->ctx);
                         free(conn);
@@ -654,6 +656,67 @@ func server(int $port, str $cert_file, str $key_file) int {
                 }
             }
         }
+        free(cert_str);
+        free(key_str);
+    }
+    return $result;
+}
+
+# Create an SSL server bound to $host (same rules as
+# core::socket_server_host: "" / "*" / "::" = IPv6 dual-stack with an IPv4
+# fallback, "0.0.0.0" = IPv4 wildcard, a literal address = its family).
+# $backlog 0 = SOMAXCONN. Returns a server handle, or 0 on failure.
+func server_host(str $host, int $port, str $cert_file, str $key_file, int $backlog = 0) int {
+    my str $host_s = "" . $host;
+    my str $cert_s = "" . $cert_file;
+    my str $key_s = "" . $key_file;
+    my int $result = 0;
+    __C__ {
+        if (!ssl_initialized) {
+            signal(SIGPIPE, SIG_IGN);
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_initialized = 1;
+        }
+        int64_t port_num = strada_to_int(port);
+        int64_t bl = strada_to_int(backlog);
+        char *host_str = strada_to_str(host_s);
+        char *cert_str = strada_to_str(cert_s);
+        char *key_str = strada_to_str(key_s);
+        SSL_CTX *ctx = (port_num >= 0 && port_num <= 65535) ? SSL_CTX_new(TLS_server_method()) : NULL;
+        if (ctx) {
+            SSL_CTX_set_mode(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+            if (SSL_CTX_use_certificate_file(ctx, cert_str, SSL_FILETYPE_PEM) <= 0 ||
+                SSL_CTX_use_PrivateKey_file(ctx, key_str, SSL_FILETYPE_PEM) <= 0 ||
+                !SSL_CTX_check_private_key(ctx)) {
+                SSL_CTX_free(ctx);
+                ctx = NULL;
+            }
+        }
+        if (ctx) {
+            /* the runtime's host-aware listener; keep a dup of its fd */
+            StradaValue *ls = strada_socket_server_host(host_str ? host_str : "", (int)port_num,
+                                                        bl > 0 && bl <= INT_MAX ? (int)bl : SOMAXCONN);
+            int lfd = -1;
+            if (ls && !STRADA_IS_TAGGED_INT(ls) && ls->type == STRADA_SOCKET && ls->value.sock)
+                lfd = dup(ls->value.sock->fd);
+            strada_decref(ls);
+            SSLConnection *conn = lfd >= 0 ? calloc(1, sizeof(SSLConnection)) : NULL;
+            if (!conn) {
+                if (lfd >= 0) close(lfd);
+                SSL_CTX_free(ctx);
+            } else {
+                int cfl = fcntl(lfd, F_GETFD);
+                if (cfl >= 0) fcntl(lfd, F_SETFD, cfl | FD_CLOEXEC);
+                conn->is_server = 1;
+                conn->ctx = ctx;
+                conn->socket_fd = lfd;
+                strada_decref(result);
+                result = strada_new_int((int64_t)(intptr_t)conn);
+            }
+        }
+        free(host_str);
         free(cert_str);
         free(key_str);
     }

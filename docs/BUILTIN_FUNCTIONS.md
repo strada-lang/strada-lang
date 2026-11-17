@@ -240,6 +240,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::setegid(gid)` | `int → int` | setegid(2). |
 | `core::setregid(real, eff)` | `int, int → int` | setregid(2). |
 | `core::getgroups()` | `→ array` | Supplementary groups. |
+| `core::initgroups(user, gid)` | `str, int → int` | initgroups(3): set the supplementary groups of `user` (call before `setgid`/`setuid` when dropping root). 0 / -1. |
+| `core::setgroups(\@gids)` | `array → int` | setgroups(2). `core::setgroups([])` clears the supplementary groups. 0 / -1. |
 | `core::getpwuid(uid)` | `int → hash` | Password entry by uid: `name`, `passwd`, `uid`, `gid`, `gecos`, `dir`, `shell`. |
 | `core::getpwnam(name)` | `str → hash` | Password entry by name (same keys). |
 | `core::getgrgid(gid)` | `int → hash` | Group entry by gid: `name`, `passwd`, `gid`, `members`. |
@@ -386,7 +388,9 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::getsockname(fd)` | `int → hash` | Local address of a socket fd: hash with `addr`, `port`. |
 | `core::getpeername(fd)` | `int → hash` | Remote address of a socket fd: hash with `addr`, `port`. |
 | `core::getsockopt(fd, level, opt)` | `int, int, int → int` | getsockopt(2) on a socket fd. |
-| `core::setsockopt(fd, level, opt, val)` | `int, int, int, int → int` | setsockopt(2) on a socket fd. |
+| `core::setsockopt(fd, level, opt, val)` | `int, int, int, scalar → int` | setsockopt(2). A non-numeric `val` is the raw option bytes (Perl): `core::pack("qq", $sec, $usec)` for `SO_RCVTIMEO`/`SO_SNDTIMEO`, `core::pack("ii", 1, $secs)` for `SO_LINGER`. |
+| `core::unix_server(path[, backlog])` | `str, int → scalar` | Listening AF_UNIX stream socket (backlog omitted/≤0 = SOMAXCONN); undef on failure. Does not remove an existing file at `path`. |
+| `core::unix_client(path)` | `str → scalar` | Connected AF_UNIX stream socket, or undef. Both work with every `core::socket_*` function. |
 | `core::udp_socket()` | `→ scalar` | New UDP socket. |
 | `core::udp_bind(sock, port)` | `scalar, int → int` | Bind UDP socket to a port (wildcard address). |
 | `core::udp_server(port)` | `int → scalar` | UDP server (socket + bind). |

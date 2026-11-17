@@ -1,0 +1,20 @@
+# EXPECT: partial timeout ok
+# Cannoli report #5: Async::Task::send outside a task waited forever (1 ms
+# retry loop, no deadline) when the peer stopped reading. It now takes a
+# timeout and waits with poll(2); it returns the bytes sent so far.
+use lib "lib";
+use Async::Task;
+func main() int {
+    my int $port = 20000 + (core::getpid() % 20000);
+    my scalar $srv = core::socket_server($port);
+    my scalar $cli = core::socket_client("127.0.0.1", $port);
+    my scalar $peer = core::socket_accept($srv);
+    my str $chunk = "x" x 1048576;
+    my str $big = $chunk x 32;
+    my int $t0 = core::mono_ms();
+    my int $n = Async::Task::send($cli, $big, 300);
+    my int $dt = core::mono_ms() - $t0;
+    my int $ok = ($n > 0 && $n < core::byte_length($big) && $dt >= 250 && $dt < 3000) ? 1 : 0;
+    say(($ok == 1 ? "partial timeout ok" : "bad n=" . $n . " dt=" . $dt));
+    return 0;
+}

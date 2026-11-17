@@ -1356,6 +1356,14 @@ void strada_stack_restore(int mark);  /* reset it (exception unwound to a try fr
 #define strada_current_depth_il strada_current_depth
 #define strada_stack_line_il strada_stack_set_line
 #else
+/* Pending-signal flag (set by the async-signal-safe wrapper). Function entry
+ * is a safe point for running Strada signal handlers, as in the out-of-line
+ * strada_stack_push/strada_depth_push; without this check a program whose
+ * only blocking call is not a dispatch point (e.g. Async::Loop's epoll
+ * wait) never ran its handlers. */
+#include <signal.h>
+extern volatile sig_atomic_t strada_sig_pending_any;
+void strada_dispatch_signals(void);
 /* Inline fast paths — emitted by the codegen at every function entry/exit
  * and call site, so they must not be out-of-line calls (profiled at ~4.5%
  * of a call-heavy workload). The out-of-line versions above remain the
@@ -1381,6 +1389,7 @@ static inline void strada_stack_push_il(const char *func_name, const char *file_
 #ifdef STRADA_CLEANUP_CHECK
     strada_cs_marks[d + 1] = strada_cleanup_mark();
 #endif
+    if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();
 }
 static inline void strada_stack_pop_il(void) {
     if (__builtin_expect(strada_call_overflow > 0, 0)) { strada_call_overflow--; return; }
@@ -1404,6 +1413,7 @@ static inline void strada_depth_push_il(const char *func_name, const char *file_
         return;
     }
     strada_call_overflow = o + 1;
+    if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();
 }
 static inline void strada_depth_pop_il(void) {
     strada_call_overflow--;
@@ -1832,6 +1842,10 @@ StradaValue* strada_socket_server(int port);
 StradaValue* strada_socket_server_backlog(int port, int backlog);
 StradaValue* strada_socket_server_host(const char *host, int port, int backlog);
 StradaValue* strada_socket_client(const char *host, int port);
+StradaValue* strada_unix_server(StradaValue *path, StradaValue *backlog); /* AF_UNIX listen */
+StradaValue* strada_unix_client(StradaValue *path);                      /* AF_UNIX connect */
+StradaValue* strada_initgroups(StradaValue *user, StradaValue *gid);
+StradaValue* strada_setgroups(StradaValue *gids);
 StradaValue* strada_socket_select(StradaValue *sockets, int timeout_ms);
 int strada_socket_fd(StradaValue *sock);
 StradaValue* strada_select_fds(StradaValue *fds, int timeout_ms);

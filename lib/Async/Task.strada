@@ -112,10 +112,16 @@ func readline(scalar $sock, int $timeout_ms = 0, int $max_bytes = 0) str {
     }
 }
 
-# Send all of $data (handles partial writes). Returns bytes sent, -1 error.
-func send(scalar $sock, str $data) int {
+# Send all of $data (handles partial writes). Returns the bytes sent: the
+# whole length on success, fewer when $timeout_ms (> 0) expires first; -1 on
+# error. Outside a task it waits for writability with poll(2) (it used to
+# retry every millisecond with no deadline, pinning a caller whose peer
+# stopped reading).
+func send(scalar $sock, str $data, int $timeout_ms = 0) int {
     my int $total = core::byte_length($data);
     my int $sent = 0;
+    if ($timeout_ms < 0) { return 0; }
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while ($sent < $total) {
         my int $rlen = $total - $sent;
         my str $slice = ($sent == 0) ? $data : core::byte_substr($data, $sent, $rlen);
@@ -126,8 +132,13 @@ func send(scalar $sock, str $data) int {
             $sent = $sent + $n;
             next;
         }
-        if (park($sock, "w", 0) == 0) {
-            core::nanosleep(1000000);
+        my int $left = remaining($deadline);
+        if ($left < 0) { return $sent; }
+        if (park($sock, "w", $left) == 0) {
+            # not in a task: block in poll(2) for POLLOUT (4)
+            my scalar $pe = { "fd" => core::socket_fd($sock), "events" => 4 };
+            my int $wait = $deadline > 0 ? $left : 1000;
+            core::poll([$pe], $wait);
         }
     }
     return $total;

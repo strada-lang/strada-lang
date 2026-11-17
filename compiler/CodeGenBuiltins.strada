@@ -8350,6 +8350,38 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
         }
 
         # Additional socket operations
+        # Unix-domain sockets and supplementary groups (Cannoli report #6)
+        if ($name eq "sys::unix_server") {
+            my scalar $us_args = $expr->{"args"};
+            if ($expr->{"arg_count"} >= 2) {
+                gen_call_with_arg_cleanup($cg, "strada_unix_server", $us_args, 2);
+            } else {
+                my scalar $us0 = $us_args->[0];
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $us0) == 1) {
+                    emit($cg, "({ StradaValue *__us_p = ");
+                    gen_expression($cg, $us0);
+                    emit($cg, "; StradaValue *__us_r = strada_unix_server(__us_p, NULL); strada_decref(__us_p); __us_r; })");
+                } else {
+                    emit($cg, "strada_unix_server(");
+                    gen_expression($cg, $us0);
+                    emit($cg, ", NULL)");
+                }
+            }
+            return 1;
+        }
+        if ($name eq "sys::unix_client") {
+            gen_call_with_arg_cleanup($cg, "strada_unix_client", $expr->{"args"}, 1);
+            return 1;
+        }
+        if ($name eq "sys::initgroups") {
+            gen_call_with_arg_cleanup($cg, "strada_initgroups", $expr->{"args"}, 2);
+            return 1;
+        }
+        if ($name eq "sys::setgroups") {
+            gen_call_with_arg_cleanup($cg, "strada_setgroups", $expr->{"args"}, 1);
+            return 1;
+        }
+
         if ($name eq "sys::setsockopt") {
             gen_call_with_arg_cleanup($cg, "strada_setsockopt", $expr->{"args"}, 4);
             return 1;
@@ -9162,7 +9194,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
         # or stdlib reference that the final link resolves. Record its mangled name
         # so get_output() emits `extern StradaValue* name();` — otherwise C assumes
         # `int name()` and truncates the returned 64-bit StradaValue* pointer.
-        if ($cg->{"module_only_mode"} == 1) {
+        if ($cg->{"module_only_mode"} == 1 || ($expr->{"host_extern"} + 0) == 1) {
             # NB: no `//` defined-or here — the frozen bootstrap can't parse it
             # (it appears nowhere else in compiler/*.strada). Default with
             # explicit defined() checks instead.

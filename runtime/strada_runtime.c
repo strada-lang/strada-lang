@@ -78,6 +78,7 @@
 #include <fnmatch.h>
 #include <pwd.h>
 #include <grp.h>
+#include <sys/un.h>
 #include <sys/resource.h>
 #include <sys/times.h>
 #include <sys/mman.h>
@@ -12132,7 +12133,9 @@ __attribute__((constructor)) static void strada_overflow_handler_install(void) {
 #endif
 
 #define STRADA_MAX_SIGNALS 64
-static volatile sig_atomic_t strada_sig_pending_any = 0;
+/* Not static: the inline call-entry fast paths in strada_runtime.h test it
+ * so pending signal handlers still run at function calls. */
+volatile sig_atomic_t strada_sig_pending_any = 0;
 static volatile sig_atomic_t strada_sig_pending[STRADA_MAX_SIGNALS];
 static STRADA_CLEANUP_TLS int strada_in_sig_dispatch = 0;
 void strada_dispatch_signals(void);
@@ -33148,8 +33151,90 @@ StradaValue* strada_setsockopt(StradaValue *sock, StradaValue *level, StradaValu
     int s = strada_extract_fd(sock);
     int lv = strada_to_int(level);
     int opt = strada_to_int(optname);
+    /* Perl: a value that is not a number is the raw option bytes -- a
+     * packed struct such as SO_RCVTIMEO's timeval (core::pack("qq", $sec,
+     * $usec)) or SO_LINGER's linger (core::pack("ii", 1, $secs)). */
+    if (optval && !STRADA_IS_TAGGED_INT(optval) && optval->type == STRADA_STR && optval->value.pv) {
+        size_t olen = STRADA_STR_BYTELEN(optval);
+        if (olen > 0 && !perl_looks_like_number_c(optval->value.pv))
+            return strada_new_int(setsockopt(s, lv, opt, optval->value.pv, (socklen_t)olen));
+    }
     int val = strada_to_int(optval);
     return strada_new_int(setsockopt(s, lv, opt, &val, sizeof(val)));
+}
+
+/* ---- supplementary groups (dropping privileges) ---- */
+StradaValue* strada_initgroups(StradaValue *user, StradaValue *gid) {
+    char ub[256];
+    const char *u = strada_to_str_buf(user, ub, sizeof(ub));
+    return strada_new_int(initgroups(u ? u : "", (gid_t)strada_to_int(gid)));
+}
+
+StradaValue* strada_setgroups(StradaValue *gids) {
+    StradaArray *av = strada_deref_array(gids);
+    size_t n = av ? av->size : 0;
+    gid_t *list = n > 0 ? malloc(n * sizeof(gid_t)) : NULL;
+    if (n > 0 && !list) return strada_new_int(-1);
+    for (size_t i = 0; i < n; i++) list[i] = (gid_t)strada_to_int(strada_array_get(av, (int64_t)i));
+    int r = setgroups(n, list);
+    free(list);
+    return strada_new_int(r);
+}
+
+/* ---- Unix-domain stream sockets ---- */
+static StradaValue *strada_socket_wrap_fd(int fd) {
+    StradaSocketBuffer *buf = malloc(sizeof(StradaSocketBuffer));
+    if (!buf) { close(fd); return strada_new_undef(); }
+    buf->fd = fd;
+    buf->read_pos = 0;
+    buf->read_len = 0;
+    buf->write_len = 0;
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_SOCKET;
+    sv->refcount = 1;
+    sv->value.sock = buf;
+    return sv;
+}
+
+static int strada_unix_addr(StradaValue *path, struct sockaddr_un *sa) {
+    memset(sa, 0, sizeof(*sa));
+    sa->sun_family = AF_UNIX;
+    if (!path || STRADA_IS_TAGGED_INT(path) || path->type != STRADA_STR || !path->value.pv) return -1;
+    size_t len = STRADA_STR_BYTELEN(path);
+    if (len == 0 || len >= sizeof(sa->sun_path) || memchr(path->value.pv, 0, len)) return -1;
+    memcpy(sa->sun_path, path->value.pv, len);
+    return 0;
+}
+
+/* core::unix_server($path[, $backlog]): a listening AF_UNIX socket (backlog
+ * <= 0 or omitted = SOMAXCONN); undef on failure. An existing file at $path
+ * is not removed (unlink a stale socket first). */
+StradaValue* strada_unix_server(StradaValue *path, StradaValue *backlog) {
+    struct sockaddr_un sa;
+    if (strada_unix_addr(path, &sa) < 0) return strada_new_undef();
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return strada_new_undef();
+    int bl = backlog ? (int)strada_to_int(backlog) : 0;
+    if (bl <= 0) bl = SOMAXCONN;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 || listen(fd, bl) < 0) {
+        close(fd);
+        return strada_new_undef();
+    }
+    return strada_socket_wrap_fd(fd);
+}
+
+/* core::unix_client($path): a connected AF_UNIX socket, or undef. */
+StradaValue* strada_unix_client(StradaValue *path) {
+    struct sockaddr_un sa;
+    if (strada_unix_addr(path, &sa) < 0) return strada_new_undef();
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return strada_new_undef();
+    strada_fd_set_nosigpipe(fd);
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return strada_new_undef();
+    }
+    return strada_socket_wrap_fd(fd);
 }
 
 StradaValue* strada_getsockopt(StradaValue *sock, StradaValue *level, StradaValue *optname) {
@@ -38370,6 +38455,9 @@ StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd) {
 StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms) {
     EvbEvent evs[64];
     int n = evb_wait((int)strada_to_int(epfd), evs, 64, (int)strada_to_int(timeout_ms));
+    /* The event loop blocks here: run signal handlers now (a signal also
+     * interrupts the wait), or an Async::Loop program never sees them. */
+    if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();
     StradaValue *out = strada_new_array();
     for (int i = 0; i < n; i++) {
         char ms[8];

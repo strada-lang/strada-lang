@@ -75,7 +75,7 @@ func main() int {
 - `readline($sock [, $timeout_ms [, $max_bytes]])` → line (newline stripped); undef = EOF/timeout.
   A line is returned in pieces of at most 8192 bytes (the socket buffer);
   `$max_bytes` > 0 lowers that limit, leaving the rest of a longer line for the next call
-- `send($sock, $data)` → bytes sent (handles partial writes); -1 = error
+- `send($sock, $data[, $timeout_ms])` → bytes sent (handles partial writes; fewer than the length when the timeout expires); -1 = error. Outside a task it waits in poll(2).
 - `accept($listener [, $timeout_ms])` → socket; undef = timeout
 - `connect($host, $port [, $timeout_ms])` → socket; undef = failure/timeout.
   Non-blocking TCP handshake; hostnames resolve on a background thread
@@ -123,7 +123,7 @@ Async::TaskSSL::write($h, "GET / HTTP/1.0\r\n\r\n");
 my str $body = Async::TaskSSL::read($h, 65536, 10000);
 Async::TaskSSL::close($h);
 
-# Server side: ssl::server($port, $cert, $key) then, inside a task,
+# Server side: ssl::server($port, $cert, $key) (or ssl::server_host($host, $port, $cert, $key)) then, inside a task,
 # Async::TaskSSL::accept($server) — accept + handshake without blocking.
 ```
 

@@ -1,0 +1,27 @@
+# EXPECT: handler ran during the loop
+# Cannoli report #1: a core::signal handler never ran in a program whose
+# main loop is Async::Loop::run() -- the inline call-entry fast paths did not
+# check for pending signals and the epoll wait was not a dispatch point.
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+my int $flag = 0;
+my int $iters = 0;
+func on_term(int $sig) void { $flag = 1; }
+func main() int {
+    core::signal("TERM", \&on_term);
+    # the signal must arrive from outside while the loop is waiting
+    my int $parent = core::getpid();
+    my int $pid = core::fork();
+    if ($pid == 0) { core::usleep(300000); core::kill($parent, 15); core::exit(0); }
+    my scalar $loop = Async::Loop::new();
+    $loop->spawn(fn () {
+        my int $i = 0;
+        while ($i < 30 && $flag == 0) { Async::Task::sleep(100); $i = $i + 1; }
+        $iters = $i;
+    });
+    $loop->run();
+    core::waitpid($pid, 0);
+    say(($iters < 30 ? "handler ran during the loop" : "handler missed (iters=" . $iters . ")"));
+    return 0;
+}
