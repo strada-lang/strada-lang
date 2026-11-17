@@ -1595,8 +1595,10 @@ int strada_refcount(StradaValue *sv);  /* Get reference count */
 /* Weak references */
 void strada_weaken(StradaValue **ref_ptr);   /* Make a reference weak */
 void strada_weaken_hv_entry(StradaHash *hv, const char *key);  /* Weaken a hash entry value */
+void strada_weaken_hv_entry_sv(StradaHash *hv, StradaValue *key_sv);  /* binary-safe key */
 void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx);  /* Weaken an array element */
-int strada_isweak(StradaValue *ref);        /* Check if reference is weak */
+int strada_isweak(StradaValue *ref);
+StradaValue *strada_strong_copy_take(StradaValue *sv);  /* weak ref copy -> strong ref; consumes */        /* Check if reference is weak */
 void strada_weak_registry_init(void);       /* Initialize weak reference registry */
 void strada_weak_registry_remove_target(StradaValue *target);  /* Notify weak refs when target dies */
 void strada_weak_registry_unregister(StradaValue *ref);        /* Remove a weak ref from registry */

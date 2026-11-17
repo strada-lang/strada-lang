@@ -2193,6 +2193,34 @@ void strada_weaken(StradaValue **ref_ptr) {
     }
 }
 
+/* An owned value copied into a variable or container: a weak reference
+ * becomes a new strong reference to the same target (Perl: copies of weak
+ * refs are strong); anything else is returned as is. Consumes sv. */
+StradaValue *strada_strong_copy_take(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_REF || !SV_IS_WEAK(sv)) return sv;
+    if ((sv->flags & STRADA_SVf_CELL_REF) || strada_is_slot_ref(sv)) return sv;
+    StradaValue *target = sv->value.rv;
+    if (!target) {           /* dead weak ref: undef */
+        strada_decref(sv);
+        return strada_new_undef();
+    }
+    StradaValue *r = strada_value_alloc();
+    r->type = STRADA_REF;
+    r->refcount = 1;
+    r->value.rv = target;
+    strada_incref(target);
+    const char *bp = SV_BLESSED(sv);
+    if (bp) {
+        StradaMetadata *m = strada_ensure_meta(r);
+        if (m) {
+            m->blessed_package = strada_intern_pkg_name(bp);
+            m->blessed_immortal = 1;
+        }
+    }
+    strada_decref(sv);
+    return r;
+}
+
 int strada_isweak(StradaValue *ref) {
     if (!ref || STRADA_IS_TAGGED_INT(ref)) return 0;
     return SV_IS_WEAK(ref) ? 1 : 0;
@@ -2410,10 +2438,28 @@ static void strada_fh_writeback_sync(FILE *fh) {
 static unsigned int strada_hash_string(const char *str);
 static unsigned int strada_hash_bytes(const char *p, size_t len);
 
+static void strada_weaken_hv_entry_len(StradaHash *hv, const char *key, uint32_t key_len);
 void strada_weaken_hv_entry(StradaHash *hv, const char *key) {
     if (!hv || !key) return;
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    strada_weaken_hv_entry_len(hv, key, (uint32_t)strlen(key));
+}
+
+/* weaken($h{KEY}) with the key as a value: binary-safe (a key with a NUL
+ * byte was truncated, weakening a different entry). */
+void strada_weaken_hv_entry_sv(StradaHash *hv, StradaValue *key_sv) {
+    if (!hv || !key_sv) return;
+    StradaValue *ks = strada_to_str_sv(key_sv);
+    if (!ks) return;
+    strada_cleanup_push(ks);
+    const char *kp = (!STRADA_IS_TAGGED_INT(ks) && ks->value.pv) ? ks->value.pv : "";
+    size_t kl = (!STRADA_IS_TAGGED_INT(ks) && ks->type == STRADA_STR && ks->value.pv) ? STRADA_STR_BYTELEN(ks) : strlen(kp);
+    strada_weaken_hv_entry_len(hv, kp, (uint32_t)kl);
+    strada_cleanup_pop_decref(ks);
+}
+
+static void strada_weaken_hv_entry_len(StradaHash *hv, const char *key, uint32_t key_len) {
+    if (!hv || !key) return;
+    unsigned int hash = strada_hash_bytes(key, key_len);
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
     while (1) {
@@ -3387,12 +3433,13 @@ int strada_to_bool(StradaValue *sv) {
             if (strada_is_slot_ref(sv)) {
                 return sv->value.ptr != NULL;
             }
+            /* A reference is true (Perl), including one to an empty array,
+             * an empty hash or an empty object; `bool` overloads were
+             * handled above. The compiler turns @a / %h in truth context
+             * into their counts (ast_regex_truth). A freed weak target
+             * reads as undef, false. */
             StradaValue *rv = sv->value.rv;
             if (!rv) return 0;
-            if (!STRADA_IS_TAGGED_INT(rv)
-                && (SV_BLESSED(rv) || rv->type == STRADA_ARRAY || rv->type == STRADA_HASH)) {
-                return strada_to_bool(rv);
-            }
             return 1;
         }
         default:
@@ -4862,6 +4909,13 @@ static unsigned int strada_hash_bytes(const char *p, size_t len) {
 /* Resize hash table when load factor exceeds threshold */
 static void strada_hash_resize(StradaHash *hv) {
     if (!hv) return;
+    /* Mostly tombstones (insert/delete churn on a hash of steady size):
+     * rehash in place to clear them. Doubling here grew the index without
+     * bound while the live size stayed constant. */
+    if (hv->num_entries * 4 <= hv->num_buckets && hv->num_buckets >= 16) {
+        hash_rebuild_index(hv);
+        return;
+    }
     size_t new_buckets = hv->num_buckets * 2;
     /* Check if hash_index is part of a compact block (can't realloc) */
     int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
@@ -9885,6 +9939,24 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
          * fell through to "no match" and the literal "%B" stayed in
          * the buffer. Track uppercase to preserve the "0B" prefix for
          * the `#` flag (matching Perl's casing convention). */
+        if (spec == '%') {
+            /* %5% / %-5%: a literal % padded to the width (it was echoed
+             * verbatim). Consumes no argument. */
+            int pl = 0, pw = 0;
+            for (const char *q = spec_start + 1; q < p - 1; q++) {
+                if (*q == '-') pl = 1;
+                else if (*q == '.') break;
+                else if (*q >= '0' && *q <= '9' && pw < 1000000) pw = pw * 10 + (*q - '0');
+            }
+            if (width_star) { pw = width_star_val; if (pw < 0) { pl = 1; pw = -pw; } }
+            if (pw > 1000000) pw = 1000000;
+            size_t pp = pw > 1 ? (size_t)(pw - 1) : 0;
+            SPRINTF_GROW(pp + 1);
+            if (!pl) { for (size_t q = 0; q < pp; q++) *out++ = ' '; }
+            *out++ = '%';
+            if (pl) { for (size_t q = 0; q < pp; q++) *out++ = ' '; }
+            continue;
+        }
         int was_upper_b = (spec == 'B');
         if (spec == 'B') spec = 'b';
 
@@ -10118,13 +10190,32 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                  * Original `%B` (uppercase) prepends "0B" to match Perl's
                  * casing convention. */
                 uint64_t val = arg ? (uint64_t)strada_to_int(arg) : 0;
+                uint64_t val0 = val;
                 char bin_buf[65];
                 int bi = 64;
                 bin_buf[bi] = '\0';
                 if (val == 0) { bin_buf[--bi] = '0'; }
                 else { while (val > 0) { bin_buf[--bi] = (val & 1) ? '1' : '0'; val >>= 1; } }
                 const char *digits = bin_buf + bi;
-                int has_hash = (strchr(spec_buf, '#') != NULL);
+                /* Precision is the minimum digit count (%.8b of 5 is
+                 * 00000101); `%#b` of 0 is "0" without a prefix (Perl). */
+                char bin_prec[512];
+                {
+                    const char *dot = strchr(spec_buf, '.');
+                    if (dot) {
+                        int prec = atoi(dot + 1);
+                        if (prec_star) prec = prec_star_val;
+                        size_t dl0 = strlen(digits);
+                        if (prec == 0 && val0 == 0) { digits = ""; }
+                        else if (prec > 0 && (size_t)prec > dl0 && prec < (int)sizeof(bin_prec)) {
+                            size_t padz = (size_t)prec - dl0;
+                            memset(bin_prec, '0', padz);
+                            memcpy(bin_prec + padz, digits, dl0 + 1);
+                            digits = bin_prec;
+                        }
+                    }
+                }
+                int has_hash = (strchr(spec_buf, '#') != NULL) && val0 != 0;
                 char b_char = was_upper_b ? 'B' : 'b';
                 /* Parse flags + width from spec_buf for alignment. */
                 const char *fp = spec_buf;
@@ -10298,9 +10389,27 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                     ub[ulen++] = (char)(0x80 | ((val >> 6) & 0x3F));
                     ub[ulen++] = (char)(0x80 | (val & 0x3F));
                 }
-                SPRINTF_GROW((size_t)ulen);
+                /* Width and the - / 0 flags apply to %c as to %s (they were
+                 * ignored). */
+                int c_left = 0, c_zero = 0, c_width = 0;
+                {
+                    const char *fp = spec_buf;
+                    if (*fp == '%') fp++;
+                    while (*fp == '0' || *fp == '-' || *fp == '+' || *fp == ' ' || *fp == '#') {
+                        if (*fp == '0') c_zero = 1;
+                        if (*fp == '-') c_left = 1;
+                        fp++;
+                    }
+                    while (*fp >= '0' && *fp <= '9' && c_width < 1000000) { c_width = c_width * 10 + (*fp - '0'); fp++; }
+                    if (width_star) { c_width = width_star_val; if (c_width < 0) { c_left = 1; c_width = -c_width; } }
+                    if (c_width > 1000000) c_width = 1000000;
+                }
+                size_t c_pad = (c_width > 1) ? (size_t)(c_width - 1) : 0;
+                SPRINTF_GROW((size_t)ulen + c_pad);
+                if (!c_left) { for (size_t q = 0; q < c_pad; q++) *out++ = c_zero ? '0' : ' '; }
                 memcpy(out, ub, ulen);
                 out += ulen;
+                if (c_left) { for (size_t q = 0; q < c_pad; q++) *out++ = ' '; }
                 continue;
             }
             case 's': {
@@ -11063,43 +11172,49 @@ StradaValue* sys_file_mtime(StradaValue *path_sv) {
     return strada_file_mtime(path_sv);
 }
 
+/* Read a stream to EOF. `hint` (the stat size, possibly 0 or stale: /proc
+ * files report 0, files grow) only sizes the first buffer; the old code read
+ * exactly ftell() bytes, so size-0 files came back empty and a pipe lost
+ * data. Returns NULL on a stream error. */
+static char *strada_read_stream_all(FILE *f, size_t hint, size_t *len_out) {
+    size_t cap = hint + 1 > 4096 ? hint + 1 : 4096;
+    if (cap < hint) cap = hint;  /* overflow guard */
+    size_t total = 0;
+    char *buf = sr_xmalloc(cap + 1);
+    clearerr(f);
+    for (;;) {
+        if (cap - total < 1024) {
+            if (cap > SIZE_MAX / 2) { free(buf); strada_str_oom_abort(cap); }
+            cap *= 2;
+            buf = (char *)sr_xrealloc(buf, cap + 1);
+        }
+        size_t nr = fread(buf + total, 1, cap - total, f);
+        total += nr;
+        if (nr == 0) break;
+    }
+    if (ferror(f) && total == 0) { free(buf); return NULL; }
+    buf[total] = '\0';
+    *len_out = total;
+    return buf;
+}
+
 StradaValue* strada_slurp(const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (!f) {
         return strada_new_undef();
     }
 
-    /* fopen() succeeds on a directory, and ftell() on one reports LONG_MAX,
-     * which became an 8-exabyte malloc and an abort. Only regular files
-     * have a size worth trusting. */
+    /* fopen() succeeds on a directory; reading one is an error. */
     struct stat slurp_st;
     if (fstat(fileno(f), &slurp_st) != 0 || S_ISDIR(slurp_st.st_mode)) {
         fclose(f);
         return strada_new_undef();
     }
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (size < 0 || size == LONG_MAX) {
-        fclose(f);
-        return strada_new_undef();
-    }
-
-    char *content = sr_xmalloc(size + 1);
-    size_t read_size = fread(content, 1, size, f);
-    content[read_size] = '\0';
-
-    /* A short read is EOF-vs-error ambiguous; only a stream error
-     * should turn into undef (a file truncated between ftell and
-     * fread just yields the shorter content). */
-    if (read_size < (size_t)size && ferror(f)) {
-        fclose(f);
-        free(content);
-        return strada_new_undef();
-    }
+    size_t hint = (S_ISREG(slurp_st.st_mode) && slurp_st.st_size > 0) ? (size_t)slurp_st.st_size : 0;
+    size_t read_size = 0;
+    char *content = strada_read_stream_all(f, hint, &read_size);
     fclose(f);
+    if (!content) return strada_new_undef();
 
     /* Binary-safe: pass read_size explicitly so embedded NULs are
      * preserved (strada_new_str truncates at the first NUL). */
@@ -11118,55 +11233,30 @@ StradaValue* strada_slurp_fh(StradaValue *fh_sv) {
     FILE *f = fh_sv->value.fh;
     struct stat st;
     int fd = fileno(f);
-    if (fd >= 0 && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
-        return strada_new_undef();
-    }
-    long start_pos = ftell(f);
-    long end_pos = -1;
-    if (start_pos >= 0 && fseek(f, 0, SEEK_END) == 0) {
-        end_pos = ftell(f);
-    }
-    if (start_pos < 0 || end_pos < 0 || fseek(f, start_pos, SEEK_SET) != 0) {
-        /* Non-seekable stream (pipe, FIFO, socket): read in chunks to EOF. */
-        clearerr(f);
-        size_t cap = 4096;
-        size_t total = 0;
-        char *buf = sr_xmalloc(cap);
-        for (;;) {
-            if (cap - total < 1024) {
-                if (cap > SIZE_MAX / 2) { free(buf); strada_str_oom_abort(cap); }
-                cap *= 2;
-                buf = (char *)sr_xrealloc(buf, cap);
-            }
-            size_t nr = fread(buf + total, 1, cap - total, f);
-            total += nr;
-            if (nr == 0) break;
+    int is_reg = 0;
+    size_t hint = 0;
+    if (fd >= 0 && fstat(fd, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return strada_new_undef();
+        if (S_ISREG(st.st_mode)) {
+            is_reg = 1;
+            long pos = ftell(f);
+            if (pos >= 0 && st.st_size > pos) hint = (size_t)(st.st_size - pos);
         }
-        if (total == 0) {
-            free(buf);
-            return strada_new_undef();
-        }
-        StradaValue *result = strada_new_str_len(buf, total);
+    }
+    long start_pos = is_reg ? ftell(f) : -1;
+    size_t total = 0;
+    char *buf = strada_read_stream_all(f, hint, &total);
+    if (!buf) return strada_new_undef();
+    if (total == 0) {
         free(buf);
-        return result;
-    }
-
-    long size = end_pos - start_pos;
-    if (end_pos == LONG_MAX || size <= 0 || size == LONG_MAX) {
+        /* Perl: the first slurp of an empty file is "", reading at EOF
+         * (or an empty pipe) is undef. */
+        if (is_reg && start_pos == 0) return strada_new_str("");
         return strada_new_undef();
     }
-
-    char *content = sr_xmalloc(size + 1);
-    size_t read_size = fread(content, 1, size, f);
-    content[read_size] = '\0';
-
-    /* Binary-safe: pass read_size explicitly so embedded NULs are
-     * preserved. strada_new_str uses strlen() which truncates at the
-     * first NUL — `local $/; <$fh>` on a file with binary content
-     * came back with only the prefix. */
-    StradaValue *result = strada_new_str_len(content, read_size);
-    free(content);
-
+    /* Binary-safe: embedded NULs are preserved. */
+    StradaValue *result = strada_new_str_len(buf, total);
+    free(buf);
     return result;
 }
 
@@ -14812,6 +14902,16 @@ static char* pcre2_preprocess_replacement(const char *replacement, size_t repl_l
             i++;
             continue;
         }
+        if (replacement[i] == '\\' && i + 1 < len &&
+            ((replacement[i+1] >= 'a' && replacement[i+1] <= 'z') || (replacement[i+1] >= 'A' && replacement[i+1] <= 'Z')) &&
+            !strchr("aefnrtxocuUlLEQFN", replacement[i+1])) {
+            /* An escape PCRE2's extended substitute does not know (\w, \d,
+             * ...): Perl keeps the character. PCRE2 rejected the whole
+             * replacement, so the substitution silently did nothing. */
+            out[j++] = replacement[i+1];
+            i++;
+            continue;
+        }
         if (replacement[i] == '\\' && i + 1 < len && replacement[i+1] >= '1' && replacement[i+1] <= '9') {
             /* Convert \1 to $1 (Perl backref alt-syntax) */
             out[j++] = '$';
@@ -14923,7 +15023,11 @@ static char* pcre2_do_substitute_len2(const char *str, size_t subject_length, in
     /* SUBSTITUTE_EXTENDED enables \U..\E, \L..\E, \u, \l in the
      * replacement — matches Perl. Without it, `s/(\w+)/\U$1/g` left
      * the literal `\U` in the output. */
-    uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED;
+    /* UNSET_EMPTY / UNKNOWN_UNSET: a group that did not take part in the
+     * match (or does not exist) interpolates as "" as in Perl; without them
+     * PCRE2 failed and the substitution was a no-op. */
+    uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED |
+                           PCRE2_SUBSTITUTE_UNSET_EMPTY | PCRE2_SUBSTITUTE_UNKNOWN_UNSET;
     if (global) sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
 
     /* First call: determine output size */
@@ -15142,7 +15246,11 @@ int strada_regex_replace_capture_len2(const char *str, size_t subject_length, in
         size_t proc_repl_len = 0;
         char *processed_repl = pcre2_preprocess_replacement(replacement, repl_len, &proc_repl_len);
         pcre2_match_data *md = strada_md_acquire(re);
-        uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED;
+        /* UNSET_EMPTY / UNKNOWN_UNSET: a group that did not take part in the
+     * match (or does not exist) interpolates as "" as in Perl; without them
+     * PCRE2 failed and the substitution was a no-op. */
+    uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED |
+                           PCRE2_SUBSTITUTE_UNSET_EMPTY | PCRE2_SUBSTITUTE_UNKNOWN_UNSET;
         if (global) sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
         PCRE2_SIZE outlength = 0;
         int rcs = pcre2_substitute(re, (PCRE2_SPTR)str, slen, 0,
@@ -15460,8 +15568,17 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
         /* Skip a leading empty element produced by a zero-width match
          * at position 0 (Perl semantics: `split /^/m, "a\nb"` does NOT
          * include a leading "" — only "a\n", "b"). */
-        int skip_part = (first_iter && match_start == 0 && match_end == match_start);
+        /* Perl: a zero-width separator never ends a field where it starts
+         * (at the chunk start): split on \s* of "a b" is (a, b), not
+         * (a, "", b), and there is no leading "" at position 0. Retry one
+         * character further without splitting or emitting captures. */
+        int skip_part = (match_end == match_start && match_start == offset);
         first_iter = 0;
+        if (skip_part) {
+            search_off = regex_advance_utf8_char(str, match_end, subject_length);
+            if (search_off <= match_end) break;
+            continue;
+        }
 
         if (!skip_part) {
             /* Add part before match (chunk from current chunk-start to match) */
@@ -15539,8 +15656,17 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
         PCRE2_SIZE match_start = ovector[0];
         PCRE2_SIZE match_end = ovector[1];
-        int skip_part = (first_iter && match_start == 0 && match_end == match_start);
+        /* Perl: a zero-width separator never ends a field where it starts
+         * (at the chunk start): split on \s* of "a b" is (a, b), not
+         * (a, "", b), and there is no leading "" at position 0. Retry one
+         * character further without splitting or emitting captures. */
+        int skip_part = (match_end == match_start && match_start == offset);
         first_iter = 0;
+        if (skip_part) {
+            search_off = regex_advance_utf8_char(str, match_end, subject_length);
+            if (search_off <= match_end) break;
+            continue;
+        }
         if (!skip_part) {
             strada_array_push_take(parts, split_piece(str + offset, match_start - offset));
             chunks++;
@@ -21574,6 +21700,10 @@ int64_t strada_rindex_sv(StradaValue *haystack_sv, StradaValue *needle_sv, int64
     int char_oriented = (hsv && !STRADA_STR_IS_ASCII(hsv)
                          && STRADA_STR_IS_UTF8(hsv)
                          && utf8_is_valid(hay, hay_len));
+    /* Perl: with a negative position an empty needle is found at 0
+     * (rindex("abc", "", -5) is 0; it returned -1); any other needle is
+     * not found. */
+    if (has_offset && offset < 0 && ndl_len == 0) offset = 0;
     int64_t result = -1;
     if (ndl_len == 0) {
         size_t total = char_oriented ? utf8_cached_byte_to_char(hay, hay_len, hay_len) : hay_len;
@@ -24793,45 +24923,31 @@ StradaValue* strada_base64_decode(StradaValue *sv) {
     free(owned);
     size_t len = cn;
 
-    /* Remove padding from length calculation */
-    size_t pad = 0;
-    if (len >= 1 && clean[len - 1] == '=') pad++;
-    if (len >= 2 && clean[len - 2] == '=') pad++;
-
-    /* Output length: 3 bytes for every 4 chars, minus padding.
-     * Guard against unsigned underflow: for cleaned inputs of 1-3 chars
-     * ending in '=' (e.g. "=", "==", "A="), (len/4)*3 is 0 while pad>=1,
-     * so a naive `(len/4)*3 - pad` wraps to ~SIZE_MAX. That underflow made
-     * the trailing `result[out_len] = '\0'` a wild out-of-bounds write. */
-    size_t groups = len / 4;
-    size_t out_len = groups * 3;
-    if (out_len >= pad) out_len -= pad; else out_len = 0;
+    /* MIME::Base64 semantics: decoding stops at the first '=' (padding ends
+     * the data), and an unpadded tail of 2 or 3 characters still yields 1
+     * or 2 bytes. The old 4-character loop dropped unpadded tails ("QQ" was
+     * "") and turned inner '=' into NUL bytes. */
+    size_t data_len = 0;
+    while (data_len < len && clean[data_len] != '=') data_len++;
+    size_t out_len = (data_len / 4) * 3;
+    size_t rem = data_len % 4;
+    if (rem == 2) out_len += 1; else if (rem == 3) out_len += 2;
     unsigned char *result = malloc(out_len + 1);
     if (!result) { free(clean); return strada_new_str(""); }
-
-    size_t i, j;
-    for (i = 0, j = 0; i + 3 < len; i += 4) {
-        /* Get 4 input characters, decode each */
-        int8_t sextet_a = base64_decode_table[clean[i]];
-        int8_t sextet_b = base64_decode_table[clean[i + 1]];
-        int8_t sextet_c = (clean[i + 2] != '=') ? base64_decode_table[clean[i + 2]] : 0;
-        int8_t sextet_d = (clean[i + 3] != '=') ? base64_decode_table[clean[i + 3]] : 0;
-
-        /* Treat invalid characters as 0 */
-        if (sextet_a < 0) sextet_a = 0;
-        if (sextet_b < 0) sextet_b = 0;
-        if (sextet_c < 0) sextet_c = 0;
-        if (sextet_d < 0) sextet_d = 0;
-
-        uint32_t triple = ((uint32_t)sextet_a << 18) |
-                          ((uint32_t)sextet_b << 12) |
-                          ((uint32_t)sextet_c <<  6) |
-                          (uint32_t)sextet_d;
-
-        if (j < out_len) result[j++] = (triple >> 16) & 0xFF;
-        if (j < out_len) result[j++] = (triple >>  8) & 0xFF;
-        if (j < out_len) result[j++] = triple & 0xFF;
+    size_t j = 0;
+    uint32_t acc = 0;
+    int nbits = 0;
+    for (size_t i = 0; i < data_len; i++) {
+        int8_t v = base64_decode_table[clean[i]];
+        if (v < 0) v = 0;
+        acc = (acc << 6) | (uint32_t)v;
+        nbits += 6;
+        if (nbits >= 8) {
+            nbits -= 8;
+            if (j < out_len) result[j++] = (unsigned char)((acc >> nbits) & 0xFF);
+        }
     }
+    out_len = j;
 
     result[out_len] = '\0';
     StradaValue *ret = strada_new_str_len((char *)result, out_len);
@@ -24856,7 +24972,9 @@ StradaValue* strada_hex(StradaValue *sv) {
     }
     size_t i = 0;
     while (i < len && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n' || p[i] == '\r' || p[i] == '\f' || p[i] == '\v')) i++;
+    /* Perl accepts "0x1f", "x1f" and "1f". */
     if (i + 1 < len && p[i] == '0' && (p[i + 1] == 'x' || p[i + 1] == 'X')) i += 2;
+    else if (i < len && (p[i] == 'x' || p[i] == 'X')) i += 1;
     uint64_t acc = 0;
     while (i < len) {
         unsigned char c = (unsigned char)p[i++];
@@ -24869,7 +24987,7 @@ StradaValue* strada_hex(StradaValue *sv) {
         acc = (acc << 4) | d;
     }
     free(owned);
-    return strada_new_int((int64_t)acc);
+    return strada_new_uint(acc);   /* above INT64_MAX stays unsigned (Perl UV) */
 }
 
 char* strada_chomp(const char *str) {
@@ -25183,6 +25301,12 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
     /* Cache stringified results from the sizing pass so the build pass
        doesn't re-stringify (and re-alloc) every non-STR element. NULL slots
        mean "element is a plain STRADA_STR, copy directly from el->value.pv". */
+    /* Per-element guards for owned strings are capped: past 4096 (the
+     * pending-cleanup stack holds 16384) they were silently dropped and
+     * every further element leaked. Strings after the cap are freed
+     * explicitly below (they leak only if a later stringify throws). */
+    size_t join_guards = 0;
+    size_t join_unguarded_from = SIZE_MAX;
     char *stack_cached[64];
     size_t stack_cached_len[64];
     char **cached = stack_cached;
@@ -25231,7 +25355,7 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
             char *s = strada_to_str(el);
             cached[i] = s;
             if (s) {
-                strada_cleanup_push(strada_cstruct_guard(s));
+                if (join_guards < 4096) { strada_cleanup_push(strada_cstruct_guard(s)); join_guards++; } else if (join_unguarded_from == SIZE_MAX) { join_unguarded_from = i; }
                 pushed_cleanup = 1;
             }
             cached_len[i] = s ? strlen(s) : 0;
@@ -25243,7 +25367,7 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
             const char *raw = strada_sv_raw_bytes(el, el_tb, sizeof(el_tb), &rlen, &eowned);
             if (eowned) {
                 cached[i] = eowned;
-                strada_cleanup_push(strada_cstruct_guard(eowned));
+                if (join_guards < 4096) { strada_cleanup_push(strada_cstruct_guard(eowned)); join_guards++; } else if (join_unguarded_from == SIZE_MAX) { join_unguarded_from = i; }
                 pushed_cleanup = 1;
             } else if (rlen > 0) {
                 char *cp = (char *)malloc(rlen + 1);
@@ -25251,7 +25375,7 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
                 memcpy(cp, raw, rlen);
                 cp[rlen] = '\0';
                 cached[i] = cp;
-                strada_cleanup_push(strada_cstruct_guard(cp));
+                if (join_guards < 4096) { strada_cleanup_push(strada_cstruct_guard(cp)); join_guards++; } else if (join_unguarded_from == SIZE_MAX) { join_unguarded_from = i; }
                 pushed_cleanup = 1;
             }
             cached_len[i] = rlen;
@@ -25293,6 +25417,9 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
     rv->value.pv = oss->data;
     strada_str_set_len_flags(rv, total_len,
         (uint16_t)((all_ascii ? STRADA_SVf_ASCII : 0) | (any_utf8 ? STRADA_SVf_UTF8 : 0)));
+    if (join_unguarded_from != SIZE_MAX) {
+        for (size_t fi = join_unguarded_from; fi < arr->size; fi++) free(cached[fi]);
+    }
     if (pushed_cleanup) strada_cleanup_drain_to(cmark);
     return rv;
 }
@@ -27542,6 +27669,12 @@ static StradaValue* strada_clone_rec(StradaValue *sv, StradaCloneMap *m, int dep
             break;
         }
         case STRADA_REF: {
+            /* A dead weak ref (its target was freed) is undef, as reading it
+             * is; it was cloned into a defined ref to a new undef. */
+            if (SV_IS_WEAK(sv) && !strada_is_slot_ref(sv) && !sv->value.rv) {
+                out = strada_new_undef();
+                break;
+            }
             /* Build the ref shell with a placeholder target, record it, then
              * clone the target — so a cycle back through this ref resolves to
              * the shell instead of recursing. Deref slot refs via value.ptr. */
@@ -27823,12 +27956,23 @@ StradaValue* strada_strftime(StradaValue *format, StradaValue *time_hash) {
         if (localtime_r(&t, &now_buf)) tm = now_buf;
     }
 
-    char buffer[1024];
-    size_t len = strftime(buffer, sizeof(buffer), fmt, &tm);
-    if (len == 0) {
-        return strada_new_str("");
+    /* Grow the buffer until the result fits (a result of 1024+ bytes came
+     * back as ""); a 0 return with a large buffer is a genuinely empty
+     * result (e.g. format "%p" in some locales). */
+    size_t cap = 1024;
+    size_t fmt_len = strlen(fmt);
+    for (;;) {
+        char *buffer = malloc(cap);
+        if (!buffer) return strada_new_str("");
+        size_t len = strftime(buffer, cap, fmt, &tm);
+        if (len > 0 || cap > fmt_len * 64 + 4096 || cap >= ((size_t)1 << 24)) {
+            StradaValue *r = strada_new_str_len(buffer, len);
+            free(buffer);
+            return r;
+        }
+        free(buffer);
+        cap *= 4;
     }
-    return strada_new_str(buffer);
 }
 
 /* ctime - convert timestamp to string (like asctime) */

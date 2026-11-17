@@ -1,0 +1,50 @@
+# Audit cycle 20 memory fixes: owned operands held across a throwing
+# operand, join past the pending-cleanup cap, weak-ref copies, clone of a
+# dead weak ref, weaken on a NUL key.
+package T;
+func mk(int $n) str { return "s" . $n . ("x" x 20); }
+func bad(int $n) str { throw "bad" . $n; return ""; }
+func badi() int { throw "bi"; return 0; }
+func run() int {
+    my $c = 0;
+    my $i = 0;
+    while ($i < 5) {
+        try { my $r = (mk(1) eq bad(1)); } catch ($e) { $c++; }
+        try { if (mk(1) ne bad(2)) { $c = $c; } } catch ($e) { $c++; }
+        try { my $r = index(mk(1), bad(1)); } catch ($e) { $c++; }
+        try { my $r = index(mk(1), "s", badi()); } catch ($e) { $c++; }
+        try { my $r = substr(mk(1), badi(), 1); } catch ($e) { $c++; }
+        try { my $r = sb::append(sb::new(), bad(1)); } catch ($e) { $c++; }
+        try { my $r = core::get_byte(mk(1), badi()); } catch ($e) { $c++; }
+        try { my $r = core::byte_substr(mk(1), 1, badi()); } catch ($e) { $c++; }
+        try { my $r = core::byte_index(mk(1), bad(1)); } catch ($e) { $c++; }
+        try { my $r = core::vec_get(mk(1), badi(), 8); } catch ($e) { $c++; }
+        try { my $r = core::unpack(mk(1), bad(1)); } catch ($e) { $c++; }
+        try { thread::tls_set(mk(1), bad(1)); } catch ($e) { $c++; }
+        try { my $r = utf8::normalize(mk(1), bad(1)); } catch ($e) { $c++; }
+        $i = $i + 1;
+    }
+    return $c;
+}
+package main;
+func main() int {
+    my $c = T::run();
+    my @big = ();
+    for (my int $k = 0; $k < 20000; $k = $k + 1) { push(@big, $k); }
+    my $j = join(",", @big);
+    my $obj = { "x" => 1 };
+    my $w = $obj; core::weaken($w);
+    my $copy = $w;
+    my %hh = (); $hh{"k"} = $w;
+    $obj = undef;
+    my $d = 0;
+    { my $h = { "a" => 1 }; $d = $h; core::weaken($d); }
+    my $cl = clone($d);
+    my %wk = ();
+    $wk{"w"} = { "n" => 1 };
+    my $t = { "n" => 2 };
+    $wk{"w\0b"} = $t;
+    core::weaken($wk{"w\0b"});
+    say($c . " " . length($j) . " " . $copy->{"x"} . $hh{"k"}->{"x"} . " " . (defined($cl) ? 1 : 0) . " " . $wk{"w"}->{"n"});
+    return 0;
+}

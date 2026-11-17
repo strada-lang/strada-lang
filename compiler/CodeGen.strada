@@ -2818,13 +2818,20 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
     # Case 1: Right side is string literal (without embedded NUL) - use strada_str_*_lit
     if ($right_type == NODE_STR_LITERAL() && str_has_nul($right->{"value"}) == 0) {
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $left) == 1) {
+            # overloaded "" may throw while comparing: keep the temp on the
+            # cleanup stack
+            my int $c1_push = 0;
+            if ($cg->{"has_overloads"} != 0 && cleanup_push_useful($cg) == 1) { $c1_push = 1; }
             emit($cg, "({ StradaValue *__cmp_l = ");
             gen_expression($cg, $left);
-            emit($cg, "; int __cmp_r = strada_str_");
+            emit($cg, "; ");
+            if ($c1_push == 1) { emit($cg, "strada_cleanup_push(__cmp_l); "); }
+            emit($cg, "int __cmp_r = strada_str_");
             emit($cg, $cmp_suffix);
             emit($cg, "_lit(__cmp_l, ");
             gen_str_literal_c($cg, $right->{"value"});
-            emit($cg, "); strada_decref(__cmp_l); strada_new_int(__cmp_r); })");
+            if ($c1_push == 1) { emit($cg, "); strada_cleanup_pop_decref(__cmp_l); strada_new_int(__cmp_r); })"); }
+            else { emit($cg, "); strada_decref(__cmp_l); strada_new_int(__cmp_r); })"); }
         } else {
             emit($cg, "strada_new_int(strada_str_");
             emit($cg, $cmp_suffix);
@@ -2851,13 +2858,18 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
         }
         # Check if right needs cleanup
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $right) == 1) {
+            my int $c2_push = 0;
+            if ($cg->{"has_overloads"} != 0 && cleanup_push_useful($cg) == 1) { $c2_push = 1; }
             emit($cg, "({ StradaValue *__cmp_r = ");
             gen_expression($cg, $right);
-            emit($cg, "; int __cmp_res = strada_str_");
+            emit($cg, "; ");
+            if ($c2_push == 1) { emit($cg, "strada_cleanup_push(__cmp_r); "); }
+            emit($cg, "int __cmp_res = strada_str_");
             emit($cg, $swapped);
             emit($cg, "_lit(__cmp_r, ");
             gen_str_literal_c($cg, $left->{"value"});
-            emit($cg, "); strada_decref(__cmp_r); strada_new_int(__cmp_res); })");
+            if ($c2_push == 1) { emit($cg, "); strada_cleanup_pop_decref(__cmp_r); strada_new_int(__cmp_res); })"); }
+            else { emit($cg, "); strada_decref(__cmp_r); strada_new_int(__cmp_res); })"); }
         } else {
             emit($cg, "strada_new_int(strada_str_");
             emit($cg, $swapped);
@@ -2876,18 +2888,28 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
     my int $right_needs_cleanup = needs_temp_cleanup($cg, $right);
 
     if ($cg->{"cleanup_enabled"} == 1 && ($left_needs_cleanup == 1 || $right_needs_cleanup == 1)) {
+        # Owned operands go on the cleanup stack before the next evaluation
+        # (the right operand, or an overloaded stringify, may throw: the
+        # left temp leaked, one per throwing comparison).
+        my int $cmp_push = cleanup_push_useful($cg);
         emit($cg, "({ StradaValue *__cmp_lv = ");
         gen_expression($cg, $left);
-        emit($cg, "; StradaValue *__cmp_rv = ");
+        emit($cg, "; ");
+        if ($cmp_push == 1 && $left_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__cmp_lv); "); }
+        emit($cg, "StradaValue *__cmp_rv = ");
         gen_expression($cg, $right);
-        emit($cg, "; int __cmp_res = strada_sv_strcmp(__cmp_lv, __cmp_rv) ");
+        emit($cg, "; ");
+        if ($cmp_push == 1 && $right_needs_cleanup == 1) { emit($cg, "strada_cleanup_push(__cmp_rv); "); }
+        emit($cg, "int __cmp_res = strada_sv_strcmp(__cmp_lv, __cmp_rv) ");
         emit($cg, $cmp_op);
         emit($cg, "; ");
-        if ($left_needs_cleanup == 1) {
-            emit($cg, "strada_decref(__cmp_lv); ");
-        }
         if ($right_needs_cleanup == 1) {
-            emit($cg, "strada_decref(__cmp_rv); ");
+            if ($cmp_push == 1) { emit($cg, "strada_cleanup_pop_decref(__cmp_rv); "); }
+            else { emit($cg, "strada_decref(__cmp_rv); "); }
+        }
+        if ($left_needs_cleanup == 1) {
+            if ($cmp_push == 1) { emit($cg, "strada_cleanup_pop_decref(__cmp_lv); "); }
+            else { emit($cg, "strada_decref(__cmp_lv); "); }
         }
         emit($cg, "strada_new_int(__cmp_res); })");
     } else {
@@ -7137,6 +7159,7 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sort"} = 1;
     $owned_set{"nsort"} = 1;
     $owned_set{"splice"} = 1;
+    $owned_set{"__strong_copy"} = 1;
     $owned_set{"each"} = 1;
     $owned_set{"select"} = 1;
     $owned_set{"tied"} = 1;

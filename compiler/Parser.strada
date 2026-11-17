@@ -2174,10 +2174,10 @@ func parse_primary(scalar $parser) scalar {
             # Check if this is a full statement (with ;) or bare expression
             if (parser_check($parser, "SEMI")) {
                 parser_advance($parser);
-                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_value($expr)));
             } elsif (parser_check($parser, "RBRACE")) {
                 # Bare expression at end of block (e.g., map { $_ => 1 })
-                ast_add_statement($block, ast_new_expr_stmt(ast_regex_truth($expr)));
+                ast_add_statement($block, ast_new_expr_stmt(ast_regex_value($expr)));
             } else {
                 parser_error($parser, "expected ; or } in map block");
             }
@@ -3284,7 +3284,7 @@ func parse_var_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
+        $decl->{"init"} = ast_regex_value(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -3367,7 +3367,7 @@ func parse_our_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
+        $decl->{"init"} = ast_regex_value(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -3435,7 +3435,7 @@ func parse_local_decl(scalar $parser) scalar {
         # Optional initialization
         if (parser_check($parser, "ASSIGN")) {
             parser_advance($parser);
-            $decl->{"init"} = ast_regex_truth(parse_expression($parser));
+            $decl->{"init"} = ast_regex_value(parse_expression($parser));
         }
 
         parser_expect($parser, "SEMI");
@@ -3451,7 +3451,7 @@ func parse_local_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = ast_regex_truth(parse_expression($parser));
+        $decl->{"init"} = ast_regex_value(parse_expression($parser));
     }
 
     parser_expect($parser, "SEMI");
@@ -4377,7 +4377,7 @@ func list_assign_as_destructure(scalar $expr) scalar {
         my str $tmp_name = "__la_tmp";
         my scalar $blk = ast_new_block();
         my scalar $decl = ast_new_var_decl($tmp_name, TYPE_ARRAY(), "@");
-        $decl->{"init"} = ast_regex_truth($expr->{"value"});
+        $decl->{"init"} = ast_regex_value($expr->{"value"});
         ast_add_statement($blk, $decl);
         my int $la_j = 0;
         while ($la_j < $la_n) {

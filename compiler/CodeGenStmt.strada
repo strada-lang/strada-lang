@@ -5435,7 +5435,11 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "extern StradaValue *v_STDIN;\n");
         emit($cg, "extern StradaValue *v_STDOUT;\n");
         emit($cg, "extern StradaValue *v_STDERR;\n");
-        emit($cg, "extern StradaValue *__child_status;\n\n");
+        emit($cg, "extern StradaValue *__child_status;\n");
+        # $_ in a module without main(): a weak definition, so the code
+        # compiles (it was an undeclared `_`) and links to the main
+        # program's (or a dlopen host's) $_ when there is one.
+        emit($cg, "__attribute__((weak)) StradaValue *_ = NULL;\n\n");
     }
 
     # Emit global variable declarations. In module-only mode, skip globals

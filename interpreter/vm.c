@@ -4989,6 +4989,19 @@ static VMValue vm_tied_array_call(VM *vm, VMValue tied_obj, int fidx, VMValue *e
     return res;
 }
 
+/* scalar(%tied): the SCALAR method's result, else whether FIRSTKEY gives a
+ * key (Perl), else the size. */
+static VMValue vm_tied_hash_scalar(VM *vm, VMHash *h) {
+    int sfidx = vm_tied_array_find_method(vm, h->tied_obj, "SCALAR");
+    if (sfidx >= 0) return vm_tied_array_call(vm, h->tied_obj, sfidx, NULL, 0);
+    int fidx = vm_tied_array_find_method(vm, h->tied_obj, "FIRSTKEY");
+    if (fidx >= 0) {
+        VMValue fk = vm_tied_array_call(vm, h->tied_obj, fidx, NULL, 0);
+        return VM_MAKE_INT(VM_IS_UNDEF(fk) ? 0 : 1);
+    }
+    return VM_MAKE_INT((int64_t)h->size);
+}
+
 static VMValue vm_tied_scalar_fetch(VM *vm, VMValue ts_val) {
     if (!(VM_IS_PTR(ts_val) && VM_PTR_TYPE(ts_val) == VM_OBJ_TIED_SCALAR)) return ts_val;
     VMTiedScalar *ts = VM_AS_TIED_SCALAR(ts_val);
@@ -11358,6 +11371,15 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
                 }
             }
             J_PUSH(VM_MAKE_INT(arr->size));
+        } else if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_HASH) {
+            VMHash *h = VM_AS_HASH(a);
+            if (!VM_IS_UNDEF(h->tied_obj)) {
+                vm->stack_top = sp;
+                VMValue r = vm_tied_hash_scalar(vm, h);
+                stack = vm->stack; sp = vm->stack_top;
+                if (vm->has_pending_exc) return VM_JIT_EXC;
+                J_PUSH(r);
+            } else J_PUSH(VM_MAKE_INT(h->size));
         } else J_PUSH(VM_MAKE_INT(0));
         break;
     }
@@ -15817,6 +15839,19 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 SP_PUSH(VM_MAKE_INT(sz));
             } else {
                 SP_PUSH(VM_MAKE_INT(arr->size));
+            }
+        } else if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_HASH) {
+            /* scalar(%h): the key count; a tied hash asks SCALAR (or
+             * FIRSTKEY), as in Perl. It was 0 for every hash. */
+            VMHash *h = VM_AS_HASH(a);
+            if (__builtin_expect(!VM_IS_UNDEF(h->tied_obj), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                VMValue r = vm_tied_hash_scalar(vm, h);
+                stack = vm->stack; RELOAD();
+                VM_CHECK_EXC();
+                SP_PUSH(r);
+            } else {
+                SP_PUSH(VM_MAKE_INT(h->size));
             }
         } else {
             SP_PUSH(VM_MAKE_INT(0));

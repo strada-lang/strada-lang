@@ -1,0 +1,21 @@
+# EXPECT: [    %][%    ][  A][B  ][00000101][0][0b101];31 31 18446744073709551615;0 -1 -1;1600;3;a|A|c;a|b;a|b|c;A|ABCD;awc|a[]c;1 1;yes yes no
+func main() int {
+    my @o = ();
+    push(@o, sprintf("[%5%][%-5%][%3c][%-3c][%.8b][%#b][%#b]", 65, 66, 5, 0, 5));
+    push(@o, core::hex("x1f") . " " . core::hex("0x1F") . " " . core::hex("ffffffffffffffff"));
+    push(@o, rindex("abc", "", -5) . " " . rindex("abc", "a", -1) . " " . rindex("abc", "c", -1));
+    push(@o, length(core::strftime("%Y" x 400, core::localtime(0))));
+    my @sp = split(/ /, "a  b"); push(@o, scalar(@sp));
+    push(@o, join("|", split(/B/i, "abAbc")));
+    push(@o, join("|", split(/\s*/, "a b")));
+    push(@o, join("|", split(/,*/, "a,b,,c")));
+    push(@o, core::base64_decode("QQ") . "|" . core::base64_decode("QUJDRA"));
+    my $s1 = "abc"; $s1 =~ s/b/\w/; my $s2 = "abc"; $s2 =~ s/(x)?b/[$1]/;
+    push(@o, $s1 . "|" . $s2);
+    my $obj = { "x" => 1 }; my $w = $obj; core::weaken($w); my $copy = $w; $obj = undef;
+    push(@o, (defined($copy) ? 1 : 0) . " " . core::isweak($w) . "");
+    my @e = (); my $er = []; my %eh = ();
+    push(@o, ($er ? "yes" : "no") . " " . ({} ? "yes" : "no") . " " . (@e ? "yes" : "no"));
+    say(join(";", @o));
+    return 0;
+}

@@ -1498,6 +1498,60 @@ func sem_scalar_of(scalar $n) scalar {
     return $c;
 }
 
+func sem_strong_copy_src(scalar $v) int {
+    if (is_valid_node($v) == 0) { return 0; }
+    my int $t = $v->{"type"};
+    if ($t == NODE_VARIABLE() && ("" . $v->{"sigil"}) eq "$") { return 1; }
+    if ($t == NODE_HASH_ACCESS() || $t == NODE_SUBSCRIPT() || $t == NODE_DEREF_HASH() || $t == NODE_DEREF_ARRAY()) { return 1; }
+    return 0;
+}
+
+func sem_strong_copy_wrap(scalar $v) scalar {
+    my scalar $c = ast_new_call("__strong_copy");
+    ast_add_arg($c, $v);
+    ast_set_line($c, ast_get_line($v));
+    return $c;
+}
+
+func sem_strong_copy_walk(scalar $n, scalar $seen) void {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = size($n);
+        for (my int $i = 0; $i < $len; $i = $i + 1) {
+            my scalar $e = $n->[$i];
+            if (length(reftype($e)) > 0) { sem_strong_copy_walk($e, $seen); }
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    my str $id = "" . $n;
+    if (exists($seen->{$id})) { return; }
+    $seen->{$id} = 1;
+    if (exists($n->{"type"})) {
+        my int $t = $n->{"type"} + 0;
+        if ($t == NODE_ASSIGN() && ("" . $n->{"op"}) eq "=" && sem_strong_copy_src($n->{"value"}) == 1) {
+            my scalar $tg = $n->{"target"};
+            if (!(is_valid_node($tg) == 1 && $tg->{"type"} == NODE_VARIABLE() && ("" . $tg->{"sigil"}) ne "$")) {
+                $n->{"value"} = sem_strong_copy_wrap($n->{"value"});
+            }
+        }
+        if ($t == NODE_VAR_DECL() && ("" . $n->{"sigil"}) eq "$" && sem_strong_copy_src($n->{"init"}) == 1) {
+            $n->{"init"} = sem_strong_copy_wrap($n->{"init"});
+        }
+        if ($t == NODE_CALL() && (("" . $n->{"name"}) eq "push" || ("" . $n->{"name"}) eq "unshift")) {
+            my scalar $pa = $n->{"args"};
+            my int $pc = $n->{"arg_count"} + 0;
+            for (my int $pi = 1; $pi < $pc; $pi = $pi + 1) {
+                if (sem_strong_copy_src($pa->[$pi]) == 1) { $pa->[$pi] = sem_strong_copy_wrap($pa->[$pi]); }
+            }
+        }
+    }
+    foreach my str $k (keys(%{$n})) {
+        my scalar $v = $n->{$k};
+        if (length(reftype($v)) > 0) { sem_strong_copy_walk($v, $seen); }
+    }
+}
+
 func analyze_expression(scalar $ctx, scalar $expr) void {
     if (is_valid_node($expr) == 0) {
         return;
@@ -1650,6 +1704,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         # tied (a tied FETCH is observable per-mention).
         if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
             $ctx->{"uses_tie"} = 1;
+        }
+        if ($name eq "weaken" || $name eq "core::weaken" || $name eq "sys::weaken") {
+            $ctx->{"uses_weaken"} = 1;
         }
 
         # Check if builtin (builtins hash stores 1 for each builtin)
@@ -3121,6 +3178,14 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     # which the parser sets directly). uses_tie gates condition-level CSE.
     if ($ctx->{"uses_tie"} == 1) {
         $ast->{"uses_tie"} = 1;
+    }
+    # A copy of a weak reference is a strong one (Perl). The weak flag lives
+    # on the shared REF value, so in a program that weakens anything, values
+    # copied out of variables/elements by `=`, `my` and push go through
+    # __strong_copy (a new strong REF for a weak one, else the value itself).
+    if ($ctx->{"uses_weaken"} == 1) {
+        my hash %sc_seen = ();
+        sem_strong_copy_walk($ast, \%sc_seen);
     }
 
     # Report every accumulated error (capped for readability) and fail the

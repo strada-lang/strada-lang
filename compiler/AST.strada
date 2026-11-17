@@ -534,7 +534,25 @@ func ast_new_our_decl(str $name, int $var_type, str $sigil) scalar {
 # split(/,/, ...) wants: the pattern). In a CONDITION that node was just a
 # non-empty string, so `if (/x/)` was always true. Every constructor that
 # takes a condition routes it through here.
+# Truth context (conditions, !, && / || operands, ?: conditions, grep
+# blocks): ast_regex_value, plus an array/hash is its element count (Perl).
+# Arrays and hashes are references at run time and a reference is always
+# true, so the count must be asked for explicitly. NOT for value contexts
+# (return, =, my): `return @a` must stay the array.
 func ast_regex_truth(scalar $cond) scalar {
+    if (!$cond) { return $cond; }
+    my int $ct = $cond->{"type"};
+    if (($ct == NODE_VARIABLE() || $ct == NODE_DEREF_SCALAR()) && (("" . $cond->{"sigil"}) eq "@" || ("" . $cond->{"sigil"}) eq "%")) {
+        my scalar $cnt = ast_new_call("scalar");
+        ast_add_arg($cnt, $cond);
+        $cnt->{"line"} = $cond->{"line"};
+        return $cnt;
+    }
+    return ast_regex_value($cond);
+}
+
+# Value context: a bare /re/ is a match against $_ (it was the pattern text).
+func ast_regex_value(scalar $cond) scalar {
     if (!$cond) { return $cond; }
     if ($cond->{"type"} != NODE_STR_LITERAL()) { return $cond; }
     if (!$cond->{"is_regex"}) { return $cond; }
@@ -631,7 +649,7 @@ func ast_new_foreach_stmt(scalar $var_decl, str $var_name, scalar $array_expr, s
 # Create return statement
 func ast_new_return_stmt(scalar $value) scalar {
     my scalar $node = ast_new_node(NODE_RETURN_STMT());
-    $node->{"value"} = ast_regex_truth($value);
+    $node->{"value"} = ast_regex_value($value);
     return $node;
 }
 
@@ -906,7 +924,7 @@ func ast_new_assign(str $op, scalar $target, scalar $value) scalar {
     $node->{"op"} = $op;
     $node->{"target"} = $target;
     $node->{"value"} = $value;
-    if ($op eq "=") { $node->{"value"} = ast_regex_truth($value); }
+    if ($op eq "=") { $node->{"value"} = ast_regex_value($value); }
     return $node;
 }
 

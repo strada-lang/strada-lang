@@ -38,7 +38,9 @@ func main() int {
         return /{foo}/;
     }');
     my scalar $jr3 = Strada::JIT::eval('return r8_naked_ret_re();');
-    check(("" . $jr3) eq "{foo}", "R8-VM9 JIT return /{foo}/ after return keyword");
+    # `/` after `return` lexes as a regex; a bare /re/ returned is a match
+    # against $_ (Perl), false here (it used to return the pattern text).
+    check(("" . $jr3) eq "0" || ("" . $jr3) eq "", "R8-VM9 JIT return /{foo}/ after return keyword");
 
     # R8-VM10: say(...) # ) trailing comment with unbalanced paren, plus regex /a)b/
     my scalar $jr4 = Strada::JIT::eval('say("R8_JIT_COMMENT_OK"); # )');

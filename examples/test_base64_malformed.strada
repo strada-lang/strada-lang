@@ -16,7 +16,8 @@ func main() int {
     if (core::base64_decode("=") ne "") { say("FAIL: ="); return 1; }
     if (core::base64_decode("==") ne "") { say("FAIL: =="); return 1; }
     if (core::base64_decode("A=") ne "") { say("FAIL: A="); return 1; }
-    if (core::base64_decode("AB=") ne "") { say("FAIL: AB="); return 1; }
+    # MIME::Base64: "AB" carries 12 bits -> one byte (0x00)
+    if (length(core::base64_decode("AB=")) != 1) { say("FAIL: AB="); return 1; }
     if (core::base64_decode("===") ne "") { say("FAIL: ==="); return 1; }
 
     # Junk that filters down to the dangerous forms (MIME semantics ignore
@@ -27,9 +28,9 @@ func main() int {
     # Empty input.
     if (core::base64_decode("") ne "") { say("FAIL: empty"); return 1; }
     # "====" is a full 4-char group (not the 1-3 char underflow case): it
-    # decodes one all-zero group to a single NUL byte. Assert the safe,
-    # well-defined result rather than empty.
-    if (length(core::base64_decode("====")) != 1) { say("FAIL: ===="); return 1; }
+    # yields nothing (MIME::Base64: padding ends the data). Assert the safe,
+    # well-defined (Perl) result.
+    if (length(core::base64_decode("====")) != 0) { say("FAIL: ===="); return 1; }
 
     # Valid decodes still work (the guard must not break the happy path).
     if (core::base64_decode("QQ==") ne "A") { say("FAIL: QQ=="); return 1; }

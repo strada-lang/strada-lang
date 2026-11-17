@@ -248,6 +248,7 @@ TESTS=(
     "test_audit_r18_leaks"
     "test_audit_r18_eval_jit_leaks"
     "test_audit_r19_leaks"
+    "test_audit_r20_leaks"
     "test_audit_r19_eval_jit_leaks"
     "test_mem_simplify"
 )
@@ -305,7 +306,7 @@ run_one_leak() {
         test_audit_r5_stdlib_leaks)
             EXTRA_FLAGS="-lsqlite3"
             ;;
-        test_audit_r7_leaks|test_audit_r8_leaks|test_audit_r9_leaks|test_audit_r11_leaks|test_audit_r12_leaks)
+        test_audit_r7_leaks|test_audit_r8_leaks|test_audit_r9_leaks|test_audit_r11_leaks|test_audit_r12_leaks|test_audit_r20_leaks)
             EXTRA_FLAGS="-lpthread"
             ;;
         test_audit_r13_leaks|test_audit_r14_leaks|test_audit_r15_leaks|test_audit_r16_leaks|test_audit_r17_leaks|test_audit_r18_leaks|test_audit_r19_leaks)

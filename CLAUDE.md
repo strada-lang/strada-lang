@@ -1290,6 +1290,23 @@ compiler:
 - `Pkg::new(...)` on a package with no constructor builds a blessed hash
   (inlined when keys are literals, else `strada_generic_new`); an odd argument
   count (e.g. the inherited-ctor call `Kid::new("x")`) is a compile error.
+- **References are always true** (a ref to an empty array/hash/object too,
+  Perl). `@a`/`%h`/`@$r` in truth context (conditions, `!`, `&&`/`||`
+  operands, `?:` conditions, grep blocks) are rewritten to `scalar(...)` by
+  `ast_regex_truth`; value contexts (`return`, `=`, `my`, map blocks) use
+  `ast_regex_value` (bare `/re/` only) -- never the truth form there, or
+  `return @a` becomes a count.
+- **Copies of weak refs are strong** (Perl): in a program that calls
+  `weaken`, Semantic (`sem_strong_copy_walk`) wraps values copied out of
+  variables/elements by `=`, `my` and push/unshift in `__strong_copy`
+  (`strada_strong_copy_take`). `clone()` of a dead weak ref is undef;
+  `weaken($h{"a\0b"})` is binary-safe (`strada_weaken_hv_entry_sv`).
+- **Exception safety of builtin operands**: an owned operand must be on the
+  cleanup stack while later operands are evaluated -- use `emit_arg_hold` /
+  `emit_arg_release` (CodeGenBuiltins). `join` caps per-element guards at
+  4096 (the pending-cleanup stack holds 16384). Hash insert/delete churn
+  rehashes in place instead of doubling the index.
+- `$_` in a module without `main()` is a weak C definition (it was undeclared).
 - Assigning to a tied **parameter** (`func f($v) { $v = ...; }` called with a
   tied scalar) STOREs into the caller's tied scalar; rebind with a new `my`.
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
