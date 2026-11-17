@@ -1,0 +1,30 @@
+# EXPECT: u=1|h=2,yes|r=1|a=1|other=0|caught=1|q=0
+# Audit 20 R4-2: push/unshift/splice through @{...} autovivify the target
+# (undef variable, missing hash/array element) like Perl, and a non-array
+# target throws instead of filling the shared static empty array that every
+# other failed dereference returns (values leaked across unrelated variables).
+func main() int {
+    my @o = ();
+    my $u;
+    push(@$u, 1);
+    push(@o, "u=" . scalar(@$u));
+    my %h = ();
+    push(@{$h{"list"}}, 5);
+    unshift(@{$h{"list"}}, 4);
+    push(@o, "h=" . scalar(@{$h{"list"}}) . "," . (exists($h{"list"}) ? "yes" : "no"));
+    my $r = {};
+    push(@{$r->{"items"}}, "a");
+    push(@o, "r=" . scalar(@{$r->{"items"}}));
+    my @aoa = ();
+    push(@{$aoa[2]}, "z");
+    push(@o, "a=" . scalar(@{$aoa[2]}));
+    my $other = "x";
+    push(@o, "other=" . scalar(@$other));
+    my int $caught = 0;
+    try { push(@$other, 1); } catch ($e) { $caught = 1; }
+    push(@o, "caught=" . $caught);
+    my $q = "q";
+    push(@o, "q=" . scalar(@$q));
+    say(join("|", @o));
+    return 0;
+}

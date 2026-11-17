@@ -518,7 +518,12 @@ func run_vm_program(scalar $program, str $script_name, scalar $argv, str $restor
             const char *entry = "main";
             if (vm_program_find_func(vprog, "main") < 0) {
                 if (vm_program_find_func(vprog, "run") >= 0) entry = "run";
-                else { fprintf(stderr, "Error: no 'main' or 'run' function\n"); entry = NULL; }
+                else {
+                    fprintf(stderr, "Error: no 'main' or 'run' function\n");
+                    entry = NULL;
+                    strada_decref(result);
+                    result = STRADA_MAKE_TAGGED_INT(1);
+                }
             }
             if (entry) {
                 VM *vvm = vm_new(vprog);
@@ -555,7 +560,12 @@ func run_vm_program(scalar $program, str $script_name, scalar $argv, str $restor
 
 # Execute a file using the bytecode VM
 func run_file_vm(str $filename, scalar $argv) int {
-    my str $source = slurp($filename);
+    my scalar $source_raw = core::slurp($filename);
+    if (!defined($source_raw)) {
+        say(STDERR, "strada-interp: cannot read " . $filename);
+        return 2;
+    }
+    my str $source = $source_raw;
     my str $source_dir = get_dirname($filename);
     my str $project_root = find_project_root($source_dir);
     my array @lib_paths = build_lib_paths($source_dir);

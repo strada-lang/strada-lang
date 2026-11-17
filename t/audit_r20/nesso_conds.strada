@@ -1,0 +1,35 @@
+# Audit 20 S1-16/S1-17/S1-18: Nesso _offset without _limit, "_"-prefixed declared
+# columns as conditions (delete_all used to delete everything), related() on an
+# unsaved owner.
+use lib "lib";
+use DBI;
+use Nesso;
+use Nesso::Record;
+func main() int {
+    my scalar $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    my scalar $n = Nesso::new($db);
+    DBI::do_sql($db, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, _hidden INTEGER DEFAULT 0, owner_id INTEGER)");
+    $n->define("items", { "table" => "items", "columns" => ["id", "name", "_hidden", "owner_id"], "primary" => "id" });
+    DBI::do_sql($db, "CREATE TABLE owners (id INTEGER PRIMARY KEY, name TEXT)");
+    $n->define("owners", { "table" => "owners", "columns" => ["id", "name"], "primary" => "id" });
+    $n->has_many("owners", "items", "owner_id");
+    my int $i = 1;
+    while ($i <= 5) {
+        $n->save($n->create("items", { "name" => "n" . $i, "_hidden" => ($i == 5 ? 1 : 0), "owner_id" => ($i <= 2 ? 1 : undef) }));
+        $i = $i + 1;
+    }
+    say("total=" . $n->count("items", {}));
+    # 1. offset without limit
+    my scalar $r1 = $n->where("items", { "_order" => "id", "_offset" => 2 });
+    say("offset-only rows=" . size($r1) . " (expected 3)");
+    # 2. underscore column condition is silently ignored
+    say("count _hidden=1: " . $n->count("items", { "_hidden" => 1 }) . " (expected 1)");
+    # 3. unsaved owner has_many returns orphans
+    my scalar $o = $n->create("owners", { "name" => "new" });
+    my scalar $rel = $o->related("items");
+    say("unsaved owner related items=" . size($rel) . " (expected 0)");
+    # 4. delete_all on underscore column wipes the table
+    say("delete_all _hidden=1 -> " . $n->delete_all("items", { "_hidden" => 1 }));
+    say("remaining=" . $n->count("items", {}) . " (expected 4)");
+    return 0;
+}

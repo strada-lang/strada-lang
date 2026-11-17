@@ -1212,6 +1212,29 @@ compiler:
   `thread::x`, `utf8::x` that no handler claims) are a located compile error
   raised in `gen_user_call` (`unknown_builtin_name`), and `--check` now runs the
   code generator (output discarded) so it reports them too.
+- **`&&` returns the deciding operand** (Perl): `1 && "v"` is `"v"`, `0 && x` is
+  `0` -- compiled through `gen_short_circuit_or_op` with `!strada_to_bool`, the
+  same path as `||`. It used to return 0/1.
+- **`()` is an empty list**: the parser keeps it an empty `NODE_ANON_HASH` (so
+  `my %h = ()` / `%h = ()` / `@a = ()` keep their dedicated paths) flagged
+  `is_empty_list`; `ast_add_array_elem`/`ast_add_arg` drop it (`push(@a, ())`
+  adds nothing, `(1, (), 2)` has 2 elements), as a value it is an empty array,
+  Semantic turns `my $x = ()` into undef and `return ()` into undef / nothing /
+  an empty hash by return type.
+- **Mutating builtins autovivify `@{...}` targets** (`push`/`unshift`/`splice`):
+  `push(@{$h{k}}, v)` creates the array, `push(@$u, v)` with `$u` undef stores
+  a new array ref (`strada_autoviv_slot_array`), and a defined non-array target
+  throws "Not an ARRAY reference" (`mutable_array_target_kind` /
+  `gen_array_target` in CodeGenBuiltins). The static empty array/hash that
+  failed dereferences return is replaced if anything ever got into it.
+- **Filesystem paths containing a NUL byte are rejected** (`strada_path_buf`,
+  `strada_path_pv`): every such call fails as if the file did not exist.
+- **`core::spew` returns 1/0** (written fully / failed). `-e`/`file_exists` use
+  stat (they used fopen: wrong for unreadable files, hung on FIFOs).
+- **A method call on undef or a plain number throws** (catchable) instead of
+  exiting the process.
+- **Template**: names starting with `_`/`.` are private (TT's PRIVATE rule:
+  not readable, callable or assignable from templates); `html` escapes `'`.
 - **Compound assignment on an `int`/`num` variable with an overloaded operand**
   (`my int $n = 15; $n &= $obj;`) dispatches the overload, then coerces the
   result to the declared type (honoring `0+`), on every path: unboxed, boxed,

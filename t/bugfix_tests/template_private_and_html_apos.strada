@@ -1,0 +1,17 @@
+# EXPECT: alice|||alice|it&#39;s|it&apos;s|
+# Audit 20 S1-9/S1-10: Template variables and members whose names start with
+# "_" (or ".") are private, as in TT: not readable, not callable, not
+# assignable. The html filter escapes ' (TT 3.x); xml uses &apos;.
+use lib "lib";
+use Template;
+package R20Acct;
+func name(scalar $self) str { return $self->{"n"}; }
+func _wipe(scalar $self) str { $self->{"n"} = "WIPED"; return "ran"; }
+package main;
+func main() int {
+    my scalar $acct = bless({"n" => "alice", "_pw" => "hunter2"}, "R20Acct");
+    my scalar $tt = Template::new({});
+    my str $tpl = "[% a.name %]|[% a._pw %]|[% a._wipe %]|[% a.name %]|[% s | html %]|[% s | xml %]|[% _x = 5 %][% _x %]";
+    say($tt->process_string($tpl, {a => $acct, s => "it's"}));
+    return 0;
+}

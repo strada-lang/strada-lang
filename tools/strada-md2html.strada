@@ -811,7 +811,10 @@ func main() int {
 
     # Write output
     if (length($output_file) > 0) {
-        spew($output_file, $output);
+        if (!core::spew($output_file, $output)) {
+            say(STDERR, "Error: cannot write " . $output_file);
+            return 1;
+        }
         say("Converted " . $input_file . " -> " . $output_file);
     } else {
         print($output);

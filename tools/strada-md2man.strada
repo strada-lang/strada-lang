@@ -428,7 +428,10 @@ func main(int $argc, array @argv) int {
         print($man_content);
     } else {
         # Write to file
-        core::spew($output_file, $man_content);
+        if (!core::spew($output_file, $man_content)) {
+            say(STDERR, "Error: cannot write " . $output_file);
+            return 1;
+        }
         say("Generated: " . $output_file);
     }
 

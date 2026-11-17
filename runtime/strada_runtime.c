@@ -967,6 +967,14 @@ static StradaValue *__strada_empty_array_static = NULL;
 static StradaValue *__strada_empty_hash_static = NULL;
 
 static StradaValue* strada_empty_array_static(void) {
+    /* Callers only read it, but a mutating builtin given a non-array (push
+     * onto @$x for a string $x) used to fill it, and the elements then showed
+     * up in every other failed deref. If anything got in, start a new one
+     * (the old one is immortal, so borrowers still holding it stay valid). */
+    if (__strada_empty_array_static && __strada_empty_array_static->value.av &&
+        __strada_empty_array_static->value.av->size > 0) {
+        __strada_empty_array_static = NULL;
+    }
     if (!__strada_empty_array_static) {
 #ifdef STRADA_ARENA
         StradaArena *saved_arena = cur_arena;
@@ -982,6 +990,10 @@ static StradaValue* strada_empty_array_static(void) {
 }
 
 static StradaValue* strada_empty_hash_static(void) {
+    if (__strada_empty_hash_static && __strada_empty_hash_static->value.hv &&
+        __strada_empty_hash_static->value.hv->num_entries > 0) {
+        __strada_empty_hash_static = NULL;
+    }
     if (!__strada_empty_hash_static) {
 #ifdef STRADA_ARENA
         StradaArena *saved_arena = cur_arena;
@@ -2970,6 +2982,7 @@ static const char *itoa_buf_bounded(int64_t v, char *buf, size_t buflen) {
     return buf;
 }
 
+const char *strada_path_buf(StradaValue *sv, char *buf, size_t buflen);
 const char *strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen) {
     if (!sv || !buf || buflen == 0) return "";
     if (STRADA_IS_TAGGED_INT(sv)) {
@@ -3572,11 +3585,12 @@ StradaArray* strada_array_new(void) {
         av->refcount = 1;
         return av;
     }
-    StradaArray *av = malloc(sizeof(StradaArray));
+    StradaArray *av = sr_xmalloc(sizeof(StradaArray));
     av->capacity = strada_default_array_capacity;
     av->size = 0;
     av->head = 0;
-    av->elements = calloc(av->capacity, sizeof(StradaValue*));
+    av->elements = sr_xmalloc(av->capacity * sizeof(StradaValue*));
+    memset(av->elements, 0, av->capacity * sizeof(StradaValue*));
     av->refcount = 1;
     return av;
 }
@@ -3625,8 +3639,15 @@ StradaArray* strada_array_new_cap(size_t cap) {
     return av;
 }
 
+/* An array whose refcount already reached 0 is releasing its elements; a
+ * DESTROY run from that release can try to store into it ("resurrecting"
+ * the object into a dying container). Storing then left the elements in an
+ * array headed for the pool, which was later reused/freed twice. Such
+ * stores are dropped, as Perl drops them during global destruction. */
+#define STRADA_AV_DYING(av) ((av)->refcount <= 0)
+
 void strada_array_push(StradaArray *av, StradaValue *sv) {
-    if (!av) return;
+    if (!av || STRADA_AV_DYING(av)) return;
 
     if (av->head + av->size >= av->capacity) {
         if (av->head > 0) {
@@ -3689,7 +3710,7 @@ StradaValue* strada_array_copy(StradaValue *src) {
 
 /* Push without incref - caller donates ownership of newly created value */
 void strada_array_push_take(StradaArray *av, StradaValue *sv) {
-    if (!av) {
+    if (!av || STRADA_AV_DYING(av)) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
     }
@@ -3733,7 +3754,7 @@ StradaValue* strada_array_shift(StradaArray *av) {
 }
 
 void strada_array_unshift(StradaArray *av, StradaValue *sv) {
-    if (!av) return;
+    if (!av || STRADA_AV_DYING(av)) return;
     strada_mark_if_self_ref_av(av, sv);
 
     if (av->head > 0) {
@@ -3920,7 +3941,7 @@ StradaValue* strada_array_get_safe(StradaValue *arr, int64_t idx) {
 }
 
 void strada_array_set(StradaArray *av, int64_t idx, StradaValue *sv) {
-    if (!av) return;
+    if (!av || STRADA_AV_DYING(av)) return;
 
     /* Handle negative indices */
     if (idx < 0) {
@@ -3993,8 +4014,15 @@ int64_t strada_get_array_default_capacity(void) {
     return (int64_t)strada_default_array_capacity;
 }
 
+/* Capacity hints are clamped: every new array/hash allocates this much up
+ * front, and a huge value wrapped the size multiplication (NULL buffer,
+ * then writes through it). */
+#define STRADA_MAX_DEFAULT_CAPACITY ((int64_t)1 << 24)
+#define STRADA_MAX_HASH_RESERVE ((size_t)1 << 30)   /* slot indices are uint32 */
+
 void strada_set_array_default_capacity(int64_t capacity) {
     if (capacity > 0) {
+        if (capacity > STRADA_MAX_DEFAULT_CAPACITY) capacity = STRADA_MAX_DEFAULT_CAPACITY;
         strada_default_array_capacity = (size_t)capacity;
     }
 }
@@ -4006,6 +4034,7 @@ int64_t strada_get_hash_default_capacity(void) {
 
 void strada_set_hash_default_capacity(int64_t capacity) {
     if (capacity > 0) {
+        if (capacity > STRADA_MAX_DEFAULT_CAPACITY) capacity = STRADA_MAX_DEFAULT_CAPACITY;
         strada_default_hash_capacity = strada_next_pow2((size_t)capacity);
     }
 }
@@ -4738,7 +4767,7 @@ static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
     hv->capacity = 0;
     hv->next_slot = 0;
     hv->free_head = HASH_EMPTY;
-    hv->hash_index = malloc(nbuckets * sizeof(uint32_t));
+    hv->hash_index = sr_xmalloc(nbuckets * sizeof(uint32_t));
     memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
     hv->refcount = 1;
     hv->iter_index = 0;
@@ -6699,6 +6728,7 @@ StradaArray* strada_hash_values(StradaHash *hv) {
 /* Reserve capacity for hash entries, keeping the runtime's 50% max load. */
 void strada_hash_reserve(StradaHash *hv, size_t capacity) {
     if (!hv || capacity == 0) return;
+    if (capacity > STRADA_MAX_HASH_RESERVE) capacity = STRADA_MAX_HASH_RESERVE;
 
     size_t num_buckets = strada_next_pow2(capacity * 2);
     if (num_buckets <= hv->num_buckets) return;
@@ -6707,7 +6737,7 @@ void strada_hash_reserve(StradaHash *hv, size_t capacity) {
     if (hv_idx_in_block(hv)) {
         /* index lives in the compact block — can't realloc an interior
          * pointer; contents are rebuilt below anyway */
-        hv->hash_index = malloc(num_buckets * sizeof(uint32_t));
+        hv->hash_index = sr_xmalloc(num_buckets * sizeof(uint32_t));
     } else {
         hv->hash_index = sr_xrealloc(hv->hash_index, num_buckets * sizeof(uint32_t));
     }
@@ -6715,7 +6745,7 @@ void strada_hash_reserve(StradaHash *hv, size_t capacity) {
     /* Also reserve entry capacity */
     if (num_buckets > hv->capacity) {
         if (hv_ent_in_block(hv)) {
-            StradaHashEntry *ne = malloc(num_buckets * sizeof(StradaHashEntry));
+            StradaHashEntry *ne = sr_xmalloc(num_buckets * sizeof(StradaHashEntry));
             if (hv->capacity > 0) memcpy(ne, hv->entries, hv->capacity * sizeof(StradaHashEntry));
             hv->entries = ne;
         } else {
@@ -10371,6 +10401,8 @@ StradaValue* strada_sprintf_sv_arr(StradaValue *format_sv, StradaValue *args_sv)
 /* Translate Perl-style open modes (<, >, >>, +<, +>) to C fopen modes. */
 static const char* strada_normalize_open_mode(const char *mode) {
     if (!mode) return "";
+    /* "+>>" (read/append) must be tested before "+>" (read/write, truncate). */
+    if (mode[0] == '+' && mode[1] == '>' && mode[2] == '>') return "a+";
     if (mode[0] == '>' && mode[1] == '>') return "a";
     if (mode[0] == '>') return "w";
     if (mode[0] == '<') return "r";
@@ -10541,7 +10573,7 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg) {
 
     /* Not a reference — fall through to regular file open */
     char _tb[PATH_MAX];
-    const char *filename = strada_to_str_buf(first_arg, _tb, sizeof(_tb));
+    const char *filename = strada_path_buf(first_arg, _tb, sizeof(_tb));
     char _tb2[16];
     const char *mode = strada_to_str_buf(mode_arg, _tb2, sizeof(_tb2));
     return strada_open(filename, mode);
@@ -10873,12 +10905,11 @@ void strada_write_file(StradaValue *fh, const char *content) {
 }
 
 int strada_file_exists(const char *filename) {
-    FILE *f = fopen(filename, "r");
-    if (f) {
-        fclose(f);
-        return 1;
-    }
-    return 0;
+    /* stat, not fopen: an unreadable file still exists, and opening a FIFO
+     * for reading blocks until a writer appears (-e hung). */
+    struct stat st;
+    if (!filename || !*filename) return 0;
+    return stat(filename, &st) == 0;
 }
 
 /* Return mtime (seconds since epoch) of `path_sv` as a tagged-int
@@ -11082,16 +11113,20 @@ void strada_spew_len(const char *filename, const char *content, size_t len) {
 }
 
 /* Binary-safe spew from StradaValue: uses stored string length */
-void strada_spew_sv(const char *filename, StradaValue *content_sv) {
+/* Returns 1 when the whole content was written, 0 otherwise (core::spew's
+ * value, so callers can detect an unwritable path or a full disk). */
+int strada_spew_sv(const char *filename, StradaValue *content_sv) {
     FILE *f = fopen(filename, "w");
-    if (!f) return;
+    if (!f) return 0;
     char _tb[256];
     size_t len = 0;
     char *owned = NULL;
     const char *content = strada_sv_raw_bytes(content_sv, _tb, sizeof(_tb), &len, &owned);
-    if (len > 0) fwrite(content, 1, len, f);
+    int ok = 1;
+    if (len > 0 && fwrite(content, 1, len, f) != len) ok = 0;
     free(owned);
-    fclose(f);
+    if (fclose(f) != 0) ok = 0;
+    return ok;
 }
 
 /* Write content to an open FILE handle (binary-safe) */
@@ -19913,8 +19948,16 @@ StradaValue* strada_thread_create(StradaValue *closure) {
     return sv;
 }
 
+/* A thread/mutex/cond builtin must get its own handle kind: they all are
+ * CPOINTERs, and a StringBuilder or a mutex passed to thread::join was
+ * reinterpreted as the wrong struct (hangs, heap over-reads, wrong frees). */
+static int strada_handle_is(StradaValue *v, const char *kind) {
+    const char *sn = SV_STRUCT_NAME(v);
+    return sn && strcmp(sn, kind) == 0;
+}
+
 StradaValue* strada_thread_join(StradaValue *thread_val) {
-    if (!thread_val || STRADA_IS_TAGGED_INT(thread_val) || thread_val->type != STRADA_CPOINTER) {
+    if (!thread_val || STRADA_IS_TAGGED_INT(thread_val) || thread_val->type != STRADA_CPOINTER || !strada_handle_is(thread_val, "Thread")) {
         return strada_new_undef();
     }
 
@@ -19951,7 +19994,7 @@ StradaValue* strada_thread_join(StradaValue *thread_val) {
 }
 
 StradaValue* strada_thread_detach(StradaValue *thread_val) {
-    if (!thread_val || STRADA_IS_TAGGED_INT(thread_val) || thread_val->type != STRADA_CPOINTER) {
+    if (!thread_val || STRADA_IS_TAGGED_INT(thread_val) || thread_val->type != STRADA_CPOINTER || !strada_handle_is(thread_val, "Thread")) {
         return strada_new_int(-1);
     }
 
@@ -19982,7 +20025,7 @@ StradaValue* strada_mutex_new(void) {
 }
 
 StradaValue* strada_mutex_lock(StradaValue *mutex_val) {
-    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER) {
+    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER || !strada_handle_is(mutex_val, "Mutex")) {
         return strada_new_int(-1);
     }
     StradaMutex *m = (StradaMutex *)mutex_val->value.ptr;
@@ -19994,7 +20037,7 @@ StradaValue* strada_mutex_lock(StradaValue *mutex_val) {
 }
 
 StradaValue* strada_mutex_trylock(StradaValue *mutex_val) {
-    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER) {
+    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER || !strada_handle_is(mutex_val, "Mutex")) {
         return strada_new_int(-1);
     }
     StradaMutex *m = (StradaMutex *)mutex_val->value.ptr;
@@ -20004,7 +20047,7 @@ StradaValue* strada_mutex_trylock(StradaValue *mutex_val) {
 }
 
 StradaValue* strada_mutex_unlock(StradaValue *mutex_val) {
-    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER) {
+    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER || !strada_handle_is(mutex_val, "Mutex")) {
         return strada_new_int(-1);
     }
     StradaMutex *m = (StradaMutex *)mutex_val->value.ptr;
@@ -20014,7 +20057,7 @@ StradaValue* strada_mutex_unlock(StradaValue *mutex_val) {
 }
 
 StradaValue* strada_mutex_destroy(StradaValue *mutex_val) {
-    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER) {
+    if (!mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER || !strada_handle_is(mutex_val, "Mutex")) {
         return strada_new_int(-1);
     }
     StradaMutex *m = (StradaMutex *)mutex_val->value.ptr;
@@ -20039,8 +20082,8 @@ StradaValue* strada_cond_new(void) {
 }
 
 StradaValue* strada_cond_wait(StradaValue *cond_val, StradaValue *mutex_val) {
-    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER ||
-        !mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER) {
+    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER || !strada_handle_is(cond_val, "Cond") ||
+        !mutex_val || STRADA_IS_TAGGED_INT(mutex_val) || mutex_val->type != STRADA_CPOINTER || !strada_handle_is(mutex_val, "Mutex")) {
         return strada_new_int(-1);
     }
     StradaCond *c = (StradaCond *)cond_val->value.ptr;
@@ -20053,7 +20096,7 @@ StradaValue* strada_cond_wait(StradaValue *cond_val, StradaValue *mutex_val) {
 }
 
 StradaValue* strada_cond_signal(StradaValue *cond_val) {
-    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER) {
+    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER || !strada_handle_is(cond_val, "Cond")) {
         return strada_new_int(-1);
     }
     StradaCond *c = (StradaCond *)cond_val->value.ptr;
@@ -20063,7 +20106,7 @@ StradaValue* strada_cond_signal(StradaValue *cond_val) {
 }
 
 StradaValue* strada_cond_broadcast(StradaValue *cond_val) {
-    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER) {
+    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER || !strada_handle_is(cond_val, "Cond")) {
         return strada_new_int(-1);
     }
     StradaCond *c = (StradaCond *)cond_val->value.ptr;
@@ -20073,7 +20116,7 @@ StradaValue* strada_cond_broadcast(StradaValue *cond_val) {
 }
 
 StradaValue* strada_cond_destroy(StradaValue *cond_val) {
-    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER) {
+    if (!cond_val || STRADA_IS_TAGGED_INT(cond_val) || cond_val->type != STRADA_CPOINTER || !strada_handle_is(cond_val, "Cond")) {
         return strada_new_int(-1);
     }
     StradaCond *c = (StradaCond *)cond_val->value.ptr;
@@ -27673,7 +27716,10 @@ StradaValue* strada_ctime(StradaValue *timestamp) {
 /* sleep - sleep for given seconds */
 StradaValue* strada_sleep(StradaValue *seconds) {
     if (!seconds) return strada_new_int(0);
-    unsigned int secs = (unsigned int)strada_to_int(seconds);
+    int64_t req = strada_to_int(seconds);
+    /* A negative count cast to unsigned slept for ~136 years. */
+    if (req <= 0) return strada_new_int(0);
+    unsigned int secs = req > (int64_t)UINT_MAX ? UINT_MAX : (unsigned int)req;
     cc_blocking_enter();              /* safe while sleeping (a worker can be collected) */
     unsigned int remaining = sleep(secs);
     cc_blocking_leave();
@@ -27684,7 +27730,19 @@ StradaValue* strada_sleep(StradaValue *seconds) {
 /* usleep - sleep for given microseconds */
 StradaValue* strada_usleep(StradaValue *usecs) {
     if (!usecs) return strada_new_int(0);
-    useconds_t us = (useconds_t)strada_to_int(usecs);
+    int64_t req_us = strada_to_int(usecs);
+    if (req_us <= 0) return strada_new_int(0);
+    if (req_us >= 1000000) {
+        /* usleep is only specified below one second; sleep the whole
+         * seconds first (a large value wrapped through useconds_t). */
+        cc_blocking_enter();
+        struct timespec ts = { (time_t)(req_us / 1000000), (long)((req_us % 1000000) * 1000) };
+        int r = nanosleep(&ts, NULL);
+        cc_blocking_leave();
+        if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();
+        return strada_new_int(r);
+    }
+    useconds_t us = (useconds_t)req_us;
     cc_blocking_enter();
     int result = usleep(us);
     cc_blocking_leave();
@@ -28540,7 +28598,7 @@ StradaValue* strada_getcwd(void) {
 StradaValue* strada_chdir(StradaValue *path_val) {
     /* Change current working directory, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     int result = chdir(path);
     return strada_new_int(result);
 }
@@ -28552,7 +28610,7 @@ extern int chroot(const char *);
 StradaValue* strada_chroot(StradaValue *path_val) {
     /* Change root directory, returns 0 on success, -1 on error */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     int result = chroot(path);
     return strada_new_int(result);
 }
@@ -28560,7 +28618,7 @@ StradaValue* strada_chroot(StradaValue *path_val) {
 StradaValue* strada_mkdir(StradaValue *path_val, StradaValue *mode_val) {
     /* Create directory, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     mode_t mode = (mode_t)strada_to_int(mode_val);
     int result = mkdir(path, mode);
     return strada_new_int(result);
@@ -28569,7 +28627,7 @@ StradaValue* strada_mkdir(StradaValue *path_val, StradaValue *mode_val) {
 StradaValue* strada_rmdir(StradaValue *path_val) {
     /* Remove directory, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     int result = rmdir(path);
     return strada_new_int(result);
 }
@@ -28577,7 +28635,7 @@ StradaValue* strada_rmdir(StradaValue *path_val) {
 StradaValue* strada_unlink(StradaValue *path_val) {
     /* Remove file, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     int result = unlink(path);
     return strada_new_int(result);
 }
@@ -28585,9 +28643,9 @@ StradaValue* strada_unlink(StradaValue *path_val) {
 StradaValue* strada_link(StradaValue *oldpath_val, StradaValue *newpath_val) {
     /* Create hard link, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *oldpath = strada_to_str_buf(oldpath_val, _tb, sizeof(_tb));
+    const char *oldpath = strada_path_buf(oldpath_val, _tb, sizeof(_tb));
     char _tb2[PATH_MAX];
-    const char *newpath = strada_to_str_buf(newpath_val, _tb2, sizeof(_tb2));
+    const char *newpath = strada_path_buf(newpath_val, _tb2, sizeof(_tb2));
     int result = link(oldpath, newpath);
     return strada_new_int(result);
 }
@@ -28595,9 +28653,9 @@ StradaValue* strada_link(StradaValue *oldpath_val, StradaValue *newpath_val) {
 StradaValue* strada_symlink(StradaValue *target_val, StradaValue *linkpath_val) {
     /* Create symbolic link, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *target = strada_to_str_buf(target_val, _tb, sizeof(_tb));
+    const char *target = strada_path_buf(target_val, _tb, sizeof(_tb));
     char _tb2[PATH_MAX];
-    const char *linkpath = strada_to_str_buf(linkpath_val, _tb2, sizeof(_tb2));
+    const char *linkpath = strada_path_buf(linkpath_val, _tb2, sizeof(_tb2));
     int result = symlink(target, linkpath);
     return strada_new_int(result);
 }
@@ -28605,7 +28663,7 @@ StradaValue* strada_symlink(StradaValue *target_val, StradaValue *linkpath_val) 
 StradaValue* strada_readlink(StradaValue *path_val) {
     /* Read symbolic link target */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     char buf[PATH_MAX];
     ssize_t len = readlink(path, buf, sizeof(buf) - 1);
     if (len == -1) {
@@ -28618,9 +28676,9 @@ StradaValue* strada_readlink(StradaValue *path_val) {
 StradaValue* strada_rename(StradaValue *oldpath_val, StradaValue *newpath_val) {
     /* Rename file or directory, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *oldpath = strada_to_str_buf(oldpath_val, _tb, sizeof(_tb));
+    const char *oldpath = strada_path_buf(oldpath_val, _tb, sizeof(_tb));
     char _tb2[PATH_MAX];
-    const char *newpath = strada_to_str_buf(newpath_val, _tb2, sizeof(_tb2));
+    const char *newpath = strada_path_buf(newpath_val, _tb2, sizeof(_tb2));
     int result = rename(oldpath, newpath);
     return strada_new_int(result);
 }
@@ -28628,7 +28686,7 @@ StradaValue* strada_rename(StradaValue *oldpath_val, StradaValue *newpath_val) {
 StradaValue* strada_chmod(StradaValue *path_val, StradaValue *mode_val) {
     /* Change file mode, returns 0 on success */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     mode_t mode = (mode_t)strada_to_int(mode_val);
     int result = chmod(path, mode);
     return strada_new_int(result);
@@ -28637,7 +28695,7 @@ StradaValue* strada_chmod(StradaValue *path_val, StradaValue *mode_val) {
 StradaValue* strada_access(StradaValue *path_val, StradaValue *mode_val) {
     /* Check file accessibility, returns 0 if accessible */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     int mode = (int)strada_to_int(mode_val);
     int result = access(path, mode);
     return strada_new_int(result);
@@ -28876,7 +28934,7 @@ StradaValue* strada_signal(StradaValue *sig_name, StradaValue *handler) {
 StradaValue* strada_stat(StradaValue *path_val) {
     /* Get file status, returns hash with file info or undef on error */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     if (stat(path, &st) == -1) {
         return strada_new_undef();
@@ -28901,7 +28959,7 @@ StradaValue* strada_stat(StradaValue *path_val) {
 StradaValue* strada_lstat(StradaValue *path_val) {
     /* Get file status (don't follow symlinks) */
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     if (lstat(path, &st) == -1) {
         return strada_new_undef();
@@ -29145,7 +29203,7 @@ StradaValue* strada_read_fd(StradaValue *fd_val, StradaValue *size_val) {
 StradaValue* strada_open_fd(StradaValue *filename_val, StradaValue *mode_val) {
     /* Open file and return raw file descriptor (int) */
     char _tb[PATH_MAX];
-    const char *filename = strada_to_str_buf(filename_val, _tb, sizeof(_tb));
+    const char *filename = strada_path_buf(filename_val, _tb, sizeof(_tb));
     char _tb2[256];
     const char *mode = strada_to_str_buf(mode_val, _tb2, sizeof(_tb2));
     int flags = O_RDONLY;
@@ -29363,6 +29421,25 @@ StradaValue* strada_setproctitle(StradaValue *title_val) {
     /* This overwrites argv[0] and potentially more */
     if (!strada_orig_argv || strada_orig_argc == 0) {
         return strada_new_int(-1);
+    }
+
+    /* The title area runs over the environ strings too, so move the
+     * environment to the heap before overwriting it (it was zeroed: getenv
+     * and child processes saw an empty environment afterwards). */
+    static int strada_environ_moved = 0;
+    if (!strada_environ_moved) {
+        extern char **environ;
+        size_t n = 0;
+        while (environ && environ[n]) n++;
+        char **moved = malloc((n + 1) * sizeof(char *));
+        if (!moved) return strada_new_int(-1);
+        for (size_t i = 0; i < n; i++) {
+            moved[i] = strdup(environ[i]);
+            if (!moved[i]) { while (i > 0) free(moved[--i]); free(moved); return strada_new_int(-1); }
+        }
+        moved[n] = NULL;
+        environ = moved;
+        strada_environ_moved = 1;
     }
 
     char _tb[256];
@@ -30419,10 +30496,17 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
                                      StradaValue *args, unsigned int method_hash,
                                      StradaCallSite *cs) {
     /* Call a method on a blessed reference */
-    if (!obj || STRADA_IS_TAGGED_INT(obj) || !method) {
-        fprintf(stderr, "Error: Cannot call method '%s' on undefined value\n",
-                method ? method : "(null)");
+    if (!method) {
+        fprintf(stderr, "Error: method call with no method name\n");
         exit(1);
+    }
+    /* Catchable, as in Perl (a server must survive a bad call); this used to
+     * print and exit(1), and called an int "undefined". */
+    if (!obj || STRADA_IS_TAGGED_INT(obj)) {
+        char _m[512];
+        if (obj) snprintf(_m, sizeof(_m), "Can't call method \"%s\" without a package or object reference", method);
+        else snprintf(_m, sizeof(_m), "Can't call method \"%s\" on an undefined value", method);
+        strada_throw(_m);
     }
 
     /* If the dispatched user method throws (longjmp), every fall-through
@@ -30445,7 +30529,12 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
     } else {
         /* catchable, as in Perl: a server must survive a bad call */
         char _m[512];
-        snprintf(_m, sizeof(_m), "Can't call method \"%s\" on an unblessed reference", method);
+        if (obj->type == STRADA_UNDEF)
+            snprintf(_m, sizeof(_m), "Can't call method \"%s\" on an undefined value", method);
+        else if (obj->type == STRADA_INT || obj->type == STRADA_NUM)
+            snprintf(_m, sizeof(_m), "Can't call method \"%s\" without a package or object reference", method);
+        else
+            snprintf(_m, sizeof(_m), "Can't call method \"%s\" on an unblessed reference", method);
         strada_throw(_m);
         return strada_new_undef();
     }
@@ -30783,9 +30872,14 @@ int strada_can(StradaValue *obj, const char *method) {
 /* SUPER:: method call - calls method from parent class(es) */
 StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
                                const char *method, StradaValue *args) {
-    if (!obj || STRADA_IS_TAGGED_INT(obj) || !method || !from_package) {
+    if (!method || !from_package) {
         fprintf(stderr, "Error: Invalid SUPER:: call\n");
         exit(1);
+    }
+    if (!obj || STRADA_IS_TAGGED_INT(obj)) {
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Can't call SUPER::%s on a non-object", method);
+        strada_throw(_m);
     }
 
     if (args) {
@@ -30998,7 +31092,7 @@ void strada_call_destroy(StradaValue *obj) {
 /* Read all entries from a directory, returns array of filenames */
 StradaValue* strada_readdir(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     DIR *dir = opendir(path);
     if (!dir) {
         return strada_new_undef();
@@ -31022,7 +31116,7 @@ StradaValue* strada_readdir(StradaValue *path_val) {
 /* Read directory with full paths */
 StradaValue* strada_readdir_full(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     DIR *dir = opendir(path);
     if (!dir) {
         return strada_new_undef();
@@ -31055,7 +31149,7 @@ StradaValue* strada_is_dir(StradaValue *path_val) {
         return strada_new_int(is_dir ? 1 : 0);
     }
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     int is_dir = (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
     return strada_new_int(is_dir ? 1 : 0);
@@ -31074,7 +31168,7 @@ StradaValue* strada_is_file(StradaValue *path_val) {
         return strada_new_int(is_file ? 1 : 0);
     }
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     int is_file = (stat(path, &st) == 0 && S_ISREG(st.st_mode));
     return strada_new_int(is_file ? 1 : 0);
@@ -31087,7 +31181,7 @@ StradaValue* strada_is_file(StradaValue *path_val) {
  * both -T and -B. Non-existent / unreadable paths yield undef. */
 static StradaValue *strada_file_text_test(StradaValue *path_val, int want_text) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     if (stat(path, &st) != 0) return strada_new_undef();
     if (S_ISDIR(st.st_mode)) return strada_new_undef();
@@ -31125,28 +31219,28 @@ StradaValue* strada_file_is_binary(StradaValue *path_val) {
 /* File test: readable (-r) */
 StradaValue* strada_is_readable(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     return STRADA_MAKE_TAGGED_INT(access(path, R_OK) == 0 ? 1 : 0);
 }
 
 /* File test: writable (-w) */
 StradaValue* strada_is_writable(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     return STRADA_MAKE_TAGGED_INT(access(path, W_OK) == 0 ? 1 : 0);
 }
 
 /* File test: executable (-x) */
 StradaValue* strada_is_executable(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     return STRADA_MAKE_TAGGED_INT(access(path, X_OK) == 0 ? 1 : 0);
 }
 
 /* File test: zero size (-z) */
 StradaValue* strada_is_zero_size(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     return STRADA_MAKE_TAGGED_INT((stat(path, &st) == 0 && st.st_size == 0) ? 1 : 0);
 }
@@ -31154,7 +31248,7 @@ StradaValue* strada_is_zero_size(StradaValue *path_val) {
 /* File test: is symlink (-l) */
 StradaValue* strada_is_symlink(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     return STRADA_MAKE_TAGGED_INT((lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) ? 1 : 0);
 }
@@ -31162,7 +31256,7 @@ StradaValue* strada_is_symlink(StradaValue *path_val) {
 /* Get file size in bytes */
 StradaValue* strada_file_size(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     struct stat st;
     long size = 0;
     if (stat(path, &st) == 0) {
@@ -31437,7 +31531,7 @@ StradaValue* strada_getaddrinfo_first(StradaValue *hostname_val, StradaValue *se
 
 StradaValue* strada_realpath(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     char resolved[PATH_MAX];
 
     char *result = realpath(path, resolved);
@@ -31957,7 +32051,7 @@ StradaValue* sys_unlink(StradaValue *path) { return strada_unlink(path); }
 
 StradaValue* strada_truncate(StradaValue *path, StradaValue *length) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     off_t len = (off_t)strada_to_int(length);
     int result = truncate(p, len);
     return strada_new_int(result);
@@ -31971,7 +32065,7 @@ StradaValue* strada_ftruncate(StradaValue *fd, StradaValue *length) {
 
 StradaValue* strada_chown(StradaValue *path, StradaValue *uid, StradaValue *gid) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     uid_t u = (uid_t)strada_to_int(uid);
     gid_t g = (gid_t)strada_to_int(gid);
     int result = chown(p, u, g);
@@ -31980,7 +32074,7 @@ StradaValue* strada_chown(StradaValue *path, StradaValue *uid, StradaValue *gid)
 
 StradaValue* strada_lchown(StradaValue *path, StradaValue *uid, StradaValue *gid) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     uid_t u = (uid_t)strada_to_int(uid);
     gid_t g = (gid_t)strada_to_int(gid);
     int result = lchown(p, u, g);
@@ -32002,7 +32096,7 @@ StradaValue* strada_fchown(StradaValue *fd, StradaValue *uid, StradaValue *gid) 
 
 StradaValue* strada_utime(StradaValue *path, StradaValue *atime, StradaValue *mtime) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     struct utimbuf times;
     times.actime = (time_t)strada_to_int(atime);
     times.modtime = (time_t)strada_to_int(mtime);
@@ -32012,7 +32106,7 @@ StradaValue* strada_utime(StradaValue *path, StradaValue *atime, StradaValue *mt
 
 StradaValue* strada_utimes(StradaValue *path, StradaValue *atime, StradaValue *mtime) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     struct timeval times[2];
     times[0].tv_sec = (time_t)strada_to_int(atime);
     times[0].tv_usec = 0;
@@ -32942,7 +33036,7 @@ StradaValue* strada_read_byte(StradaValue *fd_val) {
 
 StradaValue* strada_opendir(StradaValue *path_val) {
     char _tb[PATH_MAX];
-    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    const char *path = strada_path_buf(path_val, _tb, sizeof(_tb));
     DIR *d = opendir(path);
     if (!d) return strada_new_undef();
     StradaValue *sv = strada_cpointer_new(d);
@@ -33151,7 +33245,7 @@ StradaValue* strada_ioctl(StradaValue *fd, StradaValue *request, StradaValue *ar
 
 StradaValue* strada_statvfs(StradaValue *path) {
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     struct statvfs buf;
 
     if (statvfs(p, &buf) < 0) {
@@ -33278,7 +33372,7 @@ StradaValue* strada_scalbn(StradaValue *x, StradaValue *n) {
 StradaValue* strada_dl_open_raw(StradaValue *path) {
     if (!path) return strada_new_int(0);
     char _tb[PATH_MAX];
-    const char *p = strada_to_str_buf(path, _tb, sizeof(_tb));
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
     void *handle = dlopen(p, RTLD_LAZY);
     return strada_new_int((int64_t)(intptr_t)handle);
 }
@@ -34085,8 +34179,12 @@ static void strada_global_registry_cleanup(void) {
                 strada_break_self_cycle_impl(strada_global_registry->entries[i].value);
             }
         }
-        strada_free_hash(strada_global_registry);
+        /* Detach before freeing: a DESTROY run by this teardown may read an
+         * `our` variable, and must not get back an entry that is in the
+         * middle of being freed (it was incref'd and freed a second time). */
+        StradaHash *reg = strada_global_registry;
         strada_global_registry = NULL;
+        strada_free_hash(reg);
     }
 }
 
@@ -38621,4 +38719,58 @@ StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int 
     if (pattern && pattern[0] == ' ' && pattern[1] == '\0') return strada_split_awk(str, limit > 0 ? limit : 0);
     if (limit < 0) return strada_regex_split_raw(str, pattern);
     return strada_regex_split_limit_raw(str, pattern, limit);
+}
+
+/* Path-argument conversion for filesystem calls. A path whose bytes contain
+ * a NUL would be silently truncated by the C call ("evil.sh\0.png" opens
+ * evil.sh after passing a .png check, CWE-158). Such a path is replaced by ""
+ * so every syscall fails with ENOENT, as Perl's open/stat/unlink do. */
+const char *strada_path_buf(StradaValue *sv, char *buf, size_t buflen) {
+    const char *p = strada_to_str_buf(sv, buf, buflen);
+    if (p && sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && p == sv->value.pv) {
+        size_t n = STRADA_STR_BYTELEN(sv);
+        if (n > 0 && memchr(p, '\0', n) != NULL) { errno = ENOENT; return ""; }
+    }
+    return p;
+}
+
+
+/* The C string of an already-stringified path SV, or "" when its bytes
+ * contain a NUL (see strada_path_buf). Used by generated code for
+ * slurp/spew/-e, whose runtime entry points take const char*. */
+const char *strada_path_pv(StradaValue *str_sv) {
+    if (!str_sv || STRADA_IS_TAGGED_INT(str_sv) || !str_sv->value.pv) return "";
+    if (str_sv->type == STRADA_STR) {
+        size_t n = STRADA_STR_BYTELEN(str_sv);
+        if (n > 0 && memchr(str_sv->value.pv, '\0', n) != NULL) { errno = ENOENT; return ""; }
+    }
+    return str_sv->value.pv;
+}
+
+/* Autovivify a scalar variable used as an array to be modified
+ * (push(@$v, ...) with $v undef): store a new array reference in the
+ * variable and return the array. A defined non-array value is an error, as
+ * under Perl's strict refs -- it used to hand back a shared static array,
+ * so the pushed elements leaked into every other failed dereference.
+ * Returns a borrowed pointer. */
+StradaValue* strada_autoviv_slot_array(StradaValue **slot) {
+    if (!slot) strada_die("Not an ARRAY reference");
+    StradaValue *cur = *slot;
+    if (cur && !STRADA_IS_TAGGED_INT(cur)) {
+        StradaValue *t = cur;
+        int depth = 0;
+        while (t && !STRADA_IS_TAGGED_INT(t) && t->type == STRADA_REF && depth++ < 1024) {
+            t = strada_is_slot_ref(t) ? (t->value.ptr ? *(StradaValue**)t->value.ptr : NULL) : t->value.rv;
+        }
+        if (t && !STRADA_IS_TAGGED_INT(t) && t->type == STRADA_ARRAY) return t;
+        if (cur->type != STRADA_UNDEF) strada_throw("Not an ARRAY reference");
+    } else if (cur) {
+        strada_throw("Not an ARRAY reference");
+    }
+    StradaValue *arr = strada_new_array();
+    StradaValue *ref = strada_ref_create_take(arr);
+    StradaValue *old = *slot;
+    *slot = ref;
+    if (old) strada_decref(old);
+    return arr;
 }

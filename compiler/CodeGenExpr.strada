@@ -4213,11 +4213,9 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
             if ($cmp_int == 1) { emit_int_operand($cg, $expr->{"right"}); } else { emit_num_operand($cg, $expr->{"right"}); }
             emit($cg, ")");
         } elsif ($op eq "&&") {
-            emit($cg, "strada_new_int(");
-            emit_bool_operand($cg, $expr->{"left"});
-            emit($cg, " && ");
-            emit_bool_operand($cg, $expr->{"right"});
-            emit($cg, ")");
+            # Perl-style && - return left if false, otherwise return right
+            # (the value, not 0/1: `my $x = $a && $b` is $b when $a is true).
+            gen_short_circuit_or_op($cg, $expr, "!strada_to_bool", "and");
         } elsif ($op eq "||") {
             # Perl-style || - return left if truthy, otherwise return right
             gen_short_circuit_or_op($cg, $expr, "strada_to_bool", "or");
@@ -5396,6 +5394,7 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
     my int $t = $elem->{"type"};
     if ($t == NODE_VARIABLE() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_ANON_ARRAY() && $elem->{"is_list"} == 1) { return 2; }
+    if ($t == NODE_ANON_HASH() && $elem->{"is_empty_list"}) { return 2; }
     if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) { return 2; }
     if ($t == NODE_CALL()) {
         my str $nm = "" . $elem->{"name"};
@@ -7479,6 +7478,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
     if ($type == NODE_DUNDER_LINE()) {
         my int $line = $expr->{"line_value"};
         emit($cg, "strada_new_int(" . $line . ")");
+        return;
+    }
+
+    # Empty list `()` used as a value: an empty array (flattens to nothing
+    # wherever lists flatten). Scalar targets turn it into undef themselves.
+    if ($type == NODE_ANON_HASH() && $expr->{"is_empty_list"}) {
+        emit($cg, "strada_new_array()");
         return;
     }
 

@@ -1,0 +1,27 @@
+# EXPECT: 1,2|2|0|0|undef|0|1:1
+# Audit 20 C4-2/C6-9: an empty `()` is an empty list, not an empty hash
+# ref: push(@a, ()) adds nothing, (1, (), 2) has two elements, return ()
+# from an array function is empty and from a scalar function undef, and
+# `my $x = ()` is undef. `my %h = ()` / `%h = ()` still give an empty hash.
+func none() array { return (); }
+func nothing() scalar { return (); }
+func cnt(scalar ...@a) int { return size(@a); }
+func main() int {
+    my @o = ();
+    my @a = (1, 2);
+    push(@a, ());
+    push(@o, join(",", @a));
+    my @l = (1, (), 2);
+    push(@o, size(@l));
+    my @n = none();
+    push(@o, size(@n));
+    push(@o, cnt(()));
+    push(@o, defined(nothing()) ? "def" : "undef");
+    my $x = ();
+    push(@o, defined($x) ? 1 : 0);
+    my %h = ();
+    $h{"k"} = 1;
+    push(@o, size(keys(%h)) . ":" . $h{"k"});
+    say(join("|", @o));
+    return 0;
+}

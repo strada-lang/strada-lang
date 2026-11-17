@@ -3649,7 +3649,7 @@ perl Makefile.PL && make && make test
 See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 - Full API reference for both directions
 - Type conversion tables
-- XS module support and LD_PRELOAD workarounds
+- XS module support
 - Complete working examples
 
 ---

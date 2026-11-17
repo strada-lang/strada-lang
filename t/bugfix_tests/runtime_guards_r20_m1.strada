@@ -1,0 +1,35 @@
+# EXPECT: m1=undefined value|m2=without a package|m3=without a package|sleep=0|usleep=0|hcap=ok|acap=ok|join=-1|lock=-1|env=kept
+# Audit 20 M1 runtime guards: a method call on undef/number is a catchable
+# error (it exited the process); sleep/usleep with a negative count return
+# at once (sleep(-1) slept ~136 years); huge capacity hints are clamped
+# (they wrapped to a NULL buffer); thread/mutex builtins reject a handle of
+# another kind; setproctitle keeps the environment (it zeroed it).
+func main() int {
+    my @o = ();
+    my $u;
+    try { $u->m(); } catch ($e) { push(@o, "m1=" . (index("" . $e, "undefined value") >= 0 ? "undefined value" : $e)); }
+    my $n = 3.5;
+    try { $n->m(); } catch ($e) { push(@o, "m2=" . (index("" . $e, "without a package") >= 0 ? "without a package" : $e)); }
+    my $i = 7;
+    try { $i->m(); } catch ($e) { push(@o, "m3=" . (index("" . $e, "without a package") >= 0 ? "without a package" : $e)); }
+    push(@o, "sleep=" . core::sleep(-1));
+    push(@o, "usleep=" . core::usleep(-5));
+    core::hash_default_capacity(4611686018427387904);
+    my %h = (); $h{"a"} = 1; $h{"b"} = 2;
+    push(@o, "hcap=" . (($h{"a"} + $h{"b"}) == 3 ? "ok" : "bad"));
+    core::hash_default_capacity(16);
+    core::array_default_capacity(4611686018427387904);
+    my @a = (); push(@a, 1);
+    push(@o, "acap=" . ($a[0] == 1 ? "ok" : "bad"));
+    core::array_default_capacity(16);
+    my $m = async::mutex();
+    my $j = thread::join($m);
+    push(@o, "join=" . (defined($j) ? $j : -1));
+    my $sb = sb::new();
+    push(@o, "lock=" . async::lock($sb));
+    my str $home = "" . core::getenv("HOME");
+    core::setproctitle("r20-title");
+    push(@o, "env=" . (("" . core::getenv("HOME")) eq $home ? "kept" : "lost"));
+    say(join("|", @o));
+    return 0;
+}

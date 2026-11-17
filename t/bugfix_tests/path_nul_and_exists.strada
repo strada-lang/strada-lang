@@ -1,0 +1,26 @@
+# EXPECT: stat=undef|open_fd=-1|open=undef|spew-made=0|-e=1|fifo=1|missing=0
+# Audit 20 R4-21/R2-8/R2-10: a path containing a NUL byte is rejected (it used
+# to be truncated at the NUL, CWE-158), and -e/file_exists use stat (they
+# reported unreadable files as missing and hung on a FIFO).
+func main() int {
+    my str $dir = "/tmp/strada_r20_nul_" . core::getpid();
+    core::mkdir($dir, 448);
+    my str $bad = $dir . "/evil.sh" . core::byte(0) . ".png";
+    my @o = ();
+    push(@o, "stat=" . (defined(core::stat($bad)) ? "found" : "undef"));
+    push(@o, "open_fd=" . core::open_fd($bad, "w"));
+    push(@o, "open=" . (defined(core::open($bad, "w")) ? "fh" : "undef"));
+    core::spew($bad, "x");
+    push(@o, "spew-made=" . ((-e ($dir . "/evil.sh")) ? 1 : 0));
+    my str $locked = $dir . "/locked";
+    core::spew($locked, "x");
+    core::chmod($locked, 0);
+    push(@o, "-e=" . ((-e $locked) ? 1 : 0));
+    my str $fifo = $dir . "/fifo";
+    core::system("mkfifo " . $fifo);
+    push(@o, "fifo=" . core::file_exists($fifo));
+    push(@o, "missing=" . core::file_exists($dir . "/nope"));
+    core::system("rm -rf " . $dir);
+    say(join("|", @o));
+    return 0;
+}

@@ -1,0 +1,14 @@
+# EXPECT: existing|added
+# Audit 20 R2-9: open mode "+>>" (read/append) appends; it used to map to
+# "w+" and truncate the file.
+func main() int {
+    my str $f = "/tmp/strada_r20_rapp_" . core::getpid();
+    core::spew($f, "existing\n");
+    my scalar $fh = core::open($f, "+>>");
+    print($fh, "added\n");
+    core::close($fh);
+    my str $c = core::slurp($f);
+    core::unlink($f);
+    say(join("|", split("\n", $c)));
+    return 0;
+}

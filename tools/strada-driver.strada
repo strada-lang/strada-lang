@@ -590,6 +590,47 @@ func find_jit_bin() str {
     return "";
 }
 
+# A module-cache path is only removed when it is clearly a dedicated
+# directory: compare canonical paths (trailing "/", "." and symlinks would
+# otherwise slip past a string check) and refuse "/", shallow system
+# directories, $HOME itself and any ancestor of $HOME.
+func cache_path_is_unsafe(str $mc) int {
+    if (length($mc) == 0) { return 1; }
+    my str $real = "" . core::realpath($mc);
+    if (length($real) == 0) {
+        # Not existing yet: nothing would be removed, but canonicalize the
+        # text form anyway so the checks below still mean something.
+        $real = $mc;
+        while (length($real) > 1 && substr($real, length($real) - 1, 1) eq "/") {
+            $real = substr($real, 0, length($real) - 1);
+        }
+    }
+    if ($real eq "/") { return 1; }
+    # Fewer than three path components (/, /usr, /usr/local, /home/u).
+    my array @parts = grep { length($_) > 0 } split("/", $real);
+    if (size(@parts) < 3) { return 1; }
+    my str $home = env("HOME");
+    if (length($home) > 0) {
+        my str $rhome = "" . core::realpath($home);
+        if (length($rhome) == 0) { $rhome = $home; }
+        if ($real eq $rhome) { return 1; }
+        if (index($rhome . "/", $real . "/") == 0) { return 1; }
+    }
+    return 0;
+}
+
+# True when two paths name the same file. Only an existing path can be an
+# input we would clobber, so compare canonical forms of existing files.
+func same_file_path(str $a, str $b) int {
+    if (length($a) == 0 || length($b) == 0) { return 0; }
+    if (!(-e $a) || !(-e $b)) { return 0; }
+    my str $ra = "" . core::realpath($a);
+    my str $rb = "" . core::realpath($b);
+    if (length($ra) == 0 || length($rb) == 0) { return 0; }
+    if ($ra eq $rb) { return 1; }
+    return 0;
+}
+
 func handle_clear_cache() void {
     my str $mc = env("STRADA_MODULE_CACHE_DIR");
     if (length($mc) == 0) {
@@ -597,7 +638,7 @@ func handle_clear_cache() void {
         if (length($xdg) == 0) { $xdg = env("HOME") . "/.cache"; }
         $mc = $xdg . "/strada/modules";
     }
-    if ($mc eq "" || $mc eq "/" || $mc eq "/home" || $mc eq "/usr" || $mc eq "/usr/local" || $mc eq env("HOME")) {
+    if (cache_path_is_unsafe($mc) == 1) {
         error("refusing to remove suspicious module cache path: '" . $mc . "'");
     }
     if (-d $mc) {
@@ -986,6 +1027,10 @@ func main() int {
             # C .so is just a link input (the linker accepts a .so path directly).
             if (is_strada_module($arg) == 1) { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, $arg); }
             else { @EXTRA_O_FILES = (@EXTRA_O_FILES, $arg); }
+        } elsif (ew($arg, ".strada")) {
+            # A second positional used to become the OUTPUT name, so
+            # `strada a.strada b.strada` silently overwrote b.strada.
+            error("only one .strada input file is supported (got also: " . $arg . "); use `use` for modules or -o for the output");
         } elsif (length($OUTPUT_FILE) == 0) {
             $OUTPUT_FILE = $arg;
         } else {
@@ -1013,6 +1058,22 @@ func main() int {
         $cfile = scratch_path($input, ".c");
         if (length($cfile) == 0) { $cfile = mkdtemp_tracked("/tmp/strada_XXXXXX") . "/out.c"; }
         @CLEANUP = (@CLEANUP, $cfile);
+    }
+
+    # Never let the build overwrite one of its own inputs.
+    my array @__inputs = ($input);
+    @__inputs = (@__inputs, @EXTRA_C_FILES);
+    @__inputs = (@__inputs, @EXTRA_O_FILES);
+    my int $__ii = 0;
+    while ($__ii < size(@__inputs)) {
+        my str $__in = $__inputs[$__ii];
+        if (same_file_path($output, $__in) == 1) {
+            error("output file '" . $output . "' would overwrite input '" . $__in . "'");
+        }
+        if ($KEEP_C == 1 && same_file_path($cfile, $__in) == 1) {
+            error("generated C file '" . $cfile . "' would overwrite input '" . $__in . "'");
+        }
+        $__ii = $__ii + 1;
     }
 
     if (!(-x $STRADAC)) {

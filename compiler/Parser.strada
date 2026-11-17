@@ -258,6 +258,30 @@ func parser_expect_ident_like(scalar $parser) void {
     parser_error($parser, "expected an identifier, got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
 
+# Builtins that operate on $_ when given no argument.
+func parser_is_topic_builtin(str $name) int {
+    if ($name eq "chomp" || $name eq "chop" || $name eq "say" || $name eq "print" ||
+        $name eq "length" || $name eq "uc" || $name eq "lc" || $name eq "ucfirst" ||
+        $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
+        $name eq "chr" || $name eq "ord") {
+        return 1;
+    }
+    return 0;
+}
+
+# True when the token after a paren-less builtin name ends its (empty)
+# argument list: end of statement, block, parenthesized group or list
+# element, or the start of a statement modifier.
+func parser_at_topic_end(scalar $parser) int {
+    my str $t = parser_current($parser)->{"type"};
+    if ($t eq "SEMI" || $t eq "RBRACE" || $t eq "RPAREN" || $t eq "COMMA" || $t eq "EOF" ||
+        $t eq "IF" || $t eq "UNLESS" || $t eq "WHILE" || $t eq "UNTIL" ||
+        $t eq "FOR" || $t eq "FOREACH") {
+        return 1;
+    }
+    return 0;
+}
+
 func parser_check_class_arrow(scalar $parser) int {
     if (parser_check($parser, "ARROW")) {
         my scalar $after = parser_peek($parser);
@@ -1661,10 +1685,16 @@ func parse_primary(scalar $parser) scalar {
     if ($type eq "LPAREN") {
         parser_advance($parser);
         
-        # Empty () - returns empty hash/array depending on context
+        # Empty () - an empty list. It stays an (empty) NODE_ANON_HASH node so
+        # `my %h = ()` / `@a = ()` / `%h = ()` keep their dedicated
+        # clear/empty-init paths, and carries is_empty_list for everything
+        # else: dropped from lists and call arguments (ast_add_array_elem /
+        # ast_add_arg), an empty array as a list value, undef as a scalar.
         if (parser_check($parser, "RPAREN")) {
             parser_advance($parser);
-            return ast_new_anon_hash();
+            my scalar $empty_list = ast_new_anon_hash();
+            $empty_list->{"is_empty_list"} = 1;
+            return $empty_list;
         }
         
         my scalar $first = parse_expression($parser);
@@ -1826,10 +1856,7 @@ func parse_primary(scalar $parser) scalar {
 
             # Builtins that default to $_ when called with no args
             if ($call->{"arg_count"} == 0) {
-                if ($name eq "chomp" || $name eq "chop" || $name eq "say" || $name eq "print" ||
-                    $name eq "length" || $name eq "uc" || $name eq "lc" || $name eq "ucfirst" ||
-                    $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
-                    $name eq "chr" || $name eq "ord" || $name eq "chomp") {
+                if (parser_is_topic_builtin($name) == 1) {
                     ast_add_arg($call, ast_new_variable("_", "$"));
                 }
                 # shift()/pop() with empty parens default to @_
@@ -1974,15 +2001,13 @@ func parse_primary(scalar $parser) scalar {
         # STRING "chomp" / "uc" (a silent no-op, or the function's own name as
         # the value). Only when the statement ends right there, so barewords
         # used as hash keys or list words are untouched.
-        if (parser_check($parser, "SEMI")) {
-            if ($name eq "chomp" || $name eq "chop" || $name eq "uc" || $name eq "lc" ||
-                $name eq "ucfirst" || $name eq "lcfirst" || $name eq "trim" || $name eq "length" ||
-                $name eq "ord" || $name eq "chr") {
-                my scalar $topic_call = ast_new_call($name);
-                ast_set_line($topic_call, $call_line);
-                ast_add_arg($topic_call, ast_new_variable("_", "$"));
-                return $topic_call;
-            }
+        # Also when the enclosing block / list / statement modifier ends
+        # there: `map { uc } @w`, `grep { length } @w`, `say if $x;`.
+        if (parser_is_topic_builtin($name) == 1 && parser_at_topic_end($parser) == 1) {
+            my scalar $topic_call = ast_new_call($name);
+            ast_set_line($topic_call, $call_line);
+            ast_add_arg($topic_call, ast_new_variable("_", "$"));
+            return $topic_call;
         }
 
         # Bareword class invocant before ->method() or ->$m() (e.g. Foo->new(), Foo->$m())

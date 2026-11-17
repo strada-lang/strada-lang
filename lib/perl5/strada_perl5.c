@@ -41,6 +41,22 @@
 /* Global Perl interpreter (singleton) */
 static PerlInterpreter *my_perl = NULL;
 
+/* XS support: register DynaLoader so `use List::Util` / POSIX / JSON::XS can
+ * load their shared objects (perl_parse used to get a NULL xs_init, so any
+ * XS module failed with "dynamic loading not available"). */
+EXTERN_C void boot_DynaLoader(pTHX_ CV *cv);
+static void strada_perl5_xs_init(pTHX) {
+    static const char file[] = __FILE__;
+    dXSUB_SYS;
+    newXS("DynaLoader::boot_DynaLoader", boot_DynaLoader, (char *)file);
+}
+
+/* PERL_SYS_INIT3 / PERL_SYS_TERM may run only once per process, so a
+ * shutdown() followed by init() used to kill the process; do the system
+ * init once and the term at exit. */
+static int strada_perl5_sys_inited = 0;
+static void strada_perl5_sys_term(void) { PERL_SYS_TERM(); }
+
 static int perl5_valid_module_name(const char *m) {
     if (!m || !*m || strlen(m) > 1024) return 0;
     for (const char *p = m; *p; p++) {
@@ -234,7 +250,11 @@ int strada_perl5_init(void) {
     char *env[] = { NULL };
     char **env_ptr = env;
 
-    PERL_SYS_INIT3(&argc, &argv_ptr, &env_ptr);
+    if (!strada_perl5_sys_inited) {
+        PERL_SYS_INIT3(&argc, &argv_ptr, &env_ptr);
+        strada_perl5_sys_inited = 1;
+        atexit(strada_perl5_sys_term);
+    }
     my_perl = perl_alloc();
     if (!my_perl) {
         return 0;
@@ -243,8 +263,7 @@ int strada_perl5_init(void) {
     perl_construct(my_perl);
     PL_exit_flags |= PERL_EXIT_DESTRUCT_END;
 
-    /* Use NULL xs_init - XS modules require LD_PRELOAD=/path/to/libperl.so */
-    if (perl_parse(my_perl, NULL, argc, argv, NULL) != 0) {
+    if (perl_parse(my_perl, strada_perl5_xs_init, argc, argv, NULL) != 0) {
         perl_destruct(my_perl);
         perl_free(my_perl);
         my_perl = NULL;
@@ -260,7 +279,6 @@ void strada_perl5_shutdown(void) {
     if (my_perl) {
         perl_destruct(my_perl);
         perl_free(my_perl);
-        PERL_SYS_TERM();
         my_perl = NULL;
     }
 }

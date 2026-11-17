@@ -1,0 +1,6 @@
+total=5
+offset-only rows=3 (expected 3)
+count _hidden=1: 1 (expected 1)
+unsaved owner related items=0 (expected 0)
+delete_all _hidden=1 -> 1
+remaining=4 (expected 4)

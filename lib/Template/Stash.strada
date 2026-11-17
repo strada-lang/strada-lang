@@ -42,7 +42,17 @@ func set_local(scalar $stash, str $name, scalar $value) void {
 }
 
 # Root variable lookup: walk frames top->parent. undef if unbound.
+# TT's PRIVATE rule: a variable or member whose name starts with "_" or "."
+# is never readable or assignable from a template (it would otherwise reach
+# private object state and run private methods on passed-in objects).
+func is_private(str $key) int {
+    my str $c = substr($key, 0, 1);
+    if ($c eq "_" || $c eq ".") { return 1; }
+    return 0;
+}
+
 func get_root(scalar $stash, str $name) scalar {
+    if (is_private($name) == 1) { return undef; }
     my scalar $f = $stash->{"top"};
     while (defined($f)) {
         if (exists(%{$f->{"vars"}}, $name)) { return $f->{"vars"}->{$name}; }
@@ -82,6 +92,7 @@ func dot(scalar $obj, str $key, scalar $args, scalar $stash) scalar {
         if (is_strict($stash) == 1) { throw(Template::Exception::make("undef", $key)); }
         return undef;
     }
+    if (is_private($key) == 1) { return undef; }
     # USE plugin instances dispatch their methods through the plugin framework.
     if (ref($obj) eq "HASH" && exists(%{$obj}, "__plugin__")) {
         return Template::Plugins::method($obj, $key, $args);

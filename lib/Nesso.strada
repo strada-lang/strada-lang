@@ -141,8 +141,11 @@ func build_where_clause(scalar $self, scalar $schema, scalar $conds, scalar $par
     my int $nkeys = scalar(@cond_keys);
     while ($i < $nkeys) {
         my str $key = $cond_keys[$i];
-        # Skip directives (keys starting with _)
-        if (substr($key, 0, 1) ne "_") {
+        # Skip the query directives. Every other key -- including a declared
+        # column whose name starts with "_" -- is a condition: skipping all
+        # "_" keys silently dropped such conditions, so delete_all({_x => 1})
+        # deleted every row.
+        if ($key ne "_order" && $key ne "_limit" && $key ne "_offset") {
             if ($self->col_allowed($schema, $key) == 0) {
                 throw "Nesso: condition references unknown column '" . $key . "'";
             }
@@ -705,7 +708,7 @@ func find_or_create(scalar $self, str $model, scalar $conds) scalar {
     my int $nk = scalar(@ckeys);
     while ($i < $nk) {
         my str $k = $ckeys[$i];
-        if (substr($k, 0, 1) ne "_") {
+        if ($k ne "_order" && $k ne "_limit" && $k ne "_offset") {
             my scalar $v = $conds->{$k};
             my str $r = ref($v);
             if ($r ne "HASH" && $r ne "ARRAY") {
@@ -746,6 +749,10 @@ func where(scalar $self, str $model, scalar $conds) scalar {
         $sql = $sql . " LIMIT " . $limit_val;
     }
     if (defined($conds->{"_offset"})) {
+        # SQLite and MySQL only accept OFFSET after a LIMIT.
+        if (!defined($conds->{"_limit"})) {
+            $sql = $sql . " LIMIT 9223372036854775807";
+        }
         my int $offset_val = $conds->{"_offset"} + 0;
         $sql = $sql . " OFFSET " . $offset_val;
     }
@@ -940,6 +947,11 @@ func related(scalar $self, scalar $record, str $name) scalar {
         my scalar $schema = $self->get_schema($model_name);
         my str $pk = $schema->{"primary"};
         my scalar $pk_val = $record->{$pk};
+        # An unsaved owner has no children; `fk IS NULL` would return orphans.
+        if (!defined($pk_val)) {
+            my array @none = ();
+            return \@none;
+        }
         my hash %conds = ();
         $conds{$fk} = $pk_val;
         return $self->where($rel_model, \%conds);
@@ -957,6 +969,9 @@ func related(scalar $self, scalar $record, str $name) scalar {
         my scalar $schema = $self->get_schema($model_name);
         my str $pk = $schema->{"primary"};
         my scalar $pk_val = $record->{$pk};
+        if (!defined($pk_val)) {
+            return undef;
+        }
         my hash %conds = ();
         $conds{$fk} = $pk_val;
         return $self->find_by($rel_model, \%conds);

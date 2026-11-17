@@ -89,6 +89,10 @@ func exec_set(scalar $node, scalar $stash, int $is_default) void {
 
 # Assign $value at a dotted path, autovivifying intermediate hashes.
 func set_path(scalar $stash, scalar $path, scalar $value) void {
+    # Assignments through a private ("_x" / ".x") name are ignored, as in TT.
+    foreach my str $pk (@{$path}) {
+        if (Template::Stash::is_private($pk) == 1) { return; }
+    }
     if (size(@{$path}) == 1) { Template::Stash::set_var($stash, $path->[0], $value); return; }
     my str $root_name = $path->[0];
     my scalar $root = Template::Stash::get_root($stash, $root_name);

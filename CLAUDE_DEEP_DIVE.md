@@ -2561,3 +2561,30 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
   `strada_hash_each_sv` no longer leaks the key on each step.
 - Lexer: `\x{HEX}` appends `chr($hv)` (chr is codepoint-oriented; assembling
   UTF-8 bytes by hand with `chr(192 + …)` double-encoded).
+
+
+## Audit cycle 20 codegen notes (2026-11)
+
+- **Empty list `()`**: parsed as an empty `NODE_ANON_HASH` with `is_empty_list = 1`.
+  Keep the node type: `my %h = ()`, `%h = ()`, `@a = ()` and typed declarations
+  test `pair_count == 0` to take their clear/empty-init paths. Everything else
+  keys off the flag: `ast_add_array_elem` / `ast_add_arg` drop it,
+  `array_flatten_kind` returns 2 for it, `gen_expression` emits
+  `strada_new_array()`, Semantic rewrites `my $x = ()` and `return ()`.
+- **`&&` value**: `gen_short_circuit_or_op($cg, $expr, "!strada_to_bool", "and")`
+  -- the predicate string is pasted before `(`, so a leading `!` inverts it.
+  Conditions still go through `emit_condition` (C `&&`).
+- **Mutable array targets**: `mutable_array_target_kind` / `gen_array_target`
+  (CodeGenBuiltins) for push/unshift/splice. Kind 1 = element chain, emitted
+  through `gen_assign_container(..., 2)` (the nested-assignment autoviv path,
+  borrowed result); kind 2 = plain scalar variable, `strada_autoviv_slot_array`
+  (takes the C slot address, cast to `StradaValue **` because try-using
+  functions declare locals `volatile`). `our` vars, unboxed vars, `$_`, sort
+  `$a`/`$b` keep the old expression path.
+- **Dying arrays**: `STRADA_AV_DYING(av)` (refcount already 0, elements being
+  released) -- push/push_take/unshift/set drop the store. A DESTROY run by the
+  release may otherwise store into the dying array, which then reached the
+  pool still holding elements (double free at exit).
+- **Global registry teardown** detaches `strada_global_registry` before
+  freeing it, so DESTROY code reading `our` variables during exit sees nothing
+  rather than an entry mid-free.

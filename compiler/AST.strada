@@ -796,6 +796,8 @@ func ast_new_call(str $name) scalar {
 # Add argument to call
 func ast_add_arg(scalar $call, scalar $arg) void {
     my scalar $args = $call->{"args"};
+    # push(@a, ()) / f(1, (), 2): an empty list passes no argument.
+    if ($arg && $arg->{"is_empty_list"}) { return; }
     # `f(key => value)`: the fat comma is a comma, so this is two arguments.
     # The expression parser builds a 2-element pair for `=>` (what
     # `map { $_ => 1 }` needs); passed on as ONE argument it made
@@ -1010,6 +1012,9 @@ func ast_new_anon_array() scalar {
 
 # Add element to anonymous array
 func ast_add_array_elem(scalar $arr_node, scalar $elem) void {
+    # An empty list `()` inside a list contributes nothing: (1, (), 2) has
+    # two elements and [()] is empty, as in Perl.
+    if ($elem && $elem->{"is_empty_list"}) { return; }
     my scalar $elems = $arr_node->{"elements"};
     push($elems, $elem);
     $arr_node->{"element_count"} = $arr_node->{"element_count"} + 1;

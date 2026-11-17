@@ -18,10 +18,19 @@
 # strada-repl - Compatibility shim that execs strada-jit
 
 func main(int $argc, array @argv) int {
-    my str $self_dir = core::dirname($argv[0]);
-    my str $jit = $self_dir . "/strada-jit";
-    if (core::is_file($jit) == 0) {
-        $jit = "strada-jit";
+    # Locate strada-jit next to this executable. Resolve our own path through
+    # /proc/self/exe: argv[0] is "strada-repl" when found via PATH, and its
+    # dirname "." would run ./strada-jit from the current directory (CWE-427).
+    my str $self_path = "" . core::realpath("/proc/self/exe");
+    if (length($self_path) == 0 && index($argv[0], "/") >= 0) {
+        $self_path = "" . core::realpath($argv[0]);
+    }
+    my str $jit = "strada-jit";
+    if (length($self_path) > 0) {
+        my str $sibling = core::dirname($self_path) . "/strada-jit";
+        if (core::is_file($sibling) == 1) {
+            $jit = $sibling;
+        }
     }
     my array @args = ($jit);
     my int $i = 1;

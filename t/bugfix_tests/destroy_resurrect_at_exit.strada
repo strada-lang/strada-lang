@@ -1,0 +1,17 @@
+# EXPECT: end
+# Audit 20 V1-10: a DESTROY that stores its object into an `our` container
+# during exit teardown used to get back the registry entry being freed and
+# free it twice (heap corruption / SIGSEGV at exit). Objects pushed into a
+# container that is itself being freed are dropped.
+package R20Res;
+our $saved = [];
+func new($n) scalar { my %h = (n => $n); return bless(\%h, "R20Res"); }
+func DESTROY($self) void { push(@{$saved}, $self); }
+package main;
+func mk($n) void { my $o = R20Res::new($n); }
+func main() int {
+    mk("a");
+    mk("b");
+    say("end");
+    return 0;
+}

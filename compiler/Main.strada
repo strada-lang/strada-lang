@@ -511,6 +511,14 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     }
 
     if (length($output_file) > 0) {
+        # spew() can't report failure: probe that the output is writable
+        # (an unwritable output used to exit 0 with nothing written).
+        my scalar $out_probe = sys::open($output_file, "w");
+        if (!defined($out_probe)) {
+            say("Error: cannot write output file: " . $output_file);
+            exit(1);
+        }
+        sys::close($out_probe);
         spew($output_file, $code);
         if ($verbose == 1) {
             say("Success! Generated " . $output_file);
@@ -753,8 +761,14 @@ func main() int {
         say("Compiling: " . $input_file . " -> " . $output_file);
     }
 
-    # Read source file
-    my str $source = slurp($input_file);
+    # Read source file. A missing/unreadable input used to compile as an
+    # empty program and exit 0 (even under --check).
+    my scalar $source_raw = slurp($input_file);
+    if (!defined($source_raw)) {
+        say("Error: cannot read input file: " . $input_file);
+        return 1;
+    }
+    my str $source = $source_raw;
 
     # Derive module target from input filename when -M was given without
     # an explicit target: "path/Foo.strada" -> "Foo".

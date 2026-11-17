@@ -66,13 +66,9 @@ func main() int {
 
 ### XS Module Support
 
-XS-based Perl modules (like POSIX, JSON::XS) require special handling:
-
-```bash
-LD_PRELOAD=/lib/x86_64-linux-gnu/libperl.so.5.38 ./your_program
-```
-
-Pure Perl modules work without this.
+XS-based Perl modules (POSIX, List::Util, JSON::XS) load directly: the
+embedded interpreter registers DynaLoader through its `xs_init`, so no
+`LD_PRELOAD` is needed.
 
 ---
 

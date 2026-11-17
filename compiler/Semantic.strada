@@ -2309,6 +2309,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my str $name = $stmt->{"name"};
         my str $sigil = $stmt->{"sigil"};
         my int $var_type = $stmt->{"var_type"};
+        # `my $x = ();` - an empty list in scalar context is undef.
+        if ($sigil eq "$" && $stmt->{"init"} && $stmt->{"init"}->{"is_empty_list"}) {
+            $stmt->{"init"} = ast_new_undef();
+        }
 
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
@@ -2612,6 +2616,23 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
     # Return statement
     if ($node_type == NODE_RETURN_STMT()) {
         my scalar $ret_val = $stmt->{"value"};
+        # `return ();` - an empty list: an empty hash/array for container
+        # returns, nothing for void, undef for scalar returns (it used to
+        # return an empty HASH ref).
+        if (is_valid_node($ret_val) == 1 && $ret_val->{"is_empty_list"}) {
+            my scalar $ecur = $ctx->{"current_func"};
+            my int $ert = TYPE_SCALAR();
+            if ($ecur) { $ert = $ecur->{"return_type"}; }
+            if ($ert == TYPE_HASH()) {
+                $ret_val->{"is_empty_list"} = 0;
+            } elsif ($ert == TYPE_VOID()) {
+                $stmt->{"value"} = 0;
+                $ret_val = 0;
+            } elsif ($ert != TYPE_ARRAY() && $ert != TYPE_DYNAMIC()) {
+                $ret_val = ast_new_undef();
+                $stmt->{"value"} = $ret_val;
+            }
+        }
         if (is_valid_node($ret_val) == 1) {
             analyze_expression($ctx, $ret_val);
             my scalar $cur = $ctx->{"current_func"};

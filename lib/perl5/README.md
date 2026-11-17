@@ -209,16 +209,10 @@ Add a path to Perl's `@INC` for module searching.
 
 ## XS Module Support
 
-Some Perl modules (like `POSIX`, `JSON::XS`, etc.) are implemented in C (XS modules).
-These require special handling due to symbol loading.
-
-To use XS modules, run your Strada program with:
-
-```bash
-LD_PRELOAD=/lib/x86_64-linux-gnu/libperl.so.5.38 ./your_program
-```
-
-Pure Perl modules work without this workaround.
+XS modules (`POSIX`, `List::Util`, `JSON::XS`, ...) load directly: the
+interpreter is started with an `xs_init` that registers DynaLoader. Link with
+`$(perl -MExtUtils::Embed -e ccopts -e ldopts)` as usual; no `LD_PRELOAD` is
+needed.
 
 ## Architecture
 
@@ -236,7 +230,6 @@ from the C library (`libstrada_perl5.so`), which embeds the Perl interpreter.
 ## Limitations
 
 - Single interpreter per process (Perl limitation)
-- XS modules require LD_PRELOAD workaround
 - Return values are converted to strings (complex data structures need serialization)
 - Thread safety depends on Perl's threading model
 

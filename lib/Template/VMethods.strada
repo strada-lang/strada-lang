@@ -73,11 +73,14 @@ func html_escape(str $s) str {
     $o = re::replace_all($o, "<", "&lt;");
     $o = re::replace_all($o, ">", "&gt;");
     $o = re::replace_all($o, "\"", "&quot;");
+    # Escape ' too (Template Toolkit 3.x): without it a value can break out
+    # of a single-quoted HTML attribute.
+    $o = re::replace_all($o, "'", "&#39;");
     return $o;
 }
 func xml_escape(str $s) str {
     my str $o = html_escape($s);
-    return re::replace_all($o, "'", "&apos;");
+    return re::replace_all($o, "&#39;", "&apos;");
 }
 func str_repeat(str $s, int $n) str {
     my str $o = "";

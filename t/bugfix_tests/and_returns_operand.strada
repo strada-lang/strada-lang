@@ -1,0 +1,19 @@
+# EXPECT: 7|b|ARRAY|0||0|x
+# Audit 20 C4-1/C2-5/C3-1: `&&` in value context returns the deciding
+# operand like Perl (and like `||`), not 0/1.
+func main() int {
+    my @o = ();
+    push(@o, 1 && 7);
+    push(@o, "a" && "b");
+    my $v = 1;
+    push(@o, ref($v && [1]));
+    push(@o, 0 && "never");
+    push(@o, "" && "never");
+    my $z = 0;
+    my $r = $z && die("short-circuit broken");
+    push(@o, $r);
+    my %h = ("k" => "x");
+    push(@o, exists($h{"k"}) && $h{"k"});
+    say(join("|", @o));
+    return 0;
+}

@@ -871,6 +871,9 @@ char* strada_to_str_ss(StradaValue *sv); /* Returns StradaString-backed char* â€
 StradaValue* strada_to_str_sv(StradaValue *sv); /* Returns owned STRADA_STR StradaValue* (cleanup-stack friendly) */
 void strada_cstr_free(char *s);          /* Free a strada_to_str_ss() result (handles both SS and malloc'd) */
 const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* Non-allocating variant */
+const char* strada_path_buf(StradaValue *sv, char *buf, size_t buflen); /* "" if the path contains a NUL byte */
+const char* strada_path_pv(StradaValue *str_sv);
+StradaValue* strada_autoviv_slot_array(StradaValue **slot); /* push(@$v,..) with $v undef */
 int strada_to_bool(StradaValue *sv);
 
 /* ===== Memory-management features (compile-time: STRADA_CYCLE_GC / STRADA_ARENA) =====
@@ -1112,7 +1115,7 @@ StradaValue* strada_slurp(const char *filename);  /* Read entire file */
 StradaValue* strada_slurp_fh(StradaValue *fh_sv);  /* Read from FILE handle to end */
 StradaValue* strada_slurp_fd(StradaValue *fd_sv);  /* Read from file descriptor to end */
 void strada_spew(const char *filename, const char *content);  /* Write entire file */
-void strada_spew_sv(const char *filename, StradaValue *content_sv);  /* Binary-safe write from StradaValue */
+int strada_spew_sv(const char *filename, StradaValue *content_sv);  /* Binary-safe write; 1 = ok, 0 = failed */
 void strada_spew_len(const char *filename, const char *content, size_t len);  /* Length-aware write */
 void strada_spew_fh(StradaValue *fh_sv, StradaValue *content_sv);  /* Write to FILE handle */
 void strada_spew_fd(StradaValue *fd_sv, StradaValue *content_sv);  /* Write to file descriptor */

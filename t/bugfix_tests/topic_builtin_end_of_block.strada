@@ -1,0 +1,21 @@
+# EXPECT: AB,C,|ab,c|12|1|ab|[x]
+# Audit 20 C6-16: a $_-defaulting builtin with no parens at the end of a
+# block, list or statement (`map { uc }`, `grep { length }`, `say if ...`)
+# is a call on $_, not a rejected bareword; hash-key barewords stay keys.
+func main() int {
+    my @w = ("ab", "c", "");
+    my @o = ();
+    push(@o, join(",", map { uc } @w));
+    push(@o, join(",", grep { length } @w));
+    my %h = ("length" => 1, "uc" => 2);
+    push(@o, $h{length} . $h{uc});
+    my $r = \%h;
+    push(@o, $r->{length});
+    my str $acc = "";
+    foreach (@w) { $acc = $acc . uc if length; }
+    push(@o, lc($acc) eq "abc" ? "ab" : "bad");
+    $_ = "x\n"; chomp;
+    push(@o, "[" . $_ . "]");
+    say(join("|", @o));
+    return 0;
+}
