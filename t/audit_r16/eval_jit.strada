@@ -97,7 +97,8 @@ func main() int {
             $di_chk = ($d_init_ok == 1 && $di == 99) ? 1 : 0;
         }
 
-        # S3-3 NI_FOREACH_STMT typed & our/captured
+        # S3-3 NI_FOREACH_STMT typed & our/captured (a pre-existing loop
+        # variable is restored after the loop, as in Perl)
         my int $fesum = 0;
         foreach my int $fi ("1.9", "2.8") { $fesum = $fesum + $fi; }
         our $fe_our = "";
@@ -143,7 +144,7 @@ func main() int {
 
         ($cap_fn->() == 777 && $cap_redo->() == 100 &&
          $di_chk == 1 &&
-         $fesum == 3 && $fe_our eq "v" && $get_fc->() eq "q" &&
+         $fesum == 3 && $fe_our eq "" && $get_fc->() eq "" &&
          $fall_undef == 1 && join(",", @sorted) eq "1,2,3" &&
          $ri1 == 4 && $ri2 == 5 &&
          $rm1 == 1 && $rm2 == 1 && $rm_fail == 0 &&

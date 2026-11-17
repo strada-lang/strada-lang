@@ -651,7 +651,20 @@ autovivifying `push/unshift/splice` targets (`compile_mutable_array_target`,
 `spew_fh`, `*_default_capacity`. The generic bridge maps `core::X` to the
 runtime's `strada_X` when not harvested and passes NULL for omitted
 trailing parameters (`vm_generic_builtin_find_min`); the generator also
-harvests per-arity calls inside handler blocks (743 entries). `interpreter/Makefile`: the front-end object
+harvests per-arity calls inside handler blocks (743 entries). M4 part 3: `::f()` in `use`d modules; `core::coro_yield_io` returns 0
+(no green tasks in the VM yet, so Async::Task takes its blocking paths);
+VM-native `core::poll` (writes revents into the caller's hashes); readline
+limit + sockets; `+>>` and NUL-path rejection in open/spew (spew returns
+1/0); print/say return 1; in-memory handles sync after bridged calls; lazy
+builders (`ast_new_method_call` sets `base_object`); C structs modelled as
+hashes with C field storage (`vm_emit_struct_new`,
+`BUILTIN_STRUCT_FIELD_STORE`: int32 / double / 63-byte str); cstruct_* short
+forms; constructor-less `Pkg::new`; string negation; `""`-only numification
+and `-$obj` via `-`; tied-hash clear fallback; `release($sref)`; foreach
+aliasing write-back (`vm_node_writes_var`, `BUILTIN_FE_WRITEBACK`) and
+restore of a pre-existing loop variable (skipped in tie programs, like the
+compiled backend's `uses_tie`); magic string ++ (`BUILTIN_INCR_VALUE`, JIT
+slow path); string ranges; `ref(\$ref)` is "REF". `interpreter/Makefile`: the front-end object
 depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **only string temporaries are owned by the stack** — consume sites must use `vm_temp_free` (freeing a shared container/filehandle/closure is a use-after-free; this was the `defined($fh)` corruption bug).
 
 ## Language Features Reference

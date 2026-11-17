@@ -571,6 +571,11 @@ func run_file_vm(str $filename, scalar $argv) int {
     my array @lib_paths = build_lib_paths($source_dir);
 
     my str $saved_cwd = core::getcwd();
+    # the lexer resolves `#include "x"` next to the including file, so it
+    # needs a path that survives the chdir below
+    my str $lex_fn = $filename;
+    my scalar $abs_fn = core::realpath($filename);
+    if (defined($abs_fn) && length("" . $abs_fn) > 0) { $lex_fn = "" . $abs_fn; }
     if (length($project_root) > 0) {
         core::chdir($project_root);
     }
@@ -578,7 +583,7 @@ func run_file_vm(str $filename, scalar $argv) int {
         core::setenv("STRADA_USE_ARTIFACTS", "0");
     }
 
-    my scalar $tokens = lex_tokenize($source);
+    my scalar $tokens = lex_tokenize_file($source, $lex_fn);
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
     my array @empty = ();

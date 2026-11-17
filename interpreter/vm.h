@@ -569,6 +569,10 @@ enum {
     BUILTIN_SET_PACKAGE,
     BUILTIN_PRINTF,
     BUILTIN_HASH_FLAT,
+    BUILTIN_INCR_VALUE,   /* (v, +1/-1) -> ++/-- of v (magic string ++, IV/UV/NV promotion) */
+    BUILTIN_FE_WRITEBACK, /* (array, idx, value): foreach alias write-back while idx is in range */
+    BUILTIN_STRUCT_FIELD_STORE, /* (v, kind) -> v as a C struct field stores it (1 int32, 2 num, 3 str[64]) */
+    BUILTIN_POLL,         /* (array of {fd, events}, timeout) -> count; writes revents */
     BUILTIN_HASH_DELETE_SLICE, /* (hash, keys) -> removed values */
     BUILTIN_CHOMP_ARRAY,  /* (array) -> chars removed */
     BUILTIN_LIST_REPEAT,  /* (list, n) -> list repeated */

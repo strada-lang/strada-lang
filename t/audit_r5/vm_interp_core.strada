@@ -357,6 +357,8 @@ func test_vm5_09_and_11() void {
     my array @items = (11, 22, 33);
     foreach $outer (@items) {
     }
+    # Perl restores a pre-existing loop variable after the loop; programs
+    # that use tie() (this one does) do not, in either backend (uses_tie)
     ok($outer == 33, "VM5-09 non-lexical foreach updates outer scalar");
 
     # MRO-chained around modifiers

@@ -46,6 +46,7 @@ int vm_generic_builtin_find_min(const char *name, int argc) {
     return -1;
 }
 #include <signal.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <errno.h>
 #include <fnmatch.h>
@@ -2633,6 +2634,7 @@ static VMArray *vm_materialize_array(VM *vm, VMArray *src);
 static VMArray *vm_tied_hash_collect_keys(VM *vm, VMValue tied_obj, int *has_firstkey);
 static int64_t vm_tied_array_fetchsize(VM *vm, VMValue tied_obj);
 static int64_t vm_to_int_vm(VM *vm, VMValue v);
+static VMValue vm_stringify_ov(VM *vm, VMValue v);
 static double vm_to_num_vm(VM *vm, VMValue v);
 static int64_t vm_to_int_ov(VM *vm, VMValue v, int depth);
 static double vm_to_num_ov(VM *vm, VMValue v, int depth);
@@ -2717,6 +2719,15 @@ static void vm_sprintf_append_bin(char **result_p, size_t *rcap_p, size_t *rlen_
 }
 
 static StradaValue *vm_to_sv(VMValue v);
+/* A filesystem path containing a NUL byte names no file (the compiled
+ * runtime's strada_path_buf rule): such calls fail. */
+static int vm_path_has_nul(VMValue v) {
+    char nb[256];
+    size_t nl = 0;
+    const char *np = vm_bytes_view(v, nb, sizeof(nb), &nl);
+    return np && nl > 0 && memchr(np, 0, nl) != NULL;
+}
+
 static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
     if (argc < 1) return vm_str("");
     /* Plain scalar arguments (numbers, strings, undef): format with the
@@ -5209,6 +5220,15 @@ static int64_t vm_to_int_vm(VM *vm, VMValue v) {
             if (vm->has_pending_exc) return 0;
         } else break;
     }
+    /* an object with only a "" overload numifies its string (Perl) */
+    if (vm && vm->program && vm_obj_class_name(v) != NULL && vm_has_stringify(vm->program, v) &&
+        vm_resolve_overload_func(vm->program, vm_obj_class_name(v), "0+") < 0) {
+        VMValue sv_s = vm_stringify_ov(vm, v);
+        if (vm->has_pending_exc) return 0;
+        int64_t r_s = vm_to_int(sv_s);
+        vm_temp_free(&sv_s);
+        return r_s;
+    }
     if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY && vm) {
         VMArray *a = VM_AS_ARRAY(v);
         if (!VM_IS_UNDEF(a->tied_obj)) return vm_tied_array_fetchsize(vm, a->tied_obj);
@@ -5226,6 +5246,15 @@ static double vm_to_num_vm(VM *vm, VMValue v) {
             v = vm_tied_scalar_fetch(vm, v);
             if (vm->has_pending_exc) return 0.0;
         } else break;
+    }
+    /* an object with only a "" overload numifies its string (Perl) */
+    if (vm && vm->program && vm_obj_class_name(v) != NULL && vm_has_stringify(vm->program, v) &&
+        vm_resolve_overload_func(vm->program, vm_obj_class_name(v), "0+") < 0) {
+        VMValue sv_s = vm_stringify_ov(vm, v);
+        if (vm->has_pending_exc) return 0;
+        double r_s = vm_to_num(sv_s);
+        vm_temp_free(&sv_s);
+        return r_s;
     }
     if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY && vm) {
         VMArray *a = VM_AS_ARRAY(v);
@@ -6735,6 +6764,19 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 RELOAD();
                 for (int i = 0; i < argc; i++) vm_fh_sync_from_sv(args[i]);
                 for (int i = 0; i < argc; i++) strada_decref(sa[i]);
+                /* a write through an in-memory handle (open(\$buf, ...))
+                 * must reach the backing scalar */
+                for (int i = 0; i < argc && !threw; i++) {
+                    if (VM_IS_PTR(args[i]) && VM_PTR_TYPE(args[i]) == VM_OBJ_FILEHANDLE) {
+                        VMFileHandle *gfh = (VMFileHandle*)VM_TO_PTR(args[i]);
+                        if (gfh->is_mem == 2 && VM_IS_PTR(gfh->mem_sref)) {
+                            if (gfh->fp) fflush((FILE*)gfh->fp);
+                            vm->stack_top = sp;
+                            vm_fh_sync_mem_sref(vm, gfh);
+                            stack = vm->stack; RELOAD();
+                        }
+                    }
+                }
                 if (threw) {
                     for (int i = 0; i < argc; i++) {
                         if (VM_IS_PTR(args[i]) && (VM_PTR_TYPE(args[i]) == VM_OBJ_STR || VM_PTR_TYPE(args[i]) == VM_OBJ_STRBUF))
@@ -6843,14 +6885,15 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     break;
                 }
                 const char *path = vm_to_cstr(target, fbuf, 256);
-                /* Convert Perl-style modes */
+                /* Convert Perl-style modes (as strada_normalize_open_mode) */
                 const char *cmode = mode;
                 if (strcmp(mode, "<") == 0) cmode = "r";
                 else if (strcmp(mode, ">") == 0) cmode = "w";
                 else if (strcmp(mode, ">>") == 0) cmode = "a";
                 else if (strcmp(mode, "+<") == 0) cmode = "r+";
+                else if (strcmp(mode, "+>>") == 0) cmode = "a+";
                 else if (strcmp(mode, "+>") == 0) cmode = "w+";
-                FILE *fp = fopen(path, cmode);
+                FILE *fp = vm_path_has_nul(target) ? NULL : fopen(path, cmode);
                 if (fp) {
                     VMFileHandle *fh = calloc(1, sizeof(VMFileHandle));
                     vm_gc_init_hdr(&fh->hdr, VM_OBJ_FILEHANDLE);
@@ -6960,6 +7003,27 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 fp = (FILE*)fh->fp;
             }
             int64_t max_bytes = (argc >= 2 && !VM_IS_UNDEF(args[1])) ? vm_to_int(args[1]) : 0;
+            if (!fp && argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_NATIVE_SV) {
+                /* runtime socket / handle: the runtime's buffered line reader */
+                StradaValue *rsv = vm_to_sv(args[0]);
+                vm->stack_top = sp;
+                int _rl_safe = vm_worker_enter_safe(vm);
+                StradaValue *line;
+                if (max_bytes > 0) {
+                    StradaValue *mx = strada_new_int(max_bytes);
+                    line = strada_read_line_max(rsv, mx);
+                    strada_decref(mx);
+                } else {
+                    line = strada_read_line(rsv);
+                }
+                vm_worker_leave_safe(vm, _rl_safe);
+                strada_decref(rsv);
+                stack = vm->stack; RELOAD();
+                VMValue lv = line ? sv_to_vm(line) : VM_UNDEF_VAL;
+                if (line) strada_decref(line);
+                SP_PUSH(lv);
+                break;
+            }
             if (fp) {
                 size_t cap = 256, len = 0;
                 char *buf = malloc(cap);
@@ -7212,15 +7276,20 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             break;
         }
         case BUILTIN_CORE_SPEW: {
-            if (argc >= 2) {
+            /* 1 = written fully, 0 = failed (a path with a NUL byte fails) */
+            int spew_ok = 0;
+            if (argc >= 2 && !vm_path_has_nul(args[0])) {
                 char fbuf[256], dbuf[64];
                 size_t dlen = 0;
                 const char *path = vm_to_cstr(args[0], fbuf, sizeof(fbuf));
                 const char *data = vm_bytes_view(args[1], dbuf, sizeof(dbuf), &dlen);
                 FILE *fp = fopen(path, "wb");
-                if (fp) { fwrite(data, 1, dlen, fp); fclose(fp); }
+                if (fp) {
+                    spew_ok = (fwrite(data, 1, dlen, fp) == dlen);
+                    if (fclose(fp) != 0) spew_ok = 0;
+                }
             }
-            SP_PUSH(VM_UNDEF_VAL);
+            SP_PUSH(VM_MAKE_INT(spew_ok));
             break;
         }
         case BUILTIN_CORE_QX: {
@@ -7438,7 +7507,8 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                 StradaValue *fsv = vm_to_sv(args[0]);
                 StradaValue *dsv = vm_to_sv(args[1]);
                 vm->stack_top = sp;
-                strada_spew_fh(fsv, dsv);
+                if (argc >= 3 && vm_to_int(args[2]) == 1) strada_spew_fd(fsv, dsv);
+                else strada_spew_fh(fsv, dsv);
                 if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) vm_fh_sync_from_sv(args[0]);
                 strada_decref(fsv);
                 strada_decref(dsv);
@@ -7540,6 +7610,97 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     for (int i = 0; i < la->size; i++) vm_array_push(out, vm_val_copy(la->items[i]));
             }
             SP_PUSH(VM_MAKE_PTR(out));
+            break;
+        }
+        case BUILTIN_POLL: {
+            /* core::poll([{fd, events}, ...], $ms): VM-native so "revents"
+             * lands in the caller's hashes (the bridge would copy them) */
+            VMArray *pa = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            if (!pa) { SP_PUSH(VM_MAKE_INT(-1)); break; }
+            int pn = pa->size;
+            struct pollfd *pfds = calloc(pn > 0 ? (size_t)pn : 1, sizeof(struct pollfd));
+            if (!pfds) { SP_PUSH(VM_MAKE_INT(-1)); break; }
+            for (int i = 0; i < pn; i++) {
+                VMValue ev = pa->items[i];
+                pfds[i].fd = -1;
+                if (!VM_IS_PTR(ev) || VM_PTR_TYPE(ev) != VM_OBJ_HASH) continue;
+                VMValue fv = vm_hash_get(VM_AS_HASH(ev), "fd");
+                VMValue evv = vm_hash_get(VM_AS_HASH(ev), "events");
+                if (VM_IS_ANY_INT(fv)) {
+                    pfds[i].fd = (int)VM_ANY_INT_VAL(fv);
+                } else if (!VM_IS_UNDEF(fv)) {
+                    StradaValue *fsv = vm_to_sv(fv);
+                    int pfd = -1;
+                    if (fsv && !STRADA_IS_TAGGED_INT(fsv) && fsv->type == STRADA_SOCKET && fsv->value.sock) pfd = fsv->value.sock->fd;
+                    else if (fsv && !STRADA_IS_TAGGED_INT(fsv) && fsv->type == STRADA_FILEHANDLE && fsv->value.fh) pfd = fileno(fsv->value.fh);
+                    else pfd = (int)strada_to_int(fsv);
+                    strada_decref(fsv);
+                    pfds[i].fd = pfd;
+                }
+                pfds[i].events = VM_IS_UNDEF(evv) ? POLLIN : (short)vm_to_int(evv);
+            }
+            int tmo = argc >= 2 ? (int)vm_to_int(args[1]) : -1;
+            vm->stack_top = sp;
+            int prc;
+            do { prc = poll(pfds, (nfds_t)pn, tmo); } while (prc < 0 && errno == EINTR);
+            for (int i = 0; i < pn; i++) {
+                VMValue ev = pa->items[i];
+                if (VM_IS_PTR(ev) && VM_PTR_TYPE(ev) == VM_OBJ_HASH)
+                    vm_hash_set(VM_AS_HASH(ev), "revents", VM_MAKE_INT(pfds[i].revents));
+            }
+            free(pfds);
+            SP_PUSH(VM_MAKE_INT(prc));
+            break;
+        }
+        case BUILTIN_STRUCT_FIELD_STORE: {
+            int64_t sk = argc >= 2 ? vm_to_int(args[1]) : 0;
+            VMValue sv0 = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            if (sk == 1) {
+                SP_PUSH(VM_MAKE_INT((int64_t)(int32_t)(uint32_t)(uint64_t)vm_to_int(sv0)));
+            } else if (sk == 2) {
+                SP_PUSH(VM_MAKE_FLOAT(vm_to_num(sv0)));
+            } else if (sk == 3) {
+                char sb[256];
+                size_t sl = 0;
+                const char *sp0 = vm_bytes_view(sv0, sb, sizeof(sb), &sl);
+                size_t keep = sl > 63 ? 63 : sl;
+                const char *nul = sp0 ? memchr(sp0, 0, keep) : NULL;
+                if (nul) keep = (size_t)(nul - sp0);
+                SP_PUSH(vm_make_str_flag(sp0 ? sp0 : "", keep, vm_is_utf8(sv0)));
+            } else {
+                SP_PUSH(vm_val_copy(sv0));
+            }
+            break;
+        }
+        case BUILTIN_FE_WRITEBACK: {
+            if (argc >= 3 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *wa = VM_AS_ARRAY(args[0]);
+                int64_t wi = vm_to_int(args[1]);
+                if (VM_IS_UNDEF(wa->tied_obj) && wi >= 0 && wi < wa->size) {
+                    VMValue nv = vm_val_copy(args[2]);
+                    vm_val_free(&wa->items[wi]);
+                    wa->items[wi] = nv;
+                    if (wa->holes) wa->holes[wi] = 0;
+                }
+            }
+            SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+        case BUILTIN_INCR_VALUE: {
+            VMValue iv0 = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            int64_t idelta = argc >= 2 ? vm_to_int(args[1]) : 1;
+            if (VM_IS_INT(iv0)) {
+                SP_PUSH(VM_MAKE_INT(VM_INT_VAL(iv0) + idelta));
+            } else if (VM_IS_FLOAT(iv0)) {
+                SP_PUSH(VM_MAKE_FLOAT(VM_FLOAT_VAL(iv0) + (double)idelta));
+            } else {
+                /* strings (magic ++), undef, big ints: the runtime's rules */
+                StradaValue *isv = vm_to_sv(iv0);
+                StradaValue *inr = strada_inc_value(isv, idelta);
+                strada_decref(isv);
+                SP_PUSH(inr ? sv_to_vm(inr) : VM_UNDEF_VAL);
+                if (inr) strada_decref(inr);
+            }
             break;
         }
         case BUILTIN_HASH_FLAT: {
@@ -7919,6 +8080,19 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             break;
         }
         case BUILTIN_RANGE: {
+            if (argc >= 2 && VM_IS_PTR(args[0]) &&
+                (VM_PTR_TYPE(args[0]) == VM_OBJ_STR || VM_PTR_TYPE(args[0]) == VM_OBJ_STRBUF)) {
+                /* "a".."e" / "x".."ab": the runtime's string range (Perl);
+                 * numeric strings still give numbers */
+                StradaValue *ra = vm_to_sv(args[0]);
+                StradaValue *rb = vm_to_sv(args[1]);
+                StradaValue *rr = strada_range(ra, rb);
+                strada_decref(ra);
+                strada_decref(rb);
+                SP_PUSH(rr ? sv_to_vm(rr) : VM_MAKE_PTR(vm_array_new(0)));
+                if (rr) strada_decref(rr);
+                break;
+            }
             if (argc >= 2) {
                 int64_t from = vm_to_int(args[0]);
                 int64_t to = vm_to_int(args[1]);
@@ -9474,6 +9648,28 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             if (cf >= 0) {
                 VMValue r = vm_tied_array_call(vm, tobj, cf, NULL, 0);
                 vm_temp_free(&r);
+            } else if (tkind == 1) {
+                /* no CLEAR (as strada_tied_hash_clear): DELETE every key from
+                 * FIRSTKEY/NEXTKEY, else empty the tie object's own hash */
+                int df = vm_tied_array_find_method(vm, tobj, "DELETE");
+                int has_fk = 0;
+                VMArray *tk = (df >= 0) ? vm_tied_hash_collect_keys(vm, tobj, &has_fk) : NULL;
+                if (df >= 0 && has_fk && tk && !vm->has_pending_exc) {
+                    for (int ki = 0; ki < tk->size && !vm->has_pending_exc; ki++) {
+                        VMValue kv = tk->items[ki];
+                        VMValue r = vm_tied_array_call(vm, tobj, df, &kv, 1);
+                        vm_temp_free(&r);
+                    }
+                } else if (VM_IS_PTR(tobj) && VM_PTR_TYPE(tobj) == VM_OBJ_HASH) {
+                    VMHash *oh = VM_AS_HASH(tobj);
+                    for (int hi = 0; hi < oh->capacity; hi++) {
+                        if (oh->entries[hi].occupied == 1) {
+                            key_free_entry(&oh->entries[hi]);
+                            vm_val_free(&oh->entries[hi].value);
+                        }
+                    }
+                    vm_hash_reset_storage(oh);
+                }
             } else if (tkind == 2) {
                 int ssf = vm_tied_array_find_method(vm, tobj, "STORESIZE");
                 VMValue z = VM_MAKE_INT(0);
@@ -9613,9 +9809,11 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
 
         /* === CStruct === */
         case BUILTIN_CORE_CSTRUCT_NEW: {
+            /* cstruct_new($size) or cstruct_new($name, $size) */
             char nbuf[256];
-            const char *name = vm_to_cstr(args[0], nbuf, 256);
-            size_t sz = (size_t)vm_to_int(args[1]);
+            const char *name = argc >= 2 ? vm_to_cstr(args[0], nbuf, 256) : "struct";
+            int64_t szi = argc >= 2 ? vm_to_int(args[1]) : (argc == 1 ? vm_to_int(args[0]) : 1);
+            size_t sz = (size_t)(szi > 0 ? szi : 1);
             StradaValue *r = strada_cstruct_new(name, sz);
             SP_PUSH(sv_to_vm(r)); strada_decref(r);
             break;
@@ -9629,49 +9827,49 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         case BUILTIN_CORE_CSTRUCT_SET_INT: {
             /* cstruct_set_int(sv, field, offset, value) */
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
-            strada_cstruct_set_int(s, field, off, vm_to_int(args[3]));
+            char fbuf[256]; int cs_short = (argc == 3); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
+            strada_cstruct_set_int(s, field, off, vm_to_int(args[cs_short ? 2 : 3]));
             SP_PUSH(VM_UNDEF_VAL); strada_decref(s);
             break;
         }
         case BUILTIN_CORE_CSTRUCT_GET_INT: {
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
+            char fbuf[256]; int cs_short = (argc == 2); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
             int64_t r = strada_cstruct_get_int(s, field, off);
             SP_PUSH(VM_MAKE_INT(r)); strada_decref(s);
             break;
         }
         case BUILTIN_CORE_CSTRUCT_SET_STRING: {
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
-            char vbuf[4096]; const char *val = vm_to_cstr(args[3], vbuf, 4096);
+            char fbuf[256]; int cs_short = (argc == 3); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
+            char vbuf[4096]; const char *val = vm_to_cstr(args[cs_short ? 2 : 3], vbuf, 4096);
             strada_cstruct_set_string(s, field, off, val);
             SP_PUSH(VM_UNDEF_VAL); strada_decref(s);
             break;
         }
         case BUILTIN_CORE_CSTRUCT_GET_STRING: {
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
+            char fbuf[256]; int cs_short = (argc == 2); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
             char *r = strada_cstruct_get_string(s, field, off);
             SP_PUSH(r ? vm_str(r) : VM_UNDEF_VAL); strada_decref(s);
             break;
         }
         case BUILTIN_CORE_CSTRUCT_SET_DOUBLE: {
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
-            strada_cstruct_set_double(s, field, off, vm_to_num(args[3]));
+            char fbuf[256]; int cs_short = (argc == 3); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
+            strada_cstruct_set_double(s, field, off, vm_to_num(args[cs_short ? 2 : 3]));
             SP_PUSH(VM_UNDEF_VAL); strada_decref(s);
             break;
         }
         case BUILTIN_CORE_CSTRUCT_GET_DOUBLE: {
             StradaValue *s = vm_to_sv(args[0]);
-            char fbuf[256]; const char *field = vm_to_cstr(args[1], fbuf, 256);
-            size_t off = (size_t)vm_to_int(args[2]);
+            char fbuf[256]; int cs_short = (argc == 2); const char *field = cs_short ? "" : vm_to_cstr(args[1], fbuf, 256);
+            size_t off = (size_t)vm_to_int(args[cs_short ? 1 : 2]);
             double r = strada_cstruct_get_double(s, field, off);
             VM_PUSH_DOUBLE(sp, r); strada_decref(s);
             break;
@@ -11514,6 +11712,20 @@ static __attribute__((noinline)) int vm_jit_incr_decr_slow(VM *vm, const VMInsn 
     VMValue old = *islot;
     if (VM_IS_ANY_INT(old)) {
         *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(old) + (is_dec ? -1ULL : 1ULL)));
+    } else if (!is_dec && VM_IS_PTR(old) && (VM_PTR_TYPE(old) == VM_OBJ_STR || VM_PTR_TYPE(old) == VM_OBJ_STRBUF)) {
+        /* magic string ++ (as the interpreter loop) */
+        StradaValue *isv = vm_to_sv(old);
+        StradaValue *inr = strada_inc_value(isv, 1);
+        strada_decref(isv);
+        *islot = inr ? sv_to_vm(inr) : VM_UNDEF_VAL;
+        if (inr) strada_decref(inr);
+        if (is_post) {
+            if (vm->stack_top >= vm->stack_cap) vm_stack_grow(vm, vm->stack_top);
+            vm->stack[vm->stack_top++] = old;   /* the old string moves to the stack */
+        } else {
+            vm_temp_free(&old);
+        }
+        return VM_JIT_OK;
     } else {
         double n = vm_to_num(old) + (is_dec ? -1.0 : 1.0);
         int was_float = VM_IS_FLOAT(old);
@@ -15924,6 +16136,16 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         }
         if (VM_IS_ANY_INT(*islot)) {
             *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(*islot) + 1ULL));
+        } else if (VM_IS_PTR(*islot) && (VM_PTR_TYPE(*islot) == VM_OBJ_STR || VM_PTR_TYPE(*islot) == VM_OBJ_STRBUF)) {
+            /* Perl's magic string increment ("az"++ is "ba") and numeric
+             * strings, via the runtime's strada_inc_value */
+            StradaValue *isv = vm_to_sv(*islot);
+            StradaValue *inr = strada_inc_value(isv, 1);
+            strada_decref(isv);
+            VMValue old = *islot;
+            *islot = inr ? sv_to_vm(inr) : VM_UNDEF_VAL;
+            if (inr) strada_decref(inr);
+            vm_temp_free(&old);
         } else {
             /* Coerce undef/float/string instead of corrupting the pointer with += 2. */
             double n = vm_to_num(*islot) + 1.0;
@@ -16025,6 +16247,13 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue old = *islot;
         if (VM_IS_ANY_INT(old)) {
             *islot = VM_MAKE_INT((int64_t)((uint64_t)VM_ANY_INT_VAL(old) + 1ULL));
+        } else if (VM_IS_PTR(old) && (VM_PTR_TYPE(old) == VM_OBJ_STR || VM_PTR_TYPE(old) == VM_OBJ_STRBUF)) {
+            /* magic string ++; the old string moves to the stack */
+            StradaValue *isv = vm_to_sv(old);
+            StradaValue *inr = strada_inc_value(isv, 1);
+            strada_decref(isv);
+            *islot = inr ? sv_to_vm(inr) : VM_UNDEF_VAL;
+            if (inr) strada_decref(inr);
         } else {
             double n = vm_to_num(old) + 1.0;
             int was_float = VM_IS_FLOAT(old);
@@ -19401,10 +19630,36 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
                 DISPATCH();
             }
         }
+        if (__builtin_expect(vm_obj_class_name(v) != NULL, 0)) {
+            /* no "neg": -$obj is 0 - $obj through an overloaded "-" */
+            VMValue _sub_res = VM_UNDEF_VAL;
+            frame->ip = ip; vm->stack_top = sp;
+            if (vm_try_bin_overload(vm, "-", VM_MAKE_INT(0), v, &_sub_res)) {
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_vm_throw_exc;
+                }
+                vm_temp_free(&v);
+                SP_PUSH(_sub_res);
+                DISPATCH();
+            }
+            stack = vm->stack; RELOAD();
+        }
         if (__builtin_expect(VM_IS_INT(v), 1)) { SP_PUSH(VM_MAKE_INT(-VM_INT_VAL(v))); DISPATCH(); }
         if (__builtin_expect(VM_IS_FLOAT(v), 1)) { SP_PUSH(VM_MAKE_FLOAT(-VM_FLOAT_VAL(v))); DISPATCH(); }
         if (VM_IS_ANY_INT(v)) {
             SP_PUSH(VM_MAKE_INT((int64_t)(0ULL - (uint64_t)VM_ANY_INT_VAL(v))));
+        } else if (VM_IS_PTR(v) && (VM_PTR_TYPE(v) == VM_OBJ_STR || VM_PTR_TYPE(v) == VM_OBJ_STRBUF)) {
+            /* Perl string negation: -"foo" is "-foo", -"-foo" is "+foo",
+             * numeric strings negate numerically (strada_negate) */
+            StradaValue *nsv = vm_to_sv(v);
+            StradaValue *nres = strada_negate(nsv);
+            strada_decref(nsv);
+            VMValue nvv = nres ? sv_to_vm(nres) : VM_UNDEF_VAL;
+            if (nres) strada_decref(nres);
+            vm_temp_free(&v);
+            SP_PUSH(nvv);
         } else if (VM_IS_PTR(v)) {
             frame->ip = ip; vm->stack_top = sp;
             vm->gc_pause++;
@@ -19537,7 +19792,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             }
             case VM_OBJ_SREF: {
                 VMScalarRef *sr = VM_AS_SREF(v);
-                SP_PUSH(vm_str(sr->class_name ? sr->class_name : "SCALAR"));
+                if (sr->class_name) { SP_PUSH(vm_str(sr->class_name)); break; }
+                /* a reference to a variable holding a reference is "REF" (Perl) */
+                VMValue stv = VM_UNDEF_VAL;
+                if (sr->global_name) stv = vm_globals_get(vm, sr->global_name);
+                else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) stv = VM_AS_CELL(sr->cell)->val;
+                int is_refval = 0;
+                if (VM_IS_PTR(stv)) {
+                    enum VMObjType stt = VM_PTR_TYPE(stv);
+                    is_refval = (stt == VM_OBJ_ARRAY || stt == VM_OBJ_HASH || stt == VM_OBJ_CLOSURE ||
+                                 stt == VM_OBJ_SREF || stt == VM_OBJ_WEAKREF);
+                }
+                SP_PUSH(vm_str(is_refval ? "REF" : "SCALAR"));
                 break;
             }
             case VM_OBJ_NATIVE_SV: {

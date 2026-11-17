@@ -1106,6 +1106,9 @@ func ast_new_method_call(scalar $object, str $method) scalar {
     my scalar $node = ast_new_node(NODE_METHOD_CALL());
     my array @args = ();
     $node->{"object"} = $object;
+    # the receiver; the parser overrides it for `$x->m()` (where "object" is
+    # the field-access node), synthesized calls rely on this default
+    $node->{"base_object"} = $object;
     $node->{"method"} = $method;
     $node->{"args"} = \@args;
     $node->{"arg_count"} = 0;

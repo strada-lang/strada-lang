@@ -113,7 +113,7 @@ func main() int {
         my scalar $wsr = \$wstrong;
         core::weaken($wsr);
         my scalar $dc_sr = clone($wsr);
-        my int $v8_wk = (ref($dc_w) eq "HASH" && $dc_w->{"x"} == 88 && ref($dc_sr) eq "SCALAR" && $$dc_sr->{"y"} == 99) ? 1 : 0;
+        my int $v8_wk = (ref($dc_w) eq "HASH" && $dc_w->{"x"} == 88 && ref($dc_sr) eq "REF" && $$dc_sr->{"y"} == 99) ? 1 : 0;
 
         ($v1_ok == 1 && $v3_ok == 1 && $v4_ok == 1 && $v7_ok == 1 &&
          $v8_tarr == 1 && $v8_dc == 1 && $v8_wk == 1) ? 1 : 0;
