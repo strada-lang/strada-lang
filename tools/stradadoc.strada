@@ -126,28 +126,41 @@ func word_wrap(str $text, int $width, int $indent) str {
     return $result;
 }
 
+# Colours only on a terminal, and never with NO_COLOR set
+func use_color() int {
+    if (length(core::getenv("NO_COLOR")) > 0) { return 0; }
+    if (core::isatty(1)) { return 1; }
+    return 0;
+}
+
 # ANSI color codes - use chr(27) for escape character
 func color_bold() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[1m";
 }
 
 func color_underline() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[4m";
 }
 
 func color_reset() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[0m";
 }
 
 func color_cyan() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[36m";
 }
 
 func color_yellow() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[33m";
 }
 
 func color_green() str {
+    if (use_color() == 0) { return ""; }
     return chr(27) . "[32m";
 }
 
@@ -247,7 +260,30 @@ func extract_pod(str $filepath) str {
     return $pod;
 }
 
-# Format POD inline elements: B<bold>, I<italic>, C<code>, L<link>, F<file>
+# POD E<...> escape: named (lt gt verbar sol amp quot apos) or numeric
+func pod_entity(str $name) str {
+    if ($name eq "lt") { return "<"; }
+    if ($name eq "gt") { return ">"; }
+    if ($name eq "verbar") { return "|"; }
+    if ($name eq "sol") { return "/"; }
+    if ($name eq "amp") { return "&"; }
+    if ($name eq "quot") { return "\""; }
+    if ($name eq "apos") { return "'"; }
+    if (length($name) > 2 && (substr($name, 0, 2) eq "0x" || substr($name, 0, 2) eq "0X")) {
+        return chr(hex(substr($name, 2, length($name) - 2)));
+    }
+    if ($name =~ /^[0-9]+$/) { return chr($name + 0); }
+    return "E<" . $name . ">";
+}
+
+func pod_is_code(str $c) int {
+    if ($c eq "B" || $c eq "I" || $c eq "C" || $c eq "L" || $c eq "F" || $c eq "E" || $c eq "S" || $c eq "X" || $c eq "Z") { return 1; }
+    return 0;
+}
+
+# Format POD inline elements: B<bold>, I<italic>, C<code>, L<link>, F<file>,
+# E<escape>, S<nbsp>, X<index>, Z<null>; single (C<x>) and multiple
+# (C<< x >>) angle-bracket delimiters; codes nest.
 func format_pod_inline(str $text) str {
     my str $result = "";
     my int $len = length($text);
@@ -255,48 +291,65 @@ func format_pod_inline(str $text) str {
 
     while ($i < $len) {
         my str $ch = substr($text, $i, 1);
-
-        # Check for B<...>, I<...>, C<...>, L<...>, F<...>
-        if ($i + 2 < $len && substr($text, $i + 1, 1) eq "<") {
-            my str $code = $ch;
-            if ($code eq "B" || $code eq "I" || $code eq "C" || $code eq "L" || $code eq "F") {
-                # Find matching >
+        if ($i + 2 < $len && substr($text, $i + 1, 1) eq "<" && pod_is_code($ch) == 1) {
+            my int $nb = 0;
+            while ($i + 1 + $nb < $len && substr($text, $i + 1 + $nb, 1) eq "<") { $nb = $nb + 1; }
+            my str $content = "";
+            my int $end = -1;
+            if ($nb >= 2 && $i + 1 + $nb < $len && (substr($text, $i + 1 + $nb, 1) eq " " || substr($text, $i + 1 + $nb, 1) eq "\t")) {
+                # C<< content >>: ends at whitespace + the same number of '>'
+                my str $closer = " " . (">" x $nb);
+                my int $cpos = index($text, $closer, $i + 1 + $nb);
+                if ($cpos >= 0) {
+                    $content = substr($text, $i + 1 + $nb, $cpos - ($i + 1 + $nb));
+                    $content =~ s/^\s+//;
+                    $content =~ s/\s+$//;
+                    $end = $cpos + length($closer);
+                }
+            } else {
+                # single brackets: the first '>' not closing a nested code
                 my int $depth = 1;
-                my int $end = $i + 2;
-                while ($end < $len && $depth > 0) {
-                    my str $c = substr($text, $end, 1);
-                    if ($c eq "<") {
+                my int $j = $i + 2;
+                while ($j < $len && $depth > 0) {
+                    my str $c = substr($text, $j, 1);
+                    if ($c eq "<" && $j > 0 && pod_is_code(substr($text, $j - 1, 1)) == 1) {
                         $depth = $depth + 1;
                     } elsif ($c eq ">") {
                         $depth = $depth - 1;
                     }
-                    $end = $end + 1;
+                    $j = $j + 1;
                 }
-
                 if ($depth == 0) {
-                    my str $content = substr($text, $i + 2, $end - $i - 3);
-
-                    if ($code eq "B") {
-                        $result = $result . color_bold() . $content . color_reset();
-                    } elsif ($code eq "I") {
-                        $result = $result . color_underline() . $content . color_reset();
-                    } elsif ($code eq "C" || $code eq "F") {
-                        $result = $result . color_cyan() . $content . color_reset();
-                    } elsif ($code eq "L") {
-                        # For links, just show the text (could be Module::Name or "text|url")
-                        if ($content =~ /\|/) {
-                            my array @parts = split("\\|", $content);
-                            $result = $result . color_underline() . $parts[0] . color_reset();
-                        } else {
-                            $result = $result . color_underline() . $content . color_reset();
-                        }
-                    }
-                    $i = $end;
-                    next;
+                    $content = substr($text, $i + 2, $j - $i - 3);
+                    $end = $j;
                 }
             }
+            if ($end >= 0) {
+                if ($ch eq "E") {
+                    $result = $result . pod_entity($content);
+                } elsif ($ch eq "X" || $ch eq "Z") {
+                    # index entry / null: no output
+                } else {
+                    my str $inner = format_pod_inline($content);
+                    if ($ch eq "B") {
+                        $result = $result . color_bold() . $inner . color_reset();
+                    } elsif ($ch eq "I") {
+                        $result = $result . color_underline() . $inner . color_reset();
+                    } elsif ($ch eq "C" || $ch eq "F") {
+                        $result = $result . color_cyan() . $inner . color_reset();
+                    } elsif ($ch eq "S") {
+                        $result = $result . $inner;
+                    } elsif ($ch eq "L") {
+                        my str $ltext = $inner;
+                        my int $bar = index($ltext, "|");
+                        if ($bar >= 0) { $ltext = substr($ltext, 0, $bar); }
+                        $result = $result . color_underline() . $ltext . color_reset();
+                    }
+                }
+                $i = $end;
+                next;
+            }
         }
-
         $result = $result . $ch;
         $i = $i + 1;
     }

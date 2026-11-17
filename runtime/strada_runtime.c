@@ -29871,6 +29871,11 @@ StradaValue* strada_stat(StradaValue *path_val) {
     strada_hash_set_take(hash->value.hv, "size", strada_new_int(st.st_size));
     strada_hash_set_take(hash->value.hv, "atime", strada_new_int(st.st_atime));
     strada_hash_set_take(hash->value.hv, "mtime", strada_new_int(st.st_mtime));
+#if defined(__APPLE__)
+    strada_hash_set_take(hash->value.hv, "mtime_ns", strada_new_int((int64_t)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec));
+#else
+    strada_hash_set_take(hash->value.hv, "mtime_ns", strada_new_int((int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec));
+#endif
     strada_hash_set_take(hash->value.hv, "ctime", strada_new_int(st.st_ctime));
     strada_hash_set_take(hash->value.hv, "blksize", strada_new_int(st.st_blksize));
     strada_hash_set_take(hash->value.hv, "blocks", strada_new_int(st.st_blocks));
@@ -29896,6 +29901,11 @@ StradaValue* strada_lstat(StradaValue *path_val) {
     strada_hash_set_take(hash->value.hv, "size", strada_new_int(st.st_size));
     strada_hash_set_take(hash->value.hv, "atime", strada_new_int(st.st_atime));
     strada_hash_set_take(hash->value.hv, "mtime", strada_new_int(st.st_mtime));
+#if defined(__APPLE__)
+    strada_hash_set_take(hash->value.hv, "mtime_ns", strada_new_int((int64_t)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec));
+#else
+    strada_hash_set_take(hash->value.hv, "mtime_ns", strada_new_int((int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec));
+#endif
     strada_hash_set_take(hash->value.hv, "ctime", strada_new_int(st.st_ctime));
     strada_hash_set_take(hash->value.hv, "blksize", strada_new_int(st.st_blksize));
     strada_hash_set_take(hash->value.hv, "blocks", strada_new_int(st.st_blocks));
@@ -32672,6 +32682,21 @@ StradaValue* strada_fnmatch(StradaValue *pattern_val, StradaValue *string_val) {
 }
 
 /* File extension helper */
+/* Modification time in nanoseconds, -1 if the file does not exist. The
+ * compiler's artifact freshness check uses it (it is callable from the
+ * compiler sources as a bare builtin, see strada_read_meta_section). */
+StradaValue* strada_file_mtime_ns(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *p = strada_path_buf(path_val, _tb, sizeof(_tb));
+    struct stat st;
+    if (stat(p, &st) != 0) return strada_new_int(-1);
+#if defined(__APPLE__)
+    return strada_new_int((int64_t)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec);
+#else
+    return strada_new_int((int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec);
+#endif
+}
+
 StradaValue* strada_file_ext(StradaValue *path_val) {
     char _tb[PATH_MAX];
     const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));

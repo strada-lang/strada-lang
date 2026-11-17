@@ -56,6 +56,7 @@ our int $REPL_MODE = 0;
 our str $SCRIPT_FILE = "";
 our int $DOC_MODE = 0;
 our str $DOC_TOPIC = "";
+our array @DOC_ARGS = ();
 
 our array @LIB_PATHS = ();
 our array @LIB_PATHS_LOW = ();
@@ -259,6 +260,34 @@ func strip_strada_ext(str $p) str {
 }
 
 # Pull a "__MARKER__: a b c */" payload out of the generated C, or "" if absent.
+# Modification time in nanoseconds (-1 if missing); see artifact_is_fresh
+func mtime_ns(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) { return -1; }
+    return $st->{"mtime_ns"} + 0;   # core::stat's nanosecond mtime
+}
+
+# Undo the compiler's marker_path_encode (%25 %20 %09 %2A).
+func marker_path_decode(str $p) str {
+    if (index($p, "%") < 0) { return $p; }
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($p);
+    while ($i < $n) {
+        my str $c = substr($p, $i, 1);
+        if ($c eq "%" && $i + 2 < $n) {
+            my str $h = substr($p, $i + 1, 2);
+            if ($h eq "25") { $out = $out . "%"; $i = $i + 3; next; }
+            if ($h eq "20") { $out = $out . " "; $i = $i + 3; next; }
+            if ($h eq "09") { $out = $out . "\t"; $i = $i + 3; next; }
+            if ($h eq "2A") { $out = $out . "*"; $i = $i + 3; next; }
+        }
+        $out = $out . $c;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
 func marker_payload(str $content, str $marker) str {
     my int $pos = index($content, $marker);
     if ($pos < 0) { return ""; }
@@ -512,12 +541,13 @@ func parse_args(array @av) void {
         elsif ($a eq "--script") { $SCRIPT_FILE = need_arg(@av, $i, $n, $a); $i = $i + 2; }
         elsif (sw($a, "--compiler=") || $a eq "--chunked") { @JIT_PASSTHROUGH = (@JIT_PASSTHROUGH, $a); $i = $i + 1; }
         elsif ($a eq "--doc") {
+            # everything after --doc belongs to stradadoc (topic and its own
+            # options such as --list / --raw)
             $DOC_MODE = 1;
-            if ($i + 1 < $n && !sw($av[$i + 1], "-")) {
-                $DOC_TOPIC = $av[$i + 1];
-                $i = $i + 2;
-            } else {
-                $DOC_TOPIC = "";
+            $DOC_TOPIC = "";
+            $i = $i + 1;
+            while ($i < $n) {
+                @DOC_ARGS = (@DOC_ARGS, $av[$i]);
                 $i = $i + 1;
             }
         }
@@ -695,6 +725,7 @@ func handle_doc() void {
     }
     my array @cmd = ($docbin);
     if (length($DOC_TOPIC) > 0) { @cmd = (@cmd, $DOC_TOPIC); }
+    @cmd = (@cmd, @DOC_ARGS);
     @cmd = (@cmd, @POSITIONAL);
     exec_or_run(@cmd);
 }
@@ -1207,6 +1238,15 @@ func main() int {
     my str $cache_dir = "";
     my str $cache_key = "";
     my str $deps_file = "";
+    # The define-set key namespaces cached artifacts. Always set (empty
+    # without -D): the compiler also consults a user-set
+    # STRADA_MODULE_CACHE_DIR without --module-cache, and must never pick an
+    # artifact built with a different define set.
+    if (size(@PP_DEFINES) > 0) {
+        my str $sorted0 = core::qx("printf '%s\\n' " . join(" ", map { sq($_) } @PP_DEFINES) . " | sort | md5sum | cut -c1-12");
+        $cache_key = trim($sorted0);
+    }
+    core::setenv("STRADA_MODULE_CACHE_KEY", $cache_key);
     if ($MODULE_CACHE == 1) {
         $cache_dir = env("STRADA_MODULE_CACHE_DIR");
         if (length($cache_dir) == 0) {
@@ -1215,11 +1255,6 @@ func main() int {
             $cache_dir = $xdg . "/strada/modules";
         }
         core::setenv("STRADA_MODULE_CACHE_DIR", $cache_dir);
-        if (size(@PP_DEFINES) > 0) {
-            my str $sorted = core::qx("printf '%s\\n' " . join(" ", map { sq($_) } @PP_DEFINES) . " | sort | md5sum | cut -c1-12");
-            $cache_key = trim($sorted);
-        }
-        core::setenv("STRADA_MODULE_CACHE_KEY", $cache_key);
         $deps_file = mkdtemp_tracked("/tmp/strada_deps_XXXXXX") . "/deps";
         core::setenv("STRADA_DEPS_OUT", $deps_file);
         @CLEANUP = (@CLEANUP, $deps_file);
@@ -1297,7 +1332,7 @@ func main() int {
     my str $objs = marker_payload($gen, "__STRADA_OBJECT_FILES__" . $COLON);
     if (length($objs) > 0) {
         info("import_object files: " . $objs);
-        my array @ofiles = split_ws($objs);
+        my array @ofiles = map { marker_path_decode($_) } split_ws($objs);
         my int $of = 0;
         while ($of < size(@ofiles)) {
             if (!(-f $ofiles[$of])) { error("import_object: object file not found: " . $ofiles[$of]); }
@@ -1310,7 +1345,7 @@ func main() int {
     my str $archs = marker_payload($gen, "__STRADA_ARCHIVE_FILES__" . $COLON);
     if (length($archs) > 0) {
         info("import_archive files: " . $archs);
-        my array @afiles = split_ws($archs);
+        my array @afiles = map { marker_path_decode($_) } split_ws($archs);
         my int $af = 0;
         while ($af < size(@afiles)) {
             if (!(-f $afiles[$af])) { error("import_archive: archive file not found: " . $afiles[$af]); }
@@ -1745,6 +1780,8 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         @cc3 = (@cc3, "-I" . $RUNTIME_DIR);
         if (run_argv(@cc3) != 0) { error("Runtime compilation failed"); }
         info("Creating archive " . $output);
+        # a fresh archive: `ar rcs` into an existing one keeps old members
+        if (-f $output) { core::unlink($output); }
         my array @arcmd = ("ar", "rcs", $output, $objf, $rtobj);
         my hash %seen_arc = ();
         $seen_arc{$output} = 1;
@@ -1925,6 +1962,7 @@ func tcc_compile_obj(str $cfile, int $pic, array @include_flags) str {
     @CLEANUP = (@CLEANUP, $tccobj);
     my array @cmd = ("tcc", "-c", $cfile);
     if ($pic == 1) { @cmd = (@cmd, "-fPIC"); }
+    if ($DEBUG_SYMBOLS == 1) { @cmd = (@cmd, "-g"); }
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
     @cmd = (@cmd, @include_flags);
     @cmd = (@cmd, "-o");
@@ -2027,9 +2065,11 @@ func warm_module_cache(str $deps_file, str $cache_dir, str $cache_key) void {
         if (length($cache_key) > 0) { $cache_o = $cache_dir . "/" . $cache_key . $real . ".o"; }
         else { $cache_o = $cache_dir . $real . ".o"; }
         # Skip when a fresh artifact already exists (sibling or cached).
-        if ((-f $sibo) && core::file_mtime($dep) <= core::file_mtime($sibo)
+        # at least as new as the source, to the nanosecond (see
+        # artifact_is_fresh in the compiler)
+        if ((-f $sibo) && mtime_ns($dep) <= mtime_ns($sibo)
             && core::file_mtime($STRADAC) <= core::file_mtime($sibo)) { next; }
-        if ((-f $cache_o) && core::file_mtime($dep) <= core::file_mtime($cache_o)
+        if ((-f $cache_o) && mtime_ns($dep) <= mtime_ns($cache_o)
             && core::file_mtime($STRADAC) <= core::file_mtime($cache_o)) { next; }
         my array @mk = ("mkdir", "-p", dirname_of($cache_o));
         run_argv(@mk);

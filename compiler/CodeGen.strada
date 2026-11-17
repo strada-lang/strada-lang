@@ -7307,6 +7307,7 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::dl_error"} = 1;
     $owned_set{"sys::dl_call_export_info"} = 1;
     $owned_set{"strada_read_meta_section"} = 1;
+    $owned_set{"strada_file_mtime_ns"} = 1;
     $owned_set{"strada_call_named_guarded"} = 1;
     $owned_set{"sys::dl_call_version"} = 1;
     $owned_set{"sys::int_ptr"} = 1;

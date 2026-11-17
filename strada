@@ -8,10 +8,18 @@
 # directory and source config.sh, then hand off. `make install` rewrites the
 # STRADA_HOME / STRADA_BIN defaults below to the install layout.
 #
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks (a `strada` symlinked into ~/bin must still find the
+# driver beside the real script); portable, no `readlink -f`.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in /*) ;; *) SELF="$LINK_DIR/$SELF" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 STRADA_HOME="${STRADA_HOME:-$SCRIPT_DIR}"
 STRADA_BIN="${STRADA_BIN:-$SCRIPT_DIR}"
 [ -f "$STRADA_HOME/config.sh" ] && . "$STRADA_HOME/config.sh"
 export STRADA_HOME STRADA_BIN
-export STRADA_SHIM="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+export STRADA_SHIM="$SCRIPT_DIR/$(basename "$SELF")"
 exec "$STRADA_BIN/strada-driver" "$@"

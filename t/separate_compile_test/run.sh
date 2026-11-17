@@ -584,6 +584,37 @@ else
 fi
 cd "$WORK/proj"
 
+# --- Test 23: artifact + source dependency, same-second edits, odd paths ----
+# (audit c20 M2j) A precompiled Foo.o that calls a source-only Bar links (no
+# `static inline` when artifacts are linked); an edit to Foo in the same
+# second as Foo.o is not hidden by the artifact; a sibling artifact under a
+# directory containing spaces and "*" links; --static-lib replaces the archive.
+D23="$WORK/m2j dir/c*"
+mkdir -p "$D23"
+cd "$D23"
+printf 'package Bar;\nfunc greet(str $a) str { return "hi " . $a; }\n' > Bar.strada
+printf 'package Foo;\nuse Bar;\nfunc hello() str { return Bar::greet("foo"); }\n' > Foo.strada
+printf 'use lib ".";\nuse Foo;\nfunc main() int { say(Foo::hello()); return 0; }\n' > main.strada
+t23_1=""
+if "$STRADA" -O0 -M Foo.strada >"$WORK/t23a.log" 2>&1 && "$STRADA" -O0 main.strada -o m >>"$WORK/t23a.log" 2>&1; then
+    t23_1="$(./m 2>/dev/null)"
+fi
+[ "$t23_1" = "hi foo" ] && pass "artifact + source-only dependency link (odd path)" || fail "artifact + source-only dependency link (odd path)" "out='${t23_1}'"
+"$STRADA" -O0 -M Foo.strada >/dev/null 2>&1; sed -i 's/Bar::greet("foo")/Bar::greet("v2")/' Foo.strada
+t23_2=""
+"$STRADA" -O0 main.strada -o m >"$WORK/t23b.log" 2>&1 && t23_2="$(./m 2>/dev/null)"
+[ "$t23_2" = "hi v2" ] && pass "same-second source edit beats the artifact" || fail "same-second source edit beats the artifact" "out='${t23_2}'"
+printf 'package L;\nfunc f() int { return 1; }\n' > L.strada
+"$STRADA" --static-lib L.strada -o libL.a >/dev/null 2>&1
+ar q libL.a Bar.strada 2>/dev/null
+"$STRADA" --static-lib L.strada -o libL.a >/dev/null 2>&1
+if ar t libL.a 2>/dev/null | grep -q Bar.strada; then
+    fail "--static-lib replaces an existing archive" "stale member kept"
+else
+    pass "--static-lib replaces an existing archive"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

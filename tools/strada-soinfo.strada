@@ -205,6 +205,11 @@ func parse_export_info(str $info) hash {
 
 # Format parameter types list for display
 func format_param_types(str $types, int $count) str {
+    return format_param_types_v($types, $count, -1);
+}
+
+# variadic_idx >= 0 marks that parameter as the trailing `TYPE ...@name`
+func format_param_types_v(str $types, int $count, int $variadic_idx) str {
     if ($count == 0) {
         return "";
     }
@@ -222,7 +227,11 @@ func format_param_types(str $types, int $count) str {
         if ($i >= 26) {
             $var = "arg" . $i;
         }
-        $result = $result . $t . " $" . $var;
+        if ($i == $variadic_idx) {
+            $result = $result . $t . " ...@" . $var;
+        } else {
+            $result = $result . $t . " $" . $var;
+        }
         $i = $i + 1;
     }
     return $result;
@@ -443,6 +452,10 @@ func extract_lib_dir(str $path) str {
 
 # Generate an import_lib style function call using :: syntax
 func gen_import_lib_call(str $name, str $ret, int $param_count, str $param_types, str $lib_name) str {
+    return gen_import_lib_call_v($name, $ret, $param_count, $param_types, $lib_name, -1);
+}
+
+func gen_import_lib_call_v(str $name, str $ret, int $param_count, str $param_types, str $lib_name, int $variadic_idx) str {
     my str $dollar = chr(36);
     my str $call = "";
 
@@ -475,7 +488,11 @@ func gen_import_lib_call(str $name, str $ret, int $param_count, str $param_types
             if ($i >= 26) {
                 $var = "arg" . $i;
             }
-            $call = $call . $dollar . $var;
+            if ($i == $variadic_idx) {
+                $call = $call . "..." . chr(64) . $var;   # spread an array into the variadic parameter
+            } else {
+                $call = $call . $dollar . $var;
+            }
             $i = $i + 1;
         }
     }
@@ -713,7 +730,8 @@ func main(int $argc, array @argv) int {
                 my int $param_count = $info->{"param_count"};
                 my str $param_types = $info->{"param_types"};
 
-                my str $params_str = format_param_types($param_types, $param_count);
+                my int $vidx = $info->{"variadic_idx"} + 0;
+                my str $params_str = format_param_types_v($param_types, $param_count, $vidx);
                 say("#");
                 say("#   func " . $name . "(" . $params_str . ") " . $ret);
                 say("#     Returns: " . $ret);
@@ -732,7 +750,7 @@ func main(int $argc, array @argv) int {
                     }
                 }
                 # Show how to call the function
-                my str $call_example = gen_import_lib_call($name, $ret, $param_count, $param_types, $lib_name);
+                my str $call_example = gen_import_lib_call_v($name, $ret, $param_count, $param_types, $lib_name, $vidx);
                 say("#     Call: " . $call_example);
             }
             $i = $i + 1;
@@ -775,14 +793,14 @@ func main(int $argc, array @argv) int {
 
             say("# Method 1: Using import_lib (Recommended)");
             say("# ----------------------------------------");
-            say("# Requires: " . $lib_name . ".strada and " . $lib_name . ".so in the lib path");
+            say("# Requires: " . $lib_name . ".so next to the program or in the lib path");
             say("# Note: You can call functions using namespace syntax: " . $lib_name . "::func()");
             say("#       This is equivalent to " . $lib_name . "_func() but cleaner");
             say("");
             if (length($lib_dir) > 0) {
                 say("use lib \"" . $lib_dir . "\";");
             }
-            say("import_lib \"" . $lib_name . "\";");
+            say("import_lib \"" . $lib_name . ".so\";");
             say("");
             say("func main() int {");
 
@@ -797,7 +815,7 @@ func main(int $argc, array @argv) int {
                     my int $param_count = $info->{"param_count"};
                     my str $param_types = $info->{"param_types"};
 
-                    my str $call = gen_import_lib_call($name, $ret, $param_count, $param_types, $lib_name);
+                    my str $call = gen_import_lib_call_v($name, $ret, $param_count, $param_types, $lib_name, $info->{"variadic_idx"} + 0);
                     say("    " . $call);
                     $shown = $shown + 1;
                 }

@@ -5057,8 +5057,20 @@ func artifact_is_fresh(str $artifact, str $source) int {
     if ($art_mtime < 0) { return 0; }
     my int $src_mtime = core::file_mtime($source);
     if ($src_mtime < 0) { return 1; }
-    if ($art_mtime >= $src_mtime) { return 1; }
+    if ($art_mtime != $src_mtime) {
+        if ($art_mtime > $src_mtime) { return 1; }
+        return 0;
+    }
+    # Same second: compare nanoseconds, so an edit made in the second the
+    # artifact was built is not hidden by it.
+    my int $art_ns = file_mtime_ns($artifact);
+    my int $src_ns = file_mtime_ns($source);
+    if ($art_ns >= $src_ns) { return 1; }
     return 0;
+}
+
+func file_mtime_ns(str $path) int {
+    return strada_file_mtime_ns($path);
 }
 
 # Returns 1 if the artifact is at least as fresh as the running stradac

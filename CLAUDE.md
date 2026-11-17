@@ -909,6 +909,15 @@ Go-package-archive-style separate compilation, fully automatic:
   guarded only by the two freshness gates. The gate lives in Parser.strada
   (`$__ua ne "0"` ⇒ default on). The explicit
   `import_object`/`import_lib`/`import_archive` forms are always honored.
+- **Audit M2j (2026-11)**: a program that links any artifact (`.o`/`.a`/`.so`)
+  emits no `static inline` functions, so an artifact can call a module the
+  program compiled from source. Freshness compares nanosecond mtimes within
+  the same second (`strada_file_mtime_ns`, a compiler-callable builtin;
+  `core::stat` gained `mtime_ns`). The define-set cache key is set even
+  without `--module-cache`. Link-marker paths are %-encoded (spaces, `*/`).
+  `--static-lib` recreates the archive. `--tcc -g` passes `-g` (tcc writes
+  stabs). Everything after `--doc` goes to stradadoc. The shim follows
+  symlinks.
 - `strada --clear-module-cache` wipes the cache directory (always safe —
   the next `--module-cache` build regenerates it).
 - Artifacts are deliberately **not LTO-participating** (`-fno-lto`): fat-LTO

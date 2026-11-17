@@ -580,8 +580,10 @@ func md2html_depth(str $markdown, int $depth) str {
             my str $header_text = substr($line, $level, length($line) - $level);
             $header_text =~ s/^[ ]+//;
             $header_text =~ s/[ ]+$//;
-            # Remove trailing #s
-            $header_text =~ s/[ ]*#+$//;
+            # Remove a closing sequence of #s (CommonMark: only when preceded
+            # by a space, so "C#" keeps its '#')
+            $header_text =~ s/[ ]+#+$//;
+            $header_text =~ s/^#+$//;
             $html = $html . "<h" . $level . ">" . process_inline($header_text) . "</h" . $level . ">\n";
             $i = $i + 1;
             next;
@@ -686,7 +688,8 @@ func generate_html_doc(str $title, str $body) str {
     $doc = $doc . "<head>\n";
     $doc = $doc . "  <meta charset=\"UTF-8\">\n";
     $doc = $doc . "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n";
-    $doc = $doc . "  <title>" . html_escape(strip_html_tags($title)) . "</title>\n";
+    # $title is HTML text (extract_title escapes a file-name title)
+    $doc = $doc . "  <title>" . $title . "</title>\n";
     $doc = $doc . "  <style>\n";
     $doc = $doc . "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }\n";
     $doc = $doc . "    h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; }\n";
@@ -713,7 +716,10 @@ func extract_title(str $html, str $filename) str {
     if ($h1_start >= 0) {
         my int $h1_end = index($html, "</h1>", $h1_start);
         if ($h1_end > $h1_start) {
-            return strip_html_tags(substr($html, $h1_start + 4, $h1_end - $h1_start - 4));
+            # already HTML: drop markup, keep the (escaped) text as is
+            my str $h1_html = substr($html, $h1_start + 4, $h1_end - $h1_start - 4);
+            $h1_html =~ s/<\/?[a-zA-Z][^>]*>//g;
+            return $h1_html;
         }
     }
     # Remove directory path first so dots in directory names do not break extension stripping
@@ -733,7 +739,7 @@ func extract_title(str $html, str $filename) str {
     if (length($title) > 3 && substr($title, length($title) - 3, 3) eq ".md") {
         $title = substr($title, 0, length($title) - 3);
     }
-    return $title;
+    return html_escape($title);
 }
 
 func print_usage() void {

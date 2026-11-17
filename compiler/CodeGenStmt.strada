@@ -5294,6 +5294,13 @@ func gen_program(scalar $cg, scalar $program) void {
     if ($tu_has_main == 1 && $cg->{"module_only_mode"} == 0 && length("" . $cg->{"split_dir"}) == 0 && $program->{"function_count"} <= 100) {
         $aggressive = 1;
     }
+    # A linked artifact (.o/.a/.so from `use`, import_object, import_lib)
+    # may call functions of modules compiled here from source; those must
+    # keep external linkage, so no `static inline`.
+    if (($program->{"import_object_count"} + 0) > 0 || ($program->{"import_archive_count"} + 0) > 0
+        || ($program->{"import_lib_count"} + 0) > 0) {
+        $aggressive = 0;
+    }
     $cg->{"aggressive_inline"} = $aggressive;
 
     # Build all function names lookup for devirtualization
@@ -6539,7 +6546,7 @@ func gen_program(scalar $cg, scalar $program) void {
         while ($io_idx < $io_count) {
             my scalar $io_info = $io_objs->[$io_idx];
             my str $io_path = $io_info->{"o_path"};
-            emit($cg, " " . $io_path);
+            emit($cg, " " . marker_path_encode($io_path));
             $io_idx = $io_idx + 1;
         }
         emit($cg, "\n */\n\n");
@@ -6557,7 +6564,7 @@ func gen_program(scalar $cg, scalar $program) void {
         while ($ia_idx < $ia_count) {
             my scalar $ia_info = $ia_archs->[$ia_idx];
             my str $ia_path = $ia_info->{"a_path"};
-            emit($cg, " " . $ia_path);
+            emit($cg, " " . marker_path_encode($ia_path));
             $ia_idx = $ia_idx + 1;
         }
         emit($cg, "\n * __STRADA_SKIP_RUNTIME__: archives include runtime\n");
@@ -7743,4 +7750,23 @@ func default_refs_params_d(scalar $n, scalar $params, int $pc, int $depth) int {
         }
     }
     return 0;
+}
+
+# Paths in the driver's link markers (inside a C comment, space separated):
+# %-encode %, whitespace and '*' so neither "*/" nor a space in a path can
+# break the comment or the list. The driver decodes (marker_path_decode).
+func marker_path_encode(str $p) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($p);
+    while ($i < $n) {
+        my str $c = substr($p, $i, 1);
+        if ($c eq "%") { $out = $out . "%25"; }
+        elsif ($c eq " ") { $out = $out . "%20"; }
+        elsif ($c eq "\t") { $out = $out . "%09"; }
+        elsif ($c eq "*") { $out = $out . "%2A"; }
+        else { $out = $out . $c; }
+        $i = $i + 1;
+    }
+    return $out;
 }

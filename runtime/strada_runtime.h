@@ -1729,6 +1729,7 @@ StradaValue* strada_dl_open_raw(StradaValue *path);
 StradaValue* strada_dl_sym_raw(StradaValue *handle_sv, StradaValue *symbol);
 StradaValue* strada_dl_close_raw(StradaValue *handle_sv);
 StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv);
+StradaValue* strada_file_mtime_ns(StradaValue *path_val);  /* mtime in ns, -1 if missing (compiler-callable) */
 StradaValue* strada_read_meta_section(StradaValue *path_sv);  /* read .strada_meta from an ELF .o/.so, no dlopen */
 StradaValue* strada_dl_call_version(StradaValue *fn_ptr_sv);
 
