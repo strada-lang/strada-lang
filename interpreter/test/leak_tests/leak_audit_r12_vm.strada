@@ -49,7 +49,7 @@ func main() int {
             $kept = $_;
         }
         my scalar $nf = 42;
-        $nf->();
+        try { $nf->(); } catch ($ne) { }   # calling a non-code value dies (Perl)
         try {
             my scalar $exc_call = ctx_f();
             throw "boom";

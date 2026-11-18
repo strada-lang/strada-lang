@@ -16,9 +16,7 @@ strada> say($s)
 baa
 1
 strada> my %h = ("a" => 1)
-{
-  'a' => 1,
-}
+1
 strada> say($h{"a"} > 0 ? "pos" : "neg")
 pos
 1
