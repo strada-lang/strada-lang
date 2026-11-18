@@ -1,0 +1,28 @@
+Strada Interpreter v0.3
+Type expressions or statements. Enter .help for commands, .quit to exit.
+
+strada> my $t = <<EOT;
+...     hello
+...     EOT
+hello
+strada> say($t);
+hello
+1
+strada> my $s = "a" .
+...         "b";
+ab
+strada> say($s);
+ab
+1
+strada> my $q = 1 +
+...     2;
+3
+strada> say($q);
+3
+1
+strada> my $i = 1; $i++;
+1
+strada> say($i);
+2
+1
+strada> 

@@ -1,0 +1,32 @@
+# EXPECT: n=41 [a] | 4 [x] undef undef | undef 3 cundef | 12 k
+# Audit 20 R2-20/V2-14: the VM kept only 10 capture groups ($0..$9), made an
+# unmatched group "" instead of undef, and captures() stopped at the last
+# matched group instead of listing every group of the pattern.
+func show(scalar $v) str { if (!defined($v)) { return "undef"; } return "[" . $v . "]"; }
+func main() int {
+    my @o = ();
+    my str $s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    if ($s =~ /(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)(a)/) {
+        my array @c = captures();
+        push(@o, "n=" . scalar(@c) . " " . show($c[40]));
+    }
+    push(@o, "|");
+    if ("xyz" =~ /(x)(q)?(z)?/) {
+        my array @c = captures();
+        push(@o, scalar(@c) . " " . show($c[1]) . " " . show($c[2]) . " " . show($2));
+    }
+    push(@o, "|");
+    if ("x" =~ /^(y)?(x)$/) {
+        push(@o, defined($1) ? "def" : "undef");
+        my @c = captures();
+        push(@o, size(@c));
+        push(@o, defined($c[1]) ? "cdef" : "cundef");
+    }
+    push(@o, "|");
+    if ("abcdefghijkl" =~ /(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/) {
+        my @c = captures();
+        push(@o, size(@c) . " " . $c[11]);
+    }
+    say(join(" ", @o));
+    return 0;
+}

@@ -17,6 +17,9 @@
 #include <pthread.h>
 
 /* Opcodes */
+/* capture groups the VM keeps per match ($0..$N); groups beyond are dropped */
+#define VM_RX_MAX 256
+
 typedef enum {
     OP_NOP = 0,
     OP_PUSH_INT,        /* push immediate int64 */
@@ -261,6 +264,8 @@ typedef enum {
     OP_TAIL_CALL,            /* u16 func_idx, u8 argc — reuse frame & tail-call callee */
     OP_CAST_ASSIGN_INT,      /* coerce top of stack to int in-place unless blessed object */
     OP_CAST_ASSIGN_NUM,      /* coerce top of stack to num in-place unless blessed object */
+    OP_STR_OV,               /* top of stack: a blessed object with a "" overload becomes its string
+                              * (emitted before string builtins only in programs with overloads) */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -626,6 +631,9 @@ enum {
     BUILTIN_STACKTRACE,
     BUILTIN_CORE_GC_COLLECT,
     BUILTIN_CAPTURE,
+    BUILTIN_REGEX_GPOS_NEXT,   /* (subject, mstart, mend) -> next /g position (zero-width: +1 char) */
+    BUILTIN_STD_HANDLE,        /* (n) -> filehandle for stdin (0) / stdout (1) / stderr (2) */
+    BUILTIN_READ_ALL_LINES,    /* (fh) -> array of the remaining lines, newlines removed */
 };
 
 /* Heap object type tag */
@@ -955,6 +963,8 @@ typedef struct {
     size_t str_const_count;
     int local_count;
     int fixed_param_count;
+    uint8_t *rawint_slots;   /* [256]: slot is an `int` parameter (converts where int arithmetic
+                              * uses it: fused-op slow paths truncate it), or NULL */
     int is_async;          /* async func: calls return a future */
     int has_variadic;
     int return_type;
@@ -1113,10 +1123,11 @@ typedef struct VM {
                               * frame_count pops back to this (re-entrancy) */
     VMProgram *program;
     /* Regex captures */
-    char *regex_captures[10]; /* $1-$9 (index 0 = $0/full match) */
-    size_t regex_capture_len[10]; /* byte length of regex_captures[i] (NUL-safe) */
-    uint8_t regex_capture_utf8[10]; /* character-oriented UTF-8 flag */
-    char *regex_capture_names[10]; /* named-group name per group number (or NULL) */
+    char *regex_captures[VM_RX_MAX]; /* $1-$N (index 0 = $0/full match); NULL = group unset */
+    size_t regex_capture_len[VM_RX_MAX]; /* byte length of regex_captures[i] (NUL-safe) */
+    uint8_t regex_capture_utf8[VM_RX_MAX]; /* character-oriented UTF-8 flag */
+    char *regex_capture_names[VM_RX_MAX]; /* named-group name per group number (or NULL) */
+    int regex_ngroups;               /* groups of the last successful match, $0 included */
     /* Exception handling */
     VMExcHandler *exc_stack;
     int exc_top;

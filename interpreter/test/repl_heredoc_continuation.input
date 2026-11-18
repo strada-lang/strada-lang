@@ -1,0 +1,12 @@
+my $t = <<EOT;
+hello
+EOT
+say($t);
+my $s = "a" .
+    "b";
+say($s);
+my $q = 1 +
+2;
+say($q);
+my $i = 1; $i++;
+say($i);

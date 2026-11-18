@@ -1,0 +1,17 @@
+# EXPECT: N(5) N(5) N(3)
+# abs() of an object that overloads only "-" (and "<"): Perl computes
+# $x < 0 ? 0 - $x : $x through the overloads. The VM's math::abs saw the
+# object's address and the compiled backend numified the "" string to 0
+# (so never negated).
+package N;
+func new($v) { my %h = ("v" => $v); return bless(\%h, "N"); }
+func sub_($a, $b, $r) { my $x = $r ? $b - $a->{"v"} : $a->{"v"} - $b; return N::new($x); }
+func lt_($a, $b, $r) { return $r ? ($b < $a->{"v"}) : ($a->{"v"} < $b); }
+func str_($a) { return "N(" . $a->{"v"} . ")"; }
+use overload "-" => "sub_", "<" => "lt_", '""' => "str_";
+package main;
+func main() int {
+    my $o = N::new(-5);
+    say(math::abs($o) . " " . (0 - $o) . " " . math::abs(N::new(3)));
+    return 0;
+}

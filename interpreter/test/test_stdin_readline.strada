@@ -1,0 +1,11 @@
+# <STDIN> (and STDIN/STDERR as values) in the VM: <STDIN> returned "" even
+# with piped input; readline keeps the "\r" of a CRLF line (compiled).
+func main() int {
+    my str $a = <STDIN>;
+    my $b = readline();
+    my $c = <STDIN>;
+    say("[" . length($a) . "] [" . $b . "] " . (defined($c) ? "def" : "eof"));
+    say(STDERR, "to stderr");
+    print(STDOUT, "to stdout\n");
+    return 0;
+}

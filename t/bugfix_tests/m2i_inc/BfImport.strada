@@ -1,0 +1,6 @@
+package BfImport;
+# helper module for vm_use_calls_import.strada
+our $seen = "none";
+func import(str $pkg, array @list) void { $seen = "import(" . $pkg . "," . scalar(@list) . ")"; }
+func seen() str { return $seen; }
+func hello(str $n) str { return "hello " . $n; }

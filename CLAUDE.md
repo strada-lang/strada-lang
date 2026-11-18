@@ -682,6 +682,36 @@ DESTROY runs at GC time, not at the last reference (tracing GC), and raw
 pointers into variables (`core::int_ptr`) are compiled-only. `interpreter/Makefile`: the front-end object
 depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **only string temporaries are owned by the stack** — consume sites must use `vm_temp_free` (freeing a shared container/filehandle/closure is a use-after-free; this was the `defined($fh)` corruption bug).
 
+**VM parity batch (Audit 20, 2026-11-18)**:
+- **Overloads.** In a program that declares any `use overload` (`g_prog_has_overloads`, found by scanning the AST, because the overload table is filled only after the functions compile), the compiler emits `OP_STR_OV` after the string operands of `length`, `uc`, `lc`, `substr`, `index`, `ord`, `split` and the `=~` subject. The opcode leaves non-objects alone.
+  - Hash keys and array indexes are converted at run time (`VM_KEY_OV` in `OP_HASH_GET`/`SET`/`EXISTS`/`DELETE`, `VM_IDX_OV` in `OP_ARRAY_GET`/`SET`), which covers every compile path (slices, lvalues).
+  - `vm_exec_builtin` converts blessed arguments per builtin (`vm_builtin_ov_kind`: string, number via `0+`, or abs).
+  - String compares and `x` stringify after `VM_TRY_BIN_OV` finds no operator overload (`VM_STR_OV_PAIR`). `join` stringifies each element and lets a throw propagate.
+  - `vm_to_num_vm` and `vm_to_int_vm` honor `0+`; sprintf's numeric conversions do too.
+  - `.=` dispatches `.` in `OP_APPEND_LOCAL` and `OP_APPEND_CONST`. The JIT step helper resumes the interpreter (`VM_JIT_INTERP`) for a blessed operand of NOT, CONCAT, APPEND, STR_LEN or BUILTIN.
+  - `abs` with only `-` overloaded is `$x < 0 ? 0 - $x : $x`, compared through `<` (also in the runtime's `strada_overload_unary`).
+- **Regex.** `while (S =~ /re/g)` keeps a per-loop position local and matches through `OP_REGEX_FIND` plus `BUILTIN_REGEX_GPOS_NEXT` (`compile_regex_g_cond`). It is reset when the while statement starts, like the compiled `__gpos_N`.
+  - Captures hold `VM_RX_MAX` (256) groups; `regex_ngroups` is the pattern's group count, so `captures()` lists unmatched groups as undef.
+  - An unset `$N` is undef.
+- **I/O.**
+  - `<$fh>` drops only the `\n`.
+  - `@a = <$fh>` is `BUILTIN_READ_ALL_LINES`.
+  - `STDIN`, `STDOUT` and `STDERR` are values (`BUILTIN_STD_HANDLE`, wrapping an immortal runtime filehandle, so it is never fclose'd by GC), and `<STDIN>` reads stdin.
+- **Calls.** A call with more than 255 arguments uses the spread opcodes, since argc is a u8 operand.
+- **Name resolution.**
+  - An unqualified call resolves to the current package's function, then main's, then `qw_imports`. The any-package alias fallback applies only where no package is known.
+  - File-level `my` and `const` are lexical. A redeclaration is registered as `NAME__shadowN`, and a function sees the nearest declaration before it in its own file (`file_my_lexical_key`). `Pkg::CONST` uses the `const_pkg` that the parser records (Semantic uses it too).
+  - A redundant `extern func Pkg::f` declaration is skipped.
+  - `use Mod;` calls `Mod::import(PKG, [])` from a synthesized `__import_calls` begin chunk.
+- **Scoping and types.**
+  - `my $x = INIT` adds the slot after compiling INIT.
+  - An `int` parameter (`local_rawint`, `VMChunk.rawint_slots`) is converted where it is an operand of int `+ - * %`, as in compiled use-site conversion. The fused local ops do this in their slow paths (`vm_rawint_operand`), so fib-style code keeps its fast paths. The generic path emits `OP_CAST_INT`.
+- **Builtins.** `core::getenv` of an unset name is undef, `core::stat`/`lstat` go through the runtime, and `tell` on a closed handle is -1.
+- **Interpreter front end.** `VM error:` goes to stderr. The REPL's `is_balanced` waits for heredoc terminators and continues after a trailing binary operator.
+  - Trailing `/`, `<` and `>` do not count as operators (`s/a/b/`, `<$fh>`); `->` and `=>` do.
+  - In the REPL and eval, a module's `import()` runs once (`%g_eval_vm_imports_done`), and a redeclaration with an initializer is seeded with the earlier value (`keep_seed`).
+- `interpreter/test/run_tests.sh` accepts `test_X.stdin`, `test_X.stdout_only` and `repl_X.input`/`.expected` sessions.
+
 ## Language Features Reference
 
 ### Namespaces

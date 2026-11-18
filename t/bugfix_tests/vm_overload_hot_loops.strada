@@ -1,0 +1,49 @@
+# EXPECT: a<cat> p<cat> <cat>b NOT 300300 NEG MUL SUB 600 9 1
+# Audit 20 V2-1/V2-2/V2-3: in VM loops hot enough for the native JIT the "."
+# overload (also through .=) and the "!" overload were ignored; `$s .= $obj`
+# ignored "." even in the interpreter. Also length($obj), $a[$obj] and
+# $h{$obj} in hot loops (the native JIT resumes the interpreter for them).
+package V;
+func new(scalar $x) scalar { return bless({"x" => $x}, "V"); }
+func str_(scalar $self) str { return "V" . $self->{"x"}; }
+func cat_(scalar $self, scalar $o, int $r) str { return $r ? ($o . "<cat>") : ("<cat>" . $o); }
+use overload '""' => "str_", "." => "cat_";
+package W;
+func new(scalar $x) scalar { return bless({"x" => $x}, "W"); }
+func bool_(scalar $self, scalar $o, int $r) int { return $self->{"x"} > 0 ? 1 : 0; }
+func not_(scalar $self, scalar $o, int $r) scalar { return "NOT"; }
+func neg_(scalar $self, scalar $o, int $r) scalar { return "NEG"; }
+func mul_(scalar $self, scalar $o, int $r) scalar { return "MUL"; }
+func sub_(scalar $self, scalar $o, int $r) scalar { return "SUB"; }
+use overload "bool" => "bool_", "!" => "not_", "neg" => "neg_", "*" => "mul_", "-" => "sub_";
+package I;
+func new(scalar $x) scalar { return bless({"x" => $x}, "I"); }
+func num_(scalar $self, scalar $o, int $r) scalar { return $self->{"x"}; }
+func str_(scalar $self) str { return "k" . $self->{"x"}; }
+use overload "0+" => "num_", '""' => "str_";
+package main;
+func main() int {
+    my $v = V::new(1);
+    my $r1 = ""; my $r2 = ""; my $r3 = "";
+    for (my int $i = 0; $i < 300; $i++) {
+        $r1 = "a" . $v;
+        my $s = "p"; $s .= $v; $r2 = $s;
+        $r3 = $v . "b";
+    }
+    my $z = W::new(0); my $w = W::new(5);
+    my $a = ""; my $b = 0; my $c = ""; my $d = ""; my $e = "";
+    for (my int $i = 0; $i < 300; $i++) {
+        $a = !$z; if ($w) { $b++; } if (!$w) { $b += 1000; } $c = -$z; $d = $z * 2; $e = 3 - $z;
+    }
+    my $len = 0; my $sub = 0; my $hit = 0;
+    my @arr = (0..20);
+    my %h = ("k9" => 1);
+    my $iv = I::new(9);
+    for (my int $i = 0; $i < 300; $i++) {
+        $len = $len + length($v);
+        $sub = $arr[$iv];
+        $hit = exists($h{$iv}) ? 1 : 0;
+    }
+    say($r1 . " " . $r2 . " " . $r3 . " " . $a . " " . $b . " " . $c . " " . $d . " " . $e . " " . $len . " " . $sub . " " . $hit);
+    return 0;
+}

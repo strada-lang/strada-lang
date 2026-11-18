@@ -1696,6 +1696,22 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
             $expr->{"orig_name"} = $name;
             $expr->{"name"} = sem_resolve_vinfo_cname($ctx, $lookup_result->{"info"}, $name, $line, $sigil);
+            # Pkg::CONST: the const that package declared (several file-level
+            # consts may share the bare name)
+            my str $cq_pkg = "" . $expr->{"const_pkg"};
+            my scalar $cq_info = $lookup_result->{"info"};
+            if (length($cq_pkg) > 0 && $cq_info->{"is_global"} == 1 && defined($cq_info->{"decls"})) {
+                my scalar $cq_decls = $cq_info->{"decls"};
+                my int $cqi = 0;
+                while ($cqi < size(@{$cq_decls})) {
+                    my scalar $cq_d = $cq_decls->[$cqi];
+                    if ($cq_d->{"type"} == NODE_CONST_DECL() && ("" . $cq_d->{"source_module"}) eq $cq_pkg) {
+                        $expr->{"name"} = "" . $cq_d->{"name"};
+                        $cqi = size(@{$cq_decls});
+                    }
+                    $cqi = $cqi + 1;
+                }
+            }
         }
         return;
     }

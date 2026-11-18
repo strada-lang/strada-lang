@@ -1,0 +1,25 @@
+Strada Interpreter v0.3
+Type expressions or statements. Enter .help for commands, .quit to exit.
+
+strada> my $fh = core::open_str("q\nw\n", "r"); 0
+0
+strada> my $l = <$fh>
+q
+strada> say($l)
+q
+1
+strada> my $s = "aaa"
+aaa
+strada> $s =~ s/a/b/
+1
+strada> say($s)
+baa
+1
+strada> my %h = ("a" => 1)
+{
+  'a' => 1,
+}
+strada> say($h{"a"} > 0 ? "pos" : "neg")
+pos
+1
+strada> 

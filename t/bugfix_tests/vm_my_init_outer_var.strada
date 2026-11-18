@@ -1,0 +1,21 @@
+# EXPECT: inner 11 | n 6 | global-local | closure 101 | 10 | 1 | 3 2
+# Audit 20 C3-16/V5-15: `my $x = $x + 10;` must read the outer $x (Perl: the
+# new variable is in scope from the next statement on); the VM bound the new
+# slot first and read undef.
+our $g = "global";
+func f(int $n) str {
+    my @o = ();
+    my $x = 1;
+    { my $x = $x + 10; push(@o, "inner " . $x); }
+    if (1) { my int $n = $n * 2; push(@o, "|", "n " . $n); }
+    { my $g = $g . "-local"; push(@o, "|", $g); }
+    my $c = fn () { my $x = $x + 100; return $x; };
+    push(@o, "|", "closure " . $c->());
+    { my $m = 5; { my $m = $m * 2; push(@o, "|", $m); } }
+    push(@o, "|", $x);
+    my @a = (1, 2);
+    { my @a = (@a, 3); push(@o, "|", scalar(@a)); }
+    push(@o, scalar(@a));
+    return join(" ", @o);
+}
+func main() int { say(f(3)); return 0; }

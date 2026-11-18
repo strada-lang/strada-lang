@@ -1,0 +1,26 @@
+# EXPECT: 6 caught strdie 1030 N(1),N(2) caught str7
+# Audit 20 V2-4/V3-2: in the VM a "" overload that throws inside length()
+# or join() was swallowed (and join printed the object's address).
+package V;
+func new(scalar $x) scalar { return bless({"x" => $x}, "V"); }
+func str_(scalar $self) str { if ($self->{"x"} == 3) { die("strdie"); } return "Vxxxx" . $self->{"x"}; }
+use overload '""' => "str_";
+package N;
+func new(scalar $v) scalar { return bless({"v" => $v}, "N"); }
+func s(scalar $self) str { if ($self->{"v"} == 7) { throw "str7"; } return "N(" . $self->{"v"} . ")"; }
+use overload '""' => "s";
+package main;
+func main() int {
+    my @o = ();
+    push(@o, length(V::new(1)));
+    my $L = 0;
+    for (my int $i = 0; $i < 6; $i++) {
+        try { $L += length(V::new($i)); } catch ($e) { $L += 1000; push(@o, "caught " . $e); }
+    }
+    push(@o, $L);
+    push(@o, join(",", N::new(1), N::new(2)));
+    my @arr = (N::new(1), N::new(7));
+    try { push(@o, join(",", @arr)); } catch ($e) { push(@o, "caught " . $e); }
+    say(join(" ", @o));
+    return 0;
+}

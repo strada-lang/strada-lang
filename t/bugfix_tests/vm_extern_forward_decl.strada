@@ -1,0 +1,14 @@
+# EXPECT: [greet:x] [part:y]
+# Audit 20 V4-31: in the VM a body-less `extern func Pkg::f(...)` forward
+# declaration replaced the function it declares (the call returned undef),
+# whether it came before or after the definition.
+package Lib;
+extern func Lib::greet(str $s) str;
+func greet(str $s) str { return "greet:" . $s; }
+func part(str $s) str { return "part:" . $s; }
+extern func Lib::part(str $s) str;
+package main;
+func main() int {
+    say("[" . Lib::greet("x") . "] [" . Lib::part("y") . "]");
+    return 0;
+}

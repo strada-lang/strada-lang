@@ -232,6 +232,9 @@ my str $g_eval_vm_decls = "";
 my int $g_eval_vm_decls_globals = 0;
 my hash %g_eval_vm_globals = ();
 my hash %g_eval_vm_our_names = ();
+# import() functions already called by an earlier eval: the persisted
+# `use` lines recompile with every eval, but a module imports once
+my hash %g_eval_vm_imports_done = ();
 my hash %g_eval_vm_funcs = ();
 my array @g_eval_vm_lib_paths = ();
 my str $g_eval_backend = "vm";
@@ -903,6 +906,7 @@ func reset() void {
         $g_eval_vm_pkg = "main";
         $g_eval_vm_decls = "";
         $g_eval_vm_decls_globals = 0;
+        %g_eval_vm_imports_done = ();
         core::gc_collect();
     } finally {
         __C__ { eval_vm_unlock(); }
@@ -1096,6 +1100,15 @@ private func eval_vm_promote_body(scalar $body, str $seg_pkg, scalar $program, s
             $st->{"type"} = NI::OUR_DECL;
             $st->{"package"} = $seg_pkg;
             eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state);
+            # `my $n = $n * 2;` redeclaring a variable of an earlier eval: the
+            # initializer reads the earlier value (Perl), so that global is
+            # seeded; a declaration without one starts out undef
+            my scalar $vinit = $st->{"init"};
+            if (defined($vinit) && length(ref($vinit)) > 0) {
+                my str $kvn = ($seg_pkg ne "" && $seg_pkg ne "main" && index($vn, "::") < 0) ? ($seg_pkg . "::" . $vn) : $vn;
+                my scalar $ks_ref = $prom_state->{"keep_seed"};
+                $ks_ref->{$kvn} = 1;
+            }
         } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
             $st->{"is_decl"} = 0;
             my scalar $dvars = $st->{"vars"};
@@ -1205,6 +1218,23 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");
         my array @empty = ();
         my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+        {
+            my scalar $ic_list = $program->{"import_calls"};
+            my int $ic_n = defined($program->{"import_call_count"}) ? $program->{"import_call_count"} : 0;
+            my array @ic_keep = ();
+            my int $ici = 0;
+            while ($ici < $ic_n) {
+                my scalar $ic = $ic_list->[$ici];
+                my str $icf = "" . $ic->{"func_name"};
+                if (!exists(%g_eval_vm_imports_done, $icf)) {
+                    push(@ic_keep, $ic);
+                    $g_eval_vm_imports_done{$icf} = 1;
+                }
+                $ici = $ici + 1;
+            }
+            $program->{"import_calls"} = \@ic_keep;
+            $program->{"import_call_count"} = scalar(@ic_keep);
+        }
 
         # Collect global declarations introduced by this call (after prior persistent decls)
         my hash %newly_declared = ();
@@ -1237,6 +1267,8 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         my hash %new_funcs = ();
         my hash %prom_state = ();
         $prom_state{"newly_declared"} = \%newly_declared;
+        my hash %keep_seed = ();
+        $prom_state{"keep_seed"} = \%keep_seed;
         $prom_state{"added_our"} = \%added_our;
         $prom_state{"added_our_stubs"} = "";
         $prom_state{"added_our_cnt"} = 0;
@@ -1278,7 +1310,12 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         }
 
         # Compile to bytecode under lock, commit persistent declarations before execution so nested/threaded eval sees them
-        my scalar $skip_ref = \%newly_declared;
+        my hash %seed_skip = ();
+        my scalar $keep_seed_ref = $prom_state{"keep_seed"};
+        foreach my str $ssk (keys(%newly_declared)) {
+            if (!defined($keep_seed_ref->{$ssk})) { $seed_skip{$ssk} = 1; }
+        }
+        my scalar $skip_ref = \%seed_skip;
         my int $compiled_ok = 0;
         my int $vprog_handle = 0;
         __C__ {

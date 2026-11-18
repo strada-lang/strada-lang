@@ -2083,6 +2083,9 @@ func parse_primary(scalar $parser) scalar {
                 if ($qc_is_enum == 0 && $parser->{"const_names"}->{$qc_base}) {
                     my scalar $qc_var = ast_new_variable($qc_base, "$");
                     ast_set_line($qc_var, $call_line);
+                    # the declaring package: Semantic / the VM pick that
+                    # package's const when several share the name
+                    $qc_var->{"const_pkg"} = $qc_pkg;
                     return $qc_var;
                 }
             }

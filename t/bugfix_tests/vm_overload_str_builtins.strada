@@ -1,0 +1,46 @@
+# EXPECT: 4 ABC7 abc7 bc 2 1 65 eq lt -1 m7 A|c7 Abc7Abc7 Abc7 k=Abc7 [Abc7] ABc7 QWJjNw== Abc7,Abc7 m=Abc7 e:1 s:1 d:gone
+# Audit 20 V1-8/V2-4/V3-1/V3-2: the bytecode VM ignored a "" overload in
+# string builtins (length uc lc substr index ord eq lt cmp =~ split x, hash
+# keys, re::replace, base64, join): they saw the object's address.
+package V;
+func new(scalar $x) scalar { return bless({"x" => $x}, "V"); }
+func str_(scalar $self) str { return "Abc" . $self->{"x"}; }
+use overload '""' => "str_";
+package main;
+func main() int {
+    my $v = V::new(7);
+    my @o = ();
+    push(@o, length($v));
+    push(@o, uc($v));
+    push(@o, lc($v));
+    push(@o, substr($v, 1, 2));
+    push(@o, index($v, "c7"));
+    push(@o, rindex($v, "b"));
+    push(@o, ord($v));
+    push(@o, $v eq "Abc7" ? "eq" : "ne");
+    push(@o, $v lt "B" ? "lt" : "ge");
+    push(@o, $v cmp "Abd");
+    push(@o, ($v =~ /c(\d)/) ? "m" . $1 : "nomatch");
+    push(@o, join("|", split("b", $v)));
+    push(@o, $v x 2);
+    my %h = ();
+    $h{$v} = 1;
+    push(@o, join(",", keys(%h)));
+    my %g = ($v => 2);
+    push(@o, "k=" . join(",", keys(%g)));
+    push(@o, "[" . trim($v) . "]");
+    push(@o, re::replace($v, "b", "B"));
+    push(@o, core::base64_encode($v));
+    my @arr = ($v, V::new(7));
+    push(@o, join(",", @arr));
+    my $s = "m=";
+    $s .= $v;
+    push(@o, $s);
+    push(@o, "e:" . (exists($h{$v}) ? 1 : 0));
+    my @sl = @h{$v};
+    push(@o, "s:" . $sl[0]);
+    delete($h{$v});
+    push(@o, "d:" . (exists($h{"Abc7"}) ? "still" : "gone"));
+    say(join(" ", @o));
+    return 0;
+}
