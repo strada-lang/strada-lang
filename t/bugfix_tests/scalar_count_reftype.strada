@@ -1,0 +1,40 @@
+# EXPECT: 3 3 2 3 0|3 2 2 1|1 1 ARRAY|REF REF SCALAR ARRAY|5|3 3 3
+# Perl scalar context: keys/values/split assigned to a scalar give a count
+# (they stored the array), including `our` and file-scope declarations;
+# `[LIST]` with a flattening element is a reference (is_ref said 0);
+# reftype of a reference to a scalar holding a reference is "REF" (it
+# looked through to "ARRAY"); refto($x) refers to $x itself (it referred to
+# a copy in compiled code).
+our @g = (1, 2, 3);
+our $gc = @g;
+my %fh = ("a" => 1, "b" => 2);
+my $fk = keys(%fh);
+my $fm = grep { $_ > 1 } @g;
+func main() int {
+    my %h = ("a" => 1, "b" => 2, "c" => 3);
+    my @out;
+    my $n = keys(%h);
+    my $m; $m = values %h;
+    my $p = split(",", "x,y");
+    my $q = scalar(@{[split(",", "a,b,c")]});
+    my $e = split(",", "");
+    push(@out, join(" ", $n, $m, $p, $q, $e));
+    push(@out, join(" ", $gc, $fk, $fm, scalar(keys(%fh)) * 2 - 3));
+    my @c = (1);
+    my $r1 = [split(",", "x,y")];
+    my $r2 = [@c];
+    push(@out, is_ref($r1) . " " . is_ref($r2) . " " . reftype($r1));
+    my $x = 5;
+    push(@out, reftype(\$r1) . " " . ref(\$r1) . " " . reftype(\$x) . " " . reftype($r1));
+    my $y = 1;
+    my $yr = refto($y);
+    $$yr = 5;
+    push(@out, $y);
+    my %th; my @ta; my $tr = [0];
+    $th{"n"} = keys(%h);
+    $ta[0] = values(%h);
+    $tr->[0] = split(",", "a,b,c");
+    push(@out, $th{"n"} . " " . $ta[0] . " " . $tr->[0]);
+    say(join("|", @out));
+    return 0;
+}

@@ -69,9 +69,9 @@ func demo_array_based() void {
     say("=== Array-Based Variadic ===");
     
     # Different numbers of arguments via arrays
-    my scalar $small = split("a,b,c", ",");
-    my scalar $medium = split("1,2,3,4,5", ",");
-    my scalar $large = split("x,y,z,w,a,b,c,d,e,f", ",");
+    my scalar $small = [split(",", "a,b,c")];
+    my scalar $medium = [split(",", "1,2,3,4,5")];
+    my scalar $large = [split(",", "x,y,z,w,a,b,c,d,e,f")];
     
     process_list($small);
     process_list($medium);

@@ -55,7 +55,7 @@ func main() int {
     # Keys and values
     say("");
     say("Keys: ");
-    my scalar $keys = keys(%user);
+    my scalar $keys = [keys(%user)];
     my int $i = 0;
     while ($i < size($keys)) {
         say("  " . $keys[$i]);

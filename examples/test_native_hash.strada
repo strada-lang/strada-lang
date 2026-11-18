@@ -40,7 +40,7 @@ func main() int {
     # Using keys() function
     say("");
     say("All keys:");
-    my scalar $k = keys(%user);
+    my scalar $k = [keys(%user)];
     my int $i = 0;
     my int $len = size($k);
     while ($i < $len) {
@@ -51,7 +51,7 @@ func main() int {
     # Using values() function
     say("");
     say("All values:");
-    my scalar $v = values(%user);
+    my scalar $v = [values(%user)];
     $i = 0;
     $len = size($v);
     while ($i < $len) {

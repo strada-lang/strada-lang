@@ -1435,7 +1435,8 @@ func expr_refs_var_name(scalar $node, str $vname) int {
     }
     if ($nt == NODE_ANON_FUNC()) { return 0; }
     if (ast_is_leaf_node_type($nt) == 1) { return 0; }
-    my scalar $ks = keys(%{$node});
+    my array @ks_klist = keys(%{$node});
+    my scalar $ks = \@ks_klist;
     my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
@@ -8061,7 +8062,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $fi = $fi + 1;
             }
             if ($fl_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-            emit($cg, "__fl_arr; })");
+            if ($expr->{"is_list"}) {
+                emit($cg, "__fl_arr; })");
+            } else {
+                # `[LIST]` is a reference to the new array, like `[1, 2]`
+                emit($cg, "strada_ref_create_take(__fl_arr); })");
+            }
             return;
         }
 

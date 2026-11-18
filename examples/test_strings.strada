@@ -119,8 +119,8 @@ func test_type_casting() void {
 func test_join() void {
     say("=== Join Function ===");
     
-    my scalar $arr = split("apple,banana,cherry", ",");
-    my str $joined = join(", ", $arr);
+    my scalar $arr = [split(",", "apple,banana,cherry")];
+    my str $joined = join(", ", @$arr);
     say("Joined: " . $joined);
     
     say("");

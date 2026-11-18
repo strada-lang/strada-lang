@@ -1454,7 +1454,8 @@ func ast_clone_node(scalar $v) scalar {
     my str $rt = reftype($v);
     if ($rt eq "HASH") {
         my hash %copy = ();
-        my scalar $ks = keys(%{$v});
+        my array @ks_klist = keys(%{$v});
+        my scalar $ks = \@ks_klist;
         my int $i = 0;
         my int $n = size($ks);
         while ($i < $n) {

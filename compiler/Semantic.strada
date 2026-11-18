@@ -1131,6 +1131,7 @@ func register_globals(scalar $ctx, scalar $ast) void {
         my str $sigil = "$";  # Default for consts
         if ($gvar_type == NODE_VAR_DECL() || $gvar_type == NODE_OUR_DECL()) {
             $sigil = $gvar->{"sigil"};
+            sem_scalar_decl_count($ctx, $gvar);
         }
         $gvar->{"orig_name"} = $name;
         if ($gvar_type == NODE_OUR_DECL()) {
@@ -1588,6 +1589,33 @@ func sem_is_container_value(scalar $ctx, scalar $n) int {
 }
 
 # scalar(EXPR): the element count of an array value.
+# `our $n = @a` / file-scope `my $n = keys(%h)`: a list value assigned to a
+# scalar declaration is its count (Perl). Function-level `my $n = @a` is
+# counted by the code generator; this covers the declaration forms it does
+# not see that way.
+func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
+    if (is_valid_node($decl) == 0) { return; }
+    if (("" . $decl->{"sigil"}) ne "$") { return; }
+    my scalar $ini = $decl->{"init"};
+    if (is_valid_node($ini) == 0) { return; }
+    my int $it = $ini->{"type"};
+    my int $hit = sem_is_count_in_scalar_call($ctx, $ini);
+    if (($it == NODE_VARIABLE() || $it == NODE_DEREF_SCALAR()) && ("" . $ini->{"sigil"}) eq "@") { $hit = 1; }
+    if ($it == NODE_MAP() || $it == NODE_GREP()) { $hit = 1; }
+    if ($hit == 1) { $decl->{"init"} = sem_scalar_of($ini); }
+}
+
+# keys/values/split calls: Perl gives their count in scalar context
+func sem_is_count_in_scalar_call(scalar $ctx, scalar $n) int {
+    if (is_valid_node($n) == 0) { return 0; }
+    if ($n->{"type"} != NODE_CALL()) { return 0; }
+    my str $cn = "" . $n->{"name"};
+    # (keys/values/split are core operators: a user function of the same
+    # name never replaces them, in Perl or Strada)
+    if ($cn eq "keys" || $cn eq "values" || $cn eq "split" || $cn eq "sys::split") { return 1; }
+    return 0;
+}
+
 func sem_scalar_of(scalar $n) scalar {
     my scalar $c = ast_new_call("scalar");
     ast_add_arg($c, $n);
@@ -1793,6 +1821,19 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                         return;
                     }
                 }
+            }
+        }
+
+        # refto($var) is \$var: a reference to the variable itself, so a write
+        # through it changes $var (it used to reference a copy of the value).
+        if ($name eq "refto" && $arg_count == 1) {
+            my scalar $rt_arg = $args->[0];
+            if (is_valid_node($rt_arg) == 1 && $rt_arg->{"type"} == NODE_VARIABLE()) {
+                $expr->{"type"} = NODE_REF();
+                $expr->{"target"} = $rt_arg;
+                $expr->{"ref_type"} = "" . $rt_arg->{"sigil"};
+                analyze_expression($ctx, $expr);
+                return;
             }
         }
 
@@ -2157,6 +2198,17 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     if ($node_type == NODE_ASSIGN()) {
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
+        # `$n = keys(%h)` / `$h{n} = split(...)`: keys/values/split in scalar
+        # context are counts (Perl)
+        if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 &&
+            sem_is_count_in_scalar_call($ctx, $expr->{"value"}) == 1) {
+            my scalar $ct = $expr->{"target"};
+            my int $ctt = $ct->{"type"};
+            if (($ctt == NODE_VARIABLE() && ("" . $ct->{"sigil"}) eq "$") || $ctt == NODE_HASH_ACCESS() ||
+                $ctt == NODE_SUBSCRIPT() || $ctt == NODE_DEREF_HASH() || $ctt == NODE_DEREF_ARRAY()) {
+                $expr->{"value"} = sem_scalar_of($expr->{"value"});
+            }
+        }
         # Stage-0 type check: plain `=` to a declared scalar variable.
         # Compound ops (+=, .=, ...) keep their own operand semantics.
         if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
@@ -2188,7 +2240,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     }
 
     # Array subscript ($arr[idx]): parser sets sigil "@" on $arr, which may refer
-    # to `@arr` OR to a scalar/array-typed `$arr` (e.g. `my scalar $k = keys(%h); $k[0]`).
+    # to `@arr` OR to a scalar/array-typed `$arr` (e.g. `my scalar $k = [keys(%h)]; $k[0]`).
     if ($node_type == NODE_SUBSCRIPT()) {
         my scalar $sub_arr = $expr->{"array"};
         if ($sub_arr->{"type"} == NODE_VARIABLE() && $sub_arr->{"sigil"} eq "@") {
@@ -2547,6 +2599,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$" && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_CALL() && $stmt->{"init"}->{"name"} eq "splice") {
             $stmt->{"init"}->{"scalar_ctx"} = 1;
         }
+        # `my $n = keys %h` / values / split: a count in scalar context (Perl)
+        if ($sigil eq "$" && $stmt->{"init"} && sem_is_count_in_scalar_call($ctx, $stmt->{"init"}) == 1) {
+            $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
+        }
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {
             my int $iit = $stmt->{"init"}->{"type"};
             if ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $iit == NODE_GREP() || $iit == NODE_MAP()) {
@@ -2679,6 +2735,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         $oinfo->{"our_key"} = $our_key;
 
         # Analyze initializer if present
+        sem_scalar_decl_count($ctx, $stmt);
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);

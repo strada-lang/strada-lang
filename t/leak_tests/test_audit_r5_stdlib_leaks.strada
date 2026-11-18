@@ -19,7 +19,7 @@ func EXISTS(scalar $self, str $k) int {
     return exists($self->{"data"}, $k) ? 1 : 0;
 }
 func FIRSTKEY(scalar $self) str {
-    my scalar $ks = keys($self->{"data"});
+    my scalar $ks = [keys($self->{"data"})];
     $self->{"_keys"} = $ks;
     $self->{"_idx"} = 0;
     if (scalar(@{$ks}) == 0) { return undef; }

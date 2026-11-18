@@ -21,7 +21,7 @@ func main() int {
     say("=== Negative Index Value Access ===");
     say("");
     
-    my scalar $arr = split("apple,banana,cherry,date,elderberry", ",");
+    my scalar $arr = [split(",", "apple,banana,cherry,date,elderberry")];
     say("Array: [apple, banana, cherry, date, elderberry]");
     say("Size: " . size($arr));
     say("");
@@ -52,7 +52,7 @@ func main() int {
     say("");
     
     # Test with numbers
-    my scalar $nums = split("10,20,30,40,50", ",");
+    my scalar $nums = [split(",", "10,20,30,40,50")];
     say("Number array: [10, 20, 30, 40, 50]");
     say("");
     
@@ -64,7 +64,7 @@ func main() int {
     
     # Test modification
     say("=== Modification with Negative Indices ===");
-    my scalar $items = split("a,b,c,d,e", ",");
+    my scalar $items = [split(",", "a,b,c,d,e")];
     say("Before: [a,b,c,d,e]");
     say("");
     
@@ -79,7 +79,7 @@ func main() int {
     
     # Queue/Stack peek operations
     say("=== Peek Operations (No Removal) ===");
-    my scalar $queue = split("task1,task2,task3,task4", ",");
+    my scalar $queue = [split(",", "task1,task2,task3,task4")];
     say("Queue: [task1, task2, task3, task4]");
     say("");
     

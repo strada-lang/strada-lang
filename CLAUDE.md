@@ -1476,8 +1476,20 @@ compiler:
   `while (my ($k, $v) = LIST)` loops while the list is non-empty (desugared to
   a hidden `@__wlN`); a parenthesized group of pairs in a hash literal joins
   the hash (`parse_anon_hash_entry`), while `(EXPR) => v` stays a computed key.
-  `my $n = keys(%h)` still stores the key array (a Strada idiom the compiler
-  itself uses), not Perl's count.
+- **Perl scalar context for list operators (2026-11)**: `keys`/`values`/`split`
+  assigned to a scalar give their count -- `my`, `our`, file-scope
+  declarations, `$x = ...` and element targets (`$h{n} = keys(%h)`)
+  (`sem_is_count_in_scalar_call`, `sem_scalar_decl_count`; VM
+  `vm_sc_is_count_call` in `vm_sc_pass`). `our $n = @a` / file-scope
+  `my $n = @a` / `= map/grep` count too. To keep the list in a scalar write
+  `my $ks = [keys(%h)]` (compiler/*.strada uses `my array @ks_klist =
+  keys(...); my scalar $ks = \@ks_klist;`, which the frozen bootstrap also
+  compiles). `[LIST]` with a flattening element is a reference (it was the
+  bare array, so `is_ref` said 0). `reftype` looks one level only: a
+  reference to a scalar holding a reference is "REF" (it looked through to
+  "ARRAY"), so `is_refto(\$aref, "ARRAY")` is false. `refto($var)` is
+  `\$var` (Semantic rewrite): writing through it changes `$var` (compiled
+  code referred to a copy).
 - `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /

@@ -20,7 +20,7 @@
 func demo_push_pop() void {
     say("=== Push and Pop ===");
     
-    my scalar $arr = split("a,b,c", ",");
+    my scalar $arr = [split(",", "a,b,c")];
     say("Initial: size = " . size($arr));
     
     # Push items to end
@@ -43,7 +43,7 @@ func demo_push_pop() void {
 func demo_shift_unshift() void {
     say("=== Shift and Unshift ===");
     
-    my scalar $arr = split("x,y,z", ",");
+    my scalar $arr = [split(",", "x,y,z")];
     say("Initial: size = " . size($arr));
     
     # Unshift items to beginning
@@ -66,7 +66,7 @@ func demo_shift_unshift() void {
 func demo_queue() void {
     say("=== Queue Pattern (push + shift) ===");
     
-    my scalar $queue = split("", ",");  # Empty array
+    my scalar $queue = [split(",", "")];  # Empty array
     say("Created empty queue");
     
     # Add to queue (push to end)
@@ -92,7 +92,7 @@ func demo_queue() void {
 func demo_stack() void {
     say("=== Stack Pattern (push + pop) ===");
     
-    my scalar $stack = split("", ",");  # Empty array
+    my scalar $stack = [split(",", "")];  # Empty array
     say("Created empty stack");
     
     # Push onto stack
@@ -118,7 +118,7 @@ func demo_stack() void {
 func demo_combined() void {
     say("=== Combined Operations ===");
     
-    my scalar $arr = split("2,3,4", ",");
+    my scalar $arr = [split(",", "2,3,4")];
     say("Start: size = " . size($arr));
     
     unshift($arr, "1");  # Add to beginning

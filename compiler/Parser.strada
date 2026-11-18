@@ -6502,7 +6502,8 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # Build list of OOP init function names
     my array @oop_inits = ();
     my hash %seen_oop_inits = ();
-    my scalar $pkg_keys = keys(%packages);
+    my array @pkg_keys_klist = keys(%packages);
+    my scalar $pkg_keys = \@pkg_keys_klist;
     my int $pkg_count = size($pkg_keys);
     my int $pi = 0;
     while ($pi < $pkg_count) {

@@ -27195,26 +27195,19 @@ const char* strada_reftype(StradaValue *ref) {
  * Scalar::Util::reftype) - "HASH" for a blessed hash, where ref() gives
  * the class name. */
 const char* strada_reftype_raw(StradaValue *ref) {
+    /* Scalar::Util::reftype: the underlying type of what REF points to, one
+     * level only -- a reference to a scalar holding a reference is "REF". */
     if (!ref || STRADA_IS_TAGGED_INT(ref)) return "";
-    if (strada_is_slot_ref(ref)) return "SCALAR";
+    if (strada_is_slot_ref(ref)) {
+        StradaValue **slot = (StradaValue **)ref->value.ptr;
+        StradaValue *sv0 = slot ? *slot : NULL;
+        if (sv0 && !STRADA_IS_TAGGED_INT(sv0) && sv0->type == STRADA_REF) return "REF";
+        return "SCALAR";
+    }
     if (ref->type == STRADA_REF) {
         StradaValue *target = ref->value.rv;
         if (!target) return "";
-        int depth = 0;
-        while (!STRADA_IS_TAGGED_INT(target) && target->type == STRADA_REF && depth < 10
-               && !SV_BLESSED(target)) {
-            if (strada_is_slot_ref(target)) {
-                StradaValue **slot = (StradaValue**)target->value.ptr;
-                if (!slot || !*slot) return "SCALAR";
-                target = *slot;
-            } else if (target->value.rv) {
-                target = target->value.rv;
-            } else {
-                break;
-            }
-            depth++;
-        }
-        if (!target || STRADA_IS_TAGGED_INT(target)) return "SCALAR";
+        if (STRADA_IS_TAGGED_INT(target)) return "SCALAR";
         switch (target->type) {
             case STRADA_ARRAY: return "ARRAY";
             case STRADA_HASH: return "HASH";

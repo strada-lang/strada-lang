@@ -91,7 +91,7 @@ func main() int {
         $nh{$nk1} = "v1_" . $i;
         $nh{$nk2} = "v2_" . $i;
         $nh{$nk1} = "V1_" . $i;
-        my scalar $ks = keys(%nh);
+        my scalar $ks = [keys(%nh)];
         if (!exists($nh{$nk1}) || size($ks) != 2) { die("vm5 fail"); }
         my array @kv = each(%nh);
         while (size(@kv) > 0) {

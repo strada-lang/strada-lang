@@ -45,7 +45,7 @@ func main() int {
     say("");
     
     say("5. Arrays and Hashes:");
-    my scalar $arr = split("a,b,c,d,e,f,g,h", ",");
+    my scalar $arr = [split(",", "a,b,c,d,e,f,g,h")];
     say("Created array with split()");
     say("Reference count: " . refcount($arr));
     say("(Array will be freed automatically at end of function)");

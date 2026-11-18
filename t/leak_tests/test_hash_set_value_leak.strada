@@ -31,7 +31,7 @@ func build_hash(int $seed) scalar {
     hash_set($h, "rep", repeat("x", 3));             # repeat() result value
     hash_set($h, "cat", "row" . $seed);              # concat result value
     hash_set($h, "cast", cast_str($seed));           # cast_str() result value
-    my scalar $parts = split("a,b,c", ",");
+    my scalar $parts = [split(",", "a,b,c")];
     hash_set($h, "first", $parts);                   # owned array as value
     return $h;
 }

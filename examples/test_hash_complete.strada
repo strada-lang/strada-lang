@@ -41,7 +41,7 @@ func main() int {
     # Iterate over keys
     say("");
     say("Iterating with keys():");
-    my scalar $k = keys(%person);
+    my scalar $k = [keys(%person)];
     my int $i = 0;
     while ($i < size($k)) {
         my str $key = $k[$i];
@@ -68,7 +68,7 @@ func main() int {
     # Show final keys
     say("");
     say("Final keys:");
-    $k = keys(%person);
+    $k = [keys(%person)];
     $i = 0;
     while ($i < size($k)) {
         say("  " . $k[$i]);
@@ -85,7 +85,7 @@ func main() int {
 
 func print_hash(hash %h) void {
     say("  Hash contents via function:");
-    my scalar $keys = keys(%h);
+    my scalar $keys = [keys(%h)];
     my int $i = 0;
     while ($i < size($keys)) {
         my str $k = $keys[$i];

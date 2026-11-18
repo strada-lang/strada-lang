@@ -10487,7 +10487,21 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
                     case VM_OBJ_ARRAY: SP_PUSH(vm_str("ARRAY")); break;
                     case VM_OBJ_HASH: SP_PUSH(vm_str("HASH")); break;
                     case VM_OBJ_CLOSURE: SP_PUSH(vm_str("CODE")); break;
-                    case VM_OBJ_SREF: SP_PUSH(vm_str("SCALAR")); break;
+                    case VM_OBJ_SREF: {
+                        /* \$x where $x holds a reference: "REF" (Perl) */
+                        VMScalarRef *rsr = VM_AS_SREF(args[0]);
+                        VMValue rstv = VM_UNDEF_VAL;
+                        if (rsr->global_name) rstv = vm_globals_get(vm, rsr->global_name);
+                        else if (VM_IS_PTR(rsr->cell) && VM_PTR_TYPE(rsr->cell) == VM_OBJ_CELL) rstv = VM_AS_CELL(rsr->cell)->val;
+                        int r_isref = 0;
+                        if (VM_IS_PTR(rstv)) {
+                            enum VMObjType rt2 = VM_PTR_TYPE(rstv);
+                            r_isref = (rt2 == VM_OBJ_ARRAY || rt2 == VM_OBJ_HASH || rt2 == VM_OBJ_CLOSURE ||
+                                       rt2 == VM_OBJ_SREF || rt2 == VM_OBJ_WEAKREF);
+                        }
+                        SP_PUSH(vm_str(r_isref ? "REF" : "SCALAR"));
+                        break;
+                    }
                     case VM_OBJ_NATIVE_SV: {
                         VMNativeSV *nsv = (VMNativeSV*)VM_TO_PTR(args[0]);
                         SP_PUSH(vm_str(strada_reftype_raw(nsv->sv)));

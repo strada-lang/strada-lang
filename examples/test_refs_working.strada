@@ -58,11 +58,11 @@ func main() int {
     say("");
     say("--- Array References ---");
     
-    # Arrays are stored in scalars
-    my scalar $nums = split("10,20,30", ",");
+    # Arrays are stored in scalars as array references
+    my scalar $nums = [split(",", "10,20,30")];
     
-    # Create reference to array
-    my scalar $arr_ref = refto($nums);
+    # $nums already refers to the array
+    my scalar $arr_ref = $nums;
     
     say("Array size = " . size($nums));
     say("is_ref(arr_ref) = " . is_ref($arr_ref));

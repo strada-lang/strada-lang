@@ -20,7 +20,7 @@
 func test_array_size() void {
     say("=== Array Size Test ===");
     
-    my scalar $arr = split("apple,banana,cherry,date,elderberry", ",");
+    my scalar $arr = [split(",", "apple,banana,cherry,date,elderberry")];
     my int $len = size($arr);
     
     say("Array has " . $len . " elements");
@@ -37,7 +37,7 @@ func test_hash_keys() void {
     hash_set($person, "city", "NYC");
     
     # Get keys
-    my scalar $key_list = keys($person);
+    my scalar $key_list = [keys($person)];
     my int $key_count = size($key_list);
     
     say("Hash has " . $key_count . " keys");
@@ -54,7 +54,7 @@ func test_hash_values() void {
     hash_set($config, "debug", "true");
     
     # Get values
-    my scalar $value_list = values($config);
+    my scalar $value_list = [values($config)];
     my int $value_count = size($value_list);
     
     say("Hash has " . $value_count . " values");
@@ -72,11 +72,11 @@ func test_combined() void {
     hash_set($inventory, "grapes", "200");
     
     # Get keys and show count
-    my scalar $items = keys($inventory);
+    my scalar $items = [keys($inventory)];
     say("Inventory items: " . size($items));
     
     # Get values
-    my scalar $quantities = values($inventory);
+    my scalar $quantities = [values($inventory)];
     say("Total entries: " . size($quantities));
     
     say("");
@@ -86,12 +86,12 @@ func test_empty_structures() void {
     say("=== Empty Structure Test ===");
     
     # Empty array
-    my scalar $empty_arr = split("", ",");
+    my scalar $empty_arr = [split(",", "")];
     say("Empty array size: " . size($empty_arr));
     
     # Empty hash
     my scalar $empty_hash = hash_new();
-    my scalar $empty_keys = keys($empty_hash);
+    my scalar $empty_keys = [keys($empty_hash)];
     say("Empty hash keys: " . size($empty_keys));
     
     say("");

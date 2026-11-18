@@ -9482,6 +9482,15 @@ static int vm_sc_is_container(StradaValue *n, int with_hash) {
     if (t == NI_MAP || t == NI_GREP) return 1;
     return 0;
 }
+/* keys/values/split assigned to a scalar variable: their count (Perl), as
+ * the compiler's sem_is_count_in_scalar_call */
+static int vm_sc_is_count_call(StradaValue *n) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH || (int)ast_int(n, "type") != NI_CALL) return 0;
+    const char *cn = ast_str(n, "name");
+    return cn && (strcmp(cn, "keys") == 0 || strcmp(cn, "values") == 0 || strcmp(cn, "split") == 0 ||
+                  strcmp(cn, "sys::split") == 0);
+}
 static StradaValue *vm_sc_wrap(StradaValue *child) {
     StradaValue *node = strada_new_hash();
     strada_hash_set_take(node->value.hv, "type", strada_new_int(NI_CALL));
@@ -9523,14 +9532,21 @@ static void vm_sc_pass(StradaValue *v, int depth) {
                 if (vm_sc_is_container(ast_get(v, "left"), 1)) vm_sc_replace(v, "left");
                 if (vm_sc_is_container(ast_get(v, "right"), 1)) vm_sc_replace(v, "right");
             }
-        } else if (t == NI_VAR_DECL) {
-            if (ast_str(v, "sigil")[0] == '$' && vm_sc_is_container(ast_get(v, "init"), 0)) vm_sc_replace(v, "init");
+        } else if (t == NI_VAR_DECL || t == NI_OUR_DECL) {
+            if (ast_str(v, "sigil")[0] == '$' && (vm_sc_is_container(ast_get(v, "init"), 0) ||
+                                                   vm_sc_is_count_call(ast_get(v, "init")))) vm_sc_replace(v, "init");
         } else if (t == NI_ASSIGN) {
             StradaValue *tg = ast_deref(ast_get(v, "target"));
             if (strcmp(ast_str(v, "op"), "=") == 0 && tg && !STRADA_IS_TAGGED_INT(tg)
                 && (int)ast_int(tg, "type") == NI_VARIABLE && ast_str(tg, "sigil")[0] == '$'
-                && vm_sc_is_container(ast_get(v, "value"), 0)) {
+                && (vm_sc_is_container(ast_get(v, "value"), 0) || vm_sc_is_count_call(ast_get(v, "value")))) {
                 vm_sc_replace(v, "value");
+            } else if (strcmp(ast_str(v, "op"), "=") == 0 && tg && !STRADA_IS_TAGGED_INT(tg)
+                       && vm_sc_is_count_call(ast_get(v, "value"))) {
+                /* $h{n} = keys(%h) / $a[0] = split(...): a count (Perl) */
+                int tgt = (int)ast_int(tg, "type");
+                if (tgt == NI_HASH_ACCESS || tgt == NI_SUBSCRIPT || tgt == NI_DEREF_HASH || tgt == NI_DEREF_ARRAY)
+                    vm_sc_replace(v, "value");
             }
         }
     }

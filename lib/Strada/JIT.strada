@@ -2675,14 +2675,14 @@ private func snapshot_jit_state() scalar {
 
 private func restore_jit_state(scalar $snap) void {
     my scalar $vt = $snap->{"var_types"};
-    my scalar $vt_keys = keys($vt);
+    my scalar $vt_keys = [keys($vt)];
     my scalar $imp = $snap->{"imports"};
     my scalar $consts = $snap->{"constants"};
     my scalar $cidx = $snap->{"constant_idx"};
-    my scalar $c_keys = keys($cidx);
+    my scalar $c_keys = [keys($cidx)];
     my scalar $funcs = $snap->{"functions"};
     my scalar $oops = $snap->{"oop_packages"};
-    my scalar $op_keys = keys($oops);
+    my scalar $op_keys = [keys($oops)];
     my array @cur_vt_keys = keys(%g_var_types);
     my array @cur_op_keys = keys(%g_oop_packages);
 

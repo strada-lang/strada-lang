@@ -75,13 +75,13 @@ func test_split() void {
     say("=== Testing split() ===");
     
     my str $csv = "apple,banana,cherry,date";
-    my scalar $parts = split($csv, ",");
+    my scalar $parts = [split(",", $csv)];
     
     say("Split CSV: " . $csv);
     say("  (Array created with split)");
     
     my str $words = "one  two   three    four";
-    my scalar $word_list = split($words, " +");
+    my scalar $word_list = [split(" +", $words)];
     say("Split words: " . $words);
     say("  (Array created with split)");
 }

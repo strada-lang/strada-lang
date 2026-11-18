@@ -20,7 +20,7 @@
 func demo_negative_access() void {
     say("=== Negative Index Access ===");
     
-    my scalar $arr = split("a,b,c,d,e", ",");
+    my scalar $arr = [split(",", "a,b,c,d,e")];
     say("Array: [a,b,c,d,e], size = " . size($arr));
     
     # Access from end using negative indices
@@ -36,7 +36,7 @@ func demo_negative_access() void {
 func demo_negative_set() void {
     say("=== Negative Index Assignment ===");
     
-    my scalar $arr = split("1,2,3,4,5", ",");
+    my scalar $arr = [split(",", "1,2,3,4,5")];
     say("Initial: [1,2,3,4,5]");
     
     # Modify from end
@@ -49,7 +49,7 @@ func demo_negative_set() void {
 func demo_edge_cases() void {
     say("=== Edge Cases ===");
     
-    my scalar $arr = split("x,y,z", ",");
+    my scalar $arr = [split(",", "x,y,z")];
     say("Array: [x,y,z], size = " . size($arr));
     
     say("arr[0] = first (positive index)");
@@ -64,7 +64,7 @@ func demo_edge_cases() void {
 func demo_practical_use() void {
     say("=== Practical Uses ===");
     
-    my scalar $log = split("entry1,entry2,entry3,entry4,entry5", ",");
+    my scalar $log = [split(",", "entry1,entry2,entry3,entry4,entry5")];
     say("Log entries: size = " . size($log));
     
     say("");
@@ -83,7 +83,7 @@ func demo_practical_use() void {
 func demo_with_operations() void {
     say("=== Combined with Array Operations ===");
     
-    my scalar $queue = split("", ",");
+    my scalar $queue = [split(",", "")];
     
     # Build queue
     push($queue, "task1");
@@ -108,7 +108,7 @@ func demo_with_operations() void {
 func demo_iteration_backwards() void {
     say("=== Backwards Iteration ===");
     
-    my scalar $items = split("10,20,30,40,50", ",");
+    my scalar $items = [split(",", "10,20,30,40,50")];
     say("Items: [10,20,30,40,50]");
     say("");
     

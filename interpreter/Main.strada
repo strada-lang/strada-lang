@@ -404,7 +404,7 @@ func run_repl() void {
         if ($input eq ".help" || $input eq ".h") { print_help(); next; }
         if ($input eq ".vars") {
             my scalar $vars = Strada::Interpreter::vm_eval_globals();
-            my scalar $var_keys = keys($vars);
+            my scalar $var_keys = [keys($vars)];
             my int $vk_len = size($var_keys);
             if ($vk_len == 0) {
                 say("(no variables)");
@@ -425,7 +425,7 @@ func run_repl() void {
         }
         if ($input eq ".funcs") {
             my scalar $func_hash = Strada::Interpreter::vm_eval_funcs();
-            my scalar $func_keys = keys($func_hash);
+            my scalar $func_keys = [keys($func_hash)];
             my int $fk_len = size($func_keys);
             if ($fk_len == 0) {
                 say("(no user functions)");
