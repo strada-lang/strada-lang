@@ -2783,7 +2783,7 @@ Measured with callgrind (instruction counts). Wall times are best of 3; VM befor
 
 Instruction counts (callgrind), tier 1 commit → tier 2:
 - closures: 6181M → 3279M
-- data: 10753M → 6312M
+- data: 10753M → 9830M (re-measured: the first figure, 6312M, came from two runs racing on bench_data's fixed /tmp file)
 - hotpaths: 40299M → 28115M
 - binary_trees: 5416M → 4277M
 - oop: 9900M → 8439M
@@ -2803,8 +2803,53 @@ Instruction counts (callgrind), tier 1 commit → tier 2:
 
 Test: `interpreter/test/test_vm_perf_c20b.strada`.
 
+## VM performance, round 3 (2026-11-18)
+
+Instruction counts (callgrind), tier 2 commit -> round 3:
+
+| Benchmark | Tier 2 | Round 3 | Change |
+|---|---|---|---|
+| compute | 137527M | 109248M | -21% |
+| functions | 1886M | 1652M | -12% |
+| binary_trees | 4277M | 3766M | -12% |
+| sort | 13243M | 11872M | -10% |
+| data | 9830M | 8922M | -9% |
+| closures | 3279M | 3032M | -8% |
+| hotpaths | 28115M | 26111M | -7% |
+| exceptions | 3328M | 3105M | -7% |
+| gc | 6052M | 5670M | -6% |
+| pipeline | 9863M | 9251M | -6% |
+| utf8 | 6010M | 5665M | -6% |
+| array_hash | 4464M | 4251M | -5% |
+| oop | 8439M | 8103M | -4% |
+| sprintf | 13653M | 13195M | -3% |
+| regex | 13206M | 12910M | -2% |
+| binary | 4065M | 4017M | -1% |
+| strings, json | | | 0% |
+
+bench_data writes a fixed file (`/tmp/strada_bench_data.csv`), so never run two interpreters on it at once when comparing.
+
+**Integer add/sub in the JIT** (`jb_int_addsub_rr`, `jb_int_addsub_imm`, `jb_int_tag_after_hi`). Both tagged operands are shifted left 14 so the 50-bit values fill the register; the CPU overflow flag (`jo`) is then the 50-bit overflow check, and `sar 14` + `or VM_TAG_INT_BASE` re-tags. Used by ADD/SUB, ADD/SUB_LOCALS, ADD/SUB_LOCAL_I32, ADD_TO_LOCAL(_VAL), SUB_TO_LOCAL_VAL and INCR/DECR. MUL and the BIT_AND forms keep `jb_tag_rax_int50_or_jump`.
+
+**Calls.** `OP_CALL` uses `callee->local_count` and `has_variadic` as compile-time constants (both are fixed once the program is compiled); a variadic callee jumps straight to the prep/slow path. An int ADD/SUB/MUL followed by `OP_CAST_INT` jumps past the cast's check on its fast path (`skip_cast_idx`). `OP_JMP_IF_INT_LOCAL` is one `je` to the target; the return path's GC check is a single `jb`. fib: 131 -> 117 instructions per call.
+
+**Boxed int64** (values outside the 50-bit inline range) come from the `VM_POOL_CELL` pool (same size as `VMCell`; `_Static_assert`), whose cap is `VM_POOL_MAX_CELL` (16384, one GC cycle's worth). `vm_to_int_vm` returns tagged and boxed ints before any unwrapping. `vm_slow_add_to_local` adds two ints (inline or boxed) directly: wrapping for an `int` target (`coerce == 1`), checked for untyped. In the JIT, `+=` falls back to `vm_jit_add_local_helper`, not the step helper. A `+=` loop on a boxed int: 1087 -> 230 instructions per iteration.
+
+**Per-opcode helpers** (`jb_emit_op_helper`: same contract as the step helper, `int fn(VM *, const VMInsn *)`). Each handles the plain case and otherwise calls `vm_jit_op_step` or `vm_jit_bail_here` (resume the interpreter at this instruction):
+- `vm_jit_h_new_container` (NEW_ARRAY / NEW_HASH), `vm_jit_h_array_push` (untied array), `vm_jit_h_concat` (plain strings and numbers), `vm_jit_h_hash_get` / `_set` / `_bless` (moved out of the step helper), `vm_jit_h_spaceship` (floats; two ints are native JIT code).
+- Opcodes that used to bail at run time: `vm_jit_h_unary_str` (CHR, BYTES, STR_UPPER, STR_LOWER), `vm_jit_h_split` (STR_SPLIT), `vm_jit_h_sprintf`, `vm_jit_h_map_push` (tied / native sources bail), `vm_jit_h_hash_delete` (untied hash, string key), `vm_jit_h_try` (TRY_BEGIN / TRY_END), `vm_jit_h_isa`, `vm_jit_h_make_closure`, `vm_jit_h_regex` (REGEX_MATCH / REGEX_FIND with a constant pattern).
+- The interpreter and these helpers share one implementation: `vm_op_chr`, `vm_op_split`, `vm_op_bytes`, `vm_op_sprintf`, `vm_op_try_begin`, `vm_op_isa`, `vm_op_make_closure`, `vm_op_regex_match`, `vm_op_regex_find`.
+
+**`try` in JIT code.** TRY_BEGIN only pushes a `VMExcHandler` (catch instruction, stack base, frame count), so JIT code can run it. A throw returns `VM_JIT_EXC` up the native call chain to the interpreter, which unwinds to the handler and continues at the catch in the interpreter (OSR re-enters at the next backedge). A callee that is not compiled yet runs in a nested interpreter (`vm_jit_call_slow`); a throw there unwinds to the nested run's base and is raised again in the caller. `VM.exc_trace_keep` / `exc_trace_keep_val` mark that re-raise so `core::exception_trace()` keeps the frames of the original throw (it was rebuilt from the caller's shallower stack; `examples/test_exception_trace_lazy.strada`).
+
+Test: `interpreter/test/test_vm_perf_c20c.strada`.
+
+**Known parity gaps found here (not changed).**
+- Untyped `$a + $b` past int64 wraps in the VM (`vm_slow_add_locals`); compiled code promotes to UV/NV.
+- `++` / `+= 1` past int64: the interpreter promotes and the JIT's `vm_jit_incr_decr_slow` wraps, whatever the declared type. The opcodes do not carry the `int` declaration.
+- An `int` parameter given a value past int64 (or a float) differs from compiled.
+
 **Not yet done.**
-- `$sum` in bench_compute exceeds the 50-bit inline int range, so every `+=` boxes; compute and functions did not move.
-- The busiest step-helper ops are `CONCAT`, `ARRAY_PUSH`, `ADD_TO_LOCAL` (boxed), `HASH_*_CONST`, `NEW_HASH` / `NEW_ARRAY` and `BUILTIN`; each step call costs 60-80 instructions of dispatch.
-- Opcodes that still bail to the interpreter at run time: `TRY_BEGIN`, `SPRINTF`, `MAP_PUSH`, `CHR`, regex ops, `MAKE_CLOSURE`, `HASH_DELETE`, `ISA`, `STR_SPLIT`, `STR_UPPER`, `BYTES`, `WEAKEN_SLOT`, `C_BLOCK`.
-- JIT code keeps every value on the memory stack (about 55 instructions per integer loop iteration).
+- HASH_GET_CONST / HASH_SET_CONST misses (new keys, probe collisions) and BUILTIN still use the step helper.
+- `OP_WEAKEN_SLOT`, `OP_TR`, `OP_C_BLOCK`, interpolated regex patterns and tied/native operands still resume the interpreter.
+- JIT code keeps every value on the memory stack; fib still spends ~65 of its ~117 instructions per call on call/return.

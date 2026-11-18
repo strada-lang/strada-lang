@@ -760,12 +760,21 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
 - Test: `interpreter/test/test_vm_perf_c20.strada`.
 - Gate VM changes with the suites run twice, JIT on and `STRADA_NO_JIT=1`. After a `vm.h` change, rebuild `lib/Eval.o` (`make lib/Eval.o`).
 
-**VM performance, tier 2 (2026-11-18)**: callgrind instruction counts fell by up to 47% (closures 47%, data 41%, hotpaths 30%, binary_trees 21%, oop 15%); details in CLAUDE_DEEP_DIVE.md.
+**VM performance, tier 2 (2026-11-18)**: callgrind instruction counts fell by up to 47% (closures 47%, hotpaths 30%, binary_trees 21%, oop 15%, data 9%); details in CLAUDE_DEEP_DIVE.md.
 - Closures and variadic functions run in the JIT, and JIT code calls an already-compiled callee directly (`vm_jit_call_prep` / `vm_jit_closure_prep` build the frame in C and return the entry).
 - `%`, `!`, `scalar(@a)`, `defined` and int captures are native JIT code.
 - The step helper handles only the plain case of `<=>`, hash get/set and `bless`. Anything else bails (`jit_step_bail`, `VM_JIT_INTERP`) and the interpreter's handler runs the opcode, so tie, weak refs and overloads stay in one place.
 - Integers stringify without `snprintf` (`vm_i64_to_cstr`).
 - Test: `interpreter/test/test_vm_perf_c20b.strada`.
+
+**VM performance, round 3 (2026-11-18)**: compute -21%, functions -12%, binary_trees -12%, sort -10%, data -9%, everything else 0-8% fewer instructions; details in CLAUDE_DEEP_DIVE.md.
+- JIT integer add/sub use the CPU overflow flag on values shifted into the top 50 bits; calls use the callee's constant facts; fib is 11% fewer instructions.
+- Integers outside the 50-bit inline range come from the cell pool, and `+=` on them has a direct path (4.7x fewer instructions).
+- Push, `{}`/`[]`, `.`, hash get/set, `bless` and `<=>` have their own JIT helpers (`jb_emit_op_helper`); `<=>` on ints is native.
+- `try`, `sprintf`, `map`, `chr`, `uc`/`lc`, `split`, `delete`, `isa`, closure creation and constant-pattern regex no longer leave JIT code. Their interpreter code moved into shared `vm_op_*` functions.
+- `core::exception_trace()` keeps the throw site's frames when a nested run re-raises the exception (`VM.exc_trace_keep`).
+- Known VM parity gaps around int64 overflow (untyped `+`, `++`) are listed in CLAUDE_DEEP_DIVE.md.
+- Test: `interpreter/test/test_vm_perf_c20c.strada`.
 
 ## Language Features Reference
 
