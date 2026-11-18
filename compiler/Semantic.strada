@@ -1746,6 +1746,16 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             if (($af_p->{"has_default"} + 0) == 1 && is_valid_node($af_p->{"default"}) == 1) {
                 analyze_expression($ctx, $af_p->{"default"});
             }
+            if ($af_pname eq "_" && ("" . $af_p->{"sigil"}) eq "@") {
+                # implicit @_ of `func { ... }`: C name __args_ (as `_` it
+                # would hide $_)
+                scope_add_var($ctx->{"scope"}, "@:_", "@", $af_p->{"param_type"}, ast_get_line($af_p));
+                $ctx->{"scope"}->{"vars"}->{"@:_"}->{"c_name"} = "__args_";
+                $af_p->{"orig_name"} = "_";
+                $af_p->{"name"} = "__args_";
+                $af_pi = $af_pi + 1;
+                next;
+            }
             my str $af_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $af_pname);
             scope_add_var($ctx->{"scope"}, $af_pname, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
             if (length($af_calias) > 0) {
@@ -2613,7 +2623,15 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
-        if (exists($scope_vars->{$name}) || exists($scope_vars->{$sigil . ":" . $name})) {
+        # `my %t; my @t;` (Perl): the same name with another sigil is a
+        # separate variable. It is kept under the sigil-qualified key, with
+        # its own C name (the two would collide in C).
+        my int $other_sigil = 0;
+        if (exists($scope_vars->{$name}) && !exists($scope_vars->{$sigil . ":" . $name})
+            && ("" . $scope_vars->{$name}->{"sigil"}) ne $sigil && $scope_vars->{$name}->{"is_global"} != 1) {
+            $other_sigil = 1;
+        }
+        if ($other_sigil == 0 && (exists($scope_vars->{$name}) || exists($scope_vars->{$sigil . ":" . $name}))) {
             my scalar $prev_info = $scope_vars->{$name};
             if (!defined($prev_info)) {
                 $prev_info = $scope_vars->{$sigil . ":" . $name};
@@ -2624,6 +2642,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
         my str $c_alias = sem_alloc_local_cname($ctx, $current_scope, $name);
+        if ($other_sigil == 1) {
+            my str $sg_tag = "s";
+            if ($sigil eq "@") { $sg_tag = "a"; }
+            if ($sigil eq "%") { $sg_tag = "h"; }
+            $c_alias = $name . "__sg" . $sg_tag;
+        }
         my scalar $init_expr = $stmt->{"init"};
         my int $init_before = 0;
         if (length($c_alias) > 0 && is_valid_node($init_expr) == 1 && $init_expr->{"type"} != NODE_ANON_FUNC()) {
@@ -2635,11 +2659,13 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         }
 
         # Add variable to scope
-        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+        my str $add_key = $name;
+        if ($other_sigil == 1) { $add_key = $sigil . ":" . $name; }
+        scope_add_var($current_scope, $add_key, $sigil, $var_type, $line);
         if (length($c_alias) > 0) {
             $stmt->{"orig_name"} = $name;
             $stmt->{"name"} = $c_alias;
-            $current_scope->{"vars"}->{$name}->{"c_name"} = $c_alias;
+            $current_scope->{"vars"}->{$add_key}->{"c_name"} = $c_alias;
         }
 
         if ($init_before == 0) {

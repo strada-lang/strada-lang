@@ -1134,12 +1134,18 @@ func main() int {
     while ($ii < size(@INCLUDE_PATHS)) { @include_flags = (@include_flags, "-I" . $INCLUDE_PATHS[$ii]); $ii = $ii + 1; }
     $ii = 0;
     while ($ii < size(@EXTRA_INCLUDE_FLAGS)) { @include_flags = (@include_flags, $EXTRA_INCLUDE_FLAGS[$ii]); $ii = $ii + 1; }
+    # user -I flags (headers there may change between builds); the configured
+    # library paths added below are covered by the shard flags stamp
+    my int $user_include_count = size(@include_flags);
     # OpenSSL compile flags (configure's STRADA_SSL_CFLAGS): needed to compile
     # lib/ssl.strada's `#include <openssl/ssl.h>` __C__ block when OpenSSL lives
     # off the default include path (e.g. Homebrew's keg-only openssl@3 on macOS).
     # Empty on Linux / when SSL is absent, so a harmless no-op there.
     my str $__ssl_cf = env("STRADA_SSL_CFLAGS");
     if (length($__ssl_cf) > 0) { @include_flags = (@include_flags, split_ws($__ssl_cf)); }
+    # Database client include paths (lib/DBI.strada's drivers), likewise
+    my str $__db_cf = env("STRADA_MYSQL_CFLAGS") . " " . env("STRADA_POSTGRES_CFLAGS") . " " . env("STRADA_SQLITE_CFLAGS");
+    if (length(trim($__db_cf)) > 0) { @include_flags = (@include_flags, split_ws($__db_cf)); }
 
     my array @link_flags = ();
     my int $lpi = 0;
@@ -1282,7 +1288,7 @@ func main() int {
                     if (-f $stamp_path) {
                         if (core::slurp($stamp_path) eq $stamp) { $stamp_ok = 1; }
                     }
-                    if ($stamp_ok == 0 || size(@include_flags) > 0) {
+                    if ($stamp_ok == 0 || $user_include_count > 0) {
                         my int $wi = 0;
                         while ($wi <= 64) {
                             my str $wtag = ($wi < 10) ? ("0" . $wi) : ("" . $wi);

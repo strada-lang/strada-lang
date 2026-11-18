@@ -119,3 +119,4 @@ runtime/perla_dbi.c
 runtime/perla_stash.c
 *.smeta
 __pycache__/
+lib/strada_config.inc

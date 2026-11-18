@@ -826,6 +826,62 @@ func parse_type(scalar $parser) int {
 # Expression Parsing (Precedence Climbing)
 # ============================================================
 
+# One anonymous-function parameter: [TYPE] [...] SIGIL NAME. `...@rest`
+# (last parameter only) collects the remaining arguments, like a named
+# function's variadic parameter.
+func parse_anon_param(scalar $parser, scalar $anon) void {
+    my int $af_var = 0;
+    if (parser_check($parser, "ELLIPSIS")) { parser_advance($parser); $af_var = 1; }
+    my scalar $af_peek = parser_current($parser);
+    my str $af_pt = $af_peek->{"type"};
+    my int $ptype = 0;
+    if ($af_pt eq "DOLLAR" || $af_pt eq "AT" || $af_pt eq "PERCENT") {
+        if ($af_pt eq "DOLLAR") { $ptype = TYPE_SCALAR(); }
+        elsif ($af_pt eq "AT") { $ptype = TYPE_ARRAY(); }
+        elsif ($af_pt eq "PERCENT") { $ptype = TYPE_HASH(); }
+    } else {
+        $ptype = parse_type($parser);
+        if (parser_check($parser, "ELLIPSIS")) { parser_advance($parser); $af_var = 1; }
+    }
+    my str $sigil = "$";
+    if (parser_check($parser, "DOLLAR")) {
+        parser_advance($parser);
+    } elsif (parser_check($parser, "AT")) {
+        parser_advance($parser);
+        $sigil = "@";
+    } elsif (parser_check($parser, "PERCENT")) {
+        parser_advance($parser);
+        $sigil = "%";
+    }
+    if ($af_var == 1 && $sigil ne "@") {
+        parser_error($parser, "variadic parameter must use array sigil (@), e.g. ...@rest");
+    }
+    if (($anon->{"is_variadic"} + 0) == 1) {
+        parser_error($parser, "variadic parameter must be the last parameter");
+    }
+    # Same naming rules as `my` declarations ($default, $hash, ... are fine)
+    my str $pname = parse_var_name($parser);
+    my scalar $param = ast_new_param($pname, $ptype, $sigil);
+    if ($af_var == 1) {
+        $param->{"is_variadic"} = 1;
+        $anon->{"is_variadic"} = 1;
+    }
+    ast_add_param($anon, $param);
+}
+
+# `func { BODY }` / `fn { BODY }`: no parameter list -- the arguments
+# arrive in @_ (Perl's `sub { ... }`)
+func parse_anon_func_args(scalar $parser, int $line) scalar {
+    my scalar $na = ast_new_anon_func(TYPE_SCALAR());
+    my scalar $nup = ast_new_param("_", TYPE_SCALAR(), "@");
+    $nup->{"is_variadic"} = 1;
+    $na->{"is_variadic"} = 1;
+    ast_add_param($na, $nup);
+    $na->{"body"} = parse_block($parser);
+    ast_set_line($na, $line);
+    return $na;
+}
+
 # Parse anonymous function: func (params) return_type { body }
 # Called after 'func' and seeing LPAREN
 func parse_anon_func(scalar $parser, int $line) scalar {
@@ -835,68 +891,10 @@ func parse_anon_func(scalar $parser, int $line) scalar {
 
     # Parse parameters
     if (!parser_check($parser, "RPAREN")) {
-        # Parse first parameter (type optional — defaults to scalar/array/hash from sigil)
-        my scalar $af_peek = parser_current($parser);
-        my str $af_pt = $af_peek->{"type"};
-        my int $ptype = 0;
-        if ($af_pt eq "DOLLAR" || $af_pt eq "AT" || $af_pt eq "PERCENT") {
-            if ($af_pt eq "DOLLAR") { $ptype = TYPE_SCALAR(); }
-            elsif ($af_pt eq "AT") { $ptype = TYPE_ARRAY(); }
-            elsif ($af_pt eq "PERCENT") { $ptype = TYPE_HASH(); }
-        } else {
-            $ptype = parse_type($parser);
-        }
-        my str $sigil = "$";
-        my str $pname = "";
-
-        # Check for sigil
-        if (parser_check($parser, "DOLLAR")) {
-            parser_advance($parser);
-            $sigil = "$";
-        } elsif (parser_check($parser, "AT")) {
-            parser_advance($parser);
-            $sigil = "@";
-        } elsif (parser_check($parser, "PERCENT")) {
-            parser_advance($parser);
-            $sigil = "%";
-        }
-
-        # Same naming rules as `my` declarations ($default, $hash, ... are fine)
-        $pname = parse_var_name($parser);
-
-        my scalar $param = ast_new_param($pname, $ptype, $sigil);
-        ast_add_param($anon, $param);
-
-        # Parse remaining parameters
+        parse_anon_param($parser, $anon);
         while (parser_check($parser, "COMMA")) {
             parser_advance($parser);
-
-            $af_peek = parser_current($parser);
-            $af_pt = $af_peek->{"type"};
-            if ($af_pt eq "DOLLAR" || $af_pt eq "AT" || $af_pt eq "PERCENT") {
-                if ($af_pt eq "DOLLAR") { $ptype = TYPE_SCALAR(); }
-                elsif ($af_pt eq "AT") { $ptype = TYPE_ARRAY(); }
-                elsif ($af_pt eq "PERCENT") { $ptype = TYPE_HASH(); }
-            } else {
-                $ptype = parse_type($parser);
-            }
-            $sigil = "$";
-
-            if (parser_check($parser, "DOLLAR")) {
-                parser_advance($parser);
-                $sigil = "$";
-            } elsif (parser_check($parser, "AT")) {
-                parser_advance($parser);
-                $sigil = "@";
-            } elsif (parser_check($parser, "PERCENT")) {
-                parser_advance($parser);
-                $sigil = "%";
-            }
-
-            $pname = parse_var_name($parser);
-
-            $param = ast_new_param($pname, $ptype, $sigil);
-            ast_add_param($anon, $param);
+            parse_anon_param($parser, $anon);
         }
     }
 
@@ -1889,6 +1887,9 @@ func parse_primary(scalar $parser) scalar {
         if (parser_check($parser, "LPAREN")) {
             return parse_anon_func($parser, $anon_line);
         }
+        if (parser_check($parser, "LBRACE")) {
+            return parse_anon_func_args($parser, $anon_line);
+        }
         parser_error($parser, "unexpected 'fn' in expression context");
     }
 
@@ -2374,6 +2375,9 @@ func parse_primary(scalar $parser) scalar {
         # Check for LPAREN - if present, this is an anonymous function
         if (parser_check($parser, "LPAREN")) {
             return parse_anon_func($parser, $anon_line);
+        }
+        if (parser_check($parser, "LBRACE")) {
+            return parse_anon_func_args($parser, $anon_line);
         }
         # Otherwise it's a parse error (named func should be at statement level)
         parser_error($parser, "unexpected 'func' in expression context");

@@ -19883,6 +19883,17 @@ StradaValue* strada_closure_new_shared(void *func, int params, int captures, Str
     return sv;
 }
 
+/* Mark an anonymous function variadic: arguments past FIXED_PARAMS arrive
+ * packed in an array as the last parameter. Returns CLOSURE. */
+StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params) {
+    if (closure && !STRADA_IS_TAGGED_INT(closure) && closure->type == STRADA_CLOSURE && closure->value.ptr) {
+        StradaClosure *cl = (StradaClosure *)closure->value.ptr;
+        cl->is_variadic = 1;
+        cl->fixed_params = fixed_params < 0 ? 0 : fixed_params;
+    }
+    return closure;
+}
+
 StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_void, int fixed_params) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_CLOSURE;

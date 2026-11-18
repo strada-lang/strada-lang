@@ -1,0 +1,19 @@
+# EXPECT: sv,a1,hv,3,jk,2|a0a1a2|sva0hj
+# `my %t; my @t; my $t;` in one scope are three variables (Perl); the second
+# declaration was "already declared".
+func main() int {
+    my %t = ("k" => "hv");
+    my @t = ("a0", "a1");
+    my $t = "sv";
+    push(@t, "a2");
+    $t{"j"} = "hj";
+    my @o;
+    push(@o, join(",", $t, $t[1], $t{"k"}, scalar(@t), join("", sort keys %t), scalar(@t) - 1));
+    my $s = "";
+    foreach my $e (@t) { $s = $s . $e; }
+    push(@o, $s);
+    my $f = func () { return $t . $t[0] . $t{"j"}; };
+    push(@o, $f->());
+    say(join("|", @o));
+    return 0;
+}

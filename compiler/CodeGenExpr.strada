@@ -9197,6 +9197,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         $cg->{"anon_func_defs"} = $cg->{"anon_func_defs"} . $def;
 
+        # A variadic anonymous function (`func { }` / `...@rest`): the last
+        # parameter receives the remaining arguments as an array
+        my int $af_is_var = ($expr->{"is_variadic"} + 0);
+        if ($af_is_var == 1) { emit($cg, "strada_closure_set_variadic("); }
         # Emit closure creation with captures (using PerlaCell mode 0 / static global mode 1 / boxed local mode 2)
         if ($capture_count == 0) {
             emit($cg, "strada_closure_new((void*)&" . $func_name . ", " . $param_count . ", 0, NULL)");
@@ -9259,6 +9263,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             emit($cg, "strada_closure_new_shared((void*)&" . $func_name . ", " . $param_count . ", " . $capture_count . ", (StradaValue**[]){" . $ptrs_str . "}, (unsigned char[]){" . $modes_str . "})");
         }
+        if ($af_is_var == 1) { emit($cg, ", " . ($param_count - 1) . ")"); }
         return;
     }
 

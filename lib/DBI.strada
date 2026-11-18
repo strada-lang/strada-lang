@@ -297,6 +297,32 @@ L<SQLite documentation|https://sqlite.org/lang.html>
 
 package DBI;
 
+# Database drivers detected by ./configure (-D flags still add to these)
+#include "strada_config.inc"
+
+# The C code below tests the same names
+#ifdef HAVE_SQLITE3
+__C__ {
+#ifndef HAVE_SQLITE3
+#define HAVE_SQLITE3 1
+#endif
+}
+#endif
+#ifdef HAVE_MYSQL
+__C__ {
+#ifndef HAVE_MYSQL
+#define HAVE_MYSQL 1
+#endif
+}
+#endif
+#ifdef HAVE_POSTGRES
+__C__ {
+#ifndef HAVE_POSTGRES
+#define HAVE_POSTGRES 1
+#endif
+}
+#endif
+
 # Extern-C library deps that the final binary needs at link time. These
 # track DBI_DEFINES from the Makefile: when a driver is configured in,
 # the corresponding -l flag is recorded so consumers of DBI.o (via
