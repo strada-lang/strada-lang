@@ -1750,6 +1750,40 @@ Strada::JIT::init();
 my scalar $r = Strada::JIT::eval("1 + 2");  # Runtime eval, returns 3
 ```
 
+**Strada::JIT notes (Audit 20 V5)**: with tcc the generated
+`__strada_init_globals` is made non-static and called after dlopen (tcc drops
+`__attribute__((constructor))`, so methods/inheritance were never registered).
+Top-level `our` declarations are recorded (`register_our_decls`) and
+re-declared at package level in every later snippet. Named funcs after other
+statements are hoisted (`jit_hoist_named_funcs`); function/brace extraction
+runs on `strip_strings_and_comments()` output (heredoc bodies, strings,
+regexes blanked). A redeclared tracked `my` of the same type is restored
+first, so `my $n = $n * 2` sees the old `$n`. `reset()` no longer
+dlcloses: closures from earlier evals stay callable. `is_balanced()` is 0
+for input ending in a binary operator. Known limit: `@x` and `$x` are one
+variable (the compiler's symbol table is keyed by name, not sigil).
+
+**lib/Eval (Strada::Interpreter) notes (Audit 20 V5)**: every eval runs in a
+fresh VM seeded from / exported to the session store `%g_eval_vm_globals`.
+`vm_to_sv`/`sv_to_vm` (interpreter/vm.c) memoize by identity
+(`vm_conv_begin/end` widen one memo over all globals + the result), so
+aliases, cycles and shared DAGs survive (no depth cap; linear time); nested
+containers convert to REFs and results/exceptions to scalars
+(`vm_value_to_sv_scalar`). A blessed ref whose class the VM program defines
+converts back to a VM object. Closures/methods of an earlier eval's VM run
+through `vm_foreign_call`, with `vm_foreign_vm_call_hook` syncing that VM
+with the store (generation `eval_sync_gen`, epoch bumped by `reset()`).
+Eval-defined classes get host `strada_inherit` + an `AUTOLOAD` trampoline
+into the latest eval VM (typed catch, `$obj->method()` from the host; `can()`
+does not see them). Tokens are renumbered to the user's lines
+(`eval_sb_*`), and VM compile errors (stderr) are captured into the
+exception. The session mutex is taken with `strada_gc_mutex_lock` (runtime:
+GC-safe while waiting; a waiter used to stall every stop-the-world
+collection). A redeclaration with an initializer is seeded (old value
+visible in the initializer); one without starts undef. Tests:
+`t/audit_r20/eval_v5.strada`, `t/audit_r20/jit_v5.strada`,
+`t/leak_tests/test_audit_r20_eval_jit_leaks.strada`.
+
 ### Heredocs
 
 ```strada

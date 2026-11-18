@@ -1211,6 +1211,10 @@ typedef struct VM {
     VMValue jit_ret_val;
     uint32_t jit_sig_poll;
     size_t jit_stop_base;
+    /* lib/Eval session bookkeeping (opaque to the VM; 0 for other VMs) */
+    uint64_t eval_sync_gen;  /* session store generation last synced with */
+    uint32_t eval_epoch;     /* session epoch (reset() starts a new one) */
+    int eval_running;        /* executing an eval right now */
 } VM;
 
 /* Program API */
@@ -1282,5 +1286,14 @@ struct StradaValue *vm_value_to_sv(VMValue v);
 void vm_run_globals_init(VM *vm);
 void vm_seed_globals(VM *vm, struct StradaValue *hash_sv, struct StradaValue *skip_hash_sv);
 void vm_export_globals(VM *vm, struct StradaValue *hash_sv);
+
+/* lib/Eval support. Conversions memoize by identity; begin/end widen the
+ * memo over several conversions (no VM code may run inside a span). */
+void vm_conv_begin(void);
+void vm_conv_end(void);
+struct StradaValue *vm_value_to_sv_scalar(VMValue v);  /* container -> ref */
+VMValue vm_value_from_sv(struct StradaValue *sv);
+extern void (*vm_foreign_vm_call_hook)(VM *target, int phase);
+struct StradaValue *vm_host_method_call(VM *vm, const char *cls, const char *method, int argc, struct StradaValue **self_and_args);
 
 #endif

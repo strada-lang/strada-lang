@@ -928,6 +928,9 @@ void strada_gc_set_enabled(int on);      /* Enable/disable automatic collection 
 void strada_gc_set_threshold(long n);    /* Candidate-root count that triggers auto-collect */
 unsigned long strada_gc_collections(void); /* Stats: collections run */
 unsigned long strada_gc_objects_freed(void); /* Stats: cyclic objects reclaimed */
+void strada_gc_blocking_enter(void);     /* about to block outside the runtime: count as GC-safe */
+void strada_gc_blocking_leave(void);     /* ...returned (parks if a collection is running) */
+void strada_gc_mutex_lock(pthread_mutex_t *mtx); /* pthread_mutex_lock that is GC-safe while waiting */
 void strada_arena_begin(void);           /* Start a request arena (bump region) */
 void strada_arena_end(void);             /* Free the current arena wholesale */
 int  strada_arena_active(void);          /* 1 if an arena is currently active */

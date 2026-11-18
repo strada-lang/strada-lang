@@ -1,0 +1,47 @@
+# Cycle 20 V5 Valgrind Leak Test (Eval identity-preserving conversion,
+# cross-VM closures, host dispatch of eval classes, JIT reset)
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    Strada::Interpreter::reset();
+    my int $i = 0;
+    while ($i < 3) {
+        # shared, cyclic and deep values between evals and the host
+        Strada::Interpreter::eval("my \$a = [1]; my \$b = \$a; my \$h = {}; \$h->{\"s\"} = \$h; \$h->{\"t\"} = \$h; my \$x = 1; my int \$k = 0; while (\$k < 40) { \$x = [\$x, \$x]; \$k++; } 1");
+        if (Strada::Interpreter::eval("push(\@\$a, 2); size(\@\$b)") != 2) { return 1; }
+        my scalar $hv = Strada::Interpreter::eval("\$h");
+        # closure from an earlier eval, called from a later eval and the host
+        Strada::Interpreter::eval("my \@st = (); my \$pf = fn (\$v) { push(\@st, \$v); return size(\@st); };");
+        Strada::Interpreter::eval("\$pf->(1);");
+        my scalar $pf = Strada::Interpreter::eval("\$pf");
+        $pf->(2);
+        if (Strada::Interpreter::eval("size(\@st)") != 2) { return 2; }
+        # eval class: typed catch + host method call
+        Strada::Interpreter::eval("package R20LkB; func new(str \$m) scalar { return bless({\"m\"=>\$m}, \"R20LkB\"); } func m(scalar \$s) str { return \$s->{\"m\"}; } package R20LkS; extends R20LkB; func new(str \$m) scalar { return bless({\"m\"=>\$m}, \"R20LkS\"); } package main;");
+        my int $caught = 0;
+        try { Strada::Interpreter::eval("throw R20LkS::new(\"x\");"); } catch (R20LkB $e) { $caught = 1; }
+        if ($caught != 1) { return 3; }
+        my scalar $o = Strada::Interpreter::eval("R20LkS::new(\"y\")");
+        if ($o->m() ne "y") { return 4; }
+        # exceptions out of an eval method / closure called by the host
+        Strada::Interpreter::eval("package R20LkS; func bad(scalar \$s) int { die({\"why\" => \"m\"}); } package main; my \$badf = fn () { die(\"c\"); };");
+        try { $o->bad(); } catch ($e) {}
+        my scalar $badf = Strada::Interpreter::eval("\$badf");
+        try { $badf->(); } catch ($e) {}
+        try { Strada::Interpreter::eval("1 +* 2"); } catch ($e) {}
+        try { Strada::Interpreter::eval("\$nope_r20 + 1"); } catch ($e) {}
+        $i = $i + 1;
+    }
+    Strada::Interpreter::reset();
+
+    Strada::JIT::init();
+    Strada::JIT::eval("our \$r20gv = 4;");
+    if (Strada::JIT::eval("my \$r20d = 2; func r20f() { return \$r20gv; } \$r20d * r20f()") != 8) { return 5; }
+    my scalar $jc = Strada::JIT::eval("fn (\$x) { return \$x + 1; }");
+    Strada::JIT::reset();
+    if ($jc->(1) != 2) { return 6; }
+    say("ok");
+    return 0;
+}

@@ -2684,3 +2684,41 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
   `index_fill`; the index is rebuilt before it passes 3/4. Fast paths use
   `vm_hash_probe_first` (NULL = the key is absent) and
   `vm_hash_append_slot`; the x86 JIT first probe reads `index[hash & mask]`.
+
+## Runtime eval: lib/Eval and Strada::JIT (Audit 20 V5, 2026-11)
+
+- **Eval value flow.** `eval_string_vm_ex` (lib/Strada/Interpreter.strada)
+  compiles session decls + the new code into a new `VMProgram`, runs it in a
+  new VM seeded from `%g_eval_vm_globals`, and exports the VM's globals back.
+  The conversions in interpreter/vm.c (`vm_to_sv_depth(v, depth, nested)`,
+  `sv_to_vm_depth` / `sv_to_vm_container`) memoize per thread
+  (`g_conv_v2s`, `g_conv_s2v`) while `g_conv_depth > 0`; `vm_seed_globals`,
+  `vm_export_globals`, and every top-level `vm_to_sv`/`sv_to_vm` open a span.
+  No VM code may run inside a span (addresses could be reused after GC), so
+  the eval keeps result + export in one span only when the program has no END
+  blocks. `nested == 1` turns a container into a REF (blessed like the
+  container). A blessed REF converts to a VM object when
+  `vm_prog_has_class(active program, pkg)`; otherwise it stays a
+  `VMNativeSV` (host object).
+- **Earlier VMs.** A closure exported from VM1 keeps VM1 alive
+  (`VMExportedClosureCtx`). `vm_foreign_call` (shared by closure calls and
+  `vm_host_method_call`) calls `vm_foreign_vm_call_hook(vm, 0/1)` around the
+  call when the VM is an eval VM (`eval_epoch != 0`) that is not active; lib/Eval's
+  hook exports the running eval VM, seeds the target if its `eval_sync_gen`
+  is behind `g_eval_store_gen`, and afterwards exports the target and
+  re-seeds the running eval. `reset()` bumps `g_eval_epoch`, so old VMs stop
+  syncing.
+- **Host OOP.** After each compile, `eval_register_host_classes` calls
+  `strada_inherit` for the program's inherits table and registers an
+  `AUTOLOAD` (`eval_host_autoload`) for every package that has functions in
+  eval code and no AUTOLOAD of its own; it runs the method in the latest eval
+  VM (`g_eval_host_vm`, retained with its program).
+- **Error locations.** The wrapped source is built with `eval_sb_add` /
+  `eval_sb_add_parts` (chunk offsets come from `split_eval_units_ex`'s
+  `top_parts` / segment `parts`); `eval_sb_renumber_tokens` rewrites token
+  lines/columns before parsing, so parser and VM-compiler messages give user
+  lines. `vm_compile_program`'s stderr output is captured (dup2 to a
+  tmpfile) and becomes the exception text.
+- **JIT.** See CLAUDE.md "Strada::JIT notes". `extract_function_def` and
+  `jit_hoist_named_funcs` work on `strip_strings_and_comments()` output, which
+  is length-preserving (every input byte maps to one output byte).

@@ -1,0 +1,143 @@
+# Audit Cycle 20 V5: lib/Eval (Strada::Interpreter) regressions.
+# Prints AUDIT_R20_EVAL_V5_OK when every check passes.
+use lib "lib";
+use Eval;
+
+my int $fails = 0;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        $fails = $fails + 1;
+    }
+}
+
+func ev(str $code) scalar {
+    return Strada::Interpreter::eval($code);
+}
+
+func ev_err(str $code) str {
+    try { ev($code); } catch ($e) { return "" . $e; }
+    return "";
+}
+
+# V5-1: evals from several threads with the cycle collector triggering often
+# (the session mutex waiter was not GC-safe: every collection timed out).
+func v51_work(int $id, int $n) int {
+    my int $i = 0;
+    my int $s = 0;
+    while ($i < $n) {
+        my scalar $r = ev("my int \$tv" . $id . " = " . $i . "; \$tv" . $id . " * 2");
+        $s = $s + $r;
+        $i++;
+    }
+    return $s;
+}
+
+func main() int {
+    Strada::Interpreter::reset();
+
+    core::gc_threshold(50);
+    my array @fs = ();
+    my int $t = 0;
+    while ($t < 4) {
+        my int $id = $t;
+        push(@fs, async::spawn(fn () { return v51_work($id, 30); }));
+        $t++;
+    }
+    my int $tsum = 0;
+    foreach my $f (@fs) { $tsum = $tsum + await $f; }
+    check($tsum == 4 * 870, "V5-1 threaded evals (" . $tsum . ")");
+    core::gc_threshold(10000);
+
+    # V5-2: aliasing survives the trip between evals
+    ev("my \$a = [1]; my \$b = \$a;");
+    check(ev("push(\@\$a, 2); size(\@\$b)") == 2, "V5-2 cross-eval alias");
+    ev("package V5Ctr; func new() scalar { return bless({\"n\"=>0}, \"V5Ctr\"); } func inc(scalar \$s) int { \$s->{\"n\"} = \$s->{\"n\"} + 1; return \$s->{\"n\"}; } package main;");
+    ev("my \$o = V5Ctr::new(); my \%reg = (\"o\" => \$o);");
+    ev("\$o->inc();");
+    check(ev("\$reg{\"o\"}->{\"n\"}") == 1, "V5-2 object shared through a hash");
+
+    # V5-3: a self-referencing hash (twice) neither hangs nor loses its shape
+    ev("my \$h = {}; \$h->{\"a\"} = \$h; \$h->{\"b\"} = \$h; \$h->{\"v\"} = 7; 1");
+    check(ev("\$h->{\"a\"}->{\"b\"}->{\"v\"}") == 7, "V5-3 cyclic hash in a later eval");
+    my scalar $hc = ev("\$h");
+    check($hc->{"a"}->{"b"}->{"v"} == 7, "V5-3 cyclic hash returned to the host");
+    check(int($hc->{"a"}) == int($hc), "V5-3 cycle keeps its identity");
+
+    # V5-4: depth is not capped; shared DAGs convert in linear time
+    my scalar $d = ev("my \$x = 1; my int \$i = 0; while (\$i < 40) { \$x = [\$x]; \$i++; } \$x");
+    my int $depth = 0;
+    my scalar $p = $d;
+    while (defined($p) && ref($p) eq "ARRAY") { $p = $p->[0]; $depth++; }
+    check($depth == 40 && defined($p) && $p == 1, "V5-4 depth 40 round trip (" . $depth . ")");
+    my int $t0 = core::mono_ms();
+    ev("my \$dag = 1; my int \$j = 0; while (\$j < 40) { \$dag = [\$dag, \$dag]; \$j++; } 1");
+    check(ev("ref(\$dag)") eq "ARRAY", "V5-4 shared DAG survives");
+    check(core::mono_ms() - $t0 < 5000, "V5-4 shared DAG converts in linear time");
+
+    # V5-5: references come back as references
+    my scalar $r = ev("my \$t5 = {\"a\" => [1,2]}; \$t5");
+    check(is_ref($r) == 1 && ref($r) eq "HASH", "V5-5 top-level hashref");
+    check(is_ref($r->{"a"}) == 1 && ref($r->{"a"}) eq "ARRAY", "V5-5 nested arrayref");
+    check(("" . ev("[5,6]")) =~ /^ARRAY\(0x/, "V5-5 arrayref stringifies as a ref");
+    check(ev("my \@cnt5 = (1,2,3);") == 3, "V5-5 my \@a = LIST is its count");
+
+    # V5-6: a closure from an earlier eval works on the session's variables
+    ev("my \@s2 = (); my \$p2 = fn (\$v) { push(\@s2, \$v); return size(\@s2); };");
+    ev("\$p2->(1);");
+    check(ev("size(\@s2)") == 1, "V5-6 closure from an earlier eval");
+    my scalar $cf = ev("my int \$cnt = 0; fn () int { \$cnt = \$cnt + 1; return \$cnt; }");
+    $cf->();
+    $cf->();
+    check(ev("\$cnt") == 2, "V5-6 host calls of an eval closure update the session");
+
+    # V5-7: package main after another package
+    check(ev("package V5A; my \$z = 1; package main; 2") == 2, "V5-7 value after package main");
+    check(ev("package V5A; my \$z2 = 1; package main; my \$m2 = 5; \$m2 + 1") == 6, "V5-7 my in last segment");
+    check(ev("\$m2") == 5, "V5-7 my in last segment persists");
+
+    # V5-8: errors name the user's line and carry the real message
+    my str $e1 = ev_err("1 +* 2");
+    check(index($e1, ":1:") >= 0 && index($e1, "unexpected") >= 0, "V5-8 parse error line 1 (" . $e1 . ")");
+    my str $e2 = ev_err("my \$ok8 = 1;\nmy \$ok9 = 2;\n\$nope8 + 1");
+    check(index($e2, ":3:") >= 0 && index($e2, "nope8") >= 0, "V5-8 compile error on line 3 (" . $e2 . ")");
+
+    # V5-9: classes defined in eval are known to host dispatch
+    ev("package V5Base; func new(str \$m) scalar { return bless({\"msg\"=>\$m}, \"V5Base\"); } func msg(scalar \$s) str { return \$s->{\"msg\"}; } package V5Sub; extends V5Base; func new(str \$m) scalar { return bless({\"msg\"=>\$m}, \"V5Sub\"); } package main;");
+    my str $caught = "none";
+    try { ev("throw V5Sub::new(\"sub\");"); }
+    catch (V5Base $e) { $caught = "base:" . ref($e); }
+    catch ($e) { $caught = "all:" . ref($e); }
+    check($caught eq "base:V5Sub", "V5-9 typed catch of an eval subclass (" . $caught . ")");
+    my scalar $obj = ev("V5Sub::new(\"m1\")");
+    my str $mres = "";
+    try { $mres = $obj->msg(); } catch ($e) { $mres = "err: " . $e; }
+    check($mres eq "m1", "V5-9 host method call on an eval object (" . $mres . ")");
+    try { ev("die({\"code\" => 5});"); } catch ($e) { check(ref($e) eq "HASH" && $e->{"code"} == 5, "V5-9 hash exception"); }
+
+    # V5-15: the new my is not in scope in its own initializer
+    ev("my \$n15 = 5;");
+    check(ev("my \$n15 = \$n15 * 2;") == 10, "V5-15 my \$n = \$n * 2");
+    check(ev("\$n15") == 10, "V5-15 value persists");
+    ev("my \$u15 = 3;");
+    check(!defined(ev("my \$u15; \$u15")), "V5-15 my \$x; still starts undef");
+
+    # after a mid-session reset(): a new closure / class syncs with the new
+    # session, an old closure keeps its own state
+    Strada::Interpreter::reset();
+    ev("my \@s6 = (); my \$p6 = fn (\$v) { push(\@s6, \$v); return size(\@s6); };");
+    ev("\$p6->(1); \$p6->(2);");
+    check(ev("size(\@s6)") == 2, "V5-6 closure sync after reset");
+    check($cf->() == 3, "V5-6 pre-reset closure keeps its state");
+    check(!defined(ev("my \$cnt; \$cnt")), "V5-6 pre-reset closure does not leak into the new session");
+    ev("package V5R; func new() scalar { return bless({\"k\"=>4}, \"V5R\"); } func k(scalar \$s) int { return \$s->{\"k\"}; } func boom(scalar \$s) int { die(\"boom\"); } package main;");
+    my scalar $ro = ev("V5R::new()");
+    check($ro->k() == 4, "V5-9 host method after reset");
+    my str $boom = "";
+    try { $ro->boom(); } catch ($e) { $boom = "" . $e; }
+    check(index($boom, "boom") >= 0, "V5-9 exception from an eval method reaches the host (" . $boom . ")");
+
+    if ($fails == 0) { say("AUDIT_R20_EVAL_V5_OK"); }
+    return $fails == 0 ? 0 : 1;
+}

@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <math.h>
 #include <limits.h>
+#include <stddef.h>
 
 /* AST node type constants */
 #define NI_PROGRAM       1
@@ -9022,9 +9023,17 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         free(chunk->dt_code);
         free(chunk->dt_aux);
         free(chunk->int_consts);
-        for (size_t ci = 0; ci < chunk->str_const_count; ci++) free(chunk->str_consts[ci]);
+        for (size_t ci = 0; ci < chunk->str_const_count; ci++) {
+            free(chunk->str_consts[ci]);
+            /* the interned constant values too (as vm_program_free does):
+             * leaked on every redefinition, e.g. each lib/Eval call that
+             * re-declares a function */
+            if (chunk->str_const_vals && VM_IS_PTR(chunk->str_const_vals[ci]))
+                free((char*)VM_TO_PTR(chunk->str_const_vals[ci]) - offsetof(VMConstString, str));
+        }
         free(chunk->str_consts);
         free(chunk->str_const_lens);
+        free(chunk->str_const_vals);
         for (int ci = 0; ci < chunk->capture_count; ci++) free(chunk->capture_names[ci]);
         free(chunk->capture_names);
         memset(chunk, 0, sizeof(VMChunk));
