@@ -2779,7 +2779,32 @@ Measured with callgrind (instruction counts). Wall times are best of 3; VM befor
 
 **`__C__` JIT cache key.** `cblock_jit_compile_n` hashes in the size and mtime of `strada_runtime.h`, `strada_runtime_tcc.h`, `vm.h` and `vm_compiler.h`, plus the sizes of the `VM`, `VMProgram` and `VMChunk` structs.
 
-**Not yet done (tier 2).**
-- Calls made from JIT code re-enter the interpreter through `vm_jit_call_slow`. This is 35% of bench_oop.
-- The interpreter's call and return path costs about 150 instructions per call.
-- Integer loops cost about 55 instructions per iteration in JIT code, which keeps everything on the memory stack.
+## VM performance, tier 2 (2026-11-18)
+
+Instruction counts (callgrind), tier 1 commit → tier 2:
+- closures: 6181M → 3279M
+- data: 10753M → 6312M
+- hotpaths: 40299M → 28115M
+- binary_trees: 5416M → 4277M
+- oop: 9900M → 8439M
+- pipeline: 11056M → 9863M
+- regex, sprintf, gc, utf8, binary: 7% fewer
+- compute, functions, strings, json: unchanged
+
+**Closures and variadic functions run in the JIT.** `vm_execute_call_cl`, `VM_TRY_JIT_OSR` and `VM_MAYBE_ENTER_JIT_CALLEE` no longer exclude closure frames or `has_variadic` chunks. `L_do_op_call_closure` enters the callee's JIT code after building the frame.
+
+**Direct JIT-to-JIT calls on the slow call paths.** `OP_CALL`'s slow label first calls `vm_jit_call_prep`, and `OP_CALL_CLOSURE` calls `vm_jit_closure_prep`. Each builds the callee frame exactly as the interpreter does (variadic packing through `vm_call_variadic_setup`) and returns the callee's `jit_code`, or NULL when the callee isn't compiled or the call isn't plain. On non-NULL the emitted code reloads its registers and calls the entry directly (`call rax`); a nonzero return code propagates with `pop rbp; ret`. On NULL it falls back to `vm_jit_call_slow` / `vm_jit_call_closure_slow`.
+
+**Native opcodes.** `OP_MOD` and `OP_MOD_LOCAL_I32` (int % positive int: `idiv`, add the divisor to a negative remainder; `jb_j_not_both_int` clobbers RCX, so the divisor is reloaded after it), `OP_NOT` (int), `OP_ARRAY_SIZE` (untied array), `OP_DEFINED` (only when `vm->has_weakrefs == 0`), `OP_LOAD_CAPTURE` / `OP_STORE_CAPTURE` for int values (direct or through a cell). `OP_HASH_REF` emits nothing. Any other operand goes to the step helper.
+
+**Fast-or-bail step cases.** `vm_jit_op_step` handles only the plain case of `OP_DEFINED`, `OP_LOAD_CAPTURE[_CELL]`, `OP_STORE_CAPTURE`, `OP_SPACESHIP` (int/int, num/num), `OP_HASH_GET` / `OP_HASH_SET` (untied hash, string key, no weak value) and `OP_HASH_BLESS`. Everything else does `goto jit_step_bail` before touching the stack: `frame->ip` is set to the instruction and the helper returns `VM_JIT_INTERP`, so the interpreter's own handler runs it (tie, weak refs, overloads and errors keep one implementation). Gotcha: a `case` added to the step helper's fall-through list compiles that opcode as the step call; a `case X: break;` placed inside that list silently turns every later opcode in the list into a no-op.
+
+**Integer to string.** `vm_to_cstr` formats integers with `vm_i64_to_cstr` instead of `snprintf` (12% of hotpaths).
+
+Test: `interpreter/test/test_vm_perf_c20b.strada`.
+
+**Not yet done.**
+- `$sum` in bench_compute exceeds the 50-bit inline int range, so every `+=` boxes; compute and functions did not move.
+- The busiest step-helper ops are `CONCAT`, `ARRAY_PUSH`, `ADD_TO_LOCAL` (boxed), `HASH_*_CONST`, `NEW_HASH` / `NEW_ARRAY` and `BUILTIN`; each step call costs 60-80 instructions of dispatch.
+- Opcodes that still bail to the interpreter at run time: `TRY_BEGIN`, `SPRINTF`, `MAP_PUSH`, `CHR`, regex ops, `MAKE_CLOSURE`, `HASH_DELETE`, `ISA`, `STR_SPLIT`, `STR_UPPER`, `BYTES`, `WEAKEN_SLOT`, `C_BLOCK`.
+- JIT code keeps every value on the memory stack (about 55 instructions per integer loop iteration).

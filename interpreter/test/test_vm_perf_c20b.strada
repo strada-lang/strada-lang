@@ -1,0 +1,136 @@
+# VM performance tier 2: JIT paths for closures (captures, cells, tied/weak
+# captures), variadic and @_ functions, %, !, scalar(@a), defined, <=>, hash
+# get/set and bless. Each loop runs long enough for the JIT to compile it.
+package Counter;
+func TIESCALAR($cls) { return bless({n => 0, log => []}, $cls); }
+func FETCH($self) { $self->{"n"} = $self->{"n"} + 1; return $self->{"n"}; }
+func STORE($self, $v) { push(@{$self->{"log"}}, $v); }
+package TA;
+func TIEARRAY($c) { return bless({a => [1,2,3,4,5]}, $c); }
+func FETCHSIZE($s) { return 5; }
+func FETCH($s, $i) { return $s->{"a"}->[$i]; }
+package Pt;
+has rw int $x = 0;
+has rw int $y = 0;
+func len2($self) { return $self->x() * $self->x() + $self->y() * $self->y(); }
+package main;
+func make($base) { my $n = $base; return fn ($d) { $n = $n + $d; return $n; }; }
+func mk_str() { my $s = "a"; return fn () { $s = $s . "b"; return $s; }; }
+func m($a, $b) { return $a % $b; }
+func nt($v) { return !$v; }
+func sz($r) { return scalar(@{$r}); }
+func mk { my %h = (a => $_[0]); return \%h; }
+func plain { return $_[0] + 1; }
+func cmpv($a, $b) { return $a <=> $b; }
+func mkobj($k, $v) { my %h; $h{$k} = $v; return bless(\%h, "Box"); }
+func sum(int ...@n) int { my $t = 0; foreach my $v (@n) { $t = $t + $v; } return $t; }
+func closures() void {
+    my $acc = make(10);
+    my $r = 0;
+    my $i = 0;
+    while ($i < 40) { $r = $acc->($i % 7); $i++; }
+    say("acc " . $r);
+    my $st = mk_str();
+    my $sv = "";
+    $i = 0;
+    while ($i < 20) { $sv = $st->(); $i++; }
+    say("str " . length($sv) . " " . substr($sv, 0, 3));
+    my $outer = 5;
+    my $bump = fn () { $outer = $outer + 2; return $outer; };
+    $i = 0;
+    while ($i < 30) { $bump->(); $i++; }
+    say("outer " . $outer);
+    $outer = "x";
+    say("after " . $bump->() . " " . $outer);
+    my $u;
+    my $getu = fn () { return defined($u) ? "def" : "undef"; };
+    $i = 0; my $g = "";
+    while ($i < 20) { $g = $getu->(); $i++; }
+    say("u " . $g);
+    $u = 3.5;
+    say("u2 " . $getu->());
+    my $lvl = 4;
+    my $mid = fn () { return fn ($x) { return $x + $lvl; }; };
+    my $inner = $mid->();
+    my $t = 0;
+    $i = 0;
+    while ($i < 30) { $t = $t + $inner->($i); $i++; }
+    say("nested " . $t);
+    my $neg = 0;
+    $i = -25;
+    while ($i < 25) { my $m = $i % 7; $neg = $neg + $m; $i++; }
+    say("mod " . $neg);
+    my $tv;
+    tie($tv, "Counter");
+    my $rd = fn () { return $tv; };
+    my $wr = fn ($v) { $tv = $v; return 1; };
+    $i = 0; my $last = 0;
+    while ($i < 20) { $last = $rd->(); $wr->($i); $i++; }
+    say("tied " . $last . " " . join(",", @{tied($tv)->{"log"}}[0..3]));
+    my $h = {k => 1};
+    my $w = $h;
+    core::weaken($w);
+    my $dw = fn () { return defined($w) ? 1 : 0; };
+    $i = 0; my $dd = 0;
+    while ($i < 20) { $dd = $dd + $dw->(); $i++; }
+    $h = undef;
+    say("weak " . $dd . " " . $dw->());
+    my $nc = 5;
+    my $ok = 0;
+    try { $nc->(1); } catch ($e) { $ok = 1; }
+    say("noncode " . $ok);
+}
+func natives() void {
+    my $i = 0;
+    my $acc = "";
+    while ($i < 20) {
+        $acc = $acc . m($i - 10, 7) . "," . m($i - 10, -3) . "," . m(17, $i + 1) . "," . m(7.5, 2) . ";";
+        $i++;
+    }
+    say($acc);
+    my $z = 0;
+    try { m(5, 0); } catch ($e) { $z = 1; }
+    say("zero " . $z);
+    my @vals = (0, 1, -1, "", "0", "a", undef, 2.5, "0.0");
+    my $out = "";
+    $i = 0;
+    while ($i < 20) { foreach my $v (@vals) { $out = $out . (nt($v) ? "T" : "F"); } $i++; }
+    say(substr($out, 0, 18) . " " . length($out));
+    my @a = (1, 2, 3);
+    my %h = (x => 1, y => 2);
+    my @t;
+    tie(@t, "TA");
+    my $s = 0;
+    $i = 0;
+    while ($i < 20) { $s = $s + sz(\@a) + sz([]) ; push(@a, $i); $i++; }
+    say("size " . $s . " " . scalar(%h) . " " . scalar(@t));
+}
+func misc() void {
+    my $i = 0;
+    while ($i < 12) { my $r = mk($i); my $p = plain($i); say($i . " " . (defined($r) ? $r->{"a"} : "UNDEF") . " " . $p); $i++; }
+    my $c = "";
+    $i = 0;
+    while ($i < 20) {
+        $c = $c . cmpv($i, 10) . cmpv(2.5, $i / 4) . cmpv("10", $i);
+        $i++;
+    }
+    say("cmp " . $c);
+    my %h;
+    $i = 0;
+    while ($i < 50) { $h{"k" . ($i % 7)} = ($h{"k" . ($i % 7)} // 0) + $i; $i++; }
+    say("hash " . join(",", map { $_ . "=" . $h{$_} } sort(keys(%h))) . " " . (defined($h{"none"}) ? "d" : "u"));
+    my $objs = "";
+    $i = 0;
+    while ($i < 20) { my $o = mkobj("v", $i); $objs = $objs . ref($o) . $o->{"v"}; $i++; }
+    say("bless " . substr($objs, 0, 20) . " " . length($objs));
+    my $t = 0;
+    $i = 0;
+    while ($i < 30) { my $p = Pt::new("x", $i, "y", 2); $t = $t + $p->len2() + sum($i, 1, 2); $i++; }
+    say("ctor " . $t);
+}
+func main() int {
+    closures();
+    natives();
+    misc();
+    return 0;
+}

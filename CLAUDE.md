@@ -760,6 +760,13 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
 - Test: `interpreter/test/test_vm_perf_c20.strada`.
 - Gate VM changes with the suites run twice, JIT on and `STRADA_NO_JIT=1`. After a `vm.h` change, rebuild `lib/Eval.o` (`make lib/Eval.o`).
 
+**VM performance, tier 2 (2026-11-18)**: callgrind instruction counts fell by up to 47% (closures 47%, data 41%, hotpaths 30%, binary_trees 21%, oop 15%); details in CLAUDE_DEEP_DIVE.md.
+- Closures and variadic functions run in the JIT, and JIT code calls an already-compiled callee directly (`vm_jit_call_prep` / `vm_jit_closure_prep` build the frame in C and return the entry).
+- `%`, `!`, `scalar(@a)`, `defined` and int captures are native JIT code.
+- The step helper handles only the plain case of `<=>`, hash get/set and `bless`. Anything else bails (`jit_step_bail`, `VM_JIT_INTERP`) and the interpreter's handler runs the opcode, so tie, weak refs and overloads stay in one place.
+- Integers stringify without `snprintf` (`vm_i64_to_cstr`).
+- Test: `interpreter/test/test_vm_perf_c20b.strada`.
+
 ## Language Features Reference
 
 ### Namespaces
