@@ -3117,13 +3117,12 @@ static int compile_rx_dynamic_pattern(CompCtx *ctx, StradaValue *owner, const ch
         if (strchr(flags, 'x')) mods[mi++] = 'x';
     }
     mods[mi] = 0;
-    char pre[16];
-    snprintf(pre, sizeof(pre), mi ? "(?%s)" : "", mods);
+    char pre[16] = "";
+    if (mi) snprintf(pre, sizeof(pre), "(?%s)", mods);
     size_t cidx = vm_chunk_add_str_const(ctx->chunk, pre);
     vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)cidx);
     size_t lit_start = 0, i = 0;
-    int nparts = 0;
 #define RX_FLUSH(upto) do { if ((upto) > lit_start) { \
         size_t li = vm_chunk_add_str_const_len(ctx->chunk, p + lit_start, (upto) - lit_start); \
         vm_chunk_emit(ctx->chunk, OP_PUSH_STR); vm_chunk_emit_u16(ctx->chunk, (uint16_t)li); \
@@ -3171,7 +3170,6 @@ static int compile_rx_dynamic_pattern(CompCtx *ctx, StradaValue *owner, const ch
                 strada_decref(expr);
             }
         }
-        nparts++;
         i = j + el;
         lit_start = i;
     }

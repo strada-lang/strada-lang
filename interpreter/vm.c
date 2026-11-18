@@ -4319,11 +4319,11 @@ static void shell_quote_arg(const char *src, char *dst, size_t dstsz) {
 }
 
 static int cblock_bind_entries(VMCBlock *cbs, int n, void *h) {
-    void (*fns[n > 0 ? n : 1])(void**);
+    StradaValue *(*fns[n > 0 ? n : 1])(StradaValue **);
     for (int bi = 0; bi < n; bi++) {
         char nm[48];
         snprintf(nm, sizeof(nm), "__cblock_entry_%d", bi);
-        fns[bi] = (void (*)(void**))dlsym(h, nm);
+        fns[bi] = (StradaValue *(*)(StradaValue **))dlsym(h, nm);
         if (!fns[bi]) return -1;
     }
     /* one handle owner (cbs[0]); vm_program_free dlcloses non-NULL handles */
@@ -4368,8 +4368,13 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
             snprintf(hp, sizeof(hp), "%s/%s", hinc, hdrs[hi]);
             if (stat(hp, &hst) == 0) {
                 hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_size;
-                hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_mtim.tv_sec;
-                hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_mtim.tv_nsec;
+#ifdef __APPLE__
+                struct timespec mtime = hst.st_mtimespec;
+#else
+                struct timespec mtime = hst.st_mtim;
+#endif
+                hash = hash * 1099511628211ULL ^ (uint64_t)mtime.tv_sec;
+                hash = hash * 1099511628211ULL ^ (uint64_t)mtime.tv_nsec;
             }
         }
         hash = hash * 1099511628211ULL ^ (uint64_t)sizeof(VM);
@@ -21026,7 +21031,8 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     CASE(OP_LOAD_CAPTURE_VAR): {
         uint8_t num = di->flags;
-        if (num < VM_RX_MAX && vm->regex_captures[num]) {
+        /* The byte-sized operand fits in the VM_RX_MAX (256) slots. */
+        if (vm->regex_captures[num]) {
             SP_PUSH(vm_make_str_flag(vm->regex_captures[num], vm->regex_capture_len[num], vm->regex_capture_utf8[num]));
         } else {
             SP_PUSH(VM_UNDEF_VAL);   /* unset group: undef (Perl, compiled) */
@@ -21964,7 +21970,7 @@ for (int i = 0; i < cb->var_count; i++) {
 
         /* Call the compiled C block */
         StradaValue *cb_ret = NULL;
-        if (vm_c_call_cblock(vm, (StradaValue *(*)(StradaValue**))cb->fn, sv_vars, &throw_exc, &cb_ret)) {
+        if (vm_c_call_cblock(vm, cb->fn, sv_vars, &throw_exc, &cb_ret)) {
             stack = vm->stack;
             RELOAD();
             for (int i = 0; i < cb->var_count; i++) {

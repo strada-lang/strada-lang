@@ -513,12 +513,12 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     if (length($output_file) > 0) {
         # spew() can't report failure: probe that the output is writable
         # (an unwritable output used to exit 0 with nothing written).
-        my scalar $out_probe = sys::open($output_file, "w");
+        my scalar $out_probe = core::open($output_file, "w");
         if (!defined($out_probe)) {
             say("Error: cannot write output file: " . $output_file);
             exit(1);
         }
-        sys::close($out_probe);
+        core::close($out_probe);
         spew($output_file, $code);
         if ($verbose == 1) {
             say("Success! Generated " . $output_file);
