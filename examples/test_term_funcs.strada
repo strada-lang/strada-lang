@@ -23,9 +23,9 @@ func test_atoi() void {
     }
 }
 
-func test_opendir() void {
-    # List current directory using iterative opendir/readdir_next/closedir
-    my scalar $dh = core::opendir(".");
+func test_opendir(str $dir) void {
+    # List a directory using iterative opendir/readdir_next/closedir
+    my scalar $dh = core::opendir($dir);
     if (defined($dh)) {
         say("ok 4 - core::opendir returns handle");
     } else {
@@ -122,9 +122,9 @@ func test_is_dir() void {
     }
 }
 
-func test_readdir_batch() void {
+func test_readdir_batch(str $dir) void {
     # Test existing batch readdir
-    my array @entries = core::readdir(".");
+    my array @entries = core::readdir($dir);
     my int $count = scalar(@entries);
     if ($count > 0) {
         say("ok 14 - core::readdir batch returns " . $count . " entries");
@@ -142,14 +142,22 @@ func test_term_raw_mode() void {
 }
 
 func main() int {
+    # A scratch directory with known contents, so the listings below are
+    # reproducible (the current directory's contents vary).
+    my str $dir = "/tmp/strada_term_funcs_" . core::getpid();
+    core::mkdir($dir);
+    foreach my str $f ("Makefile", "a.txt", "b.txt") { core::spew($dir . "/" . $f, "x"); }
+
     test_atoi();
-    test_opendir();
+    test_opendir($dir);
     test_opendir_invalid();
     test_term_size();
     test_read_byte();
     test_is_dir();
-    test_readdir_batch();
+    test_readdir_batch($dir);
     test_term_raw_mode();
+    foreach my str $f ("Makefile", "a.txt", "b.txt") { core::unlink($dir . "/" . $f); }
+    core::rmdir($dir);
     say("All tests passed");
     return 0;
 }

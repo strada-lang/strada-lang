@@ -46,13 +46,13 @@ func main(int $argc, array @argv) int {
     say("Created 'books' table");
 
     # Insert some data using placeholders (safe from SQL injection)
-    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+    DBI::exec($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
         ["The Hobbit", "J.R.R. Tolkien", 1937]);
 
-    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+    DBI::exec($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
         ["1984", "George Orwell", 1949]);
 
-    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+    DBI::exec($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
         ["Dune", "Frank Herbert", 1965]);
 
     say("Inserted 3 books\n");
@@ -76,7 +76,7 @@ func main(int $argc, array @argv) int {
     say("\nTotal books: " . $count);
 
     # Update a book
-    DBI::do($dbh, "UPDATE books SET year = ? WHERE title = ?", [1954, "The Hobbit"]);
+    DBI::exec($dbh, "UPDATE books SET year = ? WHERE title = ?", [1954, "The Hobbit"]);
     say("\nUpdated 'The Hobbit' year to 1954 (corrected)");
 
     # Find specific book

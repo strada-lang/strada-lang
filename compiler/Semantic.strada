@@ -2278,6 +2278,31 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 $expr->{"value"} = sem_scalar_of($expr->{"value"});
             }
         }
+        # `@a = deref_array($r)` / `%h = deref_hash($r)` copy like
+        # `@{$r}` / `%{$r}` (see the declaration form).
+        if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 &&
+            $expr->{"target"}->{"type"} == NODE_VARIABLE() &&
+            is_valid_node($expr->{"value"}) == 1 && $expr->{"value"}->{"type"} == NODE_CALL()) {
+            my str $dts = "" . $expr->{"target"}->{"sigil"};
+            my str $dvn = "" . $expr->{"value"}->{"name"};
+            my scalar $dva = $expr->{"value"}->{"args"};
+            if ((($dts eq "@" && $dvn eq "deref_array") || ($dts eq "%" && $dvn eq "deref_hash"))
+                && $dva && size($dva) == 1) {
+                $expr->{"value"} = ast_new_deref_scalar($dva->[0], $dts);
+            }
+        }
+        # `$n = @{$r}` / `$n = @$r`: the count, like `$n = @a` (it used to
+        # alias the referenced array).
+        if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 &&
+            is_valid_node($expr->{"value"}) == 1 &&
+            $expr->{"value"}->{"type"} == NODE_DEREF_SCALAR() && ("" . $expr->{"value"}->{"sigil"}) eq "@") {
+            my scalar $dt = $expr->{"target"};
+            my int $dtt = $dt->{"type"};
+            # (element targets keep the array, like `$h{k} = @a`)
+            if ($dtt == NODE_VARIABLE() && ("" . $dt->{"sigil"}) eq "$") {
+                $expr->{"value"} = sem_scalar_of($expr->{"value"});
+            }
+        }
         # Stage-0 type check: plain `=` to a declared scalar variable.
         # Compound ops (+=, .=, ...) keep their own operand semantics.
         if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
@@ -2660,6 +2685,16 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             ast_add_array_elem($xl, $stmt->{"init"}->{"left"});
             $stmt->{"init"}->{"left"} = $xl;
         }
+        # `my @a = deref_array($r)` / `my %h = deref_hash($r)` copy like
+        # `@{$r}` / `%{$r}` (they used to alias the referenced container).
+        if (($sigil eq "@" || $sigil eq "%") && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_CALL()) {
+            my str $dcn = "" . $stmt->{"init"}->{"name"};
+            my scalar $dca = $stmt->{"init"}->{"args"};
+            if ((($sigil eq "@" && $dcn eq "deref_array") || ($sigil eq "%" && $dcn eq "deref_hash"))
+                && $dca && size($dca) == 1) {
+                $stmt->{"init"} = ast_new_deref_scalar($dca->[0], $sigil);
+            }
+        }
         # `my int $n = arr()` / `my $n = grep {...} @x`: an array value in
         # scalar context is its count (it used to store the array reference,
         # or 0 / the address after int coercion).
@@ -2676,7 +2711,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         }
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {
             my int $iit = $stmt->{"init"}->{"type"};
-            if ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $iit == NODE_GREP() || $iit == NODE_MAP()) {
+            # `my $n = @{$r}` / `@$r`: the count, like `my $n = @a` (it
+            # used to alias the referenced array).
+            if ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $iit == NODE_GREP() || $iit == NODE_MAP()
+                || $iit == NODE_DEREF_SCALAR()) {
                 $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
             }
         }

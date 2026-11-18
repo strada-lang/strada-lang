@@ -60,13 +60,13 @@ func main() int {
     say("HOME = " . $home);
 
     # Process info
-    say("PID = " . sys::getpid());
+    say("PID is positive: " . (sys::getpid() > 0 ? "yes" : "no"));
 
     # Current directory
     say("CWD = " . sys::getcwd());
 
     # Time
-    say("Time = " . sys::time());
+    say("Time is after 2020: " . (sys::time() > 1577836800 ? "yes" : "no"));
     say("");
 
     # =============================================
@@ -75,11 +75,11 @@ func main() int {
     say("--- Core functions (no namespace) ---");
 
     my array @arr;
-    push(\@arr, "apple");
-    push(\@arr, "banana");
-    push(\@arr, "cherry");
-    say("Array size: " . size(\@arr));
-    say("Joined: " . join(", ", \@arr));
+    push(@arr, "apple");
+    push(@arr, "banana");
+    push(@arr, "cherry");
+    say("Array size: " . size(@arr));
+    say("Joined: " . join(", ", @arr));
 
     my str $s = "HELLO";
     say("lc('" . $s . "') = " . lc($s));

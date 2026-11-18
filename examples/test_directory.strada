@@ -21,22 +21,23 @@ func main() int {
     say("=== Directory Functions Test ===");
     say("");
 
-    # Test readdir
-    say("=== Reading /tmp ===");
-    my scalar $files = sys::readdir("/tmp");
+    # A scratch directory with known contents, so the listings below are
+    # reproducible (the contents of /tmp or the current directory vary).
+    my str $dir = "/tmp/strada_dir_test_" . core::getpid();
+    sys::mkdir($dir);
+    foreach my str $f ("alpha.txt", "beta.txt", "gamma.txt") { sys::spew($dir . "/" . $f, "x"); }
+
+    # Test readdir (entry order is up to the file system: sort it)
+    say("=== Reading the scratch directory ===");
+    my scalar $files = sys::readdir($dir);
     if (defined($files)) {
         my int $count = size($files);
-        say("Found " . $count . " entries in /tmp");
-        if ($count > 0) {
-            say("First few entries:");
-            my int $i = 0;
-            while ($i < $count && $i < 5) {
-                say("  " . $files->[$i]);
-                $i = $i + 1;
-            }
+        say("Found " . $count . " entries");
+        foreach my str $name (sort(@{$files})) {
+            say("  " . $name);
         }
     } else {
-        say("Could not read /tmp");
+        say("Could not read " . $dir);
     }
     say("");
 
@@ -48,23 +49,21 @@ func main() int {
     say("/etc/passwd is_file: " . sys::is_file("/etc/passwd"));
     say("");
 
-    # Test readdir_full
-    say("=== Reading current directory with full paths ===");
-    my scalar $full_paths = sys::readdir_full(".");
+    # Test readdir_full: entries prefixed with the directory path
+    say("=== Reading with full paths ===");
+    my scalar $full_paths = sys::readdir_full($dir);
     if (defined($full_paths)) {
         my int $count = size($full_paths);
         say("Found " . $count . " entries");
-        if ($count > 0) {
-            say("First few full paths:");
-            my int $i = 0;
-            while ($i < $count && $i < 3) {
-                say("  " . $full_paths->[$i]);
-                $i = $i + 1;
-            }
+        foreach my str $path (sort(@{$full_paths})) {
+            # show the part after the (per-run) directory name
+            say("  <dir>" . substr($path, length($dir)));
         }
     }
     say("");
 
+    foreach my str $f ("alpha.txt", "beta.txt", "gamma.txt") { sys::unlink($dir . "/" . $f); }
+    sys::rmdir($dir);
     say("Directory tests completed!");
     return 0;
 }

@@ -37,10 +37,10 @@ func main() int {
     # Convert to regular array (not a reference)
     say("");
     say("Converting to regular array...");
-    my scalar $arr = deref_array($arr_ref);
+    my array @arr = deref_array($arr_ref);
     
-    say("is_ref after deref_array: " . is_ref($arr));
-    say("Size: " . size($arr));
+    say("is_ref after deref_array: " . is_ref(@arr));
+    say("Size: " . size(@arr));
     
     # Access via subscript (regular array)
     say("");
@@ -53,7 +53,7 @@ func main() int {
     say("");
     say("All elements:");
     my int $i = 0;
-    while ($i < size($arr)) {
+    while ($i < size(@arr)) {
         say("  [" . $i . "] = " . $arr[$i]);
         $i = $i + 1;
     }

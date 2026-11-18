@@ -2729,3 +2729,29 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
 - `while (TARGET =~ /re/g)` compiles to `compile_regex_g_cond`: a `__gpos` local initialized before the loop, `OP_REGEX_FIND` from it, `BUILTIN_REGEX_GPOS_NEXT` for the next position (zero-width: +1 character, end+1 stops).
 - File-level `my` and `const`: `g_file_my` records each declaration (name, key, file, package, line). A redeclaration of a name gets the key `NAME__shadowN` (like Semantic's C names), and `resolve_global_var_key` picks the nearest earlier declaration in the current function's file (`g_cur_func_node`). `Pkg::CONST` is a variable node with `const_pkg` (set by the parser), resolved by `file_const_pkg_key` in the VM and by the NODE_VARIABLE branch in Semantic.
 - `NI_VAR_DECL` adds the new local's slot after compiling the initializer, so the initializer sees the outer binding.
+
+## Examples parity sweep (2026-11-18)
+
+`t/examples_parity.sh` (skips: `t/examples_parity_skip.txt`). Mechanisms added
+while making it pass:
+
+- **VM autovivification of element-store containers**: `compile_viv_container`
+  / `compile_viv_target_container` (vm_compiler.c) replace `compile_expr` on the
+  container of every element store path (plain `=` in expression and statement
+  form, compound and short-circuit assignment, `++`/`--`, in-place string ops,
+  `compile_lvalue_prepare`). For a container that is itself an element access it
+  emits get / `DUP IS_UNDEF JMP_IF_FALSE` / `NEW_HASH|NEW_ARRAY` + set-back,
+  recursively, using `__av_*` temp locals keyed by `assign_depth`. Plain reads
+  never vivify. A scalar root is not vivified (parity with compiled codegen).
+- **`__C__` block locals**: the JIT wrapper declares one C variable per
+  marshalled local; `vm_code_names_ident` restricts the list to identifiers
+  the block text contains. The marshal-back path rebuilds containers from the
+  StradaValue copy (`sv_to_vm` of nested values makes new VM objects), so a
+  block that does name an object local still replaces nested objects with
+  copies -- a remaining VM limit.
+- **Semantic rewrites** (compiled): `my $x = @{E}` / `$x = @{E}` ->
+  `scalar(@{E})` for scalar-variable targets; `my @a = deref_array(E)` /
+  `@a = deref_array(E)` (and `%`/`deref_hash`) -> `NODE_DEREF_SCALAR` so the
+  array-copy decl/assign paths apply.
+- **VM stdout**: `OP_SAY` / `OP_SAY_FH` flush after writing to `stdout`
+  (compiled `strada_say` does). `print` stays buffered in both.

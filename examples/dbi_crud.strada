@@ -78,22 +78,22 @@ func get_pending_tasks() scalar {
 
 # UPDATE - Mark task as completed
 func complete_task(int $id) int {
-    return DBI::do($db, "UPDATE tasks SET completed = 1 WHERE id = ?", [$id]);
+    return DBI::exec($db, "UPDATE tasks SET completed = 1 WHERE id = ?", [$id]);
 }
 
 # UPDATE - Change task priority
 func set_priority(int $id, int $priority) int {
-    return DBI::do($db, "UPDATE tasks SET priority = ? WHERE id = ?", [$priority, $id]);
+    return DBI::exec($db, "UPDATE tasks SET priority = ? WHERE id = ?", [$priority, $id]);
 }
 
 # UPDATE - Edit task title
 func edit_title(int $id, str $new_title) int {
-    return DBI::do($db, "UPDATE tasks SET title = ? WHERE id = ?", [$new_title, $id]);
+    return DBI::exec($db, "UPDATE tasks SET title = ? WHERE id = ?", [$new_title, $id]);
 }
 
 # DELETE - Remove a task
 func delete_task(int $id) int {
-    return DBI::do($db, "DELETE FROM tasks WHERE id = ?", [$id]);
+    return DBI::exec($db, "DELETE FROM tasks WHERE id = ?", [$id]);
 }
 
 # DELETE - Remove all completed tasks

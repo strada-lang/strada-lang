@@ -1575,6 +1575,35 @@ compiler:
   `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
   character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /
   `is_refto($v, "KIND")` honour their extra argument.
+- **Examples parity (2026-11-18)**: `t/examples_parity.sh` compiles and runs
+  every `examples/*.strada` and runs it through the VM; output and exit
+  status must match. `t/examples_parity_skip.txt` lists the examples that
+  cannot be compared, each with its reason (libraries, servers, network,
+  refcount()/DESTROY timing, compiled-only `int_ptr`). Fixes it drove:
+  - `my $n = @{$r}` / `$n = @$r` (scalar variable target) is the count; the
+    compiled backend aliased the array. Element targets (`$h{k} = @a`,
+    `$h{k} = @{$r}`) still store the array in both backends.
+  - `my @a = deref_array($r)` / `@a = ...` and the `deref_hash` forms copy
+    like `@{$r}` / `%{$r}` (Semantic rewrites them; they aliased).
+  - `nsort(...)` flattens into list arguments (`join(", ", nsort(@a))`).
+  - `stacktrace()` prints the tracked Strada frames (`  func` per line,
+    innermost first, as the VM) instead of a libc address backtrace.
+  - VM: element stores autovivify missing intermediate containers
+    (`$h{a}{b} = 1`, `$a[1][2] = 1`, `$r->{p}{q} = 1`, compound ops, `++`,
+    `push(@{$h{a}{b}}, ...)`; `compile_viv_container`). An undef scalar
+    root (`my $u; $u->{k} = 1`) is vivified by neither backend.
+  - VM: `say` to stdout flushes (as compiled `strada_say`), so output stays
+    in order with stderr, `system()` and forked children.
+  - VM: a `__C__` block receives only the locals it names
+    (`vm_code_names_ident`); marshalling every local back rebuilt referenced
+    containers as copies (a second DBI::db object freed the handle twice).
+  - VM: `my hash %h[N]` / `my array @a[N]` read the capacity expression node
+    as an integer (its address) -- `vm_hash_new` looped forever; now a
+    constant capacity is a hint (`vm_decl_capacity`), anything else ignored.
+  - VM: `$s =~ $str` / `!~` with a string pattern, `core::sprintf`,
+    `our int $x;` is undef, `is_ref(@a)` / `is_ref(%h)` are 0, clone() caps
+    at 128 nested containers (= the compiled 256 ref+container levels) with
+    the same warning, `__C__` JIT adds `-I<runtime>/../interpreter` (vm.h).
 
 ### Stack Traces and Introspection
 

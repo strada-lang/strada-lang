@@ -22,6 +22,13 @@
 use lib "lib";
 use crypt;
 
+# The algorithm marker of a salt or hash ("$6$", "$6$rounds=10000$", ...);
+# the random part is left out so the output is reproducible.
+func salt_prefix(str $salt) str {
+    if ($salt =~ /^(\$[0-9a-z]+\$(rounds=\d+\$)?)/) { return $1; }
+    return "";
+}
+
 func main() int {
     say("=== Crypt Library Tests ===");
     say("");
@@ -52,19 +59,19 @@ func main() int {
     say("--- Salt Generation ---");
 
     my str $salt_md5 = crypt::gen_salt("md5");
-    say("  MD5 salt: " . $salt_md5);
+    say("  MD5 salt: " . salt_prefix($salt_md5) . "... (random)");
     if (length($salt_md5) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     my str $salt_sha256 = crypt::gen_salt("sha256");
-    say("  SHA-256 salt: " . $salt_sha256);
+    say("  SHA-256 salt: " . salt_prefix($salt_sha256) . "... (random)");
     if (length($salt_sha256) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     my str $salt_sha512 = crypt::gen_salt("sha512");
-    say("  SHA-512 salt: " . $salt_sha512);
+    say("  SHA-512 salt: " . salt_prefix($salt_sha512) . "... (random)");
     if (length($salt_sha512) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     my str $salt_rounds = crypt::gen_salt_rounds("sha512", 10000);
-    say("  SHA-512 (10000 rounds): " . $salt_rounds);
+    say("  SHA-512 (10000 rounds): " . salt_prefix($salt_rounds) . "... (random)");
     if (length($salt_rounds) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     say("");
@@ -74,13 +81,14 @@ func main() int {
 
     my str $password = "mysecretpassword";
 
-    my str $hash_sha512 = crypt::crypt_hash($password, $salt_sha512);
+    # A fixed salt gives a reproducible hash; real code uses gen_salt().
+    my str $hash_sha512 = crypt::hashpw($password, '$6$strada.example$');
     say("  SHA-512 hash: " . $hash_sha512);
     if (length($hash_sha512) > 10) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     # Test convenience function
     my str $hash_auto = crypt::hash_password($password);
-    say("  Auto hash: " . $hash_auto);
+    say("  Auto hash: " . salt_prefix($hash_auto) . "... (random salt)");
     if (length($hash_auto) > 10) { $passed = $passed + 1; } else { $failed = $failed + 1; }
 
     say("");
@@ -130,7 +138,7 @@ func main() int {
 
     # Test MD5 hash detection
     my str $md5_salt = crypt::gen_salt("md5");
-    my str $md5_hash = crypt::crypt_hash("test", $md5_salt);
+    my str $md5_hash = crypt::hashpw("test", $md5_salt);
     my str $algo3 = crypt::get_algorithm($md5_hash);
     say("  Detected algorithm for MD5 hash: " . $algo3);
     if ($algo3 eq "md5") { $passed = $passed + 1; } else { $failed = $failed + 1; }

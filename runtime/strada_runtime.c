@@ -19495,7 +19495,19 @@ void strada_stacktrace(void) {
     void *array[20];
     size_t size;
     char **strings;
-    
+
+    /* A program that calls stacktrace() is compiled with call tracking:
+     * print the Strada frames, innermost first (as the VM does). The raw
+     * libc backtrace (addresses) is the fallback when nothing is tracked. */
+    if (strada_call_depth > 0) {
+        fprintf(stderr, "Stack trace:\n");
+        for (int i = strada_call_depth; i >= 1; i--) {
+            const char *fn = strada_call_stack[i].func_name;
+            fprintf(stderr, "  %s\n", fn ? fn : "?");
+        }
+        return;
+    }
+
     size = backtrace(array, 20);
     strings = backtrace_symbols(array, size);
     

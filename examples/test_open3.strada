@@ -103,8 +103,8 @@ func main() int {
     my str $hostname = cmd_output("hostname");
     say("Hostname: " . $hostname);
 
-    my str $date = cmd_output("date");
-    say("Date: " . $date);
+    my str $greeting = cmd_output("echo hello from a child process");
+    say("Echo: " . $greeting);
 
     # Test 2: open3 with separate stdout/stderr
     say("--- Test 2: open3() with stdout/stderr ---");
@@ -115,7 +115,8 @@ func main() int {
         return 1;
     }
 
-    say("Child PID: " . $proc->{"pid"});
+    # (the PID differs on every run)
+    say("Child PID is positive: " . ($proc->{"pid"} > 0 ? "yes" : "no"));
 
     # Close stdin (we're not sending anything)
     sys::close_fd($proc->{"stdin"});
@@ -158,8 +159,8 @@ func main() int {
 
     # Test 4: Capture command with arguments
     say("--- Test 4: Complex command ---");
-    my str $files = cmd_output("ls -la /tmp 2>/dev/null | head -3");
-    say("Files in /tmp:");
+    my str $files = cmd_output("printf 'pear\\napple\\nfig\\n' | sort | head -2");
+    say("First two of a sorted list:");
     say($files);
 
     say("=== All Tests Passed ===");

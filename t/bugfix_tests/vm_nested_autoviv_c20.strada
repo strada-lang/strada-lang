@@ -1,0 +1,36 @@
+# EXPECT: 2,3,4,5 | 7,x!,2,9 | 6,8,keep,11,12,13
+# Element stores autovivify missing intermediate containers (Perl): the VM
+# used to read the undef intermediate and store into nothing, so
+# `$h{a}{b} = 2`, `$a[1][2] = 4`, `$r->{p}{q} = 5`,
+# `$h{c}{n} += 7`, `$h{s}{t} .= "!"`, `$h{i}{j}++` all lost the value.
+our %G;
+func main() int {
+    my %h; $h{"a"}{"b"} = 2;
+    my %g = (); $g{"x"}{"y"}{"z"} = 3;
+    my @a; $a[1][2] = 4;
+    my $r = {}; $r->{"p"}{"q"} = 5;
+    $h{"c"}{"n"} += 7;
+    $h{"s"}{"t"} .= "x!";
+    $h{"i"}{"j"}++;
+    $h{"i"}{"j"}++;
+    push(@{$h{"l"}{"m"}}, 9);
+    say(join(",", $h{"a"}{"b"}, $g{"x"}{"y"}{"z"}, $a[1][2], $r->{"p"}{"q"}) . " | "
+        . join(",", $h{"c"}{"n"}, $h{"s"}{"t"}, $h{"i"}{"j"}, $h{"l"}{"m"}[0])
+        . " | " . tail());
+    return 0;
+}
+
+func tail() str {
+    my $m = {};
+    $m->{"list"}[2]{"n"} = 6;
+    $G{"o"}{"p"} = 8;
+    my %e = ("x" => {"keep" => "keep"});
+    $e{"x"}{"new"} = 1;
+    my $c = {};
+    my $f = func () void { $c->{"z"}{"w"} = 11; };
+    $f->();
+    my @aa; $aa[0]{"k"}[1] = 12;
+    my $s = []; $s->[3][0] = 13;
+    return join(",", $m->{"list"}[2]{"n"}, $G{"o"}{"p"}, $e{"x"}{"keep"}, $c->{"z"}{"w"},
+                $aa[0]{"k"}[1], $s->[3][0]);
+}

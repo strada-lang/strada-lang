@@ -30,15 +30,19 @@ func main() int {
     say("Created array reference");
     say("is_ref: " . is_ref($arr_ref));
     
-    # Convert to array using @{$ref} syntax
-    my scalar $arr = @{$arr_ref};
+    # Copy into an array using @{$ref} syntax
+    my array @arr = @{$arr_ref};
     
-    say("After @{}: is_ref = " . is_ref($arr));
-    say("Size: " . size($arr));
+    say("After @{}: is_ref = " . is_ref(@arr));
+    say("Size: " . size(@arr));
+    
+    # In scalar context @{$ref} is the element count (Perl)
+    my int $count = @{$arr_ref};
+    say("Count: " . $count);
     
     say("Elements:");
     my int $i = 0;
-    while ($i < size($arr)) {
+    while ($i < size(@arr)) {
         say("  [" . $i . "] = " . $arr[$i]);
         $i = $i + 1;
     }
