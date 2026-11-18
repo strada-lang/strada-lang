@@ -1687,6 +1687,8 @@ StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaV
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params);
 StradaValue* strada_foreach_list_take(StradaValue *v);
+StradaValue* strada_reverse_list1(StradaValue *sv);
+StradaValue* strada_reverse_scalar(StradaValue *sv);
 /* An `int` parameter's value as an integer (borrowed in, borrowed out):
  * tagged / plain heap ints as is, anything else converted once at entry. */
 StradaValue* strada_int_param_coerce_slow(StradaValue *p);

@@ -1598,11 +1598,19 @@ func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
     if (("" . $decl->{"sigil"}) ne "$") { return; }
     my scalar $ini = $decl->{"init"};
     if (is_valid_node($ini) == 0) { return; }
+    sem_rev_scalar($ini);
     my int $it = $ini->{"type"};
     my int $hit = sem_is_count_in_scalar_call($ctx, $ini);
     if (($it == NODE_VARIABLE() || $it == NODE_DEREF_SCALAR()) && ("" . $ini->{"sigil"}) eq "@") { $hit = 1; }
     if ($it == NODE_MAP() || $it == NODE_GREP()) { $hit = 1; }
     if ($hit == 1) { $decl->{"init"} = sem_scalar_of($ini); }
+}
+
+# A reverse(...) call evaluated in scalar context: the list joined and the
+# string reversed (Perl). Elsewhere it reverses the list.
+func sem_rev_scalar(scalar $n) void {
+    if (is_valid_node($n) == 0) { return; }
+    if ($n->{"type"} == NODE_CALL() && ("" . $n->{"name"}) eq "reverse") { $n->{"scalar_ctx"} = 1; }
 }
 
 # keys/values/split calls: Perl gives their count in scalar context
@@ -1826,6 +1834,15 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 $name = $qw_target;
                 $expr->{"name"} = $qw_target;
             }
+        }
+
+        # reverse(...) as the argument of a builtin that takes a string is in
+        # scalar context: length(reverse($s)), lc(reverse(...)), scalar(...)
+        if ($arg_count >= 1 && ($name eq "length" || $name eq "lc" || $name eq "uc" || $name eq "lcfirst" ||
+            $name eq "ucfirst" || $name eq "ord" || $name eq "scalar" || $name eq "quotemeta" ||
+            $name eq "substr" || $name eq "index" || $name eq "rindex" || $name eq "core::length")) {
+            sem_rev_scalar($args->[0]);
+            if ($arg_count >= 2 && ($name eq "index" || $name eq "rindex")) { sem_rev_scalar($args->[1]); }
         }
 
         # Constant-fold ord("literal"): rewrite the call node in place into
@@ -2196,6 +2213,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     # Binary operation
     if ($node_type == NODE_BINARY_OP()) {
         my str $bop = $expr->{"op"};
+        if ($bop ne ",") { sem_rev_scalar($expr->{"left"}); sem_rev_scalar($expr->{"right"}); }
         # An array in numeric context is its element count (Perl): `@a + 0`,
         # `@a - 1` used to use the array reference's address.
         # Same for comparisons and string operators, and a hash gives its key
@@ -2230,12 +2248,23 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
 
     # Unary operation
     if ($node_type == NODE_UNARY_OP()) {
+        sem_rev_scalar($expr->{"operand"});
         analyze_expression($ctx, $expr->{"operand"});
         return;
     }
 
     # Assignment
     if ($node_type == NODE_ASSIGN()) {
+        {
+            my scalar $rvt = $expr->{"target"};
+            if (is_valid_node($rvt) == 1) {
+                my int $rvtt = $rvt->{"type"};
+                if (($rvtt == NODE_VARIABLE() && ("" . $rvt->{"sigil"}) eq "$") || $rvtt == NODE_HASH_ACCESS() ||
+                    $rvtt == NODE_SUBSCRIPT() || $rvtt == NODE_DEREF_HASH() || $rvtt == NODE_DEREF_ARRAY()) {
+                    sem_rev_scalar($expr->{"value"});
+                }
+            }
+        }
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
         # `$n = keys(%h)` / `$h{n} = split(...)`: keys/values/split in scalar
@@ -2486,6 +2515,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
 
     # Ternary expression ($cond ? $true_expr : $false_expr)
     if ($node_type == NODE_TERNARY()) {
+        sem_rev_scalar($expr->{"condition"});
         analyze_expression($ctx, $expr->{"condition"});
         analyze_expression($ctx, $expr->{"true_expr"});
         analyze_expression($ctx, $expr->{"false_expr"});
@@ -2639,6 +2669,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$" && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_CALL() && $stmt->{"init"}->{"name"} eq "splice") {
             $stmt->{"init"}->{"scalar_ctx"} = 1;
         }
+        if ($sigil eq "$") { sem_rev_scalar($stmt->{"init"}); }
         # `my $n = keys %h` / values / split: a count in scalar context (Perl)
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_count_in_scalar_call($ctx, $stmt->{"init"}) == 1) {
             $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
@@ -3000,6 +3031,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if (is_valid_node($ret_val) == 1) {
             # `return @a` from an int/num function returns the count.
             my scalar $rcur = $ctx->{"current_func"};
+            if ($rcur) {
+                my int $rrt = $rcur->{"return_type"} + 0;
+                if ($rrt != TYPE_ARRAY() && $rrt != TYPE_HASH() && $rrt != TYPE_DYNAMIC() && $rrt != TYPE_VOID()) {
+                    sem_rev_scalar($ret_val);
+                }
+            }
             if ($rcur && ($rcur->{"return_type"} == TYPE_INT() || $rcur->{"return_type"} == TYPE_NUM()) && sem_is_array_value($ctx, $ret_val) == 1) {
                 $ret_val = sem_scalar_of($ret_val);
                 $stmt->{"value"} = $ret_val;

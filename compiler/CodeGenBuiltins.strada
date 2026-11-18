@@ -7514,17 +7514,27 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                         $rvi = $rvi + 1;
                     }
                 }
-                emit($cg, "StradaValue *__rvr = strada_reverse_sv(__rvl); ");
+                # scalar context (Semantic: scalar_ctx): the list joined and
+                # the string reversed; list context: the list reversed
+                if (($expr->{"scalar_ctx"} + 0) == 1) {
+                    emit($cg, "StradaValue *__rvr = strada_reverse_scalar(__rvl); ");
+                } else {
+                    emit($cg, "StradaValue *__rvr = strada_reverse_sv(__rvl); ");
+                }
                 if ($rvp == 1) { emit($cg, "strada_cleanup_pop_decref(__rvl); "); } else { emit($cg, "strada_decref(__rvl); "); }
                 emit($cg, "__rvr; })");
                 return 1;
             }
+            # One argument: a string reverse in scalar context; in list
+            # context a one-element list (an array / array ref is reversed)
+            my str $rv1_fn = "strada_reverse_list1";
+            if (($expr->{"scalar_ctx"} + 0) == 1) { $rv1_fn = "strada_reverse_scalar"; }
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
                 emit($cg, "({ StradaValue *__rev_a = ");
                 gen_expression($cg, $args->[0]);
-                emit($cg, "; StradaValue *__rev_r = strada_reverse_sv(__rev_a); strada_decref(__rev_a); __rev_r; })");
+                emit($cg, "; StradaValue *__rev_r = " . $rv1_fn . "(__rev_a); strada_decref(__rev_a); __rev_r; })");
             } else {
-                emit($cg, "strada_reverse_sv(");
+                emit($cg, $rv1_fn . "(");
                 gen_expression($cg, $args->[0]);
                 emit($cg, ")");
             }

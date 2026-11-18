@@ -614,7 +614,8 @@ chomp($s)               # Strip trailing \n or \r\n in-place, returns modified s
 join(",", @arr)         # Join array
 chr(65)  ord("A")       # Char conversion (chr is codepoint-oriented: chr(233) is "é",
                         #   2 bytes of UTF-8; use core::byte(n) for a single raw byte)
-reverse("café")         # éfac — codepoint-aware
+my $r = reverse("café") # éfac (scalar context: joins, then reverses the string; codepoint-aware)
+my @l = reverse(@arr)    # list context: the list reversed (a single string is returned as is)
 
 # UTF-8 note: length/substr/index count characters only for strings built from
 # code points (chr): length("caf" . chr(233)) is 4. For a non-ASCII string

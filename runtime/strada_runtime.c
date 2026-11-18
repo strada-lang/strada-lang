@@ -22882,6 +22882,32 @@ static StradaValue* strada_reverse_utf8_sv(const char *str, size_t byte_len, int
 }
 
 /* Generic reverse - handles both strings and arrays */
+/* reverse(X) in list context with one argument: an array (or array ref,
+ * the Strada idiom) reversed; any other value is a one-element list, so it
+ * comes back as itself (Perl). Borrowed in, new array out. */
+StradaValue* strada_reverse_list1(StradaValue *sv) {
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && !SV_BLESSED(sv) && strada_sv_is_array_or_aref(sv)) {
+        return strada_reverse_sv(sv);
+    }
+    StradaValue *out = strada_new_array();
+    if (sv) strada_array_push(out->value.av, sv);
+    return out;
+}
+
+/* reverse(LIST) in scalar context: the list joined, then the string
+ * reversed (Perl). A single non-array value is reversed as a string. */
+StradaValue* strada_reverse_scalar(StradaValue *sv) {
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && !SV_BLESSED(sv) && strada_sv_is_array_or_aref(sv)) {
+        StradaValue *sep = strada_new_str("");
+        StradaValue *joined = strada_join_sv(sep, strada_deref_array(sv));
+        strada_decref(sep);
+        StradaValue *r = strada_reverse_sv(joined);
+        strada_decref(joined);
+        return r;
+    }
+    return strada_reverse_sv(sv);
+}
+
 StradaValue* strada_reverse_sv(StradaValue *sv) {
     if (!sv) return strada_new_str("");
     if (STRADA_IS_TAGGED_INT(sv)) {

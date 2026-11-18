@@ -1528,6 +1528,17 @@ compiler:
   unblessed-method error reads "on unblessed reference" (Perl).
   `lib/DBI.strada` includes the generated `lib/strada_config.inc` (configured
   drivers as `#define`s), so `use DBI;` compiled from source has the drivers.
+- **`reverse` follows context (2026-11-18)**: Semantic `sem_rev_scalar` (VM:
+  `vm_rev_scalar` in `vm_sc_pass`) marks `reverse(...)` calls in scalar
+  context (`scalar_ctx`: scalar `my`/`our`/assignment/element targets,
+  operands of binary/unary ops and `?:` conditions, `length`/`lc`/`uc`/
+  `substr`/`index`/`scalar`/... arguments, `return` in a scalar-typed
+  function): the arguments joined and the string reversed
+  (`strada_reverse_scalar`, VM `BUILTIN_REV_JOINSTR`). Elsewhere it reverses
+  the list; a single argument that is not an array/array ref is a
+  one-element list (`strada_reverse_list1`, VM `BUILTIN_REV_LISTIFY`).
+  The VM's `say(@a)` / `say(LIST-call)` print the elements (they printed the
+  array ref).
 - **`$_` is Perl's global topic (2026-11)**: one `$_` per OS thread and per
   green task, owned by the runtime (`strada_topic_tls`; generated C has
   `#define _ STRADA_TOPIC`, which is the TLS variable under gcc and

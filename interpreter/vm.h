@@ -575,7 +575,9 @@ enum {
     BUILTIN_PRINTF,
     BUILTIN_HASH_FLAT,
     BUILTIN_EXC_TRACE,
-    BUILTIN_FE_LISTIFY,   /* foreach over a call result: scalar -> 1-element list */    /* () -> call stack captured at the latest throw */
+    BUILTIN_FE_LISTIFY,   /* foreach over a call result: scalar -> 1-element list */
+    BUILTIN_REV_LISTIFY,  /* reverse(X), list context: array as is, else [X] */
+    BUILTIN_REV_JOINSTR,  /* reverse(LIST), scalar context: joined string, reversed */    /* () -> call stack captured at the latest throw */
     BUILTIN_CORO_OP,      /* (subop, ...): core::coro_* over the runtime coroutines */
     BUILTIN_ASYNC_OP,     /* (subop, ...): futures over the runtime pool (see vm.c) */
     BUILTIN_NUMIFY_EXACT, /* (str) -> exact int / uint64 / double */

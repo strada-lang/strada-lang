@@ -354,7 +354,8 @@ R15C1_END
     # R15-C7: variadic/spread preserves array_flatten_kind>=1 non-array values
     my scalar $col1 = r15_collect("k", reverse("abc"));
     my scalar $col2 = r15_collect("k", r15_ret_arr_undef(), "z");
-    check(size($col1) == 2 && $col1->[1] eq "cba", "R15-C7 variadic reverse('abc')");
+    # reverse("abc") as a call argument is list context: the one-element list ("abc") (Perl)
+    check(size($col1) == 2 && $col1->[1] eq "abc", "R15-C7 variadic reverse('abc')");
     check(size($col2) == 3 && !defined($col2->[1]) && $col2->[2] eq "z", "R15-C7 variadic undef array-typed");
 
     # R15-C8: emit_condition_cse exception + overload mutation safety

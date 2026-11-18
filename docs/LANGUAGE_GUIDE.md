@@ -3727,7 +3727,7 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `trim($str)` | Remove whitespace |
 | `ltrim($str)` | Remove left whitespace |
 | `rtrim($str)` | Remove right whitespace |
-| `reverse($str)` | Reverse string |
+| `reverse($str)` | Reverse string (scalar context, e.g. `my $r = reverse($s)`; in list context a single string is returned as is) |
 | `repeat($str, $n)` | Repeat string |
 | `chr($code)` | Code to character |
 | `ord($char)` | Character to code |

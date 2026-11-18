@@ -3293,6 +3293,8 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
         const char *nm = ast_str(elem, "name");
         const char *check_nm = nm;
         char nbuf[256];
+        /* reverse(...) in scalar context is a string */
+        if (nm && strcmp(nm, "reverse") == 0 && (int)ast_int(elem, "scalar_ctx") == 1) return 0;
         if (strncmp(nm, "core::", 6) == 0) {
             snprintf(nbuf, sizeof(nbuf), "sys::%s", nm + 6);
             check_nm = nbuf;
@@ -4241,7 +4243,24 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_SAY);
                 }
             } else if (argc == 1) {
-                compile_expr(ctx, ast_arr_get(args, 0));
+                StradaValue *sa0 = ast_arr_get(args, 0);
+                if (vm_array_flatten_kind(ctx, sa0) >= 1) {
+                    /* say(@a) / say(LIST-valued call): its elements, as join("", LIST) */
+                    StradaValue *jn = rx_mk_node(NI_CALL);
+                    strada_hash_set_take(jn->value.hv, "name", strada_new_str("join"));
+                    StradaValue *jargs = strada_new_array();
+                    StradaValue *jsep = rx_mk_node(NI_STR_LITERAL);
+                    strada_hash_set_take(jsep->value.hv, "value", strada_new_str(""));
+                    strada_array_push_take(jargs->value.av, jsep);
+                    strada_incref(sa0);
+                    strada_array_push_take(jargs->value.av, sa0);
+                    strada_hash_set_take(jn->value.hv, "args", strada_ref_create_take(jargs));
+                    strada_hash_set_take(jn->value.hv, "arg_count", strada_new_int(2));
+                    compile_expr(ctx, jn);
+                    strada_decref(jn);
+                } else {
+                    compile_expr(ctx, sa0);
+                }
                 vm_chunk_emit(ctx->chunk, is_say ? OP_SAY : OP_PRINT);
             } else if (argc == 2) {
                 /* say($fh, $str) / print($fh, $str) */
@@ -4376,9 +4395,41 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
-        /* Built-in: reverse() */
+        /* Built-in: reverse() -- list context reverses the list (a single
+         * non-array value is a one-element list); scalar context joins it and
+         * reverses the string (vm_sc_pass marks scalar_ctx) */
+        int rev_scalar = (strcmp(name, "reverse") == 0 && (int)ast_int(node, "scalar_ctx") == 1);
+        if (rev_scalar && resolve_vm_func_idx(ctx, name) < 0) {
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, (uint32_t)(argc > 0 ? argc : 1));
+            if (argc == 0) {
+                vm_chunk_emit(ctx->chunk, OP_DUP);
+                StradaValue *dv = rx_mk_var("_", 1, "$");
+                compile_expr(ctx, dv);
+                strada_decref(dv);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            }
+            for (int ri = 0; ri < argc; ri++) {
+                StradaValue *ra = ast_arr_get(args, ri);
+                vm_chunk_emit(ctx->chunk, OP_DUP);
+                compile_list_src(ctx, ra);
+                vm_chunk_emit(ctx->chunk, vm_array_flatten_kind(ctx, ra) != 0 ? OP_ARRAY_EXTEND : OP_ARRAY_PUSH);
+            }
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_REV_JOINSTR);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
         if (strcmp(name, "reverse") == 0 && argc == 1 && !vm_is_hash_sigil_node(ast_arr_get(args, 0))) {
-            compile_mutable_array_target(ctx, ast_arr_get(args, 0));
+            StradaValue *ra0 = ast_arr_get(args, 0);
+            if (vm_array_flatten_kind(ctx, ra0) != 0) {
+                compile_mutable_array_target(ctx, ra0);
+            } else {
+                compile_expr(ctx, ra0);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_REV_LISTIFY);
+                vm_chunk_emit(ctx->chunk, 1);
+            }
             vm_chunk_emit(ctx->chunk, OP_ARRAY_REVERSE);
             break;
         }
@@ -4398,6 +4449,12 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
         /* Built-in: scalar(@arr) or size(@arr) */
         if ((strcmp(name, "scalar") == 0 || strcmp(name, "size") == 0) && argc == 1) {
+            StradaValue *sc0 = ast_deref(ast_arr_get(args, 0));
+            if (strcmp(name, "scalar") == 0 && sc0 && !STRADA_IS_TAGGED_INT(sc0) && (int)ast_int(sc0, "type") == NI_CALL &&
+                ast_str(sc0, "name") && strcmp(ast_str(sc0, "name"), "reverse") == 0 && (int)ast_int(sc0, "scalar_ctx") == 1) {
+                compile_expr(ctx, sc0);    /* scalar(reverse(...)): the reversed string */
+                break;
+            }
             compile_expr(ctx, ast_arr_get(args, 0));
             vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE);
             break;
@@ -9995,6 +10052,37 @@ static void vm_sc_replace(StradaValue *node, const char *key) {
     StradaValue *w = vm_sc_wrap(child);
     strada_hash_set_take(ast_deref(node)->value.hv, key, w);
 }
+/* reverse(...) evaluated in scalar context: joined and string-reversed
+ * (Perl); elsewhere the list is reversed. Mirrors Semantic sem_rev_scalar. */
+static void vm_rev_scalar(StradaValue *n) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH) return;
+    if ((int)ast_int(n, "type") != NI_CALL) return;
+    const char *nm = ast_str(n, "name");
+    if (nm && strcmp(nm, "reverse") == 0) strada_hash_set_take(n->value.hv, "scalar_ctx", strada_new_int(1));
+}
+/* `return reverse(...)` in a function returning a scalar type */
+static void vm_rev_mark_returns(StradaValue *v, int depth) {
+    v = ast_deref(v);
+    if (!v || STRADA_IS_TAGGED_INT(v) || depth > 4000) return;
+    if (v->type == STRADA_ARRAY) {
+        StradaArray *av = v->value.av;
+        for (size_t i = 0; av && i < av->size; i++) vm_rev_mark_returns(av->elements[av->head + i], depth + 1);
+        return;
+    }
+    if (v->type != STRADA_HASH) return;
+    if (strada_hash_get(v->value.hv, "type")) {
+        int t = (int)ast_int(v, "type");
+        if (t == NI_ANON_FUNC) return;
+        if (t == NI_RETURN_STMT) { vm_rev_scalar(ast_get(v, "value")); return; }
+    }
+    StradaHash *hv = v->value.hv;
+    for (uint32_t i = 0; hv && i < hv->next_slot; i++) {
+        StradaValue *c = hv->entries[i].value;
+        if (!hv->entries[i].key || !c || STRADA_IS_TAGGED_INT(c)) continue;
+        if (c->type == STRADA_REF || c->type == STRADA_HASH || c->type == STRADA_ARRAY) vm_rev_mark_returns(c, depth + 1);
+    }
+}
 static void vm_sc_pass(StradaValue *v, int depth) {
     v = ast_deref(v);
     if (!v || STRADA_IS_TAGGED_INT(v) || depth > 4000) return;
@@ -10007,6 +10095,38 @@ static void vm_sc_pass(StradaValue *v, int depth) {
     StradaValue *tv = strada_hash_get(v->value.hv, "type");
     if (tv) {
         int t = (int)ast_int(v, "type");
+        /* scalar contexts of reverse(...) */
+        if (t == NI_BINARY_OP) {
+            const char *rop = ast_str(v, "op");
+            if (!rop || strcmp(rop, ",") != 0) { vm_rev_scalar(ast_get(v, "left")); vm_rev_scalar(ast_get(v, "right")); }
+        } else if (t == NI_UNARY_OP) {
+            vm_rev_scalar(ast_get(v, "operand"));
+        } else if (t == NI_TERNARY) {
+            vm_rev_scalar(ast_get(v, "condition"));
+        } else if ((t == NI_VAR_DECL || t == NI_OUR_DECL) && ast_str(v, "sigil")[0] == '$') {
+            vm_rev_scalar(ast_get(v, "init"));
+        } else if (t == NI_ASSIGN) {
+            StradaValue *rtg = ast_deref(ast_get(v, "target"));
+            int rtt = (rtg && !STRADA_IS_TAGGED_INT(rtg)) ? (int)ast_int(rtg, "type") : 0;
+            if ((rtt == NI_VARIABLE && ast_str(rtg, "sigil")[0] == '$') || rtt == NI_HASH_ACCESS ||
+                rtt == NI_SUBSCRIPT || rtt == NI_DEREF_HASH || rtt == NI_DEREF_ARRAY)
+                vm_rev_scalar(ast_get(v, "value"));
+        } else if (t == NI_CALL) {
+            const char *cn = ast_str(v, "name");
+            StradaValue *cargs = ast_deref(ast_get(v, "args"));
+            if (cn && cargs && !STRADA_IS_TAGGED_INT(cargs) && cargs->type == STRADA_ARRAY && cargs->value.av->size >= 1 &&
+                (strcmp(cn, "length") == 0 || strcmp(cn, "lc") == 0 || strcmp(cn, "uc") == 0 || strcmp(cn, "lcfirst") == 0 ||
+                 strcmp(cn, "ucfirst") == 0 || strcmp(cn, "ord") == 0 || strcmp(cn, "scalar") == 0 || strcmp(cn, "quotemeta") == 0 ||
+                 strcmp(cn, "substr") == 0 || strcmp(cn, "index") == 0 || strcmp(cn, "rindex") == 0)) {
+                vm_rev_scalar(ast_arr_get(cargs, 0));
+                if (cargs->value.av->size >= 2 && (strcmp(cn, "index") == 0 || strcmp(cn, "rindex") == 0))
+                    vm_rev_scalar(ast_arr_get(cargs, 1));
+            }
+        } else if (t == NI_FUNC) {
+            int frt = (int)ast_int(v, "return_type");
+            /* AST TYPE_ARRAY 4, TYPE_HASH 5, TYPE_VOID 7, TYPE_DYNAMIC 25: list or no value */
+            if (frt != 4 && frt != 5 && frt != 7 && frt != 25) vm_rev_mark_returns(ast_get(v, "body"), 0);
+        }
         if (t == NI_BINARY_OP) {
             const char *op = ast_str(v, "op");
             static const char *ops[] = { "+", "-", "*", "/", "%", "**", "==", "!=", "<", "<=", ">", ">=", "<=>",

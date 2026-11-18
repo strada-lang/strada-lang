@@ -8349,6 +8349,53 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             SP_PUSH(vm->exc_trace ? vm_str(vm->exc_trace) : vm_str(""));
             break;
         }
+        case BUILTIN_REV_LISTIFY: {
+            VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            if (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_CELL) rv = VM_AS_CELL(rv)->val;
+            if (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL) {
+                SP_PUSH(vm_val_copy(rv));
+            } else {
+                VMArray *one = vm_array_new(1);
+                vm_array_push(one, vm_val_copy(rv));
+                SP_PUSH(VM_MAKE_PTR(one));
+            }
+            break;
+        }
+        case BUILTIN_REV_JOINSTR: {
+            /* args[0]: the flattened argument list. A single unblessed array
+             * argument (the Strada `reverse($aref)` idiom) contributes its
+             * elements. Each element is stringified (honouring "" overloads),
+             * the pieces are joined, and the string is reversed by the
+             * runtime (codepoint-aware, like the compiled backend). */
+            VMArray *rl = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            if (rl && rl->size == 1 && VM_IS_PTR(rl->items[0]) && VM_PTR_TYPE(rl->items[0]) == VM_OBJ_ARRAY &&
+                vm_obj_class_name(rl->items[0]) == NULL) {
+                rl = VM_AS_ARRAY(rl->items[0]);
+            }
+            StradaValue *acc = strada_new_str("");
+            vm->stack_top = sp;
+            vm->gc_pause++;
+            for (int ri = 0; rl && ri < rl->size; ri++) {
+                VMValue piece = vm_stringify_ov(vm, rl->items[ri]);
+                if (vm->has_pending_exc) break;
+                StradaValue *psv = vm_to_sv(piece);
+                acc = strada_concat_inplace(acc, psv);
+                strada_decref(psv);
+            }
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                strada_decref(acc);
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_builtin_throw_exc;
+            }
+            StradaValue *rev = strada_reverse_sv(acc);
+            strada_decref(acc);
+            VMValue out = sv_to_vm(rev);
+            strada_decref(rev);
+            SP_PUSH(out);
+            break;
+        }
         case BUILTIN_FE_LISTIFY: {
             /* the list a foreach iterates when its source is a call result:
              * an array as is, undef as the empty list, any other value as a

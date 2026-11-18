@@ -1,0 +1,38 @@
+# EXPECT: x3|cdab|dcba|5|qzyx|onm|eq|cd,ab|ba|3,2,1|12|abc
+# reverse() follows Perl's context: in list context it reverses the list (a
+# single string or object is a one-element list, returned as is; an array or
+# array ref is reversed), in scalar context it joins the list and reverses the
+# string. Compiled code reversed a single argument as a string in every
+# context and did not join in scalar context; the VM returned an array ref
+# everywhere, and its say(@a) / say(LIST-call) printed the array ref.
+package S;
+func new($v) { my %h = ("v" => $v); return bless(\%h, "S"); }
+func str_($s) { return "x" . $s->{"v"}; }
+use overload '""' => "str_";
+package main;
+func rs(str $s) str { return reverse($s); }
+func first_arg(...@a) scalar { return $a[0]; }
+func main() int {
+    my @out;
+    my @l1 = reverse(S::new(3));
+    push(@out, "" . $l1[0]);
+    my @l2 = reverse("ab", "cd");
+    push(@out, join("", @l2));
+    my @a = ("ab", "cd");
+    my $j = reverse(@a);
+    push(@out, $j);
+    push(@out, length(reverse("abc", "de")));
+    my $s = "xyz";
+    push(@out, "q" . reverse($s));
+    push(@out, rs("mno"));
+    push(@out, reverse($s) eq "zyx" ? "eq" : "ne");
+    push(@out, join(",", reverse(@a)));
+    push(@out, scalar(reverse("ab")));
+    my $ar = [1, 2, 3];
+    push(@out, join(",", reverse($ar)));
+    my @two = (1, 2);
+    push(@out, join("", @two));
+    push(@out, first_arg(reverse("abc")));
+    say(join("|", @out));
+    return 0;
+}

@@ -715,7 +715,7 @@ for binary data.
 | `chop(var)` | Remove last character; mutates in place. |
 | `chr(n)` | Codepoint → string. 0-127 = single byte, ≥128 = UTF-8 multi-byte (use `core::byte(n)` for a raw byte). |
 | `ord(s)` | First-character codepoint. |
-| `reverse(s)` or `reverse(@arr)` | Reverse string (codepoint-aware) in scalar context, array in list context. |
+| `reverse(s)` or `reverse(@arr)` | Scalar context (`my $r = reverse(...)`, `.`, `eq`, `length(...)`): the arguments joined, then the string reversed (codepoint-aware). List context (`say`, call arguments, `my @a = ...`): the list reversed; a single string or object is a one-element list. |
 | `substr(s, off [, len [, repl]])` | Substring extract (3-arg, codepoint offsets) or replace (4-arg lvalue). |
 | `index(s, needle [, off])` | First codepoint position of needle. |
 | `rindex(s, needle [, off])` | Last codepoint position. |
