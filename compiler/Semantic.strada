@@ -3073,6 +3073,15 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         $ctx->{"scope"} = scope_new($fe_old_scope);
 
         my scalar $fe_decl = $stmt->{"var_decl"};
+        # `foreach (LIST)` / `foreach $_ (LIST)`: the loop aliases the global
+        # $_ (Perl), so functions called from the body see the element. It
+        # goes through the existing-variable path (assign per iteration,
+        # write back, restore after the loop) instead of a fresh local.
+        if (is_valid_node($fe_decl) == 1 && ("" . $fe_decl->{"name"}) eq "_" && ("" . $fe_decl->{"sigil"}) eq "$") {
+            $stmt->{"var_decl"} = 0;
+            $stmt->{"var_name"} = "_";
+            $fe_decl = 0;
+        }
         if (is_valid_node($fe_decl) == 1) {
             my str $fe_vname = $fe_decl->{"name"};
             my str $fe_sigil = $fe_decl->{"sigil"};
@@ -3210,7 +3219,17 @@ func analyze_function(scalar $ctx, scalar $fn) void {
         if (($param->{"has_default"} + 0) == 1 && is_valid_node($param->{"default"}) == 1) {
             analyze_expression($ctx, $param->{"default"});
         }
-        scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
+        if ($pname eq "_" && $sigil eq "@") {
+            # The implicit @_ of a no-parens function gets its own C name:
+            # as `_` it hid the global $_ (C names ignore the sigil), so `$_`
+            # in such a function read the argument array.
+            scope_add_var($ctx->{"scope"}, "@:_", "@", $ptype, $pline);
+            $ctx->{"scope"}->{"vars"}->{"@:_"}->{"c_name"} = "__args_";
+            $param->{"orig_name"} = "_";
+            $param->{"name"} = "__args_";
+        } else {
+            scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
+        }
     }
 
     # Analyze function body (non-extern functions always have a body)

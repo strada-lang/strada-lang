@@ -1468,10 +1468,25 @@ static inline pthread_mutex_t *vm_globals_lock_ptr(VM *vm) {
     return &owner->globals_mutex;
 }
 
+/* $_ (main::_) is per VM -- each thread / green task runs in its own VM --
+ * while every other global is shared through vm->globals. */
+static inline int vm_is_topic_name(const char *name) {
+    return name && name[0] == 'm' && memcmp(name, "main::_", 8) == 0;
+}
+static inline VMHash *vm_gh_for(VM *vm, const char *name) {
+    if (!vm) return NULL;
+    if (vm_is_topic_name(name)) {
+        if (!vm->topic_globals) vm->topic_globals = vm_hash_new(2);
+        return vm->topic_globals;
+    }
+    return vm->globals;
+}
+
 static inline VMValue vm_globals_get(VM *vm, const char *name) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    VMValue r = (vm && vm->globals) ? vm_hash_get(vm->globals, name) : VM_UNDEF_VAL;
+    VMHash *gh = vm_gh_for(vm, name);
+    VMValue r = gh ? vm_hash_get(gh, name) : VM_UNDEF_VAL;
     if (lk) pthread_mutex_unlock(lk);
     return r;
 }
@@ -1479,7 +1494,8 @@ static inline VMValue vm_globals_get(VM *vm, const char *name) {
 static inline VMValue vm_globals_get_raw(VM *vm, const char *name) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    VMValue *slot = (vm && vm->globals) ? vm_hash_slot_ptr(vm->globals, name) : NULL;
+    VMHash *gh = vm_gh_for(vm, name);
+    VMValue *slot = gh ? vm_hash_slot_ptr(gh, name) : NULL;
     VMValue r = slot ? *slot : VM_UNDEF_VAL;
     if (lk) pthread_mutex_unlock(lk);
     return r;
@@ -1488,21 +1504,22 @@ static inline VMValue vm_globals_get_raw(VM *vm, const char *name) {
 static inline void vm_globals_set(VM *vm, const char *name, VMValue v) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    if (vm && vm->globals) vm_hash_set(vm->globals, name, v);
+    { VMHash *gh = vm_gh_for(vm, name); if (gh) vm_hash_set(gh, name, v); }
     if (lk) pthread_mutex_unlock(lk);
 }
 
 static inline void vm_globals_set_n(VM *vm, const char *name, size_t len, VMValue v) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    if (vm && vm->globals) vm_hash_set_n(vm->globals, name, len, v);
+    { VMHash *gh = (len == 7 && vm_is_topic_name(name)) ? vm_gh_for(vm, "main::_") : (vm ? vm->globals : NULL); if (gh) vm_hash_set_n(gh, name, len, v); }
     if (lk) pthread_mutex_unlock(lk);
 }
 
 static inline int vm_globals_exists(VM *vm, const char *name) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    int r = (vm && vm->globals) ? vm_hash_exists(vm->globals, name) : 0;
+    VMHash *gh = vm_gh_for(vm, name);
+    int r = gh ? vm_hash_exists(gh, name) : 0;
     if (lk) pthread_mutex_unlock(lk);
     return r;
 }
@@ -1510,7 +1527,7 @@ static inline int vm_globals_exists(VM *vm, const char *name) {
 static inline void vm_globals_delete(VM *vm, const char *name) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
     if (lk) pthread_mutex_lock(lk);
-    if (vm && vm->globals) vm_hash_delete(vm->globals, name);
+    { VMHash *gh = vm_gh_for(vm, name); if (gh) vm_hash_delete(gh, name); }
     if (lk) pthread_mutex_unlock(lk);
 }
 
@@ -1543,6 +1560,7 @@ typedef struct {
 
 static void vm_gc_mark_vm_roots(VM *tvm, VMObjHeader ***work, size_t *wlen, size_t *wcap) {
     if (!tvm) return;
+    if (tvm->topic_globals) vm_gc_mark_val(VM_MAKE_PTR(tvm->topic_globals), work, wlen, wcap);
     for (size_t i = 0; i < tvm->stack_top; i++) {
         vm_gc_mark_val(tvm->stack[i], work, wlen, wcap);
     }
@@ -1585,6 +1603,7 @@ static void vm_gc_mark_all(VM *vm) {
     if (vm->globals) {
         vm_gc_mark_val(VM_MAKE_PTR(vm->globals), &work, &wlen, &wcap);
     }
+
     if (vm->argv) {
         vm_gc_mark_val(VM_MAKE_PTR(vm->argv), &work, &wlen, &wcap);
     }
@@ -5054,8 +5073,9 @@ static void vm_task_locals_swap(VM *vm, int dir) {
         int i = dir == 0 ? (n - 1 - k) : k;
         VMGlobalSave *gs = &vm->global_saves[i];
         if (gs->is_hash_elem || !gs->name) continue;
-        VMValue cur = vm_val_copy(vm_hash_get(vm->globals, gs->name));
-        vm_hash_set(vm->globals, gs->name, gs->saved_value);
+        VMHash *gsh = vm_gh_for(vm, gs->name);
+        VMValue cur = vm_val_copy(vm_hash_get(gsh, gs->name));
+        vm_hash_set(gsh, gs->name, gs->saved_value);
         gs->saved_value = cur;
     }
     if (glk) pthread_mutex_unlock(glk);
@@ -12805,7 +12825,7 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
     }
     case OP_LOAD_GLOBAL: {
         uint16_t name_idx = di->a;
-        VMHash *gh = vm->globals;
+        VMHash *gh = vm_gh_for(vm, chunk->str_consts[name_idx]);
         VMValue v;
         if (__builtin_expect(!vm->is_worker_vm && !vm->workers_head && gh != NULL && chunk->str_const_vals != NULL, 1)) {
             uint32_t ic_slot = (uint32_t)(((uintptr_t)di >> 3) & 63);
@@ -12841,7 +12861,7 @@ static __attribute__((noinline)) int vm_jit_op_step(VM *vm, const VMInsn *di) {
     }
     case OP_STORE_GLOBAL: {
         uint16_t name_idx = di->a;
-        VMHash *gh = vm->globals;
+        VMHash *gh = vm_gh_for(vm, chunk->str_consts[name_idx]);
         VMValue v = stack[sp - 1];
         if (__builtin_expect(!vm->is_worker_vm && !vm->workers_head && gh != NULL && chunk->str_const_vals != NULL, 1)) {
             uint32_t ic_slot = (uint32_t)(((uintptr_t)di >> 3) & 63);
@@ -19619,7 +19639,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     CASE(OP_LOAD_GLOBAL): {
         const VMInsn *ic_ip = di;
         uint16_t name_idx = di->a;
-        VMHash *gh = vm->globals;
+        VMHash *gh = vm_gh_for(vm, chunk->str_consts[name_idx]);
         VMValue v;
         if (__builtin_expect(!vm->is_worker_vm && !vm->workers_head && gh != NULL && chunk->str_const_vals != NULL, 1)) {
             uint32_t ic_slot = (uint32_t)(((uintptr_t)ic_ip >> 3) & 63);
@@ -19672,7 +19692,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         const VMInsn *ic_ip = di;
         uint16_t name_idx = di->a;
         VMValue v = SP_POP();
-        VMHash *gh = vm->globals;
+        VMHash *gh = vm_gh_for(vm, chunk->str_consts[name_idx]);
         if (__builtin_expect(!vm->is_worker_vm && !vm->workers_head && gh != NULL && chunk->str_const_vals != NULL, 1)) {
             uint32_t ic_slot = (uint32_t)(((uintptr_t)ic_ip >> 3) & 63);
             VMString *nstr = VM_AS_STR(chunk->str_const_vals[name_idx]);
@@ -19742,8 +19762,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         VMValue v = SP_POP();
         pthread_mutex_t *glk = vm_globals_lock_ptr(vm);
         if (glk) pthread_mutex_lock(glk);
-        int gex = vm->globals ? vm_hash_exists(vm->globals, name) : 0;
-        if (!gex && vm->globals) vm_hash_set(vm->globals, name, v);
+        VMHash *gdh = vm_gh_for(vm, name);
+        int gex = gdh ? vm_hash_exists(gdh, name) : 0;
+        if (!gex && gdh) vm_hash_set(gdh, name, v);
         if (glk) pthread_mutex_unlock(glk);
         if (gex) {
             vm_val_free(&v);
@@ -19762,9 +19783,10 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         gs->name = strdup(name);
         pthread_mutex_t *glk = vm_globals_lock_ptr(vm);
         if (glk) pthread_mutex_lock(glk);
-        gs->saved_value = vm_val_copy(vm->globals ? vm_hash_get(vm->globals, name) : VM_UNDEF_VAL);
+        VMHash *sgh = vm_gh_for(vm, name);
+        gs->saved_value = vm_val_copy(sgh ? vm_hash_get(sgh, name) : VM_UNDEF_VAL);
         /* Shadow with undef so localizing a tied our-var does not trigger STORE */
-        if (vm->globals) vm_hash_set(vm->globals, name, VM_UNDEF_VAL);
+        if (sgh) vm_hash_set(sgh, name, VM_UNDEF_VAL);
         if (glk) pthread_mutex_unlock(glk);
         DISPATCH();
     }
@@ -20142,7 +20164,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             const char *gname = chunk->str_consts[slot];
             glk = vm_globals_lock_ptr(vm);
             if (glk) pthread_mutex_lock(glk);
-            sp_slot = vm->globals ? vm_hash_slot_ptr(vm->globals, gname) : NULL;
+            { VMHash *sph = vm_gh_for(vm, gname); sp_slot = sph ? vm_hash_slot_ptr(sph, gname) : NULL; }
         } else if (kind == 3) {
             key_tmp = SP_POP();
             cont = SP_POP();

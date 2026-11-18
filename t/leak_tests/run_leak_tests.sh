@@ -206,6 +206,7 @@ TESTS=(
     "test_strada_extern_decl"
     "test_hash_set_value_leak"
     "test_async_ergonomics"
+    "test_topic_alias_leaks"
     "test_import_lib_devirt"
     "test_arena_hardened"
     "test_encoding"
@@ -305,6 +306,9 @@ run_one_leak() {
             ;;
         test_audit_r5_stdlib_leaks)
             EXTRA_FLAGS="-lsqlite3"
+            ;;
+        test_topic_alias_leaks)
+            EXTRA_FLAGS="-L lib -lpthread"
             ;;
         test_audit_r7_leaks|test_audit_r8_leaks|test_audit_r9_leaks|test_audit_r11_leaks|test_audit_r12_leaks|test_audit_r20_leaks)
             EXTRA_FLAGS="-lpthread"

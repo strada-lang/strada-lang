@@ -50,6 +50,10 @@
 #define STRADA_TLS __thread
 #endif
 
+/* $_ : one per OS thread (and per green task, swapped in coro_ctx_*) */
+STRADA_TLS StradaValue *strada_topic_tls = NULL;
+StradaValue **strada_topic_slot(void) { return &strada_topic_tls; }
+
 /* Compatibility: O_NDELAY is O_NONBLOCK on most systems */
 #ifndef O_NDELAY
 #define O_NDELAY O_NONBLOCK
@@ -20373,6 +20377,7 @@ static void strada_thread_state_cleanup(void) {
     }
     strada_regex_thread_cleanup();
     strada_tls_thread_cleanup();
+    if (strada_topic_tls) { StradaValue *tv = strada_topic_tls; strada_topic_tls = NULL; strada_decref(tv); }
     /* The exception slots are thread-local: a worker that threw (and had
      * the exception consumed) still holds the strdup'd message — and any
      * UNCONSUMED exception value — in its TLS at exit. */
@@ -36722,6 +36727,7 @@ void strada_local_save(const char *name) {
     strada_global_init();
     StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
     save->name = strdup(name);
+    save->slot = NULL;
     save->hash_ref = NULL;
     save->hash_key = NULL;
     save->hash_key_len = 0;
@@ -36750,6 +36756,22 @@ void strada_local_save(const char *name) {
     if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
 }
 
+/* $_ : one per OS thread (and per green task, swapped in coro_ctx_*).
+ * Generated code names it STRADA_TOPIC: the variable itself under gcc, the
+ * accessor under tcc (which has no thread-local storage). */
+
+/* `local $_`: save a C variable's value (owned) and leave undef in it */
+void strada_local_save_slot(StradaValue **slot) {
+    if (strada_local_depth >= STRADA_LOCAL_STACK_MAX) {
+        strada_die("local() stack overflow (max %d)", STRADA_LOCAL_STACK_MAX);
+    }
+    StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
+    memset(save, 0, sizeof(*save));
+    save->slot = slot;
+    save->saved_value = *slot;      /* ownership moves to the save */
+    *slot = NULL;
+}
+
 /* Save a hash element for local() restore */
 void strada_local_save_hash_elem(StradaValue *hash, const char *key) {
     if (strada_local_depth >= STRADA_LOCAL_STACK_MAX) {
@@ -36766,6 +36788,7 @@ void strada_local_save_hash_elem(StradaValue *hash, const char *key) {
         if (!old_val) old_val = strada_new_undef();
     }
     StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
+    save->slot = NULL;
     save->name = NULL;
     save->hash_ref = hash;
     strada_incref(hash);
@@ -36805,6 +36828,7 @@ void strada_local_save_hash_elem_sv(StradaValue *hash, StradaValue *key_sv) {
     free(owned_k);
     if (old_val) strada_cleanup_pop();
     StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
+    save->slot = NULL;
     save->name = NULL;
     save->hash_ref = hash;
     strada_incref(hash);
@@ -36818,6 +36842,15 @@ void strada_local_restore(void) {
     strada_local_depth--;
     StradaLocalSave *save = &strada_local_stack[strada_local_depth];
 
+    if (save->slot) {
+        StradaValue **slot = save->slot;
+        StradaValue *cur = *slot;
+        *slot = save->saved_value;
+        save->slot = NULL;
+        save->saved_value = NULL;
+        strada_decref(cur);
+        return;
+    }
     if (save->hash_ref) {
         /* Restore hash element */
         StradaValue *href = save->hash_ref;
@@ -38820,6 +38853,8 @@ typedef struct StradaCoro {
     StradaStackFrame *exc_snap_saved;
     int exc_snap_depth_saved;
     StradaValue *error;             /* set when the task body threw */
+    StradaValue *topic_saved;       /* the task's $_ while it is not running */
+    StradaValue *host_topic;        /* the resumer's $_ while the task runs */
 } StradaCoro;
 
 static void try_stack_copy_out(StradaTryContext *dst, int count) {
@@ -38841,6 +38876,12 @@ static void try_stack_copy_in(const StradaTryContext *src, int count) {
  * save->saved_value) and in FIFO order when resuming (re-applying localized
  * values while capturing current outer values back into save->saved_value). */
 static void coro_local_swap_one(StradaLocalSave *save) {
+    if (save->slot) {
+        StradaValue *cur = *save->slot;
+        *save->slot = save->saved_value;
+        save->saved_value = cur;
+        return;
+    }
     if (save->hash_ref) {
         StradaValue *ksv = strada_new_str_len(save->hash_key ? save->hash_key : "",
                                               save->hash_key ? save->hash_key_len : 0);
@@ -38955,6 +38996,9 @@ static int coro_local_resume(StradaLocalSave *stack, int depth, StradaValue **er
 
 /* Swap helpers: stash the live TLS segment and install another context's. */
 static int coro_ctx_install(StradaCoro *c, StradaValue **err_out) {
+    c->host_topic = strada_topic_tls;
+    strada_topic_tls = c->topic_saved;
+    c->topic_saved = NULL;
     strada_pc_reserve(c->cleanup_saved);
     memcpy(strada_pending_cleanup, c->cleanup_save,
            (size_t)c->cleanup_saved * sizeof(StradaValue *));
@@ -39039,6 +39083,9 @@ static int coro_ctx_stash(StradaCoro *c, StradaValue **err_out) {
     } else {
         c->local_saved = 0;
     }
+    c->topic_saved = strada_topic_tls;
+    strada_topic_tls = c->host_topic;
+    c->host_topic = NULL;
     if (strada_pending_cleanup_count > c->cleanup_save_cap) {
         c->cleanup_save_cap = strada_pending_cleanup_count;
         c->cleanup_save = realloc(c->cleanup_save,
@@ -39225,6 +39272,9 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
 
     if (coro_ctx_install(c, &swap_err) != 0) {
         c->state = prev_state;
+        c->topic_saved = strada_topic_tls;      /* hand the host its $_ back */
+        strada_topic_tls = c->host_topic;
+        c->host_topic = NULL;
         goto restore_host;
     }
 
@@ -39275,6 +39325,12 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
         strada_pending_cleanup_overflow = 0;
         c->inflight_saved = 0;
         c->tmps_saved = 0;
+        {   /* the task's $_ dies with it; the host gets its own back */
+            StradaValue *task_topic = strada_topic_tls;
+            strada_topic_tls = c->host_topic;
+            c->host_topic = NULL;
+            if (task_topic) strada_decref(task_topic);
+        }
         strada_clear_exception();
         if (strada_exception_trace) { free(strada_exception_trace); strada_exception_trace = NULL; }
         strada_exc_snapshot_depth = 0;
@@ -39445,6 +39501,7 @@ StradaValue* strada_coro_free(StradaValue *handle) {
             free(ls->hash_key);
         }
         free(c->local_save);
+        if (c->topic_saved) strada_decref(c->topic_saved);
         free(c->cleanup_save);
         free(c->frames_save);
         free(c->try_save);

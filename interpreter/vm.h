@@ -1127,6 +1127,7 @@ typedef struct VM {
     int has_pending_exc;
     /* Globals for our/local */
     VMHash *globals;
+    VMHash *topic_globals;   /* this VM's own main::_ ($_ is per thread / task) */
     VMGlobalSave *global_saves;
     int global_save_count;
     int global_save_cap;

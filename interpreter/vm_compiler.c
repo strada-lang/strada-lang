@@ -662,9 +662,13 @@ static int ctx_find_local_sigil(CompCtx *ctx, const char *name, char sigil) {
                 return i;
         }
     }
-    /* Pass 2: fallback without sigil (e.g. my array $arr accessed as $arr[0]) */
+    /* Pass 2: fallback without sigil (e.g. my array $arr accessed as $arr[0]).
+     * $_ never falls back to a no-parens function's @_ (unrelated in Perl). */
     for (int i = ctx->local_count - 1; i >= 0; i--) {
-        if (strcmp(ctx->local_names[i], name) == 0) return i;
+        if (strcmp(ctx->local_names[i], name) == 0) {
+            if (sigil == '$' && ctx->local_sigils[i] == '@' && name[0] == '_' && name[1] == 0) continue;
+            return i;
+        }
     }
     return -1;
 }
@@ -1165,6 +1169,32 @@ static void vm_emit_struct_new(CompCtx *ctx, const char *sname) {
 
 /* Does the AST under n assign the scalar variable `name` ($x = ..., $x op=,
  * ++/--, s///, tr///, chomp/chop)? Closures are scanned too (conservative). */
+/* Does a map/grep block call anything (so another function could read $_)? */
+static int vm_node_has_call(StradaValue *n, int depth) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || depth > 2000) return 0;
+    if (n->type == STRADA_ARRAY) {
+        StradaArray *av = n->value.av;
+        for (size_t i = 0; av && i < av->size; i++)
+            if (vm_node_has_call(av->elements[av->head + i], depth + 1)) return 1;
+        return 0;
+    }
+    if (n->type != STRADA_HASH) return 0;
+    if (strada_hash_get(n->value.hv, "type")) {
+        int t = (int)ast_int(n, "type");
+        if (t == NI_CALL || t == NI_METHOD_CALL || t == NI_CLOSURE_CALL || t == NI_SUPER_CALL || t == NI_DYN_METHOD_CALL)
+            return 1;
+    }
+    StradaHash *hv = n->value.hv;
+    for (uint32_t i = 0; hv && i < hv->next_slot; i++) {
+        StradaValue *c = hv->entries[i].value;
+        if (!hv->entries[i].key || !c || STRADA_IS_TAGGED_INT(c)) continue;
+        if (c->type == STRADA_REF || c->type == STRADA_HASH || c->type == STRADA_ARRAY)
+            if (vm_node_has_call(c, depth + 1)) return 1;
+    }
+    return 0;
+}
+
 static int vm_node_writes_var(StradaValue *n, const char *name, int depth) {
     n = ast_deref(n);
     if (!n || STRADA_IS_TAGGED_INT(n) || depth > 3000) return 0;
@@ -6917,6 +6947,18 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)tmp_slot);
 
+    /* A block that can call out publishes the element as the global $_
+     * (Perl aliases $_); saved like `local $_` around the loop */
+    int mg_topic_lr = -1;
+    size_t mg_topic_k = 0;
+    if (vm_node_has_call(body, 0)) {
+        mg_topic_k = vm_chunk_add_str_const(ctx->chunk, "main::_");
+        vm_chunk_emit(ctx->chunk, OP_SAVE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)mg_topic_k);
+        mg_topic_lr = ctx->local_restore_count;
+        ctx_push_local_restore(ctx, "main::_");
+    }
+
     LoopCtx lctx = {0};
     lctx.parent = ctx->loop_ctx;
     lctx.local_restore_depth = ctx->local_restore_count;
@@ -6945,6 +6987,12 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
+    if (mg_topic_lr >= 0) {
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)mg_topic_k);
+    }
 
     lctx.redo_target = ctx->chunk->code_len;
 
@@ -6998,6 +7046,14 @@ static void compile_map_expr(CompCtx *ctx, StradaValue *node) {
     }
     loop_free_patches(&lctx);
     ctx->loop_ctx = lctx.parent;
+    if (mg_topic_lr >= 0) {
+        while (ctx->local_restore_count > mg_topic_lr) {
+            ctx->local_restore_count--;
+            emit_local_restore(ctx->chunk, ctx->local_restores[ctx->local_restore_count]);
+            free(ctx->local_restores[ctx->local_restore_count]);
+            ctx->local_restores[ctx->local_restore_count] = NULL;
+        }
+    }
     if (prev_u >= 0) {
         free(ctx->local_names[prev_u]);
         ctx->local_names[prev_u] = saved_u_name;
@@ -7052,6 +7108,18 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
 
+    /* A block that can call out publishes the element as the global $_
+     * (Perl aliases $_); saved like `local $_` around the loop */
+    int mg_topic_lr = -1;
+    size_t mg_topic_k = 0;
+    if (vm_node_has_call(body, 0)) {
+        mg_topic_k = vm_chunk_add_str_const(ctx->chunk, "main::_");
+        vm_chunk_emit(ctx->chunk, OP_SAVE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)mg_topic_k);
+        mg_topic_lr = ctx->local_restore_count;
+        ctx_push_local_restore(ctx, "main::_");
+    }
+
     LoopCtx lctx = {0};
     lctx.parent = ctx->loop_ctx;
     lctx.local_restore_depth = ctx->local_restore_count;
@@ -7080,6 +7148,12 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
     vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
+    if (mg_topic_lr >= 0) {
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)underscore_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)mg_topic_k);
+    }
 
     lctx.redo_target = ctx->chunk->code_len;
 
@@ -7120,6 +7194,14 @@ static void compile_grep_expr(CompCtx *ctx, StradaValue *node) {
     }
     loop_free_patches(&lctx);
     ctx->loop_ctx = lctx.parent;
+    if (mg_topic_lr >= 0) {
+        while (ctx->local_restore_count > mg_topic_lr) {
+            ctx->local_restore_count--;
+            emit_local_restore(ctx->chunk, ctx->local_restores[ctx->local_restore_count]);
+            free(ctx->local_restores[ctx->local_restore_count]);
+            ctx->local_restores[ctx->local_restore_count] = NULL;
+        }
+    }
     if (prev_u >= 0) {
         free(ctx->local_names[prev_u]);
         ctx->local_names[prev_u] = saved_u_name;
@@ -8061,7 +8143,18 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         int var_cap = -1;
         const char *var_gkey = NULL;
         int fe_restore = 0;   /* a pre-existing loop variable is restored after the loop (Perl) */
-        if (!is_lex_var) {
+        /* foreach over $_ aliases the global $_ (Perl): saved like `local $_`
+         * so return/last/next restore it too */
+        int fe_topic_lr = -1;
+        if (strcmp(vname, "_") == 0) {
+            is_lex_var = 0;
+            var_gkey = "main::_";
+            size_t tk = vm_chunk_add_str_const(ctx->chunk, "main::_");
+            vm_chunk_emit(ctx->chunk, OP_SAVE_GLOBAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)tk);
+            fe_topic_lr = ctx->local_restore_count;
+            ctx_push_local_restore(ctx, "main::_");
+        } else if (!is_lex_var) {
             var_slot = ctx_find_local_sigil(ctx, vname, '$');
             if (var_slot < 0) var_cap = ctx_resolve_capture(ctx, vname, '$');
             if (var_slot < 0 && var_cap < 0) var_gkey = resolve_global_var_key(ctx, vname);
@@ -8208,6 +8301,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         for (int i = 0; i < lctx.break_count; i++) {
             patch_u16(ctx, lctx.break_patches[i], (uint16_t)fe_brk_target);
+        }
+        if (fe_topic_lr >= 0) {
+            while (ctx->local_restore_count > fe_topic_lr) {
+                ctx->local_restore_count--;
+                emit_local_restore(ctx->chunk, ctx->local_restores[ctx->local_restore_count]);
+                free(ctx->local_restores[ctx->local_restore_count]);
+                ctx->local_restores[ctx->local_restore_count] = NULL;
+            }
         }
         if (fe_restore) {
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);

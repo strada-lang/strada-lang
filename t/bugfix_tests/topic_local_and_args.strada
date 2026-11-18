@@ -1,0 +1,21 @@
+# EXPECT: x:topic:2:yz q rex/2/topic|loc|topic
+# $_ in a no-parens function (implicit @_) read the argument array (both used
+# the C name `_`; the VM's sigil-less lookup did the same), and `local $_` in
+# compiled code set the registry entry main::_, which callees never read.
+package Dog;
+func new { my $c = shift; my %h = ("n" => $_[0]); return bless(\%h, "Dog"); }
+func name { my $self = shift; return $self->{"n"} . "/" . size(@_) . "/" . $_; }
+package main;
+func f { my $a = shift; return $a . ":" . $_ . ":" . scalar(@_) . ":" . join("", @_); }
+func g { return $_[1]; }
+func peek() str { return $_; }
+func main() int {
+    my @out;
+    $_ = "topic";
+    my $d = Dog::new("Dog", "rex");
+    push(@out, f("x", "y", "z") . " " . g("p", "q") . " " . $d->name(1, 2));
+    if (1) { local $_ = "loc"; push(@out, peek()); }
+    push(@out, peek());
+    say(join("|", @out));
+    return 0;
+}

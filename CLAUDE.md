@@ -1476,6 +1476,24 @@ compiler:
   `while (my ($k, $v) = LIST)` loops while the list is non-empty (desugared to
   a hidden `@__wlN`); a parenthesized group of pairs in a hash literal joins
   the hash (`parse_anon_hash_entry`), while `(EXPR) => v` stays a computed key.
+- **`$_` is Perl's global topic (2026-11)**: one `$_` per OS thread and per
+  green task, owned by the runtime (`strada_topic_tls`; generated C has
+  `#define _ STRADA_TOPIC`, which is the TLS variable under gcc and
+  `(*strada_topic_slot())` under tcc, which has no TLS). Coroutine switches
+  swap it (`StradaCoro.topic_saved/host_topic`); a finished task's `$_` is
+  dropped. `foreach (LIST)` / `foreach $_ (...)` assign the global per
+  iteration (Semantic drops the loop's `var_decl` `_` so the existing-variable
+  path runs) and save it with `strada_local_save_slot(&_)` on the local()
+  stack, so last/next/return/throw restore it (`stmt_has_local` counts such
+  loops). `map`/`grep` blocks that can call out (`stmt_has_call`) publish the
+  element the same way per iteration; blocks without calls keep the C local
+  (nothing else can see `$_`). `local $_` is a slot save of `_` (it used to
+  localize the unread registry entry `main::_`). `_` is never a closure
+  capture (`scalar_var_c_ref`). The implicit `@_` of a no-parens function is
+  C-named `__args_` (as `_` it hid `$_`). VM: `main::_` lives in a per-VM
+  hash (`vm_gh_for`, `VM.topic_globals`; each thread/task runs its own VM);
+  foreach over `$_` and calling map/grep blocks use OP_SAVE_GLOBAL + the
+  local-restore list; `$_` never falls back to a local `@_`.
 - **Perl scalar context for list operators (2026-11)**: `keys`/`values`/`split`
   assigned to a scalar give their count -- `my`, `our`, file-scope
   declarations, `$x = ...` and element targets (`$h{n} = keys(%h)`)

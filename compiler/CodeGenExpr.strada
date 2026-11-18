@@ -8348,6 +8348,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"in_map_block"} = 1;
         $cg->{"current_elem_var"} = $map_el_var;
         my int $map_has_local = stmt_has_local($block);
+        # A block that can call out publishes the element as the global $_
+        # (Perl aliases $_), saved per iteration on the local() stack so
+        # next/last/throw restore it. Blocks without calls keep $_ in the
+        # C local: nothing else can observe it.
+        my int $map_pub_topic = stmt_has_call($block);
+        if ($map_pub_topic == 1) { $map_has_local = 1; }
         my int $map_local_id = 0;
         my str $m_lmark = "";
         scope_push($cg);
@@ -8364,6 +8370,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "int " . $m_lmark . " = strada_local_depth_get(); ");
             local_mark_push($cg, $cg->{"scope_depth"}, $m_lmark);
             $cg->{"loop_local_var"} = $m_lmark;
+        }
+        if ($map_pub_topic == 1) {
+            emit($cg, "strada_local_save_slot(&_); _ = " . $map_el_var . "; strada_incref(_); ");
         }
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             my int $mt_id = $cg->{"tmp_counter"} + 0;
@@ -8691,6 +8700,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"in_grep_block"} = 1;
         $cg->{"current_elem_var"} = $grep_el_var;
         my int $grep_has_local = stmt_has_local($block);
+        # A block that can call out publishes the element as the global $_
+        # (Perl aliases $_), saved per iteration on the local() stack so
+        # next/last/throw restore it. Blocks without calls keep $_ in the
+        # C local: nothing else can observe it.
+        my int $grep_pub_topic = stmt_has_call($block);
+        if ($grep_pub_topic == 1) { $grep_has_local = 1; }
         my int $grep_local_id = 0;
         my str $g_lmark = "";
         scope_push($cg);
@@ -8707,6 +8722,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "int " . $g_lmark . " = strada_local_depth_get(); ");
             local_mark_push($cg, $cg->{"scope_depth"}, $g_lmark);
             $cg->{"loop_local_var"} = $g_lmark;
+        }
+        if ($grep_pub_topic == 1) {
+            emit($cg, "strada_local_save_slot(&_); _ = " . $grep_el_var . "; strada_incref(_); ");
         }
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             my int $gt_id = $cg->{"tmp_counter"} + 0;

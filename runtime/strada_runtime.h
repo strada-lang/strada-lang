@@ -2377,9 +2377,19 @@ typedef struct {
     StradaValue *hash_ref; /* For hash element saves (NULL = our-variable save) */
     char *hash_key;        /* Hash key for element saves */
     size_t hash_key_len;   /* Byte length of hash_key (binary-safe) */
+    StradaValue **slot;    /* For C-variable saves (`local $_`): NULL otherwise */
 } StradaLocalSave;
 
 void strada_local_save(const char *name);
+void strada_local_save_slot(StradaValue **slot);
+/* $_ (per thread / green task). STRADA_TOPIC is what generated code uses. */
+StradaValue **strada_topic_slot(void);
+#if defined(__TINYC__) || defined(STRADA_NO_TLS)
+#define STRADA_TOPIC (*strada_topic_slot())
+#else
+extern __thread StradaValue *strada_topic_tls;
+#define STRADA_TOPIC strada_topic_tls
+#endif
 void strada_local_save_hash_elem(StradaValue *hash, const char *key);
 void strada_local_save_hash_elem_sv(StradaValue *hash, StradaValue *key_sv);
 void strada_local_restore(void);

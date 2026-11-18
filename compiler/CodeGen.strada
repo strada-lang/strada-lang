@@ -3864,6 +3864,10 @@ func stmt_has_local(scalar $stmt) int {
     if ($type == NODE_LOCAL_DECL()) {
         return 1;
     }
+    # foreach over the global $_ saves it on the local() stack
+    if ($type == NODE_FOREACH_STMT() && !$stmt->{"var_decl"} && ("" . $stmt->{"var_name"}) eq "_") {
+        return 1;
+    }
     if ($type == NODE_ANON_FUNC()) {
         return 0;
     }
@@ -4233,6 +4237,9 @@ func is_unboxed_var_node(scalar $cg, scalar $expr) int {
 # closure with "'name' undeclared", because the closure never captured it:
 # that was the bug for /$var/ patterns, $var++ on int variables and chomp($var).
 func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
+    # `_` is the global $_ (STRADA_TOPIC): never a closure capture (a
+    # captured copy hid the caller's $_ and writes to it)
+    if ($c_var_name eq "_") { return "_"; }
     if (!$cg->{"in_anon_func"}) {
         if (($cg->{"active_boxed_vars"}->{$c_var_name} + 0) == 1) {
             return "(*__cell_" . $c_var_name . ")";

@@ -1186,6 +1186,23 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $loc_sigil = "%";
         }
 
+        # `local $_`: $_ is the C global `_` (it used to localize the
+        # registry entry main::_, which nothing reads, so callees never saw
+        # the new value)
+        if ($var_name eq "_" && $sigil eq "$" && $stmt->{"is_hash_elem"} != 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_save_slot(&_);\n");
+            if ($stmt->{"init"}) {
+                emit_indent($cg);
+                emit($cg, "{ StradaValue *__lv = ");
+                gen_expression($cg, $stmt->{"init"});
+                emit($cg, "; ");
+                if (needs_temp_cleanup($cg, $stmt->{"init"}) == 0) { emit($cg, "strada_incref(__lv); "); }
+                emit($cg, "StradaValue *__lo = _; _ = __lv; strada_decref(__lo); }\n");
+            }
+            return;
+        }
+
         # Determine package-qualified name (supporting local $Pkg::var and local %Pkg::h{k}!)
         my str $pkg = $cg->{"package"};
         if (length($pkg) == 0) {
@@ -2206,7 +2223,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # A pre-existing loop variable is restored after the loop (Perl).
             my int $fr_restore = 0;
-            if (!$var_decl && $fe_tie == 0 && (is_unboxed_int($cg, $var_cname) == 1 || is_unboxed_num($cg, $var_cname) == 1)) {
+            if (!$var_decl && $var_name eq "_") {
+                # foreach over $_: saved on the local() stack, so return,
+                # throw and last also restore it
+                $fr_restore = 3;
+                emit_indent($cg);
+                emit($cg, "int __fe_tmark_" . $foreach_id . " = strada_local_depth_get(); strada_local_save_slot(&_);\n");
+            } elsif (!$var_decl && $fe_tie == 0 && (is_unboxed_int($cg, $var_cname) == 1 || is_unboxed_num($cg, $var_cname) == 1)) {
                 $fr_restore = 2;
                 emit_indent($cg);
                 if (is_unboxed_int($cg, $var_cname) == 1) {
@@ -2393,6 +2416,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, $var_cname . " = __fr_savev_" . $foreach_id . ";\n");
             }
+            if ($fr_restore == 3) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__fe_tmark_" . $foreach_id . ");\n");
+            }
             if ($fr_restore == 1) {
                 emit_indent($cg);
                 if (length($fe_our_key) > 0) {
@@ -2472,7 +2499,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # A pre-existing loop variable gets its value back after the loop
         # (Perl localizes it); it used to keep the last element.
         my int $fe_restore = 0;
-        if (!$var_decl && $fe_tie == 0) {
+        if (!$var_decl && $var_name eq "_") {
+            # foreach over $_: saved on the local() stack, so return, throw
+            # and last also restore it
+            $fe_restore = 3;
+            emit_indent($cg);
+            emit($cg, "int __fe_tmark_" . $foreach_id . " = strada_local_depth_get(); strada_local_save_slot(&_);\n");
+        } elsif (!$var_decl && $fe_tie == 0) {
             $fe_restore = 1;
             emit_indent($cg);
             if (length($fe_our_key) > 0) {
@@ -2759,6 +2792,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "strada_cleanup_pop();\n");
             emit_indent($cg);
             emit($cg, "strada_decref(__foreach_arr_" . $foreach_id . ");\n");
+        }
+        if ($fe_restore == 3) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__fe_tmark_" . $foreach_id . ");\n");
         }
         if ($fe_restore == 1) {
             emit_indent($cg);
@@ -5449,7 +5486,8 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "/* Special variables */\n");
         emit($cg, "StradaValue *__child_status = NULL;\n");
         emit($cg, "StradaValue *__program_name = NULL;\n");
-        emit($cg, "StradaValue *_ = NULL;\n");
+        # $_ lives in the runtime, one per thread / green task
+        emit($cg, "#define _ STRADA_TOPIC\n");
         emit($cg, "static void __strada_cleanup_globals(void) {\n");
         emit($cg, "    if (__program_name) { strada_decref(__program_name); __program_name = NULL; }\n");
         emit($cg, "    if (v_STDIN) { free(v_STDIN); v_STDIN = NULL; }\n");
@@ -5464,10 +5502,9 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "extern StradaValue *v_STDOUT;\n");
         emit($cg, "extern StradaValue *v_STDERR;\n");
         emit($cg, "extern StradaValue *__child_status;\n");
-        # $_ in a module without main(): a weak definition, so the code
-        # compiles (it was an undeclared `_`) and links to the main
-        # program's (or a dlopen host's) $_ when there is one.
-        emit($cg, "__attribute__((weak)) StradaValue *_ = NULL;\n\n");
+        # $_ lives in the runtime (one per thread / green task), so a module
+        # or a dlopen'd library shares the program's $_.
+        emit($cg, "#define _ STRADA_TOPIC\n\n");
     }
 
     # Emit global variable declarations. In module-only mode, skip globals
