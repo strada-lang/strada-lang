@@ -1,0 +1,12 @@
+# An unqualified call reaches only its own package's functions (and main's,
+# and qw imports): the VM called the unrelated Logger::log (compiled:
+# "undefined function 'log'").
+package Logger;
+func log(str $m) void { say("LOGGER: " . $m); }
+package Audit;
+func record(str $m) void { log($m); }
+package main;
+func main() int {
+    try { Audit::record("hi"); } catch ($e) { say("caught: " . $e); }
+    return 0;
+}

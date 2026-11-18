@@ -1,0 +1,17 @@
+Strada Interpreter v0.3
+Type expressions or statements. Enter .help for commands, .quit to exit.
+
+strada> my $n = 5;
+5
+strada> my $n = $n * 2;
+10
+strada> say($n);
+10
+1
+strada> my $x = 7;
+7
+strada> my $x;
+strada> say(defined($x) ? "def" : "undef");
+undef
+1
+strada> 

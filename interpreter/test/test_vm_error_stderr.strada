@@ -1,0 +1,6 @@
+# VM compile/lexer errors go to stderr (they printed "VM error: ..." on
+# stdout). This file has a lexer error on purpose; stdout must stay empty.
+func main() int {
+    my int $a = 3 ` 4;
+    return 0;
+}

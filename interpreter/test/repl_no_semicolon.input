@@ -1,0 +1,8 @@
+my $fh = core::open_str("q\nw\n", "r"); 0
+my $l = <$fh>
+say($l)
+my $s = "aaa"
+$s =~ s/a/b/
+say($s)
+my %h = ("a" => 1)
+say($h{"a"} > 0 ? "pos" : "neg")

@@ -1,0 +1,33 @@
+# EXPECT: 41 80 num40 40 6.32455532033676 40 40.0 41 | 0 4
+# Audit 20 V1-8: in the VM an object with a 0+ overload was its address in
+# arithmetic, comparisons, math::, sprintf %d/%f and array subscripts; with
+# only "" its numeric value is its string's (sprintf %d of "V(3)" is 0).
+package Z;
+func new($x) scalar { my %h = (x => $x); return bless(\%h, "Z"); }
+func as_str($self, $o, $r) str { return "" . $self->{"x"}; }
+func as_num($self, $o, $r) scalar { return $self->{"x"} * 10; }
+use overload '""' => "as_str", "0+" => "as_num", "fallback" => 1;
+package S;
+func new($x) scalar { my %h = (x => $x); return bless(\%h, "S"); }
+func as_str($self) str { return "S(" . $self->{"x"} . ")"; }
+use overload '""' => "as_str";
+package main;
+func main() int {
+    my $n = Z::new(4);
+    my @o = ();
+    push(@o, $n + 1);
+    push(@o, $n * 2);
+    push(@o, $n == 40 ? "num40" : "notnum40");
+    push(@o, int($n));
+    push(@o, math::sqrt($n));
+    push(@o, sprintf("%d", $n));
+    push(@o, sprintf("%.1f", $n));
+    my @a = (1..50);
+    push(@o, $a[$n]);
+    push(@o, "|");
+    my $s = S::new(3);
+    push(@o, sprintf("%d", $s));
+    push(@o, length($s));
+    say(join(" ", @o));
+    return 0;
+}

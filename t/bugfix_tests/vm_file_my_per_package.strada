@@ -1,0 +1,32 @@
+# EXPECT: from A / from B | A changed / from B | 10 20 | 10 20 cfg other
+# Audit 20 V4-27/C2-18: file-level `my` and `const` are lexical: a second
+# declaration of the same name (in another package) is a new variable, and a
+# function sees the one declared before it. The VM shared one global, so
+# A::get() saw B's $X and Cfg::lim() saw Other's LIMIT. `Pkg::CONST` reads
+# that package's const (both backends read the last declaration).
+package A;
+my str $X = "from A";
+func get() str { return $X; }
+func set(str $v) void { $X = $v; }
+package B;
+my str $X = "from B";
+func get() str { return $X; }
+package Cfg;
+const int LIMIT = 10;
+const str NAME = "cfg";
+func lim() int { return LIMIT; }
+package Other;
+const int LIMIT = 20;
+const str NAME = "other";
+func lim() int { return LIMIT; }
+package main;
+func main() int {
+    my @o = ();
+    push(@o, A::get() . " / " . B::get());
+    A::set("A changed");
+    push(@o, "|", A::get() . " / " . B::get());
+    push(@o, "|", Cfg::lim() . " " . Other::lim());
+    push(@o, "|", Cfg::LIMIT . " " . Other::LIMIT, Cfg::NAME . " " . Other::NAME);
+    say(join(" ", @o));
+    return 0;
+}

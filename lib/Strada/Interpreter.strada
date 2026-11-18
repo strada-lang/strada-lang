@@ -277,6 +277,9 @@ my str $g_eval_vm_decls = "";
 my int $g_eval_vm_decls_globals = 0;
 my hash %g_eval_vm_globals = ();
 my hash %g_eval_vm_our_names = ();
+# import() functions already called by an earlier eval: the persisted
+# `use` lines recompile with every eval, but a module imports once
+my hash %g_eval_vm_imports_done = ();
 my hash %g_eval_vm_funcs = ();
 my array @g_eval_vm_lib_paths = ();
 my str $g_eval_backend = "vm";
@@ -956,6 +959,7 @@ func reset() void {
         $g_eval_vm_pkg = "main";
         $g_eval_vm_decls = "";
         $g_eval_vm_decls_globals = 0;
+        %g_eval_vm_imports_done = ();
         __C__ {
             /* closures from before reset() keep their own VM state */
             g_eval_epoch++;
@@ -1407,6 +1411,23 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");
         my array @empty = ();
         my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+        {
+            my scalar $ic_list = $program->{"import_calls"};
+            my int $ic_n = defined($program->{"import_call_count"}) ? $program->{"import_call_count"} : 0;
+            my array @ic_keep = ();
+            my int $ici = 0;
+            while ($ici < $ic_n) {
+                my scalar $ic = $ic_list->[$ici];
+                my str $icf = "" . $ic->{"func_name"};
+                if (!exists(%g_eval_vm_imports_done, $icf)) {
+                    push(@ic_keep, $ic);
+                    $g_eval_vm_imports_done{$icf} = 1;
+                }
+                $ici = $ici + 1;
+            }
+            $program->{"import_calls"} = \@ic_keep;
+            $program->{"import_call_count"} = scalar(@ic_keep);
+        }
 
         # Collect global declarations introduced by this call (after prior persistent decls)
         my hash %newly_declared = ();

@@ -47,8 +47,17 @@ test_output() {
         return
     fi
 
+    # test_X.stdin feeds standard input; with test_X.stdout_only the
+    # expected output is stdout alone (stderr must not leak into it)
+    local base="${file%.strada}"
+    local stdin_file="/dev/null"
+    [ -f "$base.stdin" ] && stdin_file="$base.stdin"
     local actual
-    actual=$($INTERP "$file" 2>&1)
+    if [ -f "$base.stdout_only" ]; then
+        actual=$($INTERP "$file" < "$stdin_file" 2>/dev/null)
+    else
+        actual=$($INTERP "$file" < "$stdin_file" 2>&1)
+    fi
     local exit_code=$?
 
     if [ "$actual" = "$expected" ]; then
@@ -185,6 +194,28 @@ for test_file in "$TEST_DIR"/test_*.strada; do
     else
         # Just test that it runs
         test_run "$test_name" "$test_file"
+    fi
+done
+
+# REPL sessions: repl_X.input is typed into the interpreter (no file
+# argument); the transcript must equal repl_X.expected
+for repl_in in "$TEST_DIR"/repl_*.input; do
+    [ -f "$repl_in" ] || continue
+    repl_name=$(basename "$repl_in" .input)
+    if [ -n "$PATTERN" ] && ! echo "$repl_name" | grep -q "$PATTERN"; then
+        continue
+    fi
+    repl_expected="${repl_in%.input}.expected"
+    repl_actual=$($INTERP < "$repl_in" 2>&1)
+    if [ -f "$repl_expected" ] && [ "$repl_actual" = "$(cat "$repl_expected")" ]; then
+        echo -e "  ${GREEN}PASS${NC}: $repl_name"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC}: $repl_name"
+        if [ $VERBOSE -eq 1 ]; then
+            echo "    actual: $(echo "$repl_actual" | head -8)"
+        fi
+        FAIL=$((FAIL + 1))
     fi
 done
 

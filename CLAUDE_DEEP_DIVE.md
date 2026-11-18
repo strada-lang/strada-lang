@@ -2722,3 +2722,10 @@ Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
 - **JIT.** See CLAUDE.md "Strada::JIT notes". `extract_function_def` and
   `jit_hoist_named_funcs` work on `strip_strings_and_comments()` output, which
   is length-preserving (every input byte maps to one output byte).
+
+## VM parity batch: overloads, /g, lexical file-level `my` (2026-11-18)
+
+- `OP_STR_OV` (no operands) converts a blessed object on top of the stack through its `""` overload; vm_compiler emits it only when the program declares an overload (`g_prog_has_overloads`, AST scan in `vm_compile_program`, since `prog->overloads` is filled after the functions compile). Use `compile_str_expr` for any new string operand. Hash keys and array indexes need nothing at compile time: the hash/array opcodes convert object keys at run time (`VM_KEY_OV`, `VM_IDX_OV`).
+- `while (TARGET =~ /re/g)` compiles to `compile_regex_g_cond`: a `__gpos` local initialized before the loop, `OP_REGEX_FIND` from it, `BUILTIN_REGEX_GPOS_NEXT` for the next position (zero-width: +1 character, end+1 stops).
+- File-level `my` and `const`: `g_file_my` records each declaration (name, key, file, package, line). A redeclaration of a name gets the key `NAME__shadowN` (like Semantic's C names), and `resolve_global_var_key` picks the nearest earlier declaration in the current function's file (`g_cur_func_node`). `Pkg::CONST` is a variable node with `const_pkg` (set by the parser), resolved by `file_const_pkg_key` in the VM and by the NODE_VARIABLE branch in Semantic.
+- `NI_VAR_DECL` adds the new local's slot after compiling the initializer, so the initializer sees the outer binding.

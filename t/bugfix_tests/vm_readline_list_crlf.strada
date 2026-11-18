@@ -1,0 +1,32 @@
+# EXPECT: 3:a|b|c 3 | 6 5 | 2
+# Audit 20 V4-24/R2-19/V2-9: in the VM `my @l = <$fh>` read one line (list
+# context reads them all), and <$fh> removed the "\r" of a CRLF line (the
+# compiled readline removes only the "\n"; chomp removes "\r\n").
+func main() int {
+    my @o = ();
+    my str $f = "/tmp/strada_bf_vmrl_" . core::getpid();
+    core::spew($f, "a\nb\nc\n");
+    my $fh = core::open($f, "r");
+    my @lines = <$fh>;
+    core::close($fh);
+    push(@o, scalar(@lines) . ":" . join("|", @lines));
+    my $fh2 = core::open($f, "r");
+    my @ex = ();
+    @ex = <$fh2>;
+    core::close($fh2);
+    push(@o, scalar(@ex));
+    push(@o, "|");
+    core::spew($f, "line1\r\nline2\n");
+    my $fh3 = core::open($f, "r");
+    my $l1 = <$fh3>;
+    my $l2 = <$fh3>;
+    core::close($fh3);
+    push(@o, length($l1) . " " . length($l2));
+    push(@o, "|");
+    my scalar $m = core::open_str("x\r\ny\r\n", "r");
+    my str $ml = <$m>;
+    push(@o, length($ml));
+    core::unlink($f);
+    say(join(" ", @o));
+    return 0;
+}

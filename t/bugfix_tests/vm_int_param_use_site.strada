@@ -1,0 +1,14 @@
+# EXPECT: 14 14 14 9 5 7.5
+# Audit 20 C3-18: an `int` parameter keeps the caller's value and converts
+# where int arithmetic uses it, so mulr("7.5", 2) is 7 * 2 = 14 (compiled);
+# the VM multiplied 7.5 and gave 15.
+package M;
+func mulr(int $a, int $b) int { return $a * $b; }
+func addsub(int $a, int $b) str { return ($a + $b) . " " . ($a - $b) . " " . $a; }
+func run() str {
+    my $s = "7.5";
+    my $f = \&mulr;
+    return mulr($s, 2) . " " . $f->($s, 2) . " " . M::mulr($s, 2) . " " . addsub($s, 2);
+}
+package main;
+func main() int { say(M::run()); return 0; }

@@ -1,0 +1,21 @@
+# EXPECT: 0 UNDEF | atime,blksize,blocks,ctime,dev,gid,ino,mode,mtime,mtime_ns,nlink,rdev,size,uid | 4 -1
+# Audit 20 S3-18/S3-19/R5-5: in the VM core::getenv of an unset variable was
+# "" (undef), core::stat lacked blksize/blocks/rdev/mtime_ns, and tell on a
+# closed handle was 0 (-1).
+func main() int {
+    my @o = ();
+    my scalar $e = core::getenv("STRADA_BF_NOPE_X_Y_ZZ");
+    push(@o, defined($e) ? "1" : "0", $e // "UNDEF");
+    my scalar $st = core::stat("/");
+    push(@o, "|", join(",", sort(keys(%$st))));
+    my str $p = "/tmp/strada_bf_tell_" . core::getpid();
+    core::spew($p, "abc\ndef\n");
+    my $fh = core::open($p, "r");
+    my $l = <$fh>;
+    push(@o, "|", core::tell($fh));
+    core::close($fh);
+    push(@o, core::tell($fh));
+    core::unlink($p);
+    say(join(" ", @o));
+    return 0;
+}

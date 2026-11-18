@@ -1,0 +1,40 @@
+# EXPECT: 4 1,2,3 2 2 2 k1->v1,k2->v2 4
+# Audit 20 C4-15/V2-13/V4-25/R2-20: `while ($s =~ /re/g)` never advanced
+# the match position in the VM (an endless loop, also with named captures
+# and a literal subject).
+func main() int {
+    my @o = ();
+    my $s = "ab12cd34";
+    my $c = 0;
+    while ($s =~ /(\d)/g) { $c++; last if $c > 10; }
+    push(@o, $c);
+    my @all = ();
+    my $str = "a1b2c3";
+    while ($str =~ /(\d)/g) { push(@all, $1); last if scalar(@all) > 10; }
+    push(@o, join(",", @all));
+    my $n = 0;
+    my $lines = "l1,l2,l3";
+    while ($lines =~ /,/g) { $n = $n + 1; last if $n > 10; }
+    push(@o, $n);
+    my $m = 0;
+    while ("a1b2" =~ /(\d)/g) { $m++; last if $m > 10; }
+    push(@o, $m);
+    my $k = 0;
+    my $x = "aXbXc";
+    while ($x =~ /X/g) { $k++; last if $k > 10; }
+    push(@o, $k);
+    my @kv = ();
+    my str $t = "k1=v1;k2=v2";
+    while ($t =~ /(?<k>\w+)=(?<v>\w+)/g) {
+        my hash %nc = named_captures();
+        push(@kv, $nc{"k"} . "->" . $nc{"v"});
+        last if scalar(@kv) > 10;
+    }
+    push(@o, join(",", @kv));
+    my $z = 0;
+    my $e = "abc";
+    while ($e =~ /x*/g) { $z++; last if $z > 10; }
+    push(@o, $z);
+    say(join(" ", @o));
+    return 0;
+}
