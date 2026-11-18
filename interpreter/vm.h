@@ -692,6 +692,7 @@ enum {
 
 #define VM_STR_SLAB_MAX 32
 #define VM_POOL_MAX_PER_CLASS 4096
+#define VM_POOL_MAX_CELL 16384
 #define VM_KEY_INTERN_MAX 4096
 #define VM_KEY_INTERN_SLOTS 8192
 #define VM_KEY_INTERN_MAXLEN 64
@@ -1227,6 +1228,8 @@ typedef struct VM {
     uint64_t gc_freed_total;     /* core::gc_freed(): objects reclaimed */
     int gc_user_disabled;        /* core::gc_disable(): no automatic runs */
     char *exc_trace;             /* core::exception_trace(): call stack at the latest throw */
+    VMValue exc_trace_keep_val;  /* an exception a nested run passed up: its exc_trace is already */
+    int exc_trace_keep;          /* the throw site's (set when it re-raises in the caller) */
     int exc_from_die;            /* the pending exception came from die() (uncaught: bare message) */
     size_t gc_threshold;
     int gc_pause;

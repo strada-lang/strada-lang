@@ -1,0 +1,153 @@
+# VM performance (Audit 20, round 3): integer add/sub overflow at the 50-bit
+# inline limit and at int64 (int-typed targets), boxed-int +=, and the JIT
+# helpers for chr/bytes/uc/lc/split/sprintf/map/delete/try/isa/regex/closures.
+# Each loop runs long enough for the JIT to compile it; output must match
+# the compiled program.
+
+package TH;
+func TIEHASH($c) { return bless({d => {}}, $c); }
+func STORE($s, $k, $v) { $s->{"d"}->{$k} = $v; }
+func FETCH($s, $k) { return $s->{"d"}->{$k}; }
+func DELETE($s, $k) { my $v = $s->{"d"}->{$k}; delete($s->{"d"}->{$k}); return "D:" . $v; }
+
+package E; func new($m) { return bless({m => $m}, "E"); }
+package F; extends E; func new2($m) { return bless({m => $m}, "F"); }
+
+
+package main;
+
+func t_builtins() int {
+    my $i = 0; my $acc = ""; my $n = 0;
+    my %h; my %t; tie(%t, "TH");
+    while ($i < 300) {
+        my $c = chr(($i % 300) + 60);
+        $acc = $acc . $c;
+        $n = $n + bytes($c) + length(uc($c)) + length(lc("AbC" . $i));
+        my @p = split(",", "a,b," . $i);
+        $n = $n + scalar(@p);
+        my $s = sprintf("%05d|%s|%.2f", $i, $c, $i / 7);
+        $n = $n + length($s);
+        $h{"k" . $i} = $i; $t{"k" . $i} = $i;
+        if ($i > 5) { my $d = delete($h{"k" . ($i - 5)}); $n = $n + $d; my $td = delete($t{"k" . ($i - 5)}); $acc = $acc . substr($td, 0, 2); }
+        my @m = map { [$_, $_ * 2] } (1, 2);
+        my @f = map { ($_, $_ + 1) } (1, 2, 3);
+        $n = $n + scalar(@m) + scalar(@f) + $f[5];
+        $i++;
+    }
+    say($n . " " . length($acc) . " " . substr($acc, 0, 30) . " " . scalar(keys(%h)) . " " . uc(chr(233)) . chr(0x263A) . chr(70000) . " " . bytes(chr(0x263A)));
+    say(join(",", split(/\s+/, "x  y z")));
+    return 0;
+}
+
+func thrower($i) { if ($i % 3 == 0) { throw E::new("e" . $i); } if ($i % 5 == 0) { die("d" . $i); } return $i; }
+func deep($i, $d) { if ($d == 0) { return thrower($i); } return deep($i, $d - 1) + 1; }
+func nested($i) {
+    my $r = 0;
+    try { try { $r = deep($i, 3); } catch (E $e) { $r = -1; throw $e if $i % 9 == 0; } } catch ($e) { $r = -2; }
+    return $r;
+}
+func fin($i) { my $s = 0; try { if ($i % 4 == 0) { return 100; } $s = $i; } finally { $s = $s + 1000; } return $s; }
+func t_try() int {
+    my $t = 0; my $i = 0; my $msgs = "";
+    while ($i < 200) {
+        try { $t = $t + thrower($i); } catch (E $e) { $t = $t + 1000; $msgs = $msgs . $e->{"m"}; } catch ($e) { $t = $t + 7; }
+        $t = $t + nested($i) + fin($i);
+        my $ok = 0;
+        try { my $x = $i; $ok = 1; } catch ($e) { $ok = -1; }
+        $t = $t + $ok + (E::new("q")->isa("E") ? 1 : 0) + (F::new2("z")->isa("E") ? 1 : 0) + (isa(E::new("q"), "F") ? 1 : 0);
+        foreach my $k (1, 2, 3) { try { if ($k == 2) { next; } $t = $t + $k; } catch ($e) { $t = 0; } }
+        $i++;
+    }
+    say($t . " " . length($msgs) . " " . substr($msgs, 0, 20));
+    return 0;
+}
+
+func t_regex() int {
+    my $i = 0; my $t = 0; my $o = "";
+    my @subs;
+    while ($i < 300) {
+        my $s = "id=" . $i . " name=n" . ($i * 3) . " é" . $i;
+        if ($s =~ /name=n(\d+)/) { $t = $t + $1; }
+        if ($s =~ /zzz/) { $t = $t + 1000000; }
+        my $c = 0;
+        while ($s =~ /(\d)/g) { $c = $c + $1; }
+        $t = $t + $c;
+        my $u = $s;
+        $u =~ s/(\d+)/<$1>/g;
+        $u =~ s/n(\d)/ "N" . ($1 + 1) /e;
+        $o = $u if $i == 123;
+        my $k = $i;
+        my $f = fn ($x) { return $x + $k; };
+        my $g = fn () { $k = $k + 1; return $k; };
+        $g->();
+        push(@subs, $f) if $i % 50 == 0;
+        $t = $t + $f->(1);
+        my $pat = "n" . ($i % 10);
+        if ($s =~ /$pat/) { $t = $t + 2; }
+        $i++;
+    }
+    my $sum = 0;
+    foreach my $f (@subs) { $sum = $sum + $f->(0); }
+    say($t . " " . $sum . " " . $o);
+    return 0;
+}
+
+func addi(int $a, int $b) int { return $a + $b; }
+func subi(int $a, int $b) int { return $a - $b; }
+func pm1(int $a) int { return $a - 1; }
+func pp1(int $a) int { return $a + 1; }
+func pbig(int $a) int { return $a + 1000000; }
+func mbig(int $a) int { return $a - 2000000000; }
+func t_overflow() int {
+    my @v = (562949953421311, 562949953421312, -562949953421312, -562949953421313, 0, -1, 1,
+             1125899906842623, -1125899906842624, 4611686018427387903, -4611686018427387904);
+    my $out = "";
+    my $k = 0;
+    while ($k < 3) {
+        foreach my $a (@v) {
+            foreach my $b (1, -1, 562949953421311, -562949953421312, 2) {
+                $out = $out . addi($a, $b) . " " . subi($a, $b) . "\n";
+            }
+            $out = $out . pm1($a) . " " . pp1($a) . " " . pbig($a) . " " . mbig($a) . "\n";
+        }
+        $k++;
+    }
+    print(substr($out, 0, 4000));
+    say(length($out));
+    my int $s = 562949953421300;
+    my int $i = 0;
+    my int $n = 9223372036854775800;
+    my int $one = 1;
+    while ($i < 40) { $s += $i; $n += $one; my int $t = $i; $t -= 3; $s -= $t; $i++; }
+    say($s . " " . $n);
+    my int $c = 562949953421309;
+    my int $j = 0;
+    while ($j < 6) { $c++; $j++; }
+    my int $d = -562949953421310;
+    $j = 0;
+    while ($j < 6) { $d--; $j++; }
+    say($c . " " . $d);
+    return 0;
+}
+
+func t_boxed_sum() int {
+    my int $sum = 562949953421312;
+    my $usum = 562949953421312;
+    my int $i = 1;
+    while ($i <= 20000) { $sum += $i; $usum += $i; $i++; }
+    my int $w = 9223372036854775000;
+    $i = 0;
+    my int $one = 1;
+    while ($i < 2000) { $w += $one; $i++; }
+    say("sum: " . $sum . " " . $usum . " " . $w);
+    return 0;
+}
+
+func main() int {
+    t_overflow();
+    t_boxed_sum();
+    t_builtins();
+    t_try();
+    t_regex();
+    return 0;
+}
