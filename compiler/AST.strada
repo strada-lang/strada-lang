@@ -868,7 +868,7 @@ func ast_new_variable(str $name, str $sigil) scalar {
 }
 
 # Create integer literal
-func ast_new_int_literal(int $value) scalar {
+func ast_new_int_literal(scalar $value) scalar {  # scalar: hex/bin/oct literal text "0x..." passes through
     my scalar $node = ast_new_node(NODE_INT_LITERAL());
     $node->{"value"} = $value;
     return $node;

@@ -1,7 +1,7 @@
-# EXPECT: 14 14 14 9 5 7.5
-# Audit 20 C3-18: an `int` parameter keeps the caller's value and converts
-# where int arithmetic uses it, so mulr("7.5", 2) is 7 * 2 = 14 (compiled);
-# the VM multiplied 7.5 and gave 15.
+# EXPECT: 14 14 14 9 5 7
+# Audit 20 C3-18: an `int` parameter holds an integer: mulr("7.5", 2) is
+# 7 * 2 = 14 (the VM multiplied 7.5 and gave 15), and the parameter's value
+# is 7 everywhere (converted once at entry).
 package M;
 func mulr(int $a, int $b) int { return $a * $b; }
 func addsub(int $a, int $b) str { return ($a + $b) . " " . ($a - $b) . " " . $a; }

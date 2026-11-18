@@ -1687,6 +1687,13 @@ StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaV
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params);
 StradaValue* strada_foreach_list_take(StradaValue *v);
+/* An `int` parameter's value as an integer (borrowed in, borrowed out):
+ * tagged / plain heap ints as is, anything else converted once at entry. */
+StradaValue* strada_int_param_coerce_slow(StradaValue *p);
+static inline StradaValue* strada_int_param_coerce(StradaValue *p) {
+    if (STRADA_IS_TAGGED_INT(p)) return p;
+    return strada_int_param_coerce_slow(p);
+}
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 typedef StradaValue* (*StradaCustomClosureCallFn)(void *ctx, int argc, StradaValue **argv);
 typedef void (*StradaCustomClosureFreeFn)(void *ctx);

@@ -4040,6 +4040,26 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         inner.chunk->fixed_param_count = fixed_params;
         inner.may_box_locals = ast_may_box_locals(body, 0) || ast_may_box_locals(params, 0);
         emit_param_defaults(&inner, params, param_count, 0, inner_func_idx);
+        /* `int` parameters are converted once at entry, like named functions */
+        for (int i = 0; i < param_count; i++) {
+            StradaValue *param = ast_arr_get(params, i);
+            const char *psigil = ast_str(param, "sigil");
+            if ((int)ast_int(param, "param_type") != 1 || (psigil[0] && psigil[0] != '$')) continue;
+            if ((int)ast_int(param, "is_variadic")) continue;
+            int ipslot = ctx_find_local_sigil(&inner, ast_str(param, "name"), '$');
+            if (ipslot < 0) continue;
+            vm_chunk_emit(inner.chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
+            vm_chunk_emit(inner.chunk, OP_DEFINED);
+            vm_chunk_emit(inner.chunk, OP_JMP_IF_FALSE);
+            size_t ip_skip = emit_patch_u16(&inner);   /* an omitted argument stays undef */
+            vm_chunk_emit(inner.chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
+            vm_chunk_emit(inner.chunk, OP_CAST_INT);
+            vm_chunk_emit(inner.chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
+            patch_u16(&inner, ip_skip, (uint16_t)inner.chunk->code_len);
+        }
 
         prescan_vm_labels(&inner, body, 0, 0);
         compile_block(&inner, body);
@@ -9410,6 +9430,28 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
     chunk->fixed_param_count = fixed_params;
     emit_param_defaults(&ctx, params, param_count, is_synth, (int)(chunk - prog->funcs));
     chunk = ctx.chunk;
+    /* An `int` parameter holds an integer: "7.5" passed in is 7 at every use
+     * (strada_int_param_coerce in the compiled backend) */
+    for (int i = 0; i < param_count; i++) {
+        StradaValue *param = ast_arr_get(params, i);
+        const char *psigil = ast_str(param, "sigil");
+        if ((int)ast_int(param, "param_type") != 1 || (psigil[0] && psigil[0] != '$')) continue;
+        if ((int)ast_int(param, "is_variadic")) continue;
+        int ipslot = ctx_find_local_sigil(&ctx, ast_str(param, "name"), '$');
+        if (ipslot < 0) continue;
+        vm_chunk_emit(ctx.chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
+        vm_chunk_emit(ctx.chunk, OP_DEFINED);
+        vm_chunk_emit(ctx.chunk, OP_JMP_IF_FALSE);
+        size_t ip_skip = emit_patch_u16(&ctx);   /* an omitted argument stays undef */
+        vm_chunk_emit(ctx.chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
+        vm_chunk_emit(ctx.chunk, OP_CAST_INT);
+        vm_chunk_emit(ctx.chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
+        patch_u16(&ctx, ip_skip, (uint16_t)ctx.chunk->code_len);
+    }
+    chunk = ctx.chunk;
 
     StradaValue *fn_body = ast_get(func_node, "body");
     ctx.may_box_locals = ast_may_box_locals(fn_body, 0) || ast_may_box_locals(params, 0);
@@ -10302,6 +10344,22 @@ VMProgram *vm_compile_program(StradaValue *ast) {
             vm_chunk_emit_u16(mchunk, (uint16_t)pidx);
             vm_chunk_emit(mchunk, OP_NEW_ARRAY);
             vm_chunk_emit_u32(mchunk, 1);
+            {
+                /* `use Mod qw(a b);`: import(PKG, LIST) gets the list (Perl) */
+                StradaValue *iargs = ast_deref(ast_get(ci, "args"));
+                if (iargs && !STRADA_IS_TAGGED_INT(iargs) && iargs->type == STRADA_ARRAY) {
+                    for (size_t ia = 0; ia < iargs->value.av->size; ia++) {
+                        StradaValue *aw = strada_array_get(iargs->value.av, (int64_t)ia);
+                        char *aws = strada_to_str(aw);
+                        size_t awi = vm_chunk_add_str_const(mchunk, aws ? aws : "");
+                        free(aws);
+                        vm_chunk_emit(mchunk, OP_DUP);
+                        vm_chunk_emit(mchunk, OP_PUSH_STR);
+                        vm_chunk_emit_u16(mchunk, (uint16_t)awi);
+                        vm_chunk_emit(mchunk, OP_ARRAY_PUSH);
+                    }
+                }
+            }
             vm_chunk_emit(mchunk, OP_CALL);
             vm_chunk_emit_u16(mchunk, (uint16_t)ifidx);
             vm_chunk_emit(mchunk, 2);

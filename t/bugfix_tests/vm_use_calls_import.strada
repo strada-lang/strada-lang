@@ -1,5 +1,6 @@
-# EXPECT: import(BfImport,0) hello x hello y
-# Audit 20 V4-17: the VM never called a module's import() on `use` (the
+# EXPECT: import(BfImport,1) hello x hello y
+# Audit 20 V4-17: the VM never called a module's import() on `use`, and neither
+# backend passed the `qw(...)` list to it (Perl passes it). (the
 # compiled backend calls Module::import(PKG, []) before main runs).
 use lib "t/bugfix_tests/m2i_inc";
 use BfImport qw(hello);

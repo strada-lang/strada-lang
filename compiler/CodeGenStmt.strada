@@ -4316,6 +4316,14 @@ func gen_function(scalar $cg, scalar $fn) void {
                 emit($cg, "    {\n");
                 emit($cg, "        StradaValue *__imp_pkg = strada_new_str(" . c_str_lit($call_pkg) . ");\n");
                 emit($cg, "        StradaValue *__imp_args = strada_new_array();\n");
+                my scalar $imp_list = $call_info->{"args"};
+                if (defined($imp_list)) {
+                    my int $ila = 0;
+                    while ($ila < size(@{$imp_list})) {
+                        emit($cg, "        strada_array_push_take(__imp_args->value.av, strada_new_str(" . c_str_lit("" . $imp_list->[$ila]) . "));\n");
+                        $ila = $ila + 1;
+                    }
+                }
                 my str $imp_rt = "" . $cg->{"all_func_names"}->{$call_fn};
                 if (length($imp_rt) > 0 && ($imp_rt + 0) == TYPE_VOID()) {
                     emit($cg, "        " . $call_fn . "(__imp_pkg, __imp_args);\n");
@@ -4667,6 +4675,13 @@ func gen_function(scalar $cg, scalar $fn) void {
                 my int $box_param = 0;
                 if (($cand_boxed{$c_param_name} + 0) == 1 && length("" . $param->{"struct_name"}) == 0) {
                     $box_param = 1;
+                }
+                # An `int` parameter holds an integer: "7.5" passed in is 7 at
+                # every use (it was converted only at some use sites)
+                if ($is_int_param == 1 && $p_sigil eq "$") {
+                    my str $ipc = $c_param_name;
+                    if ($box_param == 1) { $ipc = "__rawp_" . $c_param_name; }
+                    emit($cg, $ipc . " = strada_int_param_coerce(" . $ipc . ");\n");
                 }
                 if ($box_param == 1) {
                     $cg->{"func_param_skip_wrap"}->[$pc] = 1;

@@ -1,0 +1,16 @@
+# EXPECT: le,eq -7 8 7.25 7 7|7:7.25
+# C3-18: an `int` parameter given "7.5" was converted only at some use sites
+# (comparisons, unary minus) and stayed 7.5 elsewhere (returned, captured,
+# added to a float), and the VM truncated in different places. It is now
+# converted once at entry, in named functions and closures, in both backends.
+func cmp_(int $p) str { return ($p > 7 ? "gt" : "le") . "," . ($p == 7 ? "eq" : "ne"); }
+func neg_(int $p) scalar { return -$p; }
+func pluseq(int $p) scalar { $p += 1; return $p; }
+func mix(int $p, $f) scalar { return $p + $f; }
+func cap(int $p) scalar { my $c = func () { return $p * 1; }; return $c->(); }
+func show(int $p) scalar { return $p; }
+func main() int {
+    my $f = func (int $q) { return $q . ":" . ($q + 0.25); };
+    say(join(" ", cmp_("7.5"), neg_("7.5"), pluseq("7.5"), mix("7.5", 0.25), cap("7.5"), show("7.5")) . "|" . $f->("7.5"));
+    return 0;
+}

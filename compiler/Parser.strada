@@ -5884,6 +5884,7 @@ func parse_use_overload(scalar $parser, scalar $program) void {
 func parse_use(scalar $parser, scalar $program) void {
     parser_expect($parser, "USE");
 
+    my array @use_args = ();
     my str $mod_name = "";
     my scalar $tok = parser_current($parser);
 
@@ -5933,6 +5934,7 @@ func parse_use(scalar $parser, scalar $program) void {
             my int $qwl_i = 0;
             while ($qwl_i < $qwl_n) {
                 my str $qwl_w = $qwl_words->[$qwl_i];
+                push(@use_args, $qwl_w);
                 ast_add_import($program, $qwl_w);
                 ast_add_qw_import($program, $program->{"package"}, $qwl_w, $mod_name . "::" . $qwl_w);
                 $qwl_i = $qwl_i + 1;
@@ -5948,6 +5950,7 @@ func parse_use(scalar $parser, scalar $program) void {
                     if (parser_check($parser, "IDENT")) {
                         my scalar $import_tok = parser_current($parser);
                         my str $imp_w = $import_tok->{"value"};
+                        push(@use_args, $imp_w);
                         ast_add_import($program, $imp_w);
                         ast_add_qw_import($program, $program->{"package"}, $imp_w, $mod_name . "::" . $imp_w);
                     }
@@ -5968,6 +5971,17 @@ func parse_use(scalar $parser, scalar $program) void {
 
     resolve_use_module($parser, $program, $mod_name);
     ast_add_use($program, $mod_name);
+    # `use Mod qw(a b);`: Mod::import(PKG, LIST) receives the list (Perl)
+    my scalar $uic = $program->{"import_calls"};
+    my int $uin = $program->{"import_call_count"} + 0;
+    my int $uii = 0;
+    while ($uii < $uin) {
+        my scalar $uci = $uic->[$uii];
+        if (("" . $uci->{"func_name"}) eq ($mod_name . "::import") && !defined($uci->{"args"})) {
+            $uci->{"args"} = \@use_args;
+        }
+        $uii = $uii + 1;
+    }
 }
 
 # Resolve a module by name exactly as `use NAME;` does: prefer a fresh

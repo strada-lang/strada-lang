@@ -19899,6 +19899,16 @@ StradaValue* strada_closure_new_shared(void *func, int params, int captures, Str
     return sv;
 }
 
+StradaValue* strada_int_param_coerce_slow(StradaValue *p) {
+    if (!p) return p;
+    if (p->type == STRADA_UNDEF && !p->meta) return p;   /* an omitted argument stays undef */
+    if (p->type == STRADA_INT && !p->meta && !(p->flags & STRADA_SVf_UV)) return p;
+    if (p->type == STRADA_INT && (p->flags & STRADA_SVf_UV)) return p;
+    int64_t v = strada_to_int(p);
+    if (v >= STRADA_TAGGED_INT_MIN && v <= STRADA_TAGGED_INT_MAX) return STRADA_MAKE_TAGGED_INT(v);
+    return strada_mortal(strada_new_int(v));
+}
+
 /* The list a foreach iterates when its source is a call result (owned):
  * an array or array ref as is, undef as the empty list, any other value as
  * a one-element list (Perl: `foreach (f())` with a scalar result runs once). */

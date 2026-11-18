@@ -9047,6 +9047,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if (length("" . $ap->{"struct_name"}) > 0) {
                 $cg->{"struct_vars"}->{$ap_c} = "" . $ap->{"struct_name"};
             }
+            # `int` parameter: converted once at entry (strada_int_param_coerce)
+            if ($ap->{"param_type"} == TYPE_INT() && $ap_sig eq "$" && ($ap->{"is_variadic"} + 0) != 1) {
+                my str $ap_ipc = $ap_c;
+                if (($anon_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0) { $ap_ipc = "__rawp_" . $ap_c; }
+                emit_indent($cg);
+                emit($cg, $ap_ipc . " = strada_int_param_coerce(" . $ap_ipc . ");\n");
+            }
             if (($anon_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0) {
                 $cg->{"active_boxed_vars"}->{$ap_c} = 1;
                 emit_indent($cg);
