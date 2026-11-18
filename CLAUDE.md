@@ -162,6 +162,28 @@ Your Strada Programs
 
 **Critical**: The bootstrap compiler (`bootstrap/`) exists only to compile the self-hosting compiler. All new features and bug fixes go in `compiler/*.strada`.
 
+**Bootstrap memory fix (2026-11-18)**: the stage-1 compiler (the bootstrap's C
+for the compiler, built with tcc) leaked so much that compiling
+`Combined.strada` peaked near 5 GB; Claude Code's low-memory reaper killed
+background builds. Its peak is now 1.24 GB; the self-built `./stradac` needs
+0.74 GB. Stage 1 produces a byte-identical `Combined.c`. Changes in
+`bootstrap/codegen.c` (ownership fixes only, no language changes):
+- Every declared local owns its value: a borrowed initializer is increfed
+  (`gen_decl_init`), and untracked declarations are recorded (`is_struct ==
+  2`) so the innermost one decides `scope_is_tracked`.
+- `$x = v` on a tracked local releases the old value.
+- Owned values go into hashes with `strada_hash_set_take`.
+- `foreach` bodies get their own scope, and a fresh list is released after
+  the loop.
+- `keys`/`values` of `%{$r}` read the hash in place, without copying it.
+- `expr_is_owned` knows `%{}`/`@{}` copies and the builtins that return fresh
+  values.
+- String-builtin arguments go through `gen_str_arg`, which uses the runtime's
+  `strada_to_str_take` for owned temporaries.
+
+Making every local own its value was required: once stores stopped leaking,
+borrowed aliases (`my $old = $h{k}; $h{k} = ...`) would otherwise dangle.
+
 ### The `strada` Driver: Thin Shim + Compiled Driver (2026-06)
 
 The `strada` command is a **~15-line bash shim** plus a **compiled Strada

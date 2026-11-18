@@ -22944,6 +22944,14 @@ StradaValue* strada_reverse_list1(StradaValue *sv) {
 
 /* reverse(LIST) in scalar context: the list joined, then the string
  * reversed (Perl). A single non-array value is reversed as a string. */
+/* strada_to_str of an owned temporary, releasing it (the frozen bootstrap's
+ * generated code passes fresh values to string builtins). */
+char* strada_to_str_take(StradaValue *sv) {
+    char *s = strada_to_str(sv);
+    if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
+    return s;
+}
+
 /* A slice in scalar context (Perl): its last element, or undef when empty.
  * Takes ownership of the list (an array or an array reference). */
 StradaValue* strada_list_last_take(StradaValue *list) {

@@ -1716,6 +1716,7 @@ StradaValue* strada_foreach_list_take(StradaValue *v);
 StradaValue* strada_reverse_list1(StradaValue *sv);
 StradaValue* strada_reverse_scalar(StradaValue *sv);
 StradaValue* strada_list_last_take(StradaValue *list);
+char* strada_to_str_take(StradaValue *sv);   /* strada_to_str, then release sv (bootstrap-generated code) */
 /* An `int` parameter's value as an integer (borrowed in, borrowed out):
  * tagged / plain heap ints as is, anything else converted once at entry. */
 StradaValue* strada_int_param_coerce_slow(StradaValue *p);
