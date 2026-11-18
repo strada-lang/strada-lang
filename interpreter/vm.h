@@ -266,6 +266,8 @@ typedef enum {
     OP_CAST_ASSIGN_NUM,      /* coerce top of stack to num in-place unless blessed object */
     OP_STR_OV,               /* top of stack: a blessed object with a "" overload becomes its string
                               * (emitted before string builtins only in programs with overloads) */
+    OP_JMP_IF_INT_LOCAL,     /* u16 slot, u16 off — jump if locals[slot] is an integer or undef
+                              * (skips an `int` parameter's conversion prologue; JIT-compiled) */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -1072,6 +1074,9 @@ typedef struct {
     size_t func_count;
     size_t func_cap;
     char **func_names;
+    uint32_t *fn_index;      /* open-addressed name -> func idx + 1 (0 = empty);
+                              * the first function registered under a name wins */
+    size_t fn_index_cap;
     VMInherit *inherits;
     int inherit_count;
     VMOverload *overloads;
@@ -1143,6 +1148,7 @@ typedef struct VM {
     size_t regex_capture_len[VM_RX_MAX]; /* byte length of regex_captures[i] (NUL-safe) */
     uint8_t regex_capture_utf8[VM_RX_MAX]; /* character-oriented UTF-8 flag */
     char *regex_capture_names[VM_RX_MAX]; /* named-group name per group number (or NULL) */
+    int regex_hw;                  /* every capture slot >= regex_hw is unset (bounds clearing) */
     int regex_ngroups;               /* groups of the last successful match, $0 included */
     /* Exception handling */
     VMExcHandler *exc_stack;
@@ -1169,6 +1175,12 @@ typedef struct VM {
         char *method;            /* owned copy */
         int func_idx;
     } method_cache[32];
+    /* class name -> DESTROY func idx (-1 = none), valid while the program's
+     * function and inheritance counts are unchanged */
+    struct { char *cls; uint32_t hash; int fidx; } destroy_cache[64];
+    void *destroy_cache_prog;
+    size_t destroy_cache_funcs;
+    int destroy_cache_inherits;
     /* Per-PC 2-way polymorphic inline cache for static OP_METHOD_CALL / OP_FIELD_ACCESS */
     struct {
         const VMInsn *ip;

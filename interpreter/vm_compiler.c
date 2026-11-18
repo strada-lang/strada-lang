@@ -4292,6 +4292,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             if ((int)ast_int(param, "is_variadic")) continue;
             int ipslot = ctx_find_local_sigil(&inner, ast_str(param, "name"), '$');
             if (ipslot < 0) continue;
+            /* already an integer or undef: skip the conversion (JIT-compilable) */
+            vm_chunk_emit(inner.chunk, OP_JMP_IF_INT_LOCAL);
+            vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
+            size_t ip_fast = emit_patch_u16(&inner);
             vm_chunk_emit(inner.chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
             vm_chunk_emit(inner.chunk, OP_DEFINED);
@@ -4303,6 +4307,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(inner.chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(inner.chunk, (uint16_t)ipslot);
             patch_u16(&inner, ip_skip, (uint16_t)inner.chunk->code_len);
+            patch_u16(&inner, ip_fast, (uint16_t)inner.chunk->code_len);
         }
 
         prescan_vm_labels(&inner, body, 0, 0);
@@ -8066,6 +8071,38 @@ static int is_self_concat_rhs(StradaValue *value, const char *vname, char vsigil
     return 1;
 }
 
+/* $x = $x . A . B ... (left-associated): the parts after $x, when each is a
+ * literal or a variable other than $x. Appending them one by one gives the
+ * same string without copying $x each time (the chain was quadratic in a
+ * loop). Not used with tie or overloads, where the steps are observable. */
+#define VM_SELF_CHAIN_MAX 16
+static int is_self_concat_chain(StradaValue *value, const char *vname, char vsigil,
+                                StradaValue **parts, int *nparts) {
+    StradaValue *rev[VM_SELF_CHAIN_MAX];
+    int n = 0;
+    StradaValue *vn = ast_deref(value);
+    while (vn && !STRADA_IS_TAGGED_INT(vn) && (int)ast_int(vn, "type") == NI_BINARY_OP &&
+           ast_op_code(vn) == OP_AST_CONCAT) {
+        if (n >= VM_SELF_CHAIN_MAX) return 0;
+        StradaValue *rn = ast_deref(ast_get(vn, "right"));
+        if (!is_pure_append_rhs(rn)) return 0;
+        if ((int)ast_int(rn, "type") == NI_VARIABLE) {
+            const char *rs = ast_str(rn, "sigil");
+            char rsc = (rs && rs[0]) ? rs[0] : '$';
+            if (rsc == vsigil && strcmp(ast_str(rn, "name"), vname) == 0) return 0;
+        }
+        rev[n++] = rn;
+        vn = ast_deref(ast_get(vn, "left"));
+    }
+    if (n < 2 || !vn || STRADA_IS_TAGGED_INT(vn) || (int)ast_int(vn, "type") != NI_VARIABLE) return 0;
+    const char *ln_sigil = ast_str(vn, "sigil");
+    char ls = (ln_sigil && ln_sigil[0]) ? ln_sigil[0] : '$';
+    if (ls != vsigil || strcmp(ast_str(vn, "name"), vname) != 0) return 0;
+    for (int i = 0; i < n; i++) parts[i] = rev[n - 1 - i];
+    *nparts = n;
+    return 1;
+}
+
 static int is_self_unit_step(StradaValue *value, const char *vname, char vsigil, int *is_inc_out) {
     StradaValue *vn = ast_deref(value);
     if (!vn || STRADA_IS_TAGGED_INT(vn)) return 0;
@@ -8149,6 +8186,28 @@ static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
                             compile_expr(ctx, append_rhs);
                             vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
                             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                        }
+                        return;
+                    }
+                    StradaValue *chain_parts[VM_SELF_CHAIN_MAX];
+                    int chain_n = 0;
+                    if (strcmp(op, "=") == 0 && ctx->local_types[slot] == 0 && sc == '$' &&
+                        !g_vm_uses_tie && !g_prog_has_overloads &&
+                        is_self_concat_chain(value, vname, '$', chain_parts, &chain_n)) {
+                        for (int pi = 0; pi < chain_n; pi++) {
+                            StradaValue *pn = chain_parts[pi];
+                            if ((int)ast_int(pn, "type") == NI_STR_LITERAL) {
+                                size_t slen = 0;
+                                const char *sval = ast_str_len(pn, "value", &slen);
+                                size_t si = vm_chunk_add_str_const_len(ctx->chunk, sval, slen);
+                                vm_chunk_emit(ctx->chunk, OP_APPEND_CONST);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)si);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                            } else {
+                                compile_expr(ctx, pn);
+                                vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
+                                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                            }
                         }
                         return;
                     }
@@ -9978,6 +10037,10 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         if ((int)ast_int(param, "is_variadic")) continue;
         int ipslot = ctx_find_local_sigil(&ctx, ast_str(param, "name"), '$');
         if (ipslot < 0) continue;
+        /* already an integer or undef: skip the conversion (JIT-compilable) */
+        vm_chunk_emit(ctx.chunk, OP_JMP_IF_INT_LOCAL);
+        vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
+        size_t ip_fast = emit_patch_u16(&ctx);
         vm_chunk_emit(ctx.chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
         vm_chunk_emit(ctx.chunk, OP_DEFINED);
@@ -9989,6 +10052,7 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
         vm_chunk_emit(ctx.chunk, OP_STORE_LOCAL);
         vm_chunk_emit_u16(ctx.chunk, (uint16_t)ipslot);
         patch_u16(&ctx, ip_skip, (uint16_t)ctx.chunk->code_len);
+        patch_u16(&ctx, ip_fast, (uint16_t)ctx.chunk->code_len);
     }
     chunk = ctx.chunk;
 

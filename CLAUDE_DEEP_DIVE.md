@@ -2755,3 +2755,31 @@ while making it pass:
   array-copy decl/assign paths apply.
 - **VM stdout**: `OP_SAY` / `OP_SAY_FH` flush after writing to `stdout`
   (compiled `strada_say` does). `print` stays buffered in both.
+
+
+## VM performance, tier 1 (2026-11-18)
+
+Measured with callgrind (instruction counts). Wall times are best of 3; VM before → after:
+- compute: 32.4s → 7.9s
+- functions: 0.47s → 0.11s
+- oop: 1.61s → 0.86s
+- strings: 0.85s → 0.59s
+- hotpaths: 4.56s → 3.74s
+- utf8: did not finish → 2.5s
+
+**`OP_JMP_IF_INT_LOCAL` (u16 slot, u16 off).** It jumps when `locals[slot]` is an integer or undef. The `int`-parameter prologue in `compile_function` and in the closure path of `vm_compiler.c` emits it ahead of the `LOAD; DEFINED; JMP_IF_FALSE; LOAD; CAST_INT; STORE` conversion. In the JIT it is a load, a test for 0, `jb_j_not_int`, and two target patches. The jump must be forward: a backward one would need a backedge poll, so the JIT refuses it.
+
+**Function name index.** `vm_program_find_func` probes `VMProgram.fn_index`, which uses FNV-1a with linear probing and stores the function index + 1. `vm_program_add_func` inserts each new function and rebuilds the table at half load. A name that is already present keeps its first index, which is what the old linear scan returned.
+
+**DESTROY cache.** `vm_collect_finalizer_items` calls `vm_find_destroy_cached`, a 64-slot direct-mapped cache keyed by class name hash plus `strcmp`. The cache is validated against `(program, func_count, inherit_count)`. Both counts only grow, so a new method or a new inheritance edge invalidates it.
+
+**Regex capture high-water mark.** `regex_hw` covers every slot that may be set. It is raised by `vm_store_regex_capture` and by the three name writers (the two PCRE2 name tables and the named-capture fallback). Clearing and the `captures()` scans stop at it.
+
+**Self-concat chains.** `is_self_concat_chain` walks the left spine of a `.` chain. It needs 2 to 16 parts, each passing `is_pure_append_rhs` and none being the target. Each part becomes an `OP_APPEND_CONST` or an `OP_APPEND_LOCAL`. The transform is disabled under `g_vm_uses_tie` and `g_prog_has_overloads`, because a tied STORE or an overloaded `.` would observe the intermediate values.
+
+**`__C__` JIT cache key.** `cblock_jit_compile_n` hashes in the size and mtime of `strada_runtime.h`, `strada_runtime_tcc.h`, `vm.h` and `vm_compiler.h`, plus the sizes of the `VM`, `VMProgram` and `VMChunk` structs.
+
+**Not yet done (tier 2).**
+- Calls made from JIT code re-enter the interpreter through `vm_jit_call_slow`. This is 35% of bench_oop.
+- The interpreter's call and return path costs about 150 instructions per call.
+- Integer loops cost about 55 instructions per iteration in JIT code, which keeps everything on the memory stack.

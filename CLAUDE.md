@@ -750,6 +750,16 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
   - In the REPL and eval, a module's `import()` runs once (`%g_eval_vm_imports_done`), and a redeclaration with an initializer is seeded with the earlier value (`keep_seed`).
 - `interpreter/test/run_tests.sh` accepts `test_X.stdin`, `test_X.stdout_only` and `repl_X.input`/`.expected` sessions.
 
+**VM performance, tier 1 (2026-11-18)**: the user wants the VM fast before more parity work. Profile with callgrind (perf is blocked on the dev box), using a `-g` copy of `vm.c` linked against the existing `interp_*.o`.
+- **`int` parameters keep the JIT.** The prologue that converts an `int` parameter starts with `OP_JMP_IF_INT_LOCAL`, which skips the conversion when the argument is already an integer or undef. The JIT compiles that opcode. The old prologue began with `OP_DEFINED`, which the JIT doesn't compile, so every function with an `int` parameter bailed out on every call (fib(32): 0.23s to 0.04s).
+- **Function lookup by name is hashed.** `VMProgram.fn_index` is open-addressed, maintained by `vm_program_add_func`, and the first registration of a name wins.
+- **The collector's `DESTROY` lookup is cached per VM.** `destroy_cache` is keyed by class name and reset when the program or its function/inheritance counts change. oop was spending 46% of its time on this lookup.
+- **Regex captures are cleared only up to `regex_hw`.** That high-water mark is raised by every capture and capture-name writer.
+- **`$x = $x . A . B ...` appends in place** when every part is a literal or a variable other than `$x` (`is_self_concat_chain`). This is skipped in programs that use `tie` or overloads. bench_utf8 was quadratic here.
+- **The `__C__` JIT cache key includes the runtime and VM headers** (size and mtime) and the sizes of `VM`/`VMProgram`/`VMChunk`. A cached `.so` built against an older `vm.h` read stale struct offsets: lib/Eval's blocks segfaulted.
+- Test: `interpreter/test/test_vm_perf_c20.strada`.
+- Gate VM changes with the suites run twice, JIT on and `STRADA_NO_JIT=1`. After a `vm.h` change, rebuild `lib/Eval.o` (`make lib/Eval.o`).
+
 ## Language Features Reference
 
 ### Namespaces

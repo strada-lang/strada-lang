@@ -1,0 +1,59 @@
+# VM performance (audit cycle 20, 2026-11-18): the fast paths keep their semantics.
+package Num;
+func new($v) { return bless({v => $v}, "Num"); }
+func as_num($self, $o, $r) { return $self->{"v"}; }
+use overload "0+" => "as_num", "fallback" => 1;
+
+package Base;
+our @gone = ();
+func DESTROY($self) { push(@gone, $self->{"id"}); }
+func gone_list() { return join(",", sort(@gone)); }
+package Kid;
+func new($id) { my $s = bless({id => $id}, "Kid"); return $s; }
+package Plain;
+func new() { return bless({}, "Plain"); }
+
+package main;
+func f(int $n) { return $n; }
+func g(int $n, int $m) { my $c = fn () { return $n + 1; }; return $c->() . "/" . (defined($m) ? "d" : "u"); }
+func fib(int $n) int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+
+func main() int {
+    # int parameters: integers skip the conversion, everything else converts
+    my int $k = 0;
+    while ($k < 20) {
+        say(f("7.5") . " " . f(3) . " " . f("12abc") . " " . (defined(f(undef)) ? "def" : "undef") .
+            " " . f(Num::new(42)) . " " . f(2.9) . " " . g("4.2", undef));
+        $k += 10;
+    }
+    my $h = fn (int $x) { return $x * 2; };
+    say($h->("5.5") . " " . $h->(6) . " " . fib(20));
+
+    # $x = $x . A . B ... appends in place
+    my $a = "x";
+    my $n = 3;
+    my $fl = 2.5;
+    my str $s = "é";
+    $a = $a . "-" . $n . "-" . $fl . "|" . 7;
+    $s = $s . "ü" . $n . "ß—" . $a;
+    my $b = "q";
+    $b = $b . "1" . $b . "2";
+    my $c = 5;
+    $c = $c . $c . "z" . "w";
+    say($a); say($s . " " . length($s)); say($b); say($c);
+
+    # captures after matches with different group counts
+    if ("a1b2c3d4" =~ /(\w)(\d)(\w)(\d)(\w)(\d)/) { say("six: " . $1 . $6); }
+    if ("zz" =~ /(z)/) { say("one: " . $1 . " " . (defined($2) ? "stale" : "undef")); }
+    my @caps = captures();
+    say("captures: " . scalar(@caps));
+    if ("k=v" =~ /(?<key>\w)=(?<val>\w)/) { my %nc = named_captures(); say("named: " . $nc{"key"} . $nc{"val"}); }
+
+    # DESTROY found through inheritance added at run time; classes without one
+    inherit("Kid", "Base");
+    my $i = 0;
+    while ($i < 3) { my $p = Plain::new(); my $kd = Kid::new($i); $i++; }
+    core::gc_collect();
+    say("destroyed: " . Base::gone_list());
+    return 0;
+}

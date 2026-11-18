@@ -95,6 +95,8 @@ static pthread_mutex_t g_cblock_jit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void vm_regex_cache_free(VM *vm);
 static uint32_t vm_hash_fn_n(const char *key, size_t len);
+static void vm_fn_index_insert(VMProgram *p, size_t idx);
+static void vm_fn_index_rebuild(VMProgram *p);
 
 /* Matches VMConstString prefix layout so gc_immortal == 2 singletons have valid .hash */
 typedef struct {
@@ -1267,7 +1269,7 @@ void vm_program_free(VMProgram *p) {
             free(p->funcs[i].capture_names);
         }
     }
-    free(p->funcs); free(p->func_names);
+    free(p->funcs); free(p->func_names); free(p->fn_index);
     for (int i = 0; i < p->inherit_count; i++) { free(p->inherits[i].child); free(p->inherits[i].parent); }
     free(p->inherits);
     for (int i = 0; i < p->overload_count; i++) { free(p->overloads[i].class_name); free(p->overloads[i].op); free(p->overloads[i].method); }
@@ -1323,6 +1325,8 @@ VMChunk *vm_program_add_func(VMProgram *p, const char *name) {
     size_t idx = p->func_count++;
     p->funcs[idx] = vm_chunk_new(name);
     p->func_names[idx] = strdup(name);
+    if (!p->fn_index || (p->func_count * 2 + 2) > p->fn_index_cap) vm_fn_index_rebuild(p);
+    else vm_fn_index_insert(p, idx);
     return &p->funcs[idx];
 }
 
@@ -1392,9 +1396,49 @@ static char *vm_build_trace(VM *vm, int top, int plain) {
     return t;
 }
 
+static uint32_t vm_fn_name_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+    return h;
+}
+
+/* Insert func idx under its name unless the name is already indexed
+ * (lookups return the first registration, as the old linear scan did). */
+static void vm_fn_index_insert(VMProgram *p, size_t idx) {
+    size_t mask = p->fn_index_cap - 1;
+    const char *name = p->func_names[idx];
+    size_t i = vm_fn_name_hash(name) & mask;
+    while (p->fn_index[i]) {
+        if (strcmp(p->func_names[p->fn_index[i] - 1], name) == 0) return;
+        i = (i + 1) & mask;
+    }
+    p->fn_index[i] = (uint32_t)idx + 1;
+}
+
+static void vm_fn_index_rebuild(VMProgram *p) {
+    size_t cap = 64;
+    while (cap < p->func_count * 2 + 2) cap *= 2;
+    free(p->fn_index);
+    p->fn_index = calloc(cap, sizeof(uint32_t));
+    p->fn_index_cap = cap;
+    for (size_t i = 0; i < p->func_count; i++) vm_fn_index_insert(p, i);
+}
+
 int vm_program_find_func(VMProgram *p, const char *name) {
-    for (size_t i = 0; i < p->func_count; i++)
-        if (strcmp(p->func_names[i], name) == 0) return (int)i;
+    if (!p || !name) return -1;
+    if (!p->fn_index) {
+        /* not indexed (no function added through vm_program_add_func) */
+        for (size_t i = 0; i < p->func_count; i++)
+            if (p->func_names[i] && strcmp(p->func_names[i], name) == 0) return (int)i;
+        return -1;
+    }
+    size_t mask = p->fn_index_cap - 1;
+    size_t i = vm_fn_name_hash(name) & mask;
+    while (p->fn_index[i]) {
+        uint32_t fi = p->fn_index[i] - 1;
+        if (strcmp(p->func_names[fi], name) == 0) return (int)fi;
+        i = (i + 1) & mask;
+    }
     return -1;
 }
 
@@ -1891,6 +1935,37 @@ static void vm_run_destroy_batch(VM *vm, VMFinalizerItem *items, size_t count) {
     vm_run_destroy_batch_ex(vm, items, count, 0);
 }
 
+static void vm_destroy_cache_clear(VM *vm) {
+    for (int i = 0; i < 64; i++) {
+        free(vm->destroy_cache[i].cls);
+        vm->destroy_cache[i].cls = NULL;
+    }
+}
+
+/* vm_find_method(cls, "DESTROY"), cached per class name: the collector asks
+ * for every freed blessed object, and most classes have no DESTROY */
+static int vm_find_destroy_cached(VM *vm, const char *cname) {
+    VMProgram *p = vm->program;
+    if (vm->destroy_cache_prog != (void *)p || vm->destroy_cache_funcs != p->func_count ||
+        vm->destroy_cache_inherits != p->inherit_count) {
+        vm_destroy_cache_clear(vm);
+        vm->destroy_cache_prog = p;
+        vm->destroy_cache_funcs = p->func_count;
+        vm->destroy_cache_inherits = p->inherit_count;
+    }
+    uint32_t h = vm_fn_name_hash(cname);
+    int slot = (int)(h & 63);
+    if (vm->destroy_cache[slot].cls && vm->destroy_cache[slot].hash == h &&
+        strcmp(vm->destroy_cache[slot].cls, cname) == 0)
+        return vm->destroy_cache[slot].fidx;
+    int fidx = vm_find_method(p, cname, "DESTROY");
+    free(vm->destroy_cache[slot].cls);
+    vm->destroy_cache[slot].cls = strdup(cname);
+    vm->destroy_cache[slot].hash = h;
+    vm->destroy_cache[slot].fidx = fidx;
+    return fidx;
+}
+
 static size_t vm_collect_finalizer_items(VM *vm, VMFinalizerItem **out_items, int only_unmarked) {
     *out_items = NULL;
     if (!vm || !vm->program) return 0;
@@ -1903,7 +1978,7 @@ static size_t vm_collect_finalizer_items(VM *vm, VMFinalizerItem **out_items, in
         if (ot != VM_OBJ_HASH && ot != VM_OBJ_ARRAY && ot != VM_OBJ_CLOSURE && ot != VM_OBJ_SREF) continue;
         const char *cname = vm_obj_class_name(VM_MAKE_PTR(o));
         if (!cname) continue;
-        int dfidx = vm_find_method(vm->program, cname, "DESTROY");
+        int dfidx = vm_find_destroy_cached(vm, cname);
         if (dfidx < 0) continue;
         o->gc_finalized = 1;
         if (count >= cap) {
@@ -2194,6 +2269,7 @@ void vm_free(VM *vm) {
     }
     free(vm->script_name);
     vm_method_cache_clear(vm);
+    vm_destroy_cache_clear(vm);
     vm_regex_cache_free(vm);
     pthread_mutex_destroy(&vm->gc_mutex);
     pthread_mutex_destroy(&vm->gc_wait_mutex);
@@ -2405,7 +2481,10 @@ static inline void vm_write_val(FILE *fp, VMValue v, int with_nl) {
 
 static void vm_clear_regex_captures(VM *vm) {
     vm->regex_ngroups = 0;
-    for (int i = 0; i < VM_RX_MAX; i++) {
+    int hw = vm->regex_hw;
+    if (hw > VM_RX_MAX) hw = VM_RX_MAX;
+    vm->regex_hw = 0;
+    for (int i = 0; i < hw; i++) {
         if (vm->regex_captures[i]) {
             free(vm->regex_captures[i]);
             vm->regex_captures[i] = NULL;
@@ -2422,6 +2501,7 @@ static void vm_clear_regex_captures(VM *vm) {
 static void vm_store_regex_capture(VM *vm, int i, const char *s, size_t len, int is_utf8) {
     if (i < 0 || i >= VM_RX_MAX) return;
     if (i + 1 > vm->regex_ngroups) vm->regex_ngroups = i + 1;
+    if (i + 1 > vm->regex_hw) vm->regex_hw = i + 1;
     if (vm->regex_captures[i]) {
         free(vm->regex_captures[i]);
         vm->regex_captures[i] = NULL;
@@ -2471,8 +2551,10 @@ static int vm_regex_match_len_u8(VM *vm, const char *str, size_t slen, int is_ut
                 for (uint32_t __n = 0; __n < __nc; __n++) {
                     PCRE2_SPTR __e = __nt + __n * __nes;
                     int __g = (__e[0] << 8) | __e[1];
-                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g])
+                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g]) {
                         vm->regex_capture_names[__g] = strdup((const char *)(__e + 2));
+                        if (__g + 1 > vm->regex_hw) vm->regex_hw = __g + 1;
+                    }
                 }
             }
         }
@@ -2554,6 +2636,7 @@ static void vm_sync_runtime_captures(VM *vm) {
                     if (vm->regex_captures[i] && vm->regex_capture_len[i] == vlen &&
                         memcmp(vm->regex_captures[i], vptr, vlen) == 0 && !vm->regex_capture_names[i]) {
                         vm->regex_capture_names[i] = strdup(hv->entries[e].key->data);
+                        if (i + 1 > vm->regex_hw) vm->regex_hw = i + 1;
                         break;
                     }
                 }
@@ -2601,8 +2684,10 @@ static int vm_regex_find_u8(VM *vm, const char *str, size_t slen, int is_utf8, c
                 for (uint32_t __n = 0; __n < __nc; __n++) {
                     PCRE2_SPTR __e = __nt + __n * __nes;
                     int __g = (__e[0] << 8) | __e[1];
-                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g])
+                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g]) {
                         vm->regex_capture_names[__g] = strdup((const char *)(__e + 2));
+                        if (__g + 1 > vm->regex_hw) vm->regex_hw = __g + 1;
+                    }
                 }
             }
         }
@@ -4253,6 +4338,28 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     }
     if (link_flags) {
         for (const char *pp = link_flags; *pp; pp++) hash = hash * 1099511628211ULL ^ (unsigned char)*pp;
+    }
+    /* The blocks compile against the runtime and VM headers (vm.h struct
+     * layouts): a cached object built against older headers reads fields at
+     * stale offsets, so the headers' identity and this binary's struct sizes
+     * are part of the key. */
+    {
+        const char *hinc = runtime_inc ? runtime_inc : ".";
+        const char *hdrs[] = { "strada_runtime.h", "strada_runtime_tcc.h", "../interpreter/vm.h",
+                               "../interpreter/vm_compiler.h" };
+        for (size_t hi = 0; hi < sizeof(hdrs) / sizeof(hdrs[0]); hi++) {
+            char hp[1024];
+            struct stat hst;
+            snprintf(hp, sizeof(hp), "%s/%s", hinc, hdrs[hi]);
+            if (stat(hp, &hst) == 0) {
+                hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_size;
+                hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_mtim.tv_sec;
+                hash = hash * 1099511628211ULL ^ (uint64_t)hst.st_mtim.tv_nsec;
+            }
+        }
+        hash = hash * 1099511628211ULL ^ (uint64_t)sizeof(VM);
+        hash = hash * 1099511628211ULL ^ (uint64_t)sizeof(VMProgram);
+        hash = hash * 1099511628211ULL ^ (uint64_t)sizeof(VMChunk);
     }
     char so_path[600];
     snprintf(so_path, sizeof(so_path), "%s/%016llx.so", cache_dir, (unsigned long long)hash);
@@ -8065,7 +8172,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             /* captures() — [0]=full match, [1..]=groups from the last match */
             VMArray *ca = vm_array_new(10);
             int last = -1;
-            for (int i = 0; i < VM_RX_MAX; i++) if (vm->regex_captures[i]) last = i;
+            for (int i = 0; i < vm->regex_hw && i < VM_RX_MAX; i++) if (vm->regex_captures[i]) last = i;
             if (vm->regex_ngroups - 1 > last) last = vm->regex_ngroups - 1;
             for (int i = 0; i <= last; i++)
                 vm_array_push(ca, vm->regex_captures[i]
@@ -11945,7 +12052,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 const char *pat = vm_bytes_view(args[1], pbuf, sizeof(pbuf), &plen);
                 if (vm_regex_match_len_u8(vm, s, slen, vm_is_utf8(args[0]), pat, plen)) {
                     int last = -1;
-                    for (int i = 0; i < VM_RX_MAX; i++) {
+                    for (int i = 0; i < vm->regex_hw && i < VM_RX_MAX; i++) {
                         if (vm->regex_captures[i]) last = i;
                     }
                     for (int i = 0; i <= last; i++) {
@@ -12151,6 +12258,9 @@ static void vm_chunk_build_dt_locked(VMChunk *c, const void * const *dt) {
         case OP_INCR_LE_I32_JMP_T:
             if (pos + 8 <= clen) { ins->a = read_u16(p); ins->imm.i32.i0 = read_i32(p + 2); ins->b = read_u16(p + 6); pos += 8; }
             break;
+        case OP_JMP_IF_INT_LOCAL:
+            if (pos + 4 <= clen) { ins->a = read_u16(p); ins->b = read_u16(p + 2); pos += 4; }
+            break;
         case OP_LT_LOCAL_LOCAL_JMP_F:
         case OP_INCR_LT_LOCAL_JMP_T:
             if (pos + 6 <= clen) { ins->a = read_u16(p); ins->b = read_u16(p + 2); ins->c = read_u16(p + 4); pos += 6; }
@@ -12208,6 +12318,7 @@ static void vm_chunk_build_dt_locked(VMChunk *c, const void * const *dt) {
         case OP_LE_LOCAL_I32_JMP_F:
         case OP_INCR_LT_I32_JMP_T:
         case OP_INCR_LE_I32_JMP_T:
+        case OP_JMP_IF_INT_LOCAL:
             ins->b = vm_dt_map_jump(ins->b, clen, b2i);
             break;
         case OP_LT_LOCAL_LOCAL_JMP_F:
@@ -14572,6 +14683,21 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             break;
         }
 
+        case OP_JMP_IF_INT_LOCAL: {
+            /* forward jump when locals[a] is an integer or undef (0) */
+            uint16_t sa = di->a, off = di->b;
+            if (sa > (uint16_t)max_loc || off >= c->dt_len || (size_t)off <= idx) { bail_ok = 0; break; }
+            jb_mem(b, 1, 0x8B, JR_RAX, JR_R13, (int32_t)sa * 8);
+            jb_rr(b, 1, 0x85, JR_RAX, JR_RAX);
+            uint32_t p_undef = jb_jcc_placeholder(b, 0x84); /* je target */
+            jb_add_target_patch(b, p_undef, off);
+            uint32_t j_notint = jb_j_not_int(b, JR_RAX);
+            uint32_t p_int = jb_jmp_placeholder(b);
+            jb_add_target_patch(b, p_int, off);
+            jb_patch_here(b, j_notint);
+            break;
+        }
+
         case OP_LT_LOCAL_I32_JMP_F:
         case OP_LE_LOCAL_I32_JMP_F:
         case OP_LT_LOCAL_LOCAL_JMP_F: {
@@ -15360,7 +15486,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             DT(OP_INIT_GLOBAL);
             DT(OP_PUSH_I8);
             DT(OP_PUSH_I32);
-            DT(OP_CAST_INT);
+            DT(OP_CAST_INT); DT(OP_JMP_IF_INT_LOCAL);
             DT(OP_CAST_NUM);
             DT(OP_CAST_ASSIGN_INT);
             DT(OP_CAST_ASSIGN_NUM);
@@ -15614,6 +15740,14 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     }
 
     CASE(OP_CAST_ASSIGN_INT):
+    CASE(OP_JMP_IF_INT_LOCAL): {
+        VMValue v = locals[di->a];
+        if (__builtin_expect(VM_IS_INT(v) || VM_IS_UNDEF(v), 1)) {
+            ip = chunk->dt_code + di->b;
+        }
+        DISPATCH();
+    }
+
     CASE(OP_CAST_INT): {
         VMValue v = stack[sp - 1];
         if (__builtin_expect(!VM_IS_INT(v), 0)) {
