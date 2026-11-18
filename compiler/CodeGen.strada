@@ -8310,6 +8310,54 @@ func compound_overload_active(scalar $cg, scalar $target, scalar $rhs, str $op) 
     return "";
 }
 
+# The right side of a single-lookup hash compound assignment: evaluating it
+# must have no side effects (it runs before the slot is read). Literals,
+# plain variables, element reads with pure subscripts ($f[3], $h{"k"}) in a
+# program without tie, and pure integer arithmetic.
+func hca_rhs_pure(scalar $cg, scalar $e, int $depth) int {
+    if (arg_is_trivially_pure($cg, $e) == 1) { return 1; }
+    if (!$e || $depth > 6 || $cg->{"uses_tie"} != 0 || $cg->{"has_overloads"} != 0) { return 0; }
+    my int $et = $e->{"type"} + 0;
+    if ($et == NODE_SUBSCRIPT()) {
+        if (hca_rhs_pure($cg, $e->{"array"}, $depth + 1) == 0) { return 0; }
+        return hca_rhs_pure($cg, $e->{"index"}, $depth + 1);
+    }
+    if ($et == NODE_HASH_ACCESS()) {
+        if (hca_rhs_pure($cg, $e->{"hash"}, $depth + 1) == 0) { return 0; }
+        return hca_rhs_pure($cg, $e->{"key"}, $depth + 1);
+    }
+    if ($et == NODE_VARIABLE() && ("" . $e->{"sigil"}) ne "$") {
+        # @a / %h as the container of an element read
+        return 1;
+    }
+    if ($et == NODE_BINARY_OP() && expr_is_int_typed($cg, $e) == 1) {
+        my str $bop = "" . $e->{"op"};
+        if ($bop eq "+" || $bop eq "-" || $bop eq "*") {
+            if (hca_rhs_pure($cg, $e->{"left"}, $depth + 1) == 0) { return 0; }
+            return hca_rhs_pure($cg, $e->{"right"}, $depth + 1);
+        }
+        if ($bop eq "%") {
+            my scalar $mr = $e->{"right"};
+            if ($mr && ($mr->{"type"} + 0) == NODE_INT_LITERAL() && ("" . $mr->{"value"}) ne "0") {
+                return hca_rhs_pure($cg, $e->{"left"}, $depth + 1);
+            }
+        }
+    }
+    if ($et == NODE_CALL()) {
+        # builtins that cannot throw or change anything, on pure arguments
+        my str $cn = "" . $e->{"name"};
+        if ($cn eq "chr" || $cn eq "ord" || $cn eq "length" || $cn eq "uc" || $cn eq "lc" ||
+            $cn eq "ucfirst" || $cn eq "lcfirst") {
+            my scalar $pf_fns = $cg->{"functions"};
+            if (defined($pf_fns) && exists($pf_fns->{$cn})) { return 0; }
+            my int $pac = $e->{"arg_count"} + 0;
+            if ($pac != 1) { return 0; }
+            return hca_rhs_pure($cg, $e->{"args"}->[0], $depth + 1);
+        }
+    }
+    return 0;
+}
+
 func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, int $is_void) void {
     my int $ttype = $target->{"type"};
     my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
@@ -8336,7 +8384,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op, 
     my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
 
     my str $hca_opch = "";
-    if ($is_void == 1 && arg_is_trivially_pure($cg, $rhs) == 1) {
+    if ($is_void == 1 && hca_rhs_pure($cg, $rhs, 0) == 1) {
         if ($op eq "+=") { $hca_opch = "'+'"; }
         elsif ($op eq "-=") { $hca_opch = "'-'"; }
         elsif ($op eq "*=") { $hca_opch = "'*'"; }

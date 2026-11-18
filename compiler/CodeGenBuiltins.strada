@@ -9125,6 +9125,27 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
     return 0;
 }
 
+# A fused-constructor argument whose evaluation order does not matter: a
+# literal, a plain variable, or integer + - * on such operands (and % by a
+# nonzero integer literal) -- no calls, no side effects, cannot throw.
+# (Point::new("x", $i % 100, "y", ($i + 1) % 100) used to fall off the
+# fused path, 4x slower on bench_oop.)
+func fused_arg_pure(scalar $cg, scalar $expr, int $depth) int {
+    if (arg_is_trivially_pure($cg, $expr) == 1) { return expr_cannot_throw($cg, $expr); }
+    if (!$expr || $depth > 8) { return 0; }
+    if (($expr->{"type"} + 0) != NODE_BINARY_OP() || $cg->{"has_overloads"} != 0) { return 0; }
+    if (expr_is_int_typed($cg, $expr) == 0) { return 0; }
+    my str $fop = "" . $expr->{"op"};
+    if ($fop eq "%") {
+        my scalar $fr = $expr->{"right"};
+        if (!$fr || ($fr->{"type"} + 0) != NODE_INT_LITERAL() || ("" . $fr->{"value"}) eq "0") { return 0; }
+        return fused_arg_pure($cg, $expr->{"left"}, $depth + 1);
+    }
+    if ($fop ne "+" && $fop ne "-" && $fop ne "*") { return 0; }
+    if (fused_arg_pure($cg, $expr->{"left"}, $depth + 1) == 0) { return 0; }
+    return fused_arg_pure($cg, $expr->{"right"}, $depth + 1);
+}
+
 func arg_is_trivially_pure(scalar $cg, scalar $expr) int {
     if (!$expr) { return 1; }
     my int $t = $expr->{"type"};
@@ -9703,7 +9724,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                             $fused_keys_seen{$fk_chk} = 1;
                             my scalar $fv_chk = $args->[$fvi + 1];
                             if ($arg_count > 2) {
-                                if (expr_cannot_throw($cg, $fv_chk) == 0 || arg_is_trivially_pure($cg, $fv_chk) == 0) {
+                                if (fused_arg_pure($cg, $fv_chk, 0) == 0) {
                                     $fused_ok = 0;
                                     last;
                                 }

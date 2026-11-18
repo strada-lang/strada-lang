@@ -42,7 +42,7 @@ func main() int {
         "untie(%th);\n" .
         "my str \$re_ok = (\"a;b\" =~ /['\";]/) ? \"1\" : \"0\";\n" .
         "my str \$hd = <<'R17_EV_LK';\nhello;world\nR17_EV_LK\n" .
-        "(\$z == 7 && bytes(\$ks[0]) == 5 && \$ek eq \"5\" && \$re_ok eq \"1\" && \$hd eq \"hello;world\") ? 1 : 0;"
+        "(\$z == 7 && bytes(\$ks[0]) == 5 && \$ek eq \"5\" && \$re_ok eq \"1\" && \$hd eq \"hello;world\\n\") ? 1 : 0;"
     );
     if ($ok != 1) { return 1; }
 
@@ -53,7 +53,7 @@ func main() int {
         "my str \$h = <<'R17_J_LK';\nline;\nR17_J_LK\n" .
         "(\$ja + \$jb) . \":\" . \$h"
     );
-    if ($jres ne "13:line;") { return 2; }
+    if ($jres ne "13:line;\n") { return 2; }
     Strada::JIT::reset();
 
     Strada::Interpreter::reset();

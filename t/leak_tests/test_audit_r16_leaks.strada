@@ -82,7 +82,7 @@ func main() int {
     my str $hd = <<'END_LK' . ":" . join("-", qw[a b]);
 hello
 END_LK
-    if ($hd ne "hello:a-b") { return 4; }
+    if ($hd ne "hello\n:a-b") { return 4; }
 
     # S3-9: negative shift
     my int $sr = (-8 >> 100);

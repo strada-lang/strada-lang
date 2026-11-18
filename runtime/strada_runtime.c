@@ -11041,6 +11041,20 @@ StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
         int slurp = 0;
         strada_get_irs(&irs, &irs_len, &slurp);
         int custom_irs = (!slurp && irs && irs_len > 0 && !(irs_len == 1 && irs[0] == '\n'));
+        if (!slurp && !custom_irs && max == 0) {
+            /* the common <$fh>: getline() finds the newline with memchr over
+             * stdio's buffer (the getc loop below costs ~12 instructions per
+             * byte); same result: the line without its '\n', undef at EOF */
+            char *gl = NULL;
+            size_t glcap = 0;
+            ssize_t gn = getline(&gl, &glcap, fh->value.fh);
+            if (gn < 0) { free(gl); return strada_new_undef(); }
+            if (gn > 0 && gl[gn - 1] == '\n') gn--;
+            if ((size_t)gn > UINT32_MAX) { free(gl); strada_str_oom_abort((size_t)gn); }
+            StradaValue *glr = strada_new_str_len(gl, (size_t)gn);
+            free(gl);
+            return glr;
+        }
         size_t cap = 4096;
         size_t len = 0;
         char *buf = (char*)malloc(cap);
@@ -28941,6 +28955,24 @@ char* strada_replace_first(const char *str, const char *find, const char *replac
  * Modifies *target_ptr in place — decrefs old, assigns new. */
 /* strada_subst_sv_cnt: in-place literal string substitution returning match count.
  * Coerces non-STRADA_STR targets only when a match occurs; single scan when global=0. */
+/* memmem for the short needles of literal s/// (glibc's memmem costs ~2x
+ * strstr on them): memchr for the first byte, then memcmp. */
+static inline const char *strada_memmem_short(const char *h, size_t hl, const char *n, size_t nl) {
+    if (nl == 0) return h;
+    if (nl > 16) return (const char *)memmem(h, hl, n, nl);
+    if (nl > hl) return NULL;
+    const char *p = h;
+    const char *last = h + (hl - nl);
+    unsigned char c0 = (unsigned char)n[0];
+    while (p <= last) {
+        p = (const char *)memchr(p, c0, (size_t)(last - p) + 1);
+        if (!p) return NULL;
+        if (nl == 1 || memcmp(p + 1, n + 1, nl - 1) == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
 static char *strada_binary_replace(const char *src, size_t src_len,
                                    const char *find, size_t find_len,
                                    const char *replace, size_t replace_len,
@@ -28949,7 +28981,7 @@ static char *strada_binary_replace(const char *src, size_t src_len,
         if (cnt_out) *cnt_out = 0;
         return NULL;
     }
-    const void *first = memmem(src, src_len, find, find_len);
+    const void *first = strada_memmem_short(src, src_len, find, find_len);
     if (!first) {
         if (cnt_out) *cnt_out = 0;
         return NULL;
@@ -28960,7 +28992,7 @@ static char *strada_binary_replace(const char *src, size_t src_len,
         const char *scan = fp + find_len;
         const char *end = src + src_len;
         while ((size_t)(end - scan) >= find_len) {
-            const void *m = memmem(scan, (size_t)(end - scan), find, find_len);
+            const void *m = strada_memmem_short(scan, (size_t)(end - scan), find, find_len);
             if (!m) break;
             cnt++;
             scan = (const char *)m + find_len;
@@ -28990,7 +29022,7 @@ static char *strada_binary_replace(const char *src, size_t src_len,
         if (replace_len > 0) { memcpy(dst, replace, replace_len); dst += replace_len; }
         cur = match + find_len;
         if (i + 1 < cnt) {
-            match = (const char *)memmem(cur, (size_t)(src + src_len - cur), find, find_len);
+            match = strada_memmem_short(cur, (size_t)(src + src_len - cur), find, find_len);
         }
     }
     size_t tail = (size_t)(src + src_len - cur);
@@ -29008,6 +29040,46 @@ int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const ch
     size_t replace_len = strlen(replace);
 
     StradaValue *target = *target_ptr;
+    /* Fast path: a plain string (not tied, blessed, overloaded or in an
+     * arena). Nothing here can throw, so no cleanup-stack guards. */
+    if (target && !STRADA_IS_TAGGED_INT(target) && target->type == STRADA_STR && target->value.pv
+        && !SV_NEEDS_STR_DISPATCH(target) && !(target->meta && (target->meta->is_tied || target->meta->blessed_package))
+        && !ARENA_OWNS(target)) {
+        const char *fsrc = target->value.pv;
+        size_t fsrc_len = STRADA_STR_BYTELEN(target);
+        if (fsrc_len == 0 && fsrc[0] != '\0') fsrc_len = strlen(fsrc);
+        int64_t fcnt = 0;
+        size_t frlen = 0;
+        char *fres = strada_binary_replace(fsrc, fsrc_len, find, find_len, replace, replace_len, global, &fcnt, &frlen);
+        if (fcnt == 0 || !fres) { free(fres); return 0; }
+        int f_rep_non_ascii = 0;
+        for (size_t fi = 0; fi < replace_len; fi++) {
+            if ((unsigned char)replace[fi] >= 0x80) { f_rep_non_ascii = 1; break; }
+        }
+        int f_was_utf8 = STRADA_STR_IS_UTF8(target) ? 1 : 0;
+        int f_was_ascii = STRADA_STR_IS_ASCII(target) ? 1 : 0;
+        int f_src_ascii = 1;
+        if (!f_was_utf8 && f_rep_non_ascii && !f_was_ascii) {
+            for (size_t fi = 0; fi < fsrc_len; fi++) {
+                if ((unsigned char)fsrc[fi] >= 0x80) { f_src_ascii = 0; break; }
+            }
+        }
+        int f_keep_utf8 = (f_was_utf8 || (f_rep_non_ascii && f_src_ascii))
+                          && (!f_rep_non_ascii || utf8_is_valid(fres, frlen));
+        if (target->refcount == 1 && SS_FROM_PV(target->value.pv)->refcount == 1) {
+            uint16_t fasc = (f_was_ascii && !f_rep_non_ascii) ? STRADA_SVf_ASCII : strada_detect_ascii_flag(fres, frlen);
+            ss_free_pv(target->value.pv);
+            target->value.pv = ss_alloc_pv(fres, frlen);
+            strada_str_set_len_flags(target, frlen, (uint16_t)(fasc | (f_keep_utf8 ? STRADA_SVf_UTF8 : 0)));
+            if (target->meta) target->meta->has_iv_override = 0;
+        } else {
+            StradaValue *fnew = f_keep_utf8 ? strada_new_str_len_utf8(fres, frlen) : strada_new_str_len(fres, frlen);
+            *target_ptr = fnew;
+            strada_decref(target);
+        }
+        free(fres);
+        return fcnt;
+    }
     int is_tied_scalar = (target && !STRADA_IS_TAGGED_INT(target) && SV_IS_TIED(target)
                           && target->type != STRADA_HASH && target->type != STRADA_ARRAY) ? 1 : 0;
     int cm = strada_cleanup_mark();
@@ -36643,10 +36715,33 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
         }
     }
     if (!pat_non_ascii) {
-        size_t tn = 0; uint32_t mx1 = 0, mx2 = 0;
-        free(tr_decode_and_expand_set_ex(search, &tn, &mx1));
-        free(tr_decode_and_expand_set_ex(replace, &tn, &mx2));
-        if (mx1 > 0xFF || mx2 > 0xFF) pat_non_ascii = 1;
+        /* Escapes like \x{100} also make the lists wide. Decoding both lists
+         * (two allocations) on every call cost ~2x on a tr/// loop; the
+         * answer depends only on the list text, so the last one is kept
+         * per thread (by content: VM strings are not stable pointers). */
+        /* "search\0replace\0" of the last lists seen, in a fixed buffer
+         * (no allocation: nothing to free at thread exit) */
+        static STRADA_TLS char tr_wide_key[256];
+        static STRADA_TLS int tr_wide_ok = 0, tr_wide_v = 0;
+        size_t tsl = strlen(search), trl = strlen(replace);
+        int tfits = (tsl + trl + 2 <= sizeof(tr_wide_key));
+        if (tfits && tr_wide_ok && memcmp(tr_wide_key, search, tsl + 1) == 0
+            && memcmp(tr_wide_key + tsl + 1, replace, trl + 1) == 0) {
+            pat_non_ascii = tr_wide_v;
+        } else {
+            size_t tn = 0; uint32_t mx1 = 0, mx2 = 0;
+            free(tr_decode_and_expand_set_ex(search, &tn, &mx1));
+            free(tr_decode_and_expand_set_ex(replace, &tn, &mx2));
+            if (mx1 > 0xFF || mx2 > 0xFF) pat_non_ascii = 1;
+            if (tfits) {
+                memcpy(tr_wide_key, search, tsl + 1);
+                memcpy(tr_wide_key + tsl + 1, replace, trl + 1);
+                tr_wide_v = pat_non_ascii;
+                tr_wide_ok = 1;
+            } else {
+                tr_wide_ok = 0;
+            }
+        }
     }
 
     char *str = NULL;
@@ -36698,8 +36793,37 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
     unsigned char search_stack[256];
     unsigned char replace_stack[256];
     size_t search_count = 0, replace_count = 0;
-    unsigned char *search_chars = tr_expand_bytes(search, search_stack, sizeof(search_stack), &search_count);
-    unsigned char *replace_chars = tr_expand_bytes(replace, replace_stack, sizeof(replace_stack), &replace_count);
+    unsigned char *search_chars;
+    unsigned char *replace_chars;
+    {
+        /* The expanded lists depend only on the list text: keep the last
+         * pair per thread (decoding allocates; a tr/// loop paid it on every
+         * call). Fixed buffers: nothing to free at thread exit. */
+        static STRADA_TLS char trb_key[256];
+        static STRADA_TLS unsigned char trb_s[256], trb_r[256];
+        static STRADA_TLS size_t trb_sn = 0, trb_rn = 0;
+        static STRADA_TLS int trb_ok = 0;
+        size_t bsl = strlen(search), brl = strlen(replace);
+        int bfits = (bsl + brl + 2 <= sizeof(trb_key));
+        if (bfits && trb_ok && memcmp(trb_key, search, bsl + 1) == 0 && memcmp(trb_key + bsl + 1, replace, brl + 1) == 0) {
+            memcpy(search_stack, trb_s, trb_sn);
+            memcpy(replace_stack, trb_r, trb_rn);
+            search_chars = search_stack; search_count = trb_sn;
+            replace_chars = replace_stack; replace_count = trb_rn;
+        } else {
+            search_chars = tr_expand_bytes(search, search_stack, sizeof(search_stack), &search_count);
+            replace_chars = tr_expand_bytes(replace, replace_stack, sizeof(replace_stack), &replace_count);
+            if (bfits && search_count <= sizeof(trb_s) && replace_count <= sizeof(trb_r)) {
+                memcpy(trb_key, search, bsl + 1);
+                memcpy(trb_key + bsl + 1, replace, brl + 1);
+                memcpy(trb_s, search_chars, search_count); trb_sn = search_count;
+                memcpy(trb_r, replace_chars, replace_count); trb_rn = replace_count;
+                trb_ok = 1;
+            } else {
+                trb_ok = 0;
+            }
+        }
+    }
 
     /* Build translation table */
     int trans[256];

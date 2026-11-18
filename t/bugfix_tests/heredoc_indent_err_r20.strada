@@ -1,0 +1,10 @@
+# COMPILE-ERROR: Indentation on line 2 of here-doc doesn't match delimiter
+# <<~ requires every non-blank body line to start with the terminator's indentation (Perl).
+func main() int {
+    my $x = <<~EOT;
+        ok
+      short
+        EOT
+    print($x);
+    return 0;
+}

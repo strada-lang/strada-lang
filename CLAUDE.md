@@ -1707,6 +1707,26 @@ compiler:
     - `currency` rounds JPY/KRW to whole amounts.
   - `import_object` / `import_lib` / `import_archive` "cannot find" errors
     point at the filename (`parser_error_at`).
+  - **Benchmark regressions vs the 2026-06-19 build, fixed.** Measured by
+    building `efa7521` in a worktree and timing both builds interleaved,
+    best of 5 (`bench_*`).
+    - `fused_arg_pure`: the fused-constructor path accepts integer `+ - *`
+      and `%` by a nonzero literal (bench_oop was 4.3x slower).
+    - `hca_rhs_pure`: the self-append `$s = $s . X` and the single-lookup
+      hash `op=` accept element reads and builtins that cannot throw
+      (`chr`/`ord`/`length`/`uc`/`lc`/`ucfirst`/`lcfirst`).
+    - `ast_hash_list_input` leaves a parenthesized range alone, so
+      `map {...} (1..N)` uses the lazy loop again.
+    - Literal `s///` has a fast path for plain strings, and short needles
+      use `strada_memmem_short`.
+    - `tr///` caches its width probe and expanded byte lists per thread.
+    - `<$fh>` uses `getline()` for the default `$/` with no limit.
+    - `strada_sv_add`/`sub`/`mul` have an always-inline fast path for two
+      tagged ints.
+    - The remaining gaps (1.1-1.6x on oop, exceptions, closures and
+      array_hash) come from this cycle's semantics work: overflow
+      promotion, shared closure cells, exact recursion tracking, pooled
+      objects releasing their values, and index shrinking.
   - `t/t_bugfixes.sh`: a COMPILE-ERROR test may carry
     `# VM-COMPILE-ERROR: text`, and then strada-interp must reject it too.
   - `interpreter/test/run_compiler_tests.sh` runs `test_stacktrace` (the traces

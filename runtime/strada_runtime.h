@@ -830,7 +830,7 @@ static inline StradaValue* strada_int_mul_ii(int64_t a, int64_t b) {
     return strada_int_arith_ii(a, b, '*');
 }
 
-static inline StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
+static inline StradaValue* strada_sv_add_full(StradaValue *l, StradaValue *r) {
     int64_t a, b;
     if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
         if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
@@ -842,7 +842,7 @@ static inline StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
     return strada_new_num(strada_to_num(l) + strada_to_num(r));
 }
 
-static inline StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
+static inline StradaValue* strada_sv_sub_full(StradaValue *l, StradaValue *r) {
     int64_t a, b;
     if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
         if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
@@ -854,7 +854,7 @@ static inline StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
     return strada_new_num(strada_to_num(l) - strada_to_num(r));
 }
 
-static inline StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
+static inline StradaValue* strada_sv_mul_full(StradaValue *l, StradaValue *r) {
     int64_t a, b;
     if (strada_sv_is_signed_int_val(l, &a) && strada_sv_is_signed_int_val(r, &b)) {
         if (a >= -2147483648LL && a <= 2147483647LL && b >= -2147483648LL && b <= 2147483647LL) {
@@ -874,6 +874,31 @@ static inline StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
     }
     if (strada_sv_maybe_exact(l) && strada_sv_maybe_exact(r)) return strada_int_arith_slow(l, r, '*');
     return strada_new_num(strada_to_num(l) * strada_to_num(r));
+}
+
+/* Generic + - * : two tagged ints (|v| < 2^62) cannot overflow int64 when
+ * added or subtracted, so the common case is a few inlined instructions;
+ * everything else (boxed ints, UV/NV promotion, strings, numbers) takes the
+ * full path. The full bodies are too big for gcc to inline everywhere. */
+static inline __attribute__((always_inline)) StradaValue* strada_sv_add(StradaValue *l, StradaValue *r) {
+    if (STRADA_IS_TAGGED_INT(l) && STRADA_IS_TAGGED_INT(r))
+        return strada_new_int_il(STRADA_TAGGED_INT_VAL(l) + STRADA_TAGGED_INT_VAL(r));
+    return strada_sv_add_full(l, r);
+}
+static inline __attribute__((always_inline)) StradaValue* strada_sv_sub(StradaValue *l, StradaValue *r) {
+    if (STRADA_IS_TAGGED_INT(l) && STRADA_IS_TAGGED_INT(r))
+        return strada_new_int_il(STRADA_TAGGED_INT_VAL(l) - STRADA_TAGGED_INT_VAL(r));
+    return strada_sv_sub_full(l, r);
+}
+static inline __attribute__((always_inline)) StradaValue* strada_sv_mul(StradaValue *l, StradaValue *r) {
+#if !defined(__TINYC__)
+    if (STRADA_IS_TAGGED_INT(l) && STRADA_IS_TAGGED_INT(r)) {
+        int64_t mres;
+        if (!__builtin_mul_overflow(STRADA_TAGGED_INT_VAL(l), STRADA_TAGGED_INT_VAL(r), &mres))
+            return strada_new_int_il(mres);
+    }
+#endif
+    return strada_sv_mul_full(l, r);
 }
 
 /* Stack-allocated 1-element array for fast method calls.

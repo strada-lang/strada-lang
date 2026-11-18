@@ -1,0 +1,40 @@
+# EXPECT: [a=Hello W\nline2\n][b=raw \n ${name}\n][c=indented\n  more\n\n][d=lit \t\n][e=spaced\n][f=][g=first\nsecond\n]
+# Heredocs work exactly like Perl: every body line keeps its newline (the
+# last one too); <<'X' and <<\X are literal; << "X Y" (space, quoted
+# delimiter with a space); <<~X removes the terminator's indentation
+# (a blank line may be shorter); an empty body is "".
+func esc(str $s) str {
+    my str $r = $s;
+    $r =~ s/\n/\\n/g;
+    return $r;
+}
+func main() int {
+    my $name = "W";
+    my $a = <<EOT;
+Hello ${name}
+line2
+EOT
+    my $b = <<'EOT';
+raw \n ${name}
+EOT
+    my $c = <<~EOT;
+        indented
+          more
+
+        EOT
+    my $d = <<\EOT;
+lit \t
+EOT
+    my $e = << "X Y";
+spaced
+X Y
+    my $f = <<EOT;
+EOT
+    my $g = <<A . <<B;
+first
+A
+second
+B
+    say("[a=" . esc($a) . "][b=" . esc($b) . "][c=" . esc($c) . "][d=" . esc($d) . "][e=" . esc($e) . "][f=" . esc($f) . "][g=" . esc($g) . "]");
+    return 0;
+}

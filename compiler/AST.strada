@@ -901,7 +901,9 @@ func ast_hash_list_input(scalar $e) scalar {
     if (!defined($e)) { return $e; }
     my int $et = $e->{"type"};
     # map {...} ("x"): a parenthesized single item is a one-element list
-    if (($e->{"in_parens"} + 0) == 1 && $et != NODE_ANON_ARRAY()) {
+    # (a range is already a list: wrapping it hid it from the lazy
+    # map/grep-over-range loop)
+    if (($e->{"in_parens"} + 0) == 1 && $et != NODE_ANON_ARRAY() && $et != NODE_RANGE()) {
         my scalar $one = ast_new_anon_array();
         $one->{"is_list"} = 1;
         ast_add_array_elem($one, $e);

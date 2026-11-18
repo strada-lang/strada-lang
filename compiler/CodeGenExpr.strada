@@ -2366,7 +2366,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     my int $sk = 1;
                     while ($sk < $sa_n) {
                         my scalar $sl = $sa_nodes[$sk];
-                        if (arg_is_trivially_pure($cg, $sl) == 0 || expr_refs_var_name($sl, $target->{"name"}) == 1) {
+                        if (hca_rhs_pure($cg, $sl, 0) == 0 || expr_refs_var_name($sl, $target->{"name"}) == 1) {
                             $sa_ok = 0;
                         }
                         $sk = $sk + 1;

@@ -130,12 +130,12 @@ func main() int {
         "my str \$h1 = <<'R17_E1';\nalpha;beta\n{ \"x\" }\nR17_E1\n" .
         "\$r . \":\" . \$h1"
     );
-    check($ev1 eq "1:alpha;beta\n{ \"x\" }", "B15 eval multiline regex + heredoc got=" . $ev1);
+    check($ev1 eq "1:alpha;beta\n{ \"x\" }\n", "B15 eval multiline regex + heredoc got=" . $ev1);
 
     my scalar $ev2 = Strada::Interpreter::eval(
         "my int \$x = 1;\nmy str \$h2 = <<\"R17_E2\"\nlineA\nR17_E2"
     );
-    check($ev2 eq "lineA", "B15 eval final heredoc without trailing semi got=" . $ev2);
+    check($ev2 eq "lineA\n", "B15 eval final heredoc without trailing semi got=" . $ev2);
 
     # B16: Strada::JIT my ($a, $b) = ... persistence & multiline heredocs
     Strada::JIT::init();

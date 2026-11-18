@@ -5,8 +5,10 @@ strada> my $t = <<EOT;
 ...     hello
 ...     EOT
 hello
+
 strada> say($t);
 hello
+
 1
 strada> my $s = "a" .
 ...         "b";
