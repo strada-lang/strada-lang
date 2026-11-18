@@ -3340,6 +3340,13 @@ func reset() void {
     # NOTE: must iterate keys BEFORE clearing the hash (parser bug:
     # %hash = () after while/foreach block is mis-parsed as MOD operator)
     my array @var_names = keys(%g_var_types);
+    # `our` variables of the session (registry keys PKG::name)
+    my array @our_keys = keys(%g_our_decl_idx);
+    foreach my str $ok (@our_keys) {
+        if ($ok =~ /^(.*)::[\$\@\%]([A-Za-z_][A-Za-z0-9_]*)$/) {
+            core::global_delete($1 . "::" . $2);
+        }
+    }
     my int $vi = 0;
     my int $var_count = scalar(@var_names);
     my array @oop_pkgs = keys(%g_ever_oop_packages);

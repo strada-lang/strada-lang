@@ -25,6 +25,11 @@ func main() int {
         if ($caught != 1) { return 3; }
         my scalar $o = Strada::Interpreter::eval("R20LkS::new(\"y\")");
         if ($o->m() ne "y") { return 4; }
+        # exceptions out of an eval method / closure called by the host
+        Strada::Interpreter::eval("package R20LkS; func bad(scalar \$s) int { die({\"why\" => \"m\"}); } package main; my \$badf = fn () { die(\"c\"); };");
+        try { $o->bad(); } catch ($e) {}
+        my scalar $badf = Strada::Interpreter::eval("\$badf");
+        try { $badf->(); } catch ($e) {}
         try { Strada::Interpreter::eval("1 +* 2"); } catch ($e) {}
         try { Strada::Interpreter::eval("\$nope_r20 + 1"); } catch ($e) {}
         $i = $i + 1;

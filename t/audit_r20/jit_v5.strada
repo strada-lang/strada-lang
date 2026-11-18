@@ -62,6 +62,7 @@ func main(int $argc, array @argv) int {
     check($c->(2) == 4, "V5-12 closure before reset");
     Strada::JIT::reset();
     check($c->(3) == 6, "V5-12 closure after reset");
+    check(ev_s("our \$gv; defined(\$gv) ? 1 : 0") eq "0", "V5-11 reset() drops our variables");
 
     if ($fails == 0) { say("AUDIT_R20_JIT_V5_OK"); }
     return $fails == 0 ? 0 : 1;

@@ -123,6 +123,21 @@ func main() int {
     ev("my \$u15 = 3;");
     check(!defined(ev("my \$u15; \$u15")), "V5-15 my \$x; still starts undef");
 
+    # after a mid-session reset(): a new closure / class syncs with the new
+    # session, an old closure keeps its own state
+    Strada::Interpreter::reset();
+    ev("my \@s6 = (); my \$p6 = fn (\$v) { push(\@s6, \$v); return size(\@s6); };");
+    ev("\$p6->(1); \$p6->(2);");
+    check(ev("size(\@s6)") == 2, "V5-6 closure sync after reset");
+    check($cf->() == 3, "V5-6 pre-reset closure keeps its state");
+    check(!defined(ev("my \$cnt; \$cnt")), "V5-6 pre-reset closure does not leak into the new session");
+    ev("package V5R; func new() scalar { return bless({\"k\"=>4}, \"V5R\"); } func k(scalar \$s) int { return \$s->{\"k\"}; } func boom(scalar \$s) int { die(\"boom\"); } package main;");
+    my scalar $ro = ev("V5R::new()");
+    check($ro->k() == 4, "V5-9 host method after reset");
+    my str $boom = "";
+    try { $ro->boom(); } catch ($e) { $boom = "" . $e; }
+    check(index($boom, "boom") >= 0, "V5-9 exception from an eval method reaches the host (" . $boom . ")");
+
     if ($fails == 0) { say("AUDIT_R20_EVAL_V5_OK"); }
     return $fails == 0 ? 0 : 1;
 }
