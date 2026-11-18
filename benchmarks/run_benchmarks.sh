@@ -115,11 +115,11 @@ echo ""
 
 # Check tools
 echo -n "Strada: "; $STRADA --version 2>/dev/null || echo "(available)"
-echo -n "Perl:   "; $PERL -v 2>/dev/null | grep -oP 'v[\d.]+' | head -1 || echo "(not found)"
+echo -n "Perl:   "; "$PERL" -e 'printf "v%vd\n", $^V' 2>/dev/null || echo "(not found)"
 echo -n "Python: "; $PYTHON --version 2>/dev/null || echo "(not found)"
-echo -n "Ruby:   "; $RUBY --version 2>/dev/null | awk '{print $2}' || echo "(not found)"
+echo -n "Ruby:   "; $RUBY --version 2>/dev/null | awk 'NR == 1 {print $2} END {if (NR == 0) exit 1}' || echo "(not found)"
 echo -n "Node:   "; $NODE --version 2>/dev/null || echo "(not found)"
-echo -n "PHP:    "; $PHP --version 2>/dev/null | head -1 | awk '{print $2}' || echo "(not found)"
+echo -n "PHP:    "; $PHP --version 2>/dev/null | awk 'NR == 1 {print $2} END {if (NR == 0) exit 1}' || echo "(not found)"
 echo -n "VM:     "; if [ -x "$STRADA_INTERP" ]; then echo "(available: $STRADA_INTERP)"; else echo "(not built — run 'make interpreter')"; fi
 echo ""
 
@@ -164,15 +164,16 @@ if lang_enabled go && command -v $GO &>/dev/null; then
     echo ""
 fi
 
-# Time a command, return seconds as a decimal string
+# Time a command, printing seconds on success and returning nonzero on failure.
 # Usage: best_time <runs> <command...>
 best_time() {
     local runs=$1
     shift
-    local best=""
-    for ((r=1; r<=runs; r++)); do
-        local t
-        t=$( { TIMEFORMAT='%R'; time "$@" > /dev/null 2>&1; } 2>&1 )
+    local best="" run t
+    for ((run=1; run<=runs; run++)); do
+        if ! t=$( { TIMEFORMAT='%R'; time "$@" > /dev/null 2>&1; } 2>&1 ); then
+            return 1
+        fi
         if [ -z "$best" ] || (( $(echo "$t < $best" | bc -l) )); then
             best=$t
         fi
@@ -184,9 +185,8 @@ best_time() {
 speedup() {
     local base=$1
     local other=$2
-    if (( $(echo "$other == 0" | bc -l) )); then
-        echo "N/A"
-        return
+    if (( $(echo "$base == 0 || $other == 0" | bc -l) )); then
+        return 1
     fi
     echo "$(echo "scale=2; $other / $base" | bc -l)"
 }
@@ -197,100 +197,87 @@ printf "\n${BOLD}%-20s %10s %10s %10s %10s %10s %10s %10s %10s${RESET}\n" \
 printf "%-20s %10s %10s %10s %10s %10s %10s %10s %10s\n" \
     "--------------------" "----------" "----------" "----------" "----------" "----------" "----------" "----------" "----------"
 
-# Collect all results for the comparison table
-declare -A RESULTS
+# Store each timing row in the same column order as the header.
+RESULTS=()
 
 # Run benchmarks
 for bench in $BENCHMARKS; do
     printf "%-20s" "$bench"
 
     # Strada
-    if [ -f "./$bench" ]; then
-        st=$(best_time $RUNS "./$bench")
+    if [ -x "./$bench" ] && st=$(best_time "$RUNS" "./$bench"); then
         printf " %9ss" "$st"
     else
         st=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,strada"]="$st"
 
     # Go (timed binary, compiled above)
-    if lang_enabled go && [ -x "./${bench}_go" ]; then
-        gt=$(best_time $RUNS "./${bench}_go")
+    if lang_enabled go && [ -x "./${bench}_go" ] && gt=$(best_time "$RUNS" "./${bench}_go"); then
         printf " %9ss" "$gt"
     else
         gt=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,go"]="$gt"
 
     # Strada VM (bytecode interpreter, same .strada source). Probe once
     # under a timeout: unsupported features or a >$VM_TIMEOUT runtime
     # mean SKIP rather than a hung table.
-    if lang_enabled vm && [ -x "$STRADA_INTERP" ]; then
-        if timeout "$VM_TIMEOUT" "$STRADA_INTERP" "${bench}.strada" > /dev/null 2>&1; then
-            vmt=$(best_time $RUNS "$STRADA_INTERP" "${bench}.strada")
-            printf " %9ss" "$vmt"
-        else
-            vmt=""
-            printf " %10s" "SKIP"
-        fi
+    if lang_enabled vm && [ -x "$STRADA_INTERP" ] &&
+        timeout "$VM_TIMEOUT" "$STRADA_INTERP" "${bench}.strada" > /dev/null 2>&1 &&
+        vmt=$(best_time "$RUNS" "$STRADA_INTERP" "${bench}.strada"); then
+        printf " %9ss" "$vmt"
     else
         vmt=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,vm"]="$vmt"
 
     # Perl
-    if lang_enabled perl && command -v $PERL &>/dev/null && [ -f "${bench}.pl" ]; then
-        pl=$(best_time $RUNS $PERL "${bench}.pl")
+    if lang_enabled perl && command -v "$PERL" &>/dev/null && [ -f "${bench}.pl" ] &&
+        pl=$(best_time "$RUNS" "$PERL" "${bench}.pl"); then
         printf " %9ss" "$pl"
     else
         pl=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,perl"]="$pl"
 
     # Python
-    if lang_enabled python && command -v $PYTHON &>/dev/null && [ -f "${bench}.py" ]; then
-        py=$(best_time $RUNS $PYTHON "${bench}.py")
+    if lang_enabled python && command -v "$PYTHON" &>/dev/null && [ -f "${bench}.py" ] &&
+        py=$(best_time "$RUNS" "$PYTHON" "${bench}.py"); then
         printf " %9ss" "$py"
     else
         py=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,python"]="$py"
 
     # Ruby
-    if lang_enabled ruby && command -v $RUBY &>/dev/null && [ -f "${bench}.rb" ]; then
-        rb=$(best_time $RUNS $RUBY "${bench}.rb")
+    if lang_enabled ruby && command -v "$RUBY" &>/dev/null && [ -f "${bench}.rb" ] &&
+        rb=$(best_time "$RUNS" "$RUBY" "${bench}.rb"); then
         printf " %9ss" "$rb"
     else
         rb=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,ruby"]="$rb"
 
     # Node
-    if lang_enabled node && command -v $NODE &>/dev/null && [ -f "${bench}.js" ]; then
-        js=$(best_time $RUNS $NODE "${bench}.js")
+    if lang_enabled node && command -v "$NODE" &>/dev/null && [ -f "${bench}.js" ] &&
+        js=$(best_time "$RUNS" "$NODE" "${bench}.js"); then
         printf " %9ss" "$js"
     else
         js=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,node"]="$js"
 
     # PHP
-    if lang_enabled php && command -v $PHP &>/dev/null && [ -f "${bench}.php" ]; then
-        ph=$(best_time $RUNS $PHP "${bench}.php")
+    if lang_enabled php && command -v "$PHP" &>/dev/null && [ -f "${bench}.php" ] &&
+        ph=$(best_time "$RUNS" "$PHP" "${bench}.php"); then
         printf " %9ss" "$ph"
     else
         ph=""
         printf " %10s" "SKIP"
     fi
-    RESULTS["$bench,php"]="$ph"
 
+    RESULTS+=("$st" "$gt" "$vmt" "$pl" "$py" "$rb" "$js" "$ph")
     echo ""
 done
 
@@ -301,19 +288,20 @@ printf "${BOLD}%-20s %14s %14s %14s %14s %14s %14s %14s${RESET}\n" \
 printf "%-20s %14s %14s %14s %14s %14s %14s %14s\n" \
     "--------------------" "--------------" "--------------" "--------------" "--------------" "--------------" "--------------" "--------------"
 
+result_index=0
 for bench in $BENCHMARKS; do
     printf "%-20s" "$bench"
-    st="${RESULTS[$bench,strada]}"
+    st="${RESULTS[result_index]}"
 
-    for lang in go vm perl python ruby node php; do
-        val="${RESULTS[$bench,$lang]}"
-        if [ -n "$st" ] && [ -n "$val" ]; then
-            ratio=$(speedup "$st" "$val")
+    for ((column=1; column<8; column++)); do
+        val="${RESULTS[result_index + column]}"
+        if [ -n "$st" ] && [ -n "$val" ] && ratio=$(speedup "$st" "$val"); then
             printf "   ${GREEN}%9sx${RESET}  " "$ratio"
         else
             printf " %14s" "N/A"
         fi
     done
+    result_index=$((result_index + 8))
     echo ""
 done
 
