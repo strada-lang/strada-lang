@@ -138,6 +138,11 @@ func main() int {
     try { $ro->boom(); } catch ($e) { $boom = "" . $e; }
     check(index($boom, "boom") >= 0, "V5-9 exception from an eval method reaches the host (" . $boom . ")");
 
+    # `my @x` then `my $x` in a later eval: two variables
+    ev("my \@sg = (1, 2, 3);");
+    ev("my \$sg = \"s\";");
+    check(ev("scalar(\@sg) . \":\" . \$sg") eq "3:s", "same name, different sigils across evals");
+
     if ($fails == 0) { say("AUDIT_R20_EVAL_V5_OK"); }
     return $fails == 0 ? 0 : 1;
 }

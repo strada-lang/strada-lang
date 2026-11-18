@@ -246,6 +246,75 @@ my int $g_did_oop_reset = 0;
 my int $g_strip_unclosed = 0;
 my array @g_last_heredoc_ranges = ();
 
+# Tracked session variables are keyed by sigil + name ("$x", "@x", "%x"), so
+# `my @x` and a later `my $x` are two variables (Perl).
+private func jit_vk(str $type, str $name) str {
+    if ($type eq "array") { return "@" . $name; }
+    if ($type eq "hash") { return "%" . $name; }
+    return "$" . $name;
+}
+private func jit_vk_name(str $k) str { return substr($k, 1, length($k) - 1); }
+private func jit_vk_sigil(str $k) str { return substr($k, 0, 1); }
+# Global-registry key holding a tracked variable between evals: scalars keep
+# the historical "repl::NAME"; arrays / hashes are sigil-qualified.
+private func jit_vk_reg(str $k) str {
+    my str $sg = jit_vk_sigil($k);
+    if ($sg eq "$") { return "repl::" . jit_vk_name($k); }
+    return "repl::" . $sg . jit_vk_name($k);
+}
+# Tracked keys in declaration order: by name, then $ @ %.
+private func jit_vk_ordered() array {
+    my array @tmp = ();
+    foreach my str $k (keys(%g_var_types)) {
+        my str $sg = jit_vk_sigil($k);
+        my str $rank = "0";
+        if ($sg eq "@") { $rank = "1"; }
+        if ($sg eq "%") { $rank = "2"; }
+        push(@tmp, jit_vk_name($k) . "\x01" . $rank . "\x01" . $k);
+    }
+    my array @sorted = sort { $a cmp $b } @tmp;
+    my array @out = ();
+    foreach my str $e (@sorted) {
+        my array @parts = split("\x01", $e);
+        push(@out, $parts[2]);
+    }
+    return @out;
+}
+# The C name the compiler gives a tracked variable: the first declaration of
+# a name in repl_eval keeps the plain name; another sigil of the same name
+# gets NAME__sga / __sgh / __sgs (Semantic, same-name-different-sigil).
+private func jit_vk_cname(str $k, scalar $first_seen) str {
+    my str $nm = jit_vk_name($k);
+    my str $first = "" . $first_seen->{$nm};
+    if (length($first) == 0 || $first eq $k) { return jit_escape_c_keyword($nm); }
+    my str $sg = jit_vk_sigil($k);
+    my str $tag = "s";
+    if ($sg eq "@") { $tag = "a"; }
+    if ($sg eq "%") { $tag = "h"; }
+    return $nm . "__sg" . $tag;
+}
+# Public names for var_types()/state(): bare when a name has one sigil,
+# sigil-qualified when several share it.
+private func jit_vk_public(str $k) str {
+    my str $nm = jit_vk_name($k);
+    my int $n = 0;
+    foreach my str $o (keys(%g_var_types)) {
+        if (jit_vk_name($o) eq $nm) { $n = $n + 1; }
+    }
+    if ($n > 1) { return $k; }
+    return $nm;
+}
+# A name given to get()/set(): "$x" / "@x" / "%x", or bare "x" (the scalar,
+# else the only variable of that name)
+private func jit_vk_lookup(str $name) str {
+    my str $c0 = substr($name, 0, 1);
+    if ($c0 eq "$" || $c0 eq "@" || $c0 eq "%") { return $name; }
+    if (exists($g_var_types{"$" . $name})) { return "$" . $name; }
+    if (exists($g_var_types{"@" . $name})) { return "@" . $name; }
+    if (exists($g_var_types{"%" . $name})) { return "%" . $name; }
+    return "$" . $name;
+}
+
 private func jit_escape_c_keyword(str $name) str {
     if ($name eq "for" || $name eq "while" || $name eq "if" || $name eq "else" ||
         $name eq "switch" || $name eq "case" || $name eq "default" || $name eq "break" ||
@@ -1517,7 +1586,7 @@ private func register_variables(str $input) void {
                             my array @vars = @{$pd->{"vars"}};
                             my int $vi = 0;
                             while ($vi < size(@vars)) {
-                                $g_var_types{$vars[$vi]->{"name"}} = $vars[$vi]->{"type"};
+                                $g_var_types{jit_vk("" . $vars[$vi]->{"type"}, "" . $vars[$vi]->{"name"})} = $vars[$vi]->{"type"};
                                 $vi = $vi + 1;
                             }
                             $i = $pd->{"end"};
@@ -1534,7 +1603,7 @@ private func register_variables(str $input) void {
                             $pos = $pos + 1;
                         }
                         if ($name ne "") {
-                            $g_var_types{$name} = $type;
+                            $g_var_types{jit_vk($type, $name)} = $type;
                         }
                         $i = $pos;
                         next;
@@ -2140,11 +2209,26 @@ private func generate_source(str $input) str {
     # Declare tracked variables as real C `my` locals in repl_eval() and restore
     # previously-saved values from the global registry (unless redeclared in $input).
     my str $restore_code = "";
-    foreach my str $vname (keys(%g_var_types)) {
-        my str $type = $g_var_types{$vname};
-        my str $sigil = "\$";
-        if ($type eq "array") { $sigil = "@"; }
-        if ($type eq "hash") { $sigil = "%"; }
+    # C names follow declaration order: the tracked declarations below come
+    # first; a variable the input redeclares itself (non-closure path) is
+    # declared later, in the user's code
+    my hash %vk_first = ();
+    my array @vk_order = jit_vk_ordered();
+    foreach my str $ok (@vk_order) {
+        my str $on = jit_vk_name($ok);
+        my int $o_redecl = input_declares_var($input, $on, jit_vk_sigil($ok));
+        if (!($use_closure_wrap == 0 && $o_redecl == 1) && !exists($vk_first{$on})) { $vk_first{$on} = $ok; }
+    }
+    foreach my str $ok (@vk_order) {
+        my str $on = jit_vk_name($ok);
+        if (!exists($vk_first{$on})) { $vk_first{$on} = $ok; }
+    }
+    my hash %vk_cname = ();
+    foreach my str $vkey (@vk_order) {
+        my str $vname = jit_vk_name($vkey);
+        my str $type = $g_var_types{$vkey};
+        my str $sigil = jit_vk_sigil($vkey);
+        $vk_cname{$vkey} = jit_vk_cname($vkey, \%vk_first);
 
         my int $redecl = input_declares_var($input, $vname, $sigil);
         if ($use_closure_wrap == 0 && $redecl == 1) {
@@ -2170,13 +2254,14 @@ private func generate_source(str $input) str {
         # in scope in its own initializer, so `my $n = $n * 2` reads the
         # previous $n (Perl; V5-15). A type change starts fresh.
         my int $restore = ($redecl == 0) ? 1 : 0;
-        if ($redecl == 1 && exists($g_prev_var_types{$vname}) && $g_prev_var_types{$vname} eq $type) {
+        if ($redecl == 1 && exists($g_prev_var_types{$vkey}) && $g_prev_var_types{$vkey} eq $type) {
             $restore = 1;
         }
         if ($restore == 1) {
-            my str $cname = jit_escape_c_keyword($vname);
-            $restore_code = $restore_code . "        if (strada_global_exists(strada_new_str(\"repl::" . $vname . "\"))) {\n";
-            $restore_code = $restore_code . "            StradaValue *__saved_" . $cname . " = strada_global_get_cstr(\"repl::" . $vname . "\");\n";
+            my str $cname = $vk_cname{$vkey};
+            my str $rkey = jit_vk_reg($vkey);
+            $restore_code = $restore_code . "        if (strada_global_exists(strada_new_str(\"" . $rkey . "\"))) {\n";
+            $restore_code = $restore_code . "            StradaValue *__saved_" . $cname . " = strada_global_get_cstr(\"" . $rkey . "\");\n";
             $restore_code = $restore_code . "            strada_decref(" . $cname . ");\n";
             $restore_code = $restore_code . "            " . $cname . " = __saved_" . $cname . ";\n";
             $restore_code = $restore_code . "        }\n";
@@ -2285,15 +2370,16 @@ private func generate_source(str $input) str {
     if ($use_closure_wrap == 1) {
         # Wrap user body in a helper closure so even an explicit `return EXPR;`
         # returns to repl_eval(), which then saves live *__repl_caps[i] cells!
-        my array @tracked_names = keys(%g_var_types);
+        my array @tracked_names = jit_vk_ordered();
         my int $tracked_count = scalar(@tracked_names);
         $src = $src . "    my scalar \$__repl_fn = func() scalar {\n";
         if ($tracked_count > 0) {
             $src = $src . "        if (0) {\n";
             my int $ti = 0;
             while ($ti < $tracked_count) {
-                my str $tvn = $tracked_names[$ti];
-                my str $tvt = $g_var_types{$tvn};
+                my str $tvk = $tracked_names[$ti];
+                my str $tvn = jit_vk_name($tvk);
+                my str $tvt = $g_var_types{$tvk};
                 if ($tvt eq "array") {
                     $src = $src . "            my scalar \$__touch_" . $ti . " = \\@" . $tvn . ";\n";
                 } elsif ($tvt eq "hash") {
@@ -2347,7 +2433,7 @@ private func generate_source(str $input) str {
                 $persist_caps = $persist_caps
                     . "                if (*__repl_caps[" . $si . "]) {\n"
                     . "                    strada_incref(*__repl_caps[" . $si . "]);\n"
-                    . "                    strada_global_set_cstr(\"repl::" . $svn . "\", *__repl_caps[" . $si . "]);\n"
+                    . "                    strada_global_set_cstr(\"" . jit_vk_reg($svn) . "\", *__repl_caps[" . $si . "]);\n"
                     . "                }\n";
                 $si = $si + 1;
             }
@@ -2426,10 +2512,10 @@ private func generate_source(str $input) str {
 
         # Save all tracked variables back to global registry (inline __C__ path)
         my str $save_c = "";
-        foreach my str $vname (keys(%g_var_types)) {
-            my str $cv = jit_escape_c_keyword($vname);
+        foreach my str $svk (jit_vk_ordered()) {
+            my str $cv = $vk_cname{$svk};
             $save_c = $save_c . "        strada_incref(" . $cv . ");\n";
-            $save_c = $save_c . "        strada_global_set_cstr(\"repl::" . $vname . "\", " . $cv . ");\n";
+            $save_c = $save_c . "        strada_global_set_cstr(\"" . jit_vk_reg($svk) . "\", " . $cv . ");\n";
         }
         if ($save_c ne "") {
             $src = $src . "\n    __C__ {\n";
@@ -2855,7 +2941,7 @@ private func restore_jit_state(scalar $snap) void {
     while ($cvi < scalar(@cur_vt_keys)) {
         my str $cvk = $cur_vt_keys[$cvi];
         if (!exists($vt->{$cvk})) {
-            core::global_delete("repl::" . $cvk);
+            core::global_delete(jit_vk_reg($cvk));
         }
         $cvi = $cvi + 1;
     }
@@ -3310,17 +3396,20 @@ func run_file(str $filename) int {
 
 # Get a variable value from the persistent state (global registry)
 func get(str $name) scalar {
-    my str $key = "repl::" . $name;
-    return core::global_get($key);
+    return core::global_get(jit_vk_reg(jit_vk_lookup($name)));
 }
 
 # Set a variable value in the persistent state (global registry)
 func set(str $name, scalar $value) void {
-    my str $key = "repl::" . $name;
-    core::global_set($key, $value);
+    my str $vk = jit_vk_lookup($name);
+    core::global_set(jit_vk_reg($vk), $value);
     # Also register the type if not already known
-    if (!exists($g_var_types{$name})) {
-        $g_var_types{$name} = "scalar";
+    if (!exists($g_var_types{$vk})) {
+        my str $sg = jit_vk_sigil($vk);
+        my str $ty = "scalar";
+        if ($sg eq "@") { $ty = "array"; }
+        if ($sg eq "%") { $ty = "hash"; }
+        $g_var_types{$vk} = $ty;
     }
 }
 
@@ -3369,7 +3458,7 @@ func reset() void {
 
     # Now delete globals using the saved key list
     while ($vi < $var_count) {
-        core::global_delete("repl::" . $var_names[$vi]);
+        core::global_delete(jit_vk_reg($var_names[$vi]));
         $vi = $vi + 1;
     }
 
@@ -3437,7 +3526,9 @@ func compiler() str {
 
 # Get variable names and types as a hash (name -> type)
 func var_types() hash {
-    return %g_var_types;
+    my hash %pub = ();
+    foreach my str $k (keys(%g_var_types)) { $pub{jit_vk_public($k)} = $g_var_types{$k}; }
+    return %pub;
 }
 
 # Get accumulated function definitions as an array
@@ -3472,9 +3563,9 @@ func state() hash {
     my int $si = 0;
     my int $scount = scalar(@var_names);
     while ($si < $scount) {
-        my str $vname = $var_names[$si];
-        my scalar $val = core::global_get("repl::" . $vname);
-        $result{$vname} = $val;
+        my str $vkey = $var_names[$si];
+        my scalar $val = core::global_get(jit_vk_reg($vkey));
+        $result{jit_vk_public($vkey)} = $val;
         $si = $si + 1;
     }
     return %result;

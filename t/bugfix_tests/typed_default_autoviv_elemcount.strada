@@ -1,0 +1,26 @@
+# EXPECT: 111[0]|HASH 1|ARRAY 7|3 2
+# A typed scalar declared without a value holds its type's empty value
+# (`my int $x;` is 0, `my num` 0, `my str` ""): compiled code left them undef
+# while the VM gave the typed value. `$u->{k} = v` / `$u->[i] = v` on an
+# undef scalar autovivify it (Perl; both backends dropped the store).
+# An array assigned to an element is its count (`$h{n} = @a`, Perl).
+func f() scalar {
+    my int $x;
+    my num $n;
+    my str $s;
+    return (defined($x) ? 1 : 0) . (defined($n) ? 1 : 0) . (defined($s) ? 1 : 0) . "[" . $x . "]";
+}
+func main() int {
+    my $u;
+    $u->{"k"} = 1;
+    my $w;
+    $w->[2] = 7;
+    my %h;
+    my @a = (1, 2, 3);
+    $h{"n"} = @a;
+    my $r = [5, 6];
+    my @e;
+    $e[0] = @{$r};
+    say(f() . "|" . ref($u) . " " . $u->{"k"} . "|" . ref($w) . " " . $w->[2] . "|" . $h{"n"} . " " . $e[0]);
+    return 0;
+}

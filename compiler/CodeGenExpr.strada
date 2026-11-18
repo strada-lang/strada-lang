@@ -534,6 +534,26 @@ func gen_assign_container(scalar $cg, scalar $node, int $want) void {
     if (autoviv_link_type($node) == 1) {
         $cg->{"autoviv"} = $want;
     }
+    # `$v->{k} = x` / `$v->[i] = x` with $v undef: $v becomes a new hash /
+    # array reference (Perl). A plain lexical scalar only (an `our` variable
+    # lives in the registry; an unboxed int cannot hold a reference).
+    if (($want == 1 || $want == 2) && ($node->{"type"} + 0) == NODE_VARIABLE() && ("" . $node->{"sigil"}) eq "$") {
+        my str $avn = "" . $node->{"name"};
+        my str $avc = escape_c_keyword($avn);
+        my int $av_ok = 1;
+        if (index($avn, "::") >= 0) { $av_ok = 0; }
+        if (length("" . $cg->{"our_vars"}->{$avc}) > 0) { $av_ok = 0; }
+        if (is_unboxed_var_node($cg, $node) == 1) { $av_ok = 0; }
+        if ($cg->{"in_sort_block"} != 0 && ($avn eq "a" || $avn eq "b")) { $av_ok = 0; }
+        if ($cg->{"in_map_block"} != 0 && $avn eq "_") { $av_ok = 0; }
+        if ($cg->{"in_grep_block"} != 0 && $avn eq "_") { $av_ok = 0; }
+        if ($av_ok == 1) {
+            my str $av_kind = "0";
+            if ($want == 2) { $av_kind = "1"; }
+            emit($cg, "strada_autoviv_slot_ref((StradaValue **)&" . scalar_var_c_ref($cg, $avn, $avc) . ", " . $av_kind . ")");
+            return;
+        }
+    }
     gen_expression($cg, $node);
 }
 

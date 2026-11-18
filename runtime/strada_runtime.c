@@ -19532,6 +19532,28 @@ char* strada_stacktrace_str(void) {
     size_t size;
     char **strings;
 
+    /* tracked Strada frames, innermost first, one "  name" line each (as the
+     * VM and stacktrace() print); libc addresses only when nothing is tracked */
+    if (strada_call_depth > 0) {
+        size_t cap = 64, len = 0;
+        char *out = malloc(cap);
+        if (!out) return strdup("");
+        out[0] = 0;
+        for (int i = strada_call_depth; i >= 1; i--) {
+            const char *fn = strada_call_stack[i].func_name;
+            if (!fn) fn = "?";
+            size_t need = len + strlen(fn) + 4;
+            if (need > cap) {
+                while (cap < need) cap *= 2;
+                char *nb = realloc(out, cap);
+                if (!nb) { free(out); return strdup(""); }
+                out = nb;
+            }
+            len += (size_t)sprintf(out + len, "  %s\n", fn);
+        }
+        return out;
+    }
+
     size = backtrace(array, 20);
     strings = backtrace_symbols(array, size);
 
@@ -39991,6 +40013,20 @@ const char *strada_path_pv(StradaValue *str_sv) {
  * under Perl's strict refs -- it used to hand back a shared static array,
  * so the pushed elements leaked into every other failed dereference.
  * Returns a borrowed pointer. */
+/* `$v->{k} = x` / `$v->[i] = x` with $v undef: $v becomes a new hash / array
+ * reference (Perl autovivification). Any other value is returned as is
+ * (borrowed); the store path handles it as before. */
+StradaValue* strada_autoviv_slot_ref(StradaValue **slot, int want_array) {
+    if (!slot) return NULL;
+    StradaValue *cur = *slot;
+    if (cur && (STRADA_IS_TAGGED_INT(cur) || cur->type != STRADA_UNDEF || cur->meta)) return cur;
+    StradaValue *c = want_array ? strada_new_array() : strada_new_hash();
+    StradaValue *ref = strada_ref_create_take(c);
+    *slot = ref;
+    if (cur) strada_decref(cur);
+    return ref;
+}
+
 StradaValue* strada_autoviv_slot_array(StradaValue **slot) {
     if (!slot) strada_die("Not an ARRAY reference");
     StradaValue *cur = *slot;

@@ -64,6 +64,11 @@ func main(int $argc, array @argv) int {
     check($c->(3) == 6, "V5-12 closure after reset");
     check(ev_s("our \$gv; defined(\$gv) ? 1 : 0") eq "0", "V5-11 reset() drops our variables");
 
+    # `my @x` then `my $x` in a later eval: two variables
+    ev_s("my \@jsg = (1, 2, 3);");
+    ev_s("my \$jsg = \"s\";");
+    check(ev_s("scalar(\@jsg) . \":\" . \$jsg") eq "3:s", "same name, different sigils across evals");
+
     if ($fails == 0) { say("AUDIT_R20_JIT_V5_OK"); }
     return $fails == 0 ? 0 : 1;
 }

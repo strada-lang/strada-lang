@@ -588,7 +588,7 @@ static inline void ctx_pop_scope(CompCtx *ctx) {
 /* Resolve an `our` or `const` variable name using package qualification (matching compiled C)
  * while still finding unqualified eval-promoted or file-scope globals. Returned pointer stays
  * valid for the entire vm_compile_program() invocation. */
-static const char *resolve_global_var_key(CompCtx *ctx, const char *name) {
+static const char *resolve_global_var_key_plain(CompCtx *ctx, const char *name) {
     if (!name || !name[0]) return NULL;
     /* $_ outside any topicalizer is the program-wide global (Perl; the
      * compiled backend's C global `_`) */
@@ -599,6 +599,13 @@ static const char *resolve_global_var_key(CompCtx *ctx, const char *name) {
         if (lk) {
             p = find_our_var_ptr(lk);
             if (!p) p = find_const_var_ptr(lk);
+            if (!p) {
+                /* a file-level `my @x` / `my %x` is registered as "@KEY" / "%KEY" */
+                char lkb[300];
+                snprintf(lkb, sizeof(lkb), "%%%s", lk);
+                p = find_our_var_ptr(lkb);
+                if (!p) { snprintf(lkb, sizeof(lkb), "@%s", lk); p = find_our_var_ptr(lkb); }
+            }
             if (p) return p;
         }
     }
@@ -624,6 +631,53 @@ static const char *resolve_global_var_key(CompCtx *ctx, const char *name) {
     p = find_our_var_ptr(name);
     if (p) return p;
     return find_const_var_ptr(name);
+}
+
+/* `our @x` / `our %x` are registered as "@x" / "Pkg::@x" (like the compiled
+ * backend's PKG::@x registry keys), so they never collide with `our $x`.
+ * Falls back to the plain name for anything registered without a sigil. */
+static const char *resolve_global_var_key_sig(CompCtx *ctx, const char *name, char sigil) {
+    if (name && (sigil == '@' || sigil == '%') && g_file_my_count > 1 && !strchr(name, ':')) {
+        /* a file-level `my %h` declared in several packages: the nearest
+         * declaration (file_my_lexical_key), registered as "%KEY" */
+        const char *lk = file_my_lexical_key(name);
+        if (lk) {
+            char lkb[300];
+            snprintf(lkb, sizeof(lkb), "%c%s", sigil, lk);
+            const char *lp = find_our_var_ptr(lkb);
+            if (lp) return lp;
+        }
+    }
+    if (name && (sigil == '@' || sigil == '%')) {
+        char sbuf[300];
+        const char *last = strrchr(name, ':');
+        if (last && last > name && last[-1] == ':') {
+            snprintf(sbuf, sizeof(sbuf), "%.*s%c%s", (int)(last + 1 - name), name, sigil, last + 1);
+        } else {
+            snprintf(sbuf, sizeof(sbuf), "%c%s", sigil, name);
+        }
+        const char *r = resolve_global_var_key_plain(ctx, sbuf);
+        if (r) return r;
+    }
+    return resolve_global_var_key_plain(ctx, name);
+}
+
+/* A lookup by bare name (call sites that do not know the sigil): the
+ * scalar / const name, else an array or hash of that name. */
+static const char *resolve_global_var_key(CompCtx *ctx, const char *name) {
+    const char *r = resolve_global_var_key_plain(ctx, name);
+    if (r || !name || !name[0]) return r;
+    char sbuf[300];
+    const char *last = strrchr(name, ':');
+    for (int k = 0; k < 2 && !r; k++) {
+        char sg = k == 0 ? '%' : '@';
+        if (last && last > name && last[-1] == ':')
+            snprintf(sbuf, sizeof(sbuf), "%.*s%c%s", (int)(last + 1 - name), name, sg, last + 1);
+        else
+            snprintf(sbuf, sizeof(sbuf), "%c%s", sg, name);
+        r = resolve_global_var_key_plain(ctx, sbuf);
+    }
+    return r;
 }
 
 static void vm_report_undeclared_var(CompCtx *ctx, StradaValue *node, const char *sigil, const char *name) {
@@ -745,6 +799,11 @@ static const char *normalize_local_global_key(CompCtx *ctx, const char *name, co
     const char *cand = (our_key && our_key[0]) ? our_key : name;
     if (!cand || !cand[0]) return "";
     const char *res = resolve_global_var_key(ctx, cand);
+    if (res) return res;
+    /* `local $h{k}` on `our %h` (registered as "%h") / `local $a[i]` */
+    res = resolve_global_var_key_sig(ctx, cand, '%');
+    if (res) return res;
+    res = resolve_global_var_key_sig(ctx, cand, '@');
     if (res) return res;
     if (strncmp(cand, "main::", 6) == 0) return cand + 6;
     if (strchr(cand, ':') == NULL && ctx && ctx->cur_package && ctx->cur_package[0] &&
@@ -2433,7 +2492,7 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
         char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
         int slot = ctx_find_local_sigil(ctx, vname, sc);
         int cap = (slot < 0) ? ctx_resolve_capture(ctx, vname, sc) : -1;
-        const char *gkey = (slot < 0 && cap < 0) ? resolve_global_var_key(ctx, vname) : NULL;
+        const char *gkey = (slot < 0 && cap < 0) ? resolve_global_var_key_sig(ctx, vname, sc) : NULL;
         if (slot >= 0 || cap >= 0 || gkey != NULL) {
             if (slot >= 0) {
                 vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
@@ -2632,7 +2691,7 @@ static VMLValueTarget compile_lvalue_prepare(CompCtx *ctx, StradaValue *target) 
         if (slot >= 0) { lv.kind = LV_LOCAL; lv.slot = slot; return lv; }
         int cap = ctx_resolve_capture(ctx, vname, sc);
         if (cap >= 0) { lv.kind = LV_CAPTURE; lv.slot = cap; return lv; }
-        const char *gkey = resolve_global_var_key(ctx, vname);
+        const char *gkey = resolve_global_var_key_sig(ctx, vname, sc);
         if (gkey) { lv.kind = LV_GLOBAL; lv.global_name = gkey; return lv; }
         return lv;
     }
@@ -2768,9 +2827,8 @@ static void compile_lvalue_finish(CompCtx *ctx, const VMLValueTarget *lv) {
  * the missing intermediate hash/array and store it back into its slot.
  * CONT is the container node of an element access; CONT_IS_REF says it is
  * the `ref` child of a ->/deref access, WANT_HASH what kind to create.
- * Anything else compiles as a plain read -- including an undef scalar root
- * (`my $u; $u->{k} = v`), which the compiled backend does not vivify
- * either. */
+ * An undef local scalar root (`my $u; $u->{k} = v`) becomes a new hash /
+ * array reference; anything else compiles as a plain read. */
 static void emit_viv_new(CompCtx *ctx, int want_hash) {
     vm_chunk_emit(ctx->chunk, want_hash ? OP_NEW_HASH : OP_NEW_ARRAY);
     vm_chunk_emit_u32(ctx->chunk, 4);
@@ -2846,7 +2904,30 @@ static void compile_viv_container(CompCtx *ctx, StradaValue *cont, int cont_is_r
         ctx->assign_depth--;
         return;
     }
-    (void)cont_is_ref; (void)want_hash;
+    /* `my $u; $u->{k} = v` / `$u->[0] = v`: an undef scalar root becomes a
+     * new hash / array reference (Perl; the compiled backend's
+     * strada_autoviv_slot_ref). A local only: plain store, so a variable
+     * shared with a closure keeps its cell. */
+    if (cont_is_ref && nt == NI_VARIABLE && ast_str(n, "sigil")[0] == '$') {
+        const char *vn = ast_str(n, "name");
+        int vslot = vn ? ctx_find_local_sigil(ctx, vn, '$') : -1;
+        if (vslot >= 0 && !(vn[0] == '_' && vn[1] == 0)) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vslot);
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            vm_chunk_emit(ctx->chunk, OP_IS_UNDEF);
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            size_t rdone = emit_patch_u16(ctx);
+            vm_chunk_emit(ctx->chunk, OP_POP);
+            emit_viv_new(ctx, want_hash);
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vslot);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vslot);
+            patch_u16(ctx, rdone, (uint16_t)ctx->chunk->code_len);
+            return;
+        }
+    }
     compile_expr(ctx, cont);
 }
 
@@ -3554,7 +3635,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
             } else {
-                const char *gkey = resolve_global_var_key(ctx, name);
+                const char *gkey = resolve_global_var_key_sig(ctx, name, sigil[0]);
                 if (gkey) {
                     /* our variable or const inside closure / function */
                     size_t key_idx = vm_chunk_add_str_const(ctx->chunk, gkey);
@@ -4540,6 +4621,15 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
+        if (strcmp(name, "strada_call_named_guarded") == 0 && argc == 2) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            compile_expr(ctx, ast_arr_get(args, 1));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_CALL_NAMED_GUARDED);
+            vm_chunk_emit(ctx->chunk, 2);
+            break;
+        }
+
         /* Built-in: reverse() -- list context reverses the list (a single
          * non-array value is a one-element list); scalar context joins it and
          * reverses the string (vm_sc_pass marks scalar_ctx) */
@@ -5170,7 +5260,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
                     int slot = ctx_find_local_sigil(ctx, vname, sc);
                     int cap = (slot < 0) ? ctx_resolve_capture(ctx, vname, sc) : -1;
-                    const char *gkey = (slot < 0 && cap < 0) ? resolve_global_var_key(ctx, vname) : NULL;
+                    const char *gkey = (slot < 0 && cap < 0) ? resolve_global_var_key_sig(ctx, vname, sc) : NULL;
                     if (slot >= 0) {
                         vm_chunk_emit(ctx->chunk, wop);
                         vm_chunk_emit(ctx->chunk, 0);
@@ -6785,7 +6875,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 }
             } else {
                 int cap = ctx_resolve_capture(ctx, vname, sc);
-                const char *gkey = (cap < 0) ? resolve_global_var_key(ctx, vname) : NULL;
+                const char *gkey = (cap < 0) ? resolve_global_var_key_sig(ctx, vname, sc) : NULL;
                 if (cap >= 0 || gkey != NULL) {
                     uint8_t load_op = (cap >= 0) ? OP_LOAD_CAPTURE : OP_LOAD_GLOBAL;
                     uint8_t store_op = (cap >= 0) ? OP_STORE_CAPTURE : OP_STORE_GLOBAL;
@@ -8281,6 +8371,16 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else if (strncmp(name, "main::", 6) == 0) {
             qname = name + 6;
         }
+        /* `our @x` / `our %x`: "@x" / "Pkg::@x" (resolve_global_var_key_sig) */
+        char sqbuf[300];
+        if (sigil && (sigil[0] == '@' || sigil[0] == '%')) {
+            const char *last = strrchr(qname, ':');
+            if (last && last > qname && last[-1] == ':')
+                snprintf(sqbuf, sizeof(sqbuf), "%.*s%c%s", (int)(last + 1 - qname), qname, sigil[0], last + 1);
+            else
+                snprintf(sqbuf, sizeof(sqbuf), "%c%s", sigil[0], qname);
+            qname = sqbuf;
+        }
 
         register_our_var(qname);
 
@@ -9428,7 +9528,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
                     } else {
-                        const char *gkey = resolve_global_var_key(ctx, vname);
+                        const char *gkey = resolve_global_var_key_sig(ctx, vname, vsigil);
                         if (gkey) {
                             size_t gk = vm_chunk_add_str_const(ctx->chunk, gkey);
                             vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
@@ -9679,9 +9779,20 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
     chunk = ctx.chunk;
 
     StradaValue *fn_body = ast_get(func_node, "body");
+    if ((int)ast_int(func_node, "is_c_extern") == 1) {
+        /* an extern "C" function: the compiled backend links the C symbol;
+         * the VM cannot call it -- fail clearly instead of returning undef */
+        char emsg[512];
+        snprintf(emsg, sizeof(emsg), "extern \"C\" function %s() is not available in the bytecode VM (compiled backend only)", name ? name : "?");
+        size_t eidx = vm_chunk_add_str_const(ctx.chunk, emsg);
+        vm_chunk_emit(ctx.chunk, OP_PUSH_STR);
+        vm_chunk_emit_u16(ctx.chunk, (uint16_t)eidx);
+        vm_chunk_emit(ctx.chunk, OP_THROW);
+        fn_body = NULL;
+    }
     ctx.may_box_locals = ast_may_box_locals(fn_body, 0) || ast_may_box_locals(params, 0);
     prescan_vm_labels(&ctx, fn_body, 0, 0);
-    compile_block(&ctx, fn_body);
+    if (fn_body) compile_block(&ctx, fn_body);
 
     /* Refresh chunk pointer — may have been invalidated by realloc during
      * closure compilation inside compile_block */
@@ -10314,6 +10425,14 @@ static void vm_sc_pass(StradaValue *v, int depth) {
                 && (int)ast_int(tg, "type") == NI_VARIABLE && ast_str(tg, "sigil")[0] == '$'
                 && (vm_sc_is_container(ast_get(v, "value"), 0) || vm_sc_is_count_call(ast_get(v, "value")))) {
                 vm_sc_replace(v, "value");
+            } else if (strcmp(ast_str(v, "op"), "=") == 0 && tg && !STRADA_IS_TAGGED_INT(tg)
+                       && vm_sc_is_container(ast_get(v, "value"), 0) &&
+                       ((int)ast_int(ast_deref(ast_get(v, "value")), "type") == NI_VARIABLE ||
+                        (int)ast_int(ast_deref(ast_get(v, "value")), "type") == NI_DEREF_SCALAR)) {
+                /* $h{n} = @a: an array assigned to an element is its count */
+                int tgt0 = (int)ast_int(tg, "type");
+                if (tgt0 == NI_HASH_ACCESS || tgt0 == NI_SUBSCRIPT || tgt0 == NI_DEREF_HASH || tgt0 == NI_DEREF_ARRAY)
+                    vm_sc_replace(v, "value");
             } else if (strcmp(ast_str(v, "op"), "=") == 0 && tg && !STRADA_IS_TAGGED_INT(tg)
                        && vm_sc_is_count_call(ast_get(v, "value"))) {
                 /* $h{n} = keys(%h) / $a[0] = split(...): a count (Perl) */

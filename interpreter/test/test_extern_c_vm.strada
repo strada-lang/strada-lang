@@ -1,0 +1,14 @@
+# An extern "C" function cannot be called in the VM: the call raises a
+# catchable error instead of silently returning undef.
+extern "C" {
+    func no_such_c_fn_xyz(str $s) str;
+}
+func main() int {
+    try {
+        my $r = no_such_c_fn_xyz("x");
+        say("returned " . (defined($r) ? $r : "undef"));
+    } catch ($e) {
+        say("caught: " . $e);
+    }
+    return 0;
+}

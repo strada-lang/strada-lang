@@ -1,0 +1,1 @@
+caught: extern "C" function no_such_c_fn_xyz() is not available in the bytecode VM (compiled backend only)

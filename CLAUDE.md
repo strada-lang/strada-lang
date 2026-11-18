@@ -1528,6 +1528,20 @@ compiler:
   unblessed-method error reads "on unblessed reference" (Perl).
   `lib/DBI.strada` includes the generated `lib/strada_config.inc` (configured
   drivers as `#define`s), so `use DBI;` compiled from source has the drivers.
+- **Loose ends closed (2026-11-18)**: a typed scalar declared without a
+  value holds its type's empty value (`my int $x;` 0, `my num` 0, `my str`
+  "") in both backends; `$u->{k} = v` / `$u->[i] = v` on an undef scalar
+  autovivify it (`strada_autoviv_slot_ref` from `gen_assign_container`; VM
+  `compile_viv_container` root case); `$h{k} = @a` stores the count;
+  `stacktrace_str()` returns the tracked Strada frames. VM: `our @x` / `our %x`
+  register as "@x" / "Pkg::@x" (`resolve_global_var_key_sig`; a bare-name
+  lookup falls back to them) so they never collide with `our $x`; lib/Eval
+  keys session variables the same way (`eval_vm_gkey`) and Strada::JIT keys
+  them by sigil + name (`jit_vk*`); calling an `extern "C"` function in the
+  VM throws a clear error (it returned undef); `strada_call_named_guarded` in
+  the VM calls the VM's own function (`BUILTIN_CALL_NAMED_GUARDED`) -- through
+  the runtime bridge it called the interpreter binary's compiled copy with a
+  copied argument, so lib/Eval's parser looped forever under strada-interp.
 - **`reverse` follows context (2026-11-18)**: Semantic `sem_rev_scalar` (VM:
   `vm_rev_scalar` in `vm_sc_pass`) marks `reverse(...)` calls in scalar
   context (`scalar_ctx`: scalar `my`/`our`/assignment/element targets,

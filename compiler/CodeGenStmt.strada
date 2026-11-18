@@ -1055,7 +1055,18 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my int $st_sz = $cg->{"structs"}->{$st_decl_name}->{"size"} + 0;
                     emit($cg, " = strada_cstruct_new(\"" . $st_decl_name . "\", " . $st_sz . ")");
                 } else {
-                    emit($cg, " = strada_new_undef()");
+                    # a typed scalar starts out as its type's empty value:
+                    # `my int $x;` is 0, `my num` 0, `my str` "" (as in the VM)
+                    my int $dvt = $stmt->{"var_type"} + 0;
+                    if (("" . $stmt->{"sigil"}) eq "$" && $dvt == TYPE_INT()) {
+                        emit($cg, " = STRADA_MAKE_TAGGED_INT(0)");
+                    } elsif (("" . $stmt->{"sigil"}) eq "$" && $dvt == TYPE_NUM()) {
+                        emit($cg, " = strada_new_num(0.0)");
+                    } elsif (("" . $stmt->{"sigil"}) eq "$" && $dvt == TYPE_STR()) {
+                        emit($cg, " = strada_new_str(\"\")");
+                    } else {
+                        emit($cg, " = strada_new_undef()");
+                    }
                 }
             }
         }

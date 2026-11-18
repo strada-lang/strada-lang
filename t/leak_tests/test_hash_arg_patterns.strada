@@ -211,8 +211,10 @@ func main() int {
     while ($i < $iterations) {
         my hash %f = ();
         $f{"arr"} = [1, 2, 3];
-        my scalar $rev = reverse($f{"arr"});
-        if ($rev->[0] != 3 || $rev->[2] != 1) {
+        # list context: the array ref's elements reversed (scalar context
+        # would join them into a reversed string, as in Perl)
+        my array @rev = reverse($f{"arr"});
+        if ($rev[0] != 3 || $rev[2] != 1) {
             say("    FAIL: reverse");
             return 1;
         }

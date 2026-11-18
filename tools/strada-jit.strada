@@ -437,6 +437,9 @@ func main(int $argc, array @argv) int {
                     my str $sigil = "\$";
                     if ($type eq "array") { $sigil = "@"; }
                     if ($type eq "hash") { $sigil = "%"; }
+                    # a name shared by several sigils is listed sigil-qualified
+                    my str $n0 = substr($name, 0, 1);
+                    if ($n0 eq "\$" || $n0 eq "@" || $n0 eq "%") { $sigil = ""; }
                     my scalar $val = undef;
                     if (exists(%st, $name)) {
                         $val = $st{$name};

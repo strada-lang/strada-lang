@@ -42,4 +42,3 @@ test_free                    prints refcount() values; the VM has no reference c
 test_weak_ref                prints refcount() of a weak ref target; the VM has no reference counts (rest matches)
 
 # Open VM bug (not a design difference)
-test_eval                    OPEN BUG: under the VM, Strada::Interpreter::eval("1 + 2") (lib/Eval) does not return within 400s (~70s CPU): suspected hang

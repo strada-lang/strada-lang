@@ -7315,7 +7315,7 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
             if (gidx < VM_GENERIC_BUILTIN_COUNT &&
                 argc <= vm_generic_builtins[gidx].argc) {
                 const VMGenericBuiltin *gb = &vm_generic_builtins[gidx];
-                StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
+StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 /* trailing parameters the call omits are NULL, as the
                  * compiled backend passes them (e.g. localtime() = now) */
                 for (int i = 0; i < argc; i++) sa[i] = vm_to_sv(args[i]);
@@ -8369,6 +8369,47 @@ static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8
         }
         case BUILTIN_EXC_TRACE: {
             SP_PUSH(vm->exc_trace ? vm_str(vm->exc_trace) : vm_str(""));
+            break;
+        }
+        case BUILTIN_CALL_NAMED_GUARDED: {
+            /* The compiler's parse recovery (parse_function_guarded) calls a
+             * function by name under a try frame: [1, result] / [0, error] /
+             * [-1] when there is no such function. Over the runtime bridge it
+             * found the interpreter binary's own compiled function and passed
+             * it a copy of the argument, so the VM parser never advanced
+             * (lib/Eval under strada-interp looped forever). */
+            char gnb[256];
+            const char *gfn = vm_to_cstr(argc >= 1 ? args[0] : VM_UNDEF_VAL, gnb, sizeof(gnb));
+            int gfi = vm_program_find_func(vm->program, gfn);
+            if (gfi < 0) {
+                size_t gl = strlen(gfn);
+                for (size_t gi = 0; gi < vm->program->func_count && gfi < 0; gi++) {
+                    const char *fnm = vm->program->func_names[gi];
+                    size_t fl = fnm ? strlen(fnm) : 0;
+                    if (fl > gl + 2 && strcmp(fnm + fl - gl, gfn) == 0 && fnm[fl - gl - 1] == ':' && fnm[fl - gl - 2] == ':')
+                        gfi = (int)gi;
+                }
+            }
+            VMArray *gres = vm_array_new(2);
+            if (gfi < 0) {
+                vm_array_push(gres, VM_MAKE_INT(-1));
+                SP_PUSH(VM_MAKE_PTR(gres));
+                break;
+            }
+            VMValue garg = argc >= 2 ? args[1] : VM_UNDEF_VAL;
+            vm->stack_top = sp;
+            VMValue gr = vm_invoke_func(vm, gfi, &garg, 1);
+            stack = vm->stack; RELOAD();
+            if (vm->has_pending_exc) {
+                VMValue gex = vm->pending_exc;
+                vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                vm_array_push(gres, VM_MAKE_INT(0));
+                vm_array_push(gres, gex);
+            } else {
+                vm_array_push(gres, VM_MAKE_INT(1));
+                vm_array_push(gres, gr);
+            }
+            SP_PUSH(VM_MAKE_PTR(gres));
             break;
         }
         case BUILTIN_REV_LISTIFY: {
@@ -21174,7 +21215,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         StradaValue **sv_vars = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(StradaValue*)) : sv_buf;
         StradaValue **orig_sv = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(StradaValue*)) : orig_sv_buf;
         frame->ip = ip; vm->stack_top = sp;
-        for (int i = 0; i < cb->var_count; i++) {
+for (int i = 0; i < cb->var_count; i++) {
             int slot = cb->var_slots[i];
             VMValue raw_v = locals[slot];
             if (VM_IS_PTR(raw_v) && VM_PTR_TYPE(raw_v) == VM_OBJ_CELL) raw_v = VM_AS_CELL(raw_v)->val;

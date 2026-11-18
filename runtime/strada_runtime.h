@@ -909,6 +909,7 @@ const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* No
 const char* strada_path_buf(StradaValue *sv, char *buf, size_t buflen); /* "" if the path contains a NUL byte */
 const char* strada_path_pv(StradaValue *str_sv);
 StradaValue* strada_autoviv_slot_array(StradaValue **slot); /* push(@$v,..) with $v undef */
+StradaValue* strada_autoviv_slot_ref(StradaValue **slot, int want_array); /* $v->{k} = x with $v undef */
 void strada_print2(StradaValue *a, StradaValue *b, int newline);   /* print/say(a, b): a may be a filehandle */
 void strada_print_list(StradaValue *first, StradaValue *rest, int newline);
 void strada_printf_list(StradaValue *all);  /* printf(LIST): optional leading filehandle */

@@ -2267,6 +2267,16 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         }
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
+        # `$h{n} = @a` / `$a[0] = @{$r}`: an array assigned to an element is
+        # its count (Perl; it stored the array reference)
+        if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 && is_valid_node($expr->{"value"}) == 1) {
+            my int $et = $expr->{"target"}->{"type"};
+            my scalar $ev = $expr->{"value"};
+            if (($et == NODE_HASH_ACCESS() || $et == NODE_SUBSCRIPT() || $et == NODE_DEREF_HASH() || $et == NODE_DEREF_ARRAY())
+                && ($ev->{"type"} == NODE_VARIABLE() || $ev->{"type"} == NODE_DEREF_SCALAR()) && ("" . $ev->{"sigil"}) eq "@") {
+                $expr->{"value"} = sem_scalar_of($ev);
+            }
+        }
         # `$n = keys(%h)` / `$h{n} = split(...)`: keys/values/split in scalar
         # context are counts (Perl)
         if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 &&

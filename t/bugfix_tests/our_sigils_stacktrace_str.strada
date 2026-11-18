@@ -1,0 +1,14 @@
+# EXPECT: 3:s|2:t|  inner|  main
+# `our @x` and `our $x` are two variables (the VM keyed both as "x", so the
+# array read as empty); stacktrace_str() returns the Strada frames like
+# stacktrace() (compiled code returned libc backtrace addresses).
+our @x = (1, 2, 3);
+our $x = "s";
+func inner() str { return stacktrace_str(); }
+func main() int {
+    our @y = (4, 5);
+    our $y = "t";
+    my @fr = split("\n", inner());
+    say(scalar(@x) . ":" . $x . "|" . scalar(@y) . ":" . $y . "|" . join("|", @fr));
+    return 0;
+}

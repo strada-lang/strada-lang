@@ -1147,12 +1147,23 @@ func eval_vm_rewrite_tail_return(scalar $block) void {
     $block->{"statement_count"} = $scnt + 1;
 }
 
+# The VM's global key of a session variable: arrays / hashes are "@x" /
+# "Pkg::@x" (vm_compiler.c resolve_global_var_key_sig), so `my @x` and a
+# later `my $x` are two variables.
+private func eval_vm_gkey(str $qname, str $sigil) str {
+    if ($sigil ne "@" && $sigil ne "%") { return $qname; }
+    my int $li = rindex($qname, "::");
+    if ($li < 0) { return $sigil . $qname; }
+    return substr($qname, 0, $li + 2) . $sigil . substr($qname, $li + 2, length($qname) - $li - 2);
+}
+
 private func eval_vm_record_our(str $vn, str $vsig, int $vt, str $seg_pkg, scalar $program, scalar $prom_state, int $has_init) void {
     if (length($vn) == 0) { return; }
     my scalar $nd_ref = $prom_state->{"newly_declared"};
     my scalar $sk_ref = $prom_state->{"skip_seed"};
     my scalar $ao_ref = $prom_state->{"added_our"};
     my str $qvn = ($seg_pkg ne "" && $seg_pkg ne "main" && index($vn, "::") < 0) ? ($seg_pkg . "::" . $vn) : $vn;
+    $qvn = eval_vm_gkey($qvn, $vsig);
     $nd_ref->{$qvn} = 1;
     # Only a declaration without initializer starts from undef. With one, the
     # old value stays visible to the initializer (`my $n = $n * 2`: the new
@@ -1445,6 +1456,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                 if (length($gpkg) > 0 && $gpkg ne "main" && index($gn, "::") < 0) {
                     $gn = $gpkg . "::" . $gn;
                 }
+                $gn = eval_vm_gkey($gn, defined($pg->{"sigil"}) ? ("" . $pg->{"sigil"}) : "$");
                 if (length($gn) > 0) {
                     my int $has_init = (defined($pg->{"init"}) && (length(ref($pg->{"init"})) > 0 || $pg->{"init"} != 0)) ? 1 : 0;
                     if (!($pg->{"type"} == NI::OUR_DECL && exists(%g_eval_vm_our_names, $gn) && $has_init == 0)) {
