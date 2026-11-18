@@ -76,5 +76,10 @@ make test && rm -f runtime/test_runtime
 ./interpreter/test/run_tests.sh
 ./t/leak_tests/run_leak_tests.sh
 ./interpreter/test/leak_tests/run_leak_tests.sh
+bash interpreter/test/run_compiler_tests.sh   # compiler test suite through the VM: 0 failures
+t/examples_parity.sh                          # every example: compiled == VM (skips listed with reasons)
 ./strada --tcc -r examples/test_simple.strada
 ```
+
+After a `make quick`, rebuild `make libs` before running the suites: `lib/*.o`
+artifacts older than `./stradac` are recompiled from source by every `use`.

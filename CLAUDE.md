@@ -1054,14 +1054,12 @@ my scalar $f = func (int $n) int { return $n * $multiplier; };
 $f->(42);  # Arrow syntax for calling
 ```
 
-**Scalars are captured BY VALUE** (`strada_closure_new` copies each captured
-slot at closure creation; deliberate, for thread safety). The closure's copy
-persists across calls, so a counter closure counts 1, 2, 3, but the outer
-variable is unchanged and later changes to it are not seen. Arrays and hashes
-are shared (`push(@a, …)` / `$h{k} = …` inside a closure are visible outside),
-so share mutable state through a container, a ref, or `our`.
-`examples/test_closures.strada` still asserts the old by-reference behaviour and
-fails at run time; the suite only compiles it.
+**Captured variables are shared, as in Perl**: a closure and its enclosing
+scope (and sibling closures) share each captured scalar through a refcounted
+cell (`strada_closure_new_shared`, PerlaCell mode), so a counter closure
+updates the outer variable and later outer changes are visible inside; each
+foreach iteration's `my` variable is a fresh cell. Arrays and hashes are
+shared too. `examples/test_closures.strada` checks this.
 
 **Capture analysis is lazy** (2026-11): a variable is captured the first time
 codegen names it inside the anonymous function. So every codegen path that
@@ -1476,6 +1474,26 @@ compiler:
   `while (my ($k, $v) = LIST)` loops while the list is non-empty (desugared to
   a hidden `@__wlN`); a parenthesized group of pairs in a hash literal joins
   the hash (`parse_anon_hash_entry`), while `(EXPR) => v` stays a computed key.
+- **Audit 20 final batch (2026-11-18)**: `func { ... }` / `fn { ... }` (no
+  parameter list) take their arguments in `@_` and `func ($a, ...@rest)` is
+  variadic (`parse_anon_param`, `parse_anon_func_args`,
+  `strada_closure_set_variadic`); `my %t; my @t; my $t;` in one scope are
+  three variables (Semantic keeps the later ones under `@:t` with C name
+  `t__sga` etc.); `$#a` / `$#{$r}` / `$#$r` (lexer token `DOLLAR_HASH`,
+  parsed as `scalar(@a) - 1`); a `num` function returning a parameter coerces
+  it; typed `has int`/`has num` attributes are converted by the constructor
+  and setter (`parser_attr_coerce`; `inline_ctor_needs_coerce` keeps such
+  calls off the inline-constructor path); `Pkg::CONST` reads that package's
+  constant (const decls carry `package`, the variable node `const_pkg`);
+  callers set the call context for any function that calls
+  `wantarray`/`wanthash` (`uses_wantarray`), not only `dynamic` ones;
+  `foreach (f())` with a plain scalar result iterates once
+  (`strada_foreach_list_take`; undef stays the empty list); bare `abs()` is
+  `math::abs` unless a user `abs` is visible, and abs of an object with only
+  `-` overloaded decides the sign with its `<`/`<=>` overload; the
+  unblessed-method error reads "on unblessed reference" (Perl).
+  `lib/DBI.strada` includes the generated `lib/strada_config.inc` (configured
+  drivers as `#define`s), so `use DBI;` compiled from source has the drivers.
 - **`$_` is Perl's global topic (2026-11)**: one `$_` per OS thread and per
   green task, owned by the runtime (`strada_topic_tls`; generated C has
   `#define _ STRADA_TOPIC`, which is the TLS variable under gcc and

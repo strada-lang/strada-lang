@@ -1070,6 +1070,7 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     $info{"params"} = $fn->{"params"};
     $info{"return_type"} = $fn->{"return_type"};
     $info{"return_struct_name"} = "" . $fn->{"return_struct_name"};
+    $info{"uses_wantarray"} = $fn->{"uses_wantarray"} + 0;
     # Track if this is an extern function for call site conversion
     if ($fn->{"type"} == NODE_EXTERN_FUNC()) {
         # A `is_strada_extern_decl` extern is a body-less qualified extern
@@ -4091,6 +4092,31 @@ func get_capture_index(str $list, str $name) int {
 # 1 when constructing class $c_pkg (C-safe name) with these literal-keyed
 # arguments would leave a (required) attribute, its own or an inherited one,
 # unset.
+# 1 when an inlined Pkg::new(...) would store a value into an `int` / `num`
+# attribute without the conversion the generated constructor applies (the
+# value is not statically of that type): such calls use the constructor.
+func inline_ctor_needs_coerce(scalar $cg, scalar $args, int $arg_count) int {
+    my scalar $ha = $cg->{"has_attrs"};
+    my int $hac = $cg->{"has_attr_count"} + 0;
+    my int $ai = 0;
+    while ($ai + 1 < $arg_count) {
+        my str $key = "" . $args->[$ai]->{"value"};
+        my scalar $val = $args->[$ai + 1];
+        my int $hi = 0;
+        while ($hi < $hac) {
+            my scalar $at = $ha->[$hi];
+            if (("" . $at->{"name"}) eq $key) {
+                my int $aty = $at->{"attr_type"} + 0;
+                if ($aty == TYPE_INT() && expr_is_int_typed($cg, $val) == 0) { return 1; }
+                if ($aty == TYPE_NUM() && expr_is_numeric($cg, $val) == 0) { return 1; }
+            }
+            $hi = $hi + 1;
+        }
+        $ai = $ai + 2;
+    }
+    return 0;
+}
+
 func inline_ctor_missing_required(scalar $cg, str $c_pkg, scalar $args, int $arg_count) int {
     my scalar $rq_attrs = $cg->{"has_attrs"};
     my int $rq_n = 0 + $cg->{"has_attr_count"};

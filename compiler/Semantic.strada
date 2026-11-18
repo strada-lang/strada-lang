@@ -1696,6 +1696,21 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
             $expr->{"orig_name"} = $name;
             $expr->{"name"} = sem_resolve_vinfo_cname($ctx, $lookup_result->{"info"}, $name, $line, $sigil);
+            # Pkg::CONST names that package's declaration (same-named consts
+            # in several packages are separate C globals)
+            my str $cpk = "" . $expr->{"const_pkg"};
+            my scalar $cdecls = $lookup_result->{"info"}->{"decls"};
+            if (length($cpk) > 0 && defined($cdecls)) {
+                my int $cdi = 0;
+                while ($cdi < size(@{$cdecls})) {
+                    my scalar $cd = $cdecls->[$cdi];
+                    if ($cd->{"type"} == NODE_CONST_DECL() && ("" . $cd->{"package"}) eq $cpk) {
+                        $expr->{"name"} = "" . $cd->{"name"};
+                        last;
+                    }
+                    $cdi = $cdi + 1;
+                }
+            }
         }
         return;
     }
@@ -1853,6 +1868,12 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
             $ctx->{"uses_tie"} = 1;
         }
+        # a function that asks for its calling context: callers set it
+        # (otherwise only `dynamic` functions get it)
+        if ($name eq "core::wantarray" || $name eq "sys::wantarray" || $name eq "wantarray" ||
+            $name eq "core::wanthash" || $name eq "sys::wanthash" || $name eq "wanthash") {
+            if (is_valid_node($ctx->{"current_func"}) == 1) { $ctx->{"current_func"}->{"uses_wantarray"} = 1; }
+        }
         if ($name eq "weaken" || $name eq "core::weaken" || $name eq "sys::weaken") {
             $ctx->{"uses_weaken"} = 1;
         }
@@ -1988,6 +2009,15 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                             $is_reg = 1;
                         }
                     }
+                }
+                if ($is_reg == 0 && $name eq "abs") {
+                    # Perl builtin abs() (a user function of that name wins,
+                    # e.g. Math::BigInt::abs inside its package)
+                    $expr->{"name"} = "math::abs";
+                    for (my int $ai = 0; $ai < $arg_count; $ai = $ai + 1) {
+                        analyze_expression($ctx, $args->[$ai]);
+                    }
+                    return;
                 }
                 if ($is_reg == 0 && ($name eq "hex" || $name eq "oct")) {
                     # Perl builtins hex()/oct(): used when no user function of

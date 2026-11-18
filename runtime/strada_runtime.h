@@ -1683,6 +1683,7 @@ StradaValue* strada_closure_call3(StradaValue *closure, StradaValue *a0, StradaV
 StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params);
+StradaValue* strada_foreach_list_take(StradaValue *v);
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 typedef StradaValue* (*StradaCustomClosureCallFn)(void *ctx, int argc, StradaValue **argv);
 typedef void (*StradaCustomClosureFreeFn)(void *ctx);

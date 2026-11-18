@@ -1,0 +1,19 @@
+#!/usr/bin/env strada
+# R2-13: index($obj, "lit") leaked its temporary needle string when the
+# object's "" overload threw (strada_index_sv freed it only on return).
+package Boom;
+func new() scalar { my hash %h = (); return bless(\%h, "Boom"); }
+func to_str(scalar $self) str { throw "boom"; }
+use overload '""' => "to_str", "fallback" => 1;
+package main;
+func main() int {
+    my scalar $b = Boom::new();
+    my str $big = "x" x 5000;
+    my int $i = 0;
+    while ($i < 3) {
+        try { my int $x = index($b, "x"); } catch ($e) { }
+        $i++;
+    }
+    say("done");
+    return 0;
+}

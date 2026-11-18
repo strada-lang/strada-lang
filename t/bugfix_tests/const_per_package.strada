@@ -1,0 +1,17 @@
+# EXPECT: 10 20|10 20|cfg other
+# Same-named constants in two packages: Pkg::CONST from outside read the
+# last declaration (consts are file-level globals; each gets its own C name,
+# but the qualified form bound to the nearest one).
+package Cfg;
+const int LIMIT = 10;
+const str NAME = "cfg";
+func lim() int { return LIMIT; }
+package Other;
+const int LIMIT = 20;
+const str NAME = "other";
+func lim() int { return LIMIT; }
+package main;
+func main() int {
+    say(Cfg::lim() . " " . Other::lim() . "|" . Cfg::LIMIT . " " . Other::LIMIT . "|" . Cfg::NAME . " " . Other::NAME);
+    return 0;
+}

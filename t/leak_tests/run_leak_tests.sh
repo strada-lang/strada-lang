@@ -207,6 +207,7 @@ TESTS=(
     "test_hash_set_value_leak"
     "test_async_ergonomics"
     "test_topic_alias_leaks"
+    "test_index_overload_throw"
     "test_import_lib_devirt"
     "test_arena_hardened"
     "test_encoding"

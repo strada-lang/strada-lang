@@ -4744,7 +4744,21 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ';') { $token{"type"} = "SEMI"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ',') { $token{"type"} = "COMMA"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ':') { $token{"type"} = "COLON"; $lexer->{"expect_regex"} = 1; return \%token; }
-    if ($code == '$') { $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token; }
+    if ($code == '$') {
+        # `$#name` / `$#{expr}` / `$#$ref`: the last index of an array (Perl).
+        # The `#` must not start a comment here.
+        if (lex_peek_char($lexer, 0) eq "#") {
+            my str $lh = lex_peek_char($lexer, 1);
+            if ($lh eq "{" || $lh eq "$" || $lh eq "_" || ($lh ge "a" && $lh le "z") || ($lh ge "A" && $lh le "Z")) {
+                lex_advance($lexer);
+                $token{"type"} = "DOLLAR_HASH";
+                $token{"value"} = "$#";
+                $lexer->{"after_sigil"} = 1;
+                return \%token;
+            }
+        }
+        $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token;
+    }
     if ($code == '@') { $token{"type"} = "AT"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == '%') { $token{"type"} = "PERCENT"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == '+') { $token{"type"} = "PLUS"; return \%token; }

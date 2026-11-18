@@ -1,0 +1,27 @@
+# EXPECT: 2.5 2 2.5 0|v 2 x 2 v 7 v+1 8 n 3.25 n+1 4.25 neg -5
+# C3-8: a `num` function returning its `num` parameter passed "2.5x" through
+# unconverted (parameters are not coerced at entry). C3-13: typed `has`
+# attributes stored what they were given: 2.5 in an `int`, "7.9" through
+# the setter, "3.25x" in a `num`. The constructor and setter convert now, and
+# an inlined constructor is used only for values already of the right type.
+func idn(num $x) num { return $x; }
+func idi(int $x) int { return $x; }
+func g() scalar { return "2.5x"; }
+func rn() num { return g(); }
+package A;
+has rw int $v = 1;
+has rw num $n = 0.5;
+package main;
+func main() int {
+    my num $q = idn("abc");
+    my $l1 = join(" ", idn("2.5x"), idi("2x"), rn(), $q);
+    my $a = A::new("v", 2.5, "n", "3.25x");
+    my $l2 = "v " . $a->v();
+    my $x = $a->v();
+    $l2 = $l2 . " x " . $x;
+    $a->set_v("7.9");
+    $l2 = $l2 . " v " . $a->v() . " v+1 " . ($a->v() + 1) . " n " . $a->n() . " n+1 " . ($a->n() + 1);
+    my $neg = A::new("v", "-5abc");
+    say($l1 . "|" . $l2 . " neg " . ($neg->v() + 0));
+    return 0;
+}

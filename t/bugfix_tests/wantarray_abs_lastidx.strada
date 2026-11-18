@@ -1,0 +1,34 @@
+# EXPECT: list scalar list list|N(5) N(5) 3 2.5|2 1 1 -1 3|e: Can't call method "who" on unblessed reference
+# wantarray in a non-`dynamic` function always said scalar (callers set the
+# context only for `dynamic` functions); foreach over a call returning a
+# plain scalar ran zero times; abs() on an object with only `-` overloaded
+# returned it unchanged (the sign came from its address), and bare abs() was
+# an undefined function; `$#array` / `$#{$r}` / `$#$r` were a comment; the
+# unblessed-method error text differs from Perl's ("on an unblessed").
+package N;
+func new($v) { my %h = ("v" => $v); return bless(\%h, "N"); }
+func sub_($a, $b, $r) { my $x = $r ? $b - $a->{"v"} : $a->{"v"} - $b; return N::new($x); }
+func lt_($a, $b, $r) { return $r ? ($b < $a->{"v"}) : ($a->{"v"} < $b); }
+func str_($a) { return "N(" . $a->{"v"} . ")"; }
+use overload "-" => "sub_", "<" => "lt_", '""' => "str_";
+package main;
+func ctx() scalar { return core::wantarray() ? "list" : "scalar"; }
+func main() int {
+    my @a = ctx();
+    my $s = ctx();
+    my @b; @b = ctx();
+    my @c;
+    foreach my $x (ctx()) { push(@c, $x); }
+    my $l1 = $a[0] . " " . $s . " " . $b[0] . " " . $c[0];
+    my $o = N::new(-5);
+    my $l2 = math::abs($o) . " " . abs($o) . " " . abs(-3) . " " . abs("-2.5");
+    my @arr = (1, 2, 3);
+    my $r = [5, 6];
+    my @e;
+    my $l3 = $#arr . " " . $#{$r} . " " . $#$r . " " . $#e . " " . $arr[$#arr];
+    my $l4 = "";
+    my $nonobj = {"x" => 1};
+    try { $nonobj->who(); } catch ($ex) { $l4 = "e: " . $ex; }
+    say($l1 . "|" . $l2 . "|" . $l3 . "|" . $l4);
+    return 0;
+}

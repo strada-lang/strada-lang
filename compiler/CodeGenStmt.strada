@@ -625,7 +625,14 @@ func gen_return_value(scalar $cg, scalar $value) int {
             return 1;
         }
     }
-    if ($cg->{"ret_is_num"} == 1 && expr_is_numeric($cg, $value) == 0) {
+    # A parameter is numeric-typed but not coerced at entry (parameters are
+    # borrowed), so `func f(num $x) num { return $x; }` coerces here.
+    my int $rv_is_param = 0;
+    if ($value->{"type"} == NODE_VARIABLE() && ("" . $value->{"sigil"}) eq "$"
+        && ($cg->{"func_params"}->{"" . $value->{"name"}} + 0) == 1 && is_unboxed_var_node($cg, $value) == 0) {
+        $rv_is_param = 1;
+    }
+    if ($cg->{"ret_is_num"} == 1 && (expr_is_numeric($cg, $value) == 0 || $rv_is_param == 1)) {
         emit($cg, "({ StradaValue *__rcv = ");
         gen_expression($cg, $value);
         emit($cg, "; StradaValue *__rcr = strada_new_num(strada_to_num(__rcv)); ");
@@ -2463,7 +2470,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($array_expr->{"type"} == NODE_CALL()) {
             $cg->{"call_context"} = 1;
         }
+        # A call that returns a plain scalar is a one-element list (Perl):
+        # `foreach my $x (f())` iterated zero times over a string result
+        my int $fe_listify = 0;
+        my int $fe_at = $array_expr->{"type"} + 0;
+        if (($fe_at == NODE_CALL() || $fe_at == NODE_METHOD_CALL() || $fe_at == NODE_CLOSURE_CALL() ||
+             $fe_at == NODE_DYN_METHOD_CALL()) && $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1) {
+            $fe_listify = 1;
+            emit($cg, "strada_foreach_list_take(");
+        }
         gen_expression($cg, $array_expr);
+        if ($fe_listify == 1) { emit($cg, ")"); }
         if ($array_expr->{"type"} == NODE_CALL()) {
             $cg->{"call_context"} = 0;
         }

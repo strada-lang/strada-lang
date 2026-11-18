@@ -1687,6 +1687,33 @@ func parse_primary(scalar $parser) scalar {
         return $var;
     }
     
+    # $#array / $#{expr} / $#$ref: the last index, scalar(@array) - 1
+    if ($type eq "DOLLAR_HASH") {
+        my int $lh_line = parser_current_line($parser);
+        parser_advance($parser);
+        my scalar $lh_arr = 0;
+        if (parser_check($parser, "LBRACE")) {
+            parser_advance($parser);
+            my scalar $lh_ref = parse_expression($parser);
+            parser_expect($parser, "RBRACE");
+            $lh_arr = ast_new_deref_scalar($lh_ref, "@");
+        } elsif (parser_check($parser, "DOLLAR")) {
+            parser_advance($parser);
+            my scalar $lh_rv = ast_new_variable(parse_var_name($parser), "$");
+            ast_set_line($lh_rv, $lh_line);
+            $lh_arr = ast_new_deref_scalar($lh_rv, "@");
+        } else {
+            $lh_arr = ast_new_variable(parse_var_name($parser), "@");
+        }
+        ast_set_line($lh_arr, $lh_line);
+        my scalar $lh_cnt = ast_new_call("scalar");
+        ast_add_arg($lh_cnt, $lh_arr);
+        ast_set_line($lh_cnt, $lh_line);
+        my scalar $lh_res = ast_new_binary_op("-", $lh_cnt, ast_new_int_literal(1));
+        ast_set_line($lh_res, $lh_line);
+        return $lh_res;
+    }
+
     # Reference operator
     if ($type eq "BACKSLASH") {
         parser_advance($parser);
@@ -2083,6 +2110,7 @@ func parse_primary(scalar $parser) scalar {
                 if (defined($parser->{"enum_type_names"}) && $parser->{"enum_type_names"}->{$qc_pkg}) { $qc_is_enum = 1; }
                 if ($qc_is_enum == 0 && $parser->{"const_names"}->{$qc_base}) {
                     my scalar $qc_var = ast_new_variable($qc_base, "$");
+                    $qc_var->{"const_pkg"} = $qc_pkg;   # Pkg::CONST: that package's const
                     ast_set_line($qc_var, $call_line);
                     return $qc_var;
                 }
@@ -3422,6 +3450,9 @@ func parse_const_decl(scalar $parser) scalar {
 
     my scalar $decl = ast_new_const_decl($name, $var_type, $init);
     ast_set_line($decl, $decl_line);
+    my str $cd_pkg = "" . $parser->{"current_package"};
+    if (length($cd_pkg) == 0) { $cd_pkg = "main"; }
+    $decl->{"package"} = $cd_pkg;
 
     parser_expect($parser, "SEMI");
     return $decl;
@@ -7856,13 +7887,27 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         my scalar $s_self = ast_new_variable("self", "$");
         my scalar $s_key = ast_new_str_literal($attr_name);
         my scalar $s_target = ast_new_deref_hash($s_self, $s_key);
-        my scalar $s_value = ast_new_variable("val", "$");
+        my scalar $s_value = parser_attr_coerce($attr_type, ast_new_variable("val", "$"));
         my scalar $s_assign = ast_new_assign("=", $s_target, $s_value);
         my scalar $s_stmt = ast_new_expr_stmt($s_assign);
         ast_add_statement($setter_body, $s_stmt);
         $setter->{"body"} = $setter_body;
         ast_add_function($program, $setter);
     }
+}
+
+# EXPR converted for an `int` / `num` attribute: int(EXPR) / 0 + EXPR. Other
+# types are stored as given.
+func parser_attr_coerce(int $attr_type, scalar $expr) scalar {
+    if ($attr_type == TYPE_INT()) {
+        my scalar $ic = ast_new_call("int");
+        ast_add_arg($ic, $expr);
+        return $ic;
+    }
+    if ($attr_type == TYPE_NUM()) {
+        return ast_new_binary_op("+", ast_new_int_literal(0), $expr);
+    }
+    return $expr;
 }
 
 # Flush auto-constructor for a package that has `has` attributes
@@ -8054,6 +8099,17 @@ func flush_has_constructor(scalar $program, str $pkg) void {
             my scalar $rq_msg = ast_new_str_literal("Missing required attribute '" . $a_name . "' for " . $pkg . "::new");
             ast_add_statement($rq_block, ast_new_throw($rq_msg));
             ast_add_statement($ctor_body, ast_new_if_stmt($rq_cond, $rq_block));
+        }
+        # int / num attributes hold numbers: 2.5 into an `int` is 2, "3.25x"
+        # into a `num` is 3.25 (undef stays undef)
+        my int $a_ty = $attr->{"attr_type"} + 0;
+        if ($a_ty == TYPE_INT() || $a_ty == TYPE_NUM()) {
+            my scalar $cv_def = ast_new_call("defined");
+            ast_add_arg($cv_def, ast_new_hash_access(ast_new_variable("self", "%"), ast_new_str_literal($a_name)));
+            my scalar $cv_block = ast_new_block();
+            my scalar $cv_val = parser_attr_coerce($a_ty, ast_new_hash_access(ast_new_variable("self", "%"), ast_new_str_literal($a_name)));
+            ast_add_statement($cv_block, ast_new_expr_stmt(ast_new_assign("=", ast_new_hash_access(ast_new_variable("self", "%"), ast_new_str_literal($a_name)), $cv_val)));
+            ast_add_statement($ctor_body, ast_new_if_stmt($cv_def, $cv_block));
         }
         $pi = $pi + 1;
     }

@@ -9464,7 +9464,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
         # Check if function returns dynamic (context-sensitive)
         my int $is_dynamic_call = 0;
         if ($func_info) {
-            if ($func_info->{"return_type"} == TYPE_DYNAMIC()) {
+            if ($func_info->{"return_type"} == TYPE_DYNAMIC() || ($func_info->{"uses_wantarray"} + 0) == 1) {
                 $is_dynamic_call = 1;
             }
         }
@@ -9551,6 +9551,9 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 # real constructor, which throws. (Inlined, the object was
                 # simply built without it.)
                 if ($all_lit_keys == 1 && inline_ctor_missing_required($cg, $pkg_name, $args, $arg_count) == 1) {
+                    $all_lit_keys = 0;
+                }
+                if ($all_lit_keys == 1 && inline_ctor_needs_coerce($cg, $args, $arg_count) == 1) {
                     $all_lit_keys = 0;
                 }
                 # Build deduplicated MRO package chain (child before ancestors)
