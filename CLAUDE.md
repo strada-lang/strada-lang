@@ -165,8 +165,8 @@ Your Strada Programs
 **Bootstrap memory fix (2026-11-18)**: the stage-1 compiler (the bootstrap's C
 for the compiler, built with tcc) leaked so much that compiling
 `Combined.strada` peaked near 5 GB; Claude Code's low-memory reaper killed
-background builds. Its peak is now 1.24 GB; the self-built `./stradac` needs
-0.74 GB. Stage 1 produces a byte-identical `Combined.c`. Changes in
+background builds. Its peak is now 0.77 GB (a full `make` peaks at 0.76 GB);
+the self-built `./stradac` needs 0.74 GB. Stage 1 produces a byte-identical `Combined.c`. Changes in
 `bootstrap/codegen.c` (ownership fixes only, no language changes):
 - Every declared local owns its value: a borrowed initializer is increfed
   (`gen_decl_init`), and untracked declarations are recorded (`is_struct ==
@@ -183,6 +183,18 @@ background builds. Its peak is now 1.24 GB; the self-built `./stradac` needs
 
 Making every local own its value was required: once stores stopped leaking,
 borrowed aliases (`my $old = $h{k}; $h{k} = ...`) would otherwise dangle.
+
+Second round (same day):
+- Parameters own their values: non-main functions incref each parameter on entry and track it. Returns hand the caller a reference (`strada_incref` for a borrowed return value), and a non-void function falls through to `return strada_new_undef()`.
+- `expr_is_owned` counts calls to this program's non-void functions, which excludes names in `bootstrap_builtin_names[]`. It also counts `sys::`/`core::` builtins and a longer list of fresh-value builtins.
+- An expression statement whose owned call result is unused is released.
+- `next`/`last` release the loop body's tracked locals (`emit_loop_exit_cleanup`). An early `return` also releases active foreach variables and owned foreach lists.
+- `{ }`/`[ ]` literals release their owned values after construction.
+- Conversions release owned arguments: `gen_str_arg` (`strada_to_str_take`) and `gen_conv_arg` (`strada_to_int`/`_num`/`_bool`).
+- Each owned computed argument of a builtin is evaluated into a temporary and released after the call. This wrapper is at the top of `NODE_CALL` in `gen_expression`.
+- `sb_append` releases an owned text argument.
+- Void builtins (`delete`, `sb_*`) yield `strada_undef_static()`.
+- About 0.6 MB still leaks per Lexer.strada compile, in small AST-walker sites.
 
 ### The `strada` Driver: Thin Shim + Compiled Driver (2026-06)
 

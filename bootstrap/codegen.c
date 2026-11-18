@@ -29,14 +29,131 @@ static void emit_indent(CodeGen *cg);
 static void gen_function(CodeGen *cg, ASTNode *func);
 static void gen_statement(CodeGen *cg, ASTNode *stmt);
 static void gen_expression(CodeGen *cg, ASTNode *expr);
+static CodeGen *g_owned_cg = NULL;   /* the program's function registry, for expr_is_owned */
+static const char *bootstrap_builtin_names[] = {
+    "array_from_ref",
+    "backtrace",
+    "bytes",
+    "caller",
+    "capture",
+    "cast_int",
+    "cast_num",
+    "cast_str",
+    "char_at",
+    "chomp",
+    "chop",
+    "chr",
+    "close",
+    "close_fd",
+    "cstruct_get_double",
+    "cstruct_get_int",
+    "cstruct_get_string",
+    "cstruct_new",
+    "cstruct_ptr",
+    "cstruct_set_double",
+    "cstruct_set_int",
+    "cstruct_set_string",
+    "defined",
+    "delete",
+    "deref",
+    "deref_array",
+    "deref_hash",
+    "die",
+    "dumper",
+    "exists",
+    "exit",
+    "free",
+    "fwrite",
+    "getenv",
+    "getpid",
+    "hash_from_ref",
+    "hash_get",
+    "hash_new",
+    "hash_set",
+    "hires_time",
+    "index",
+    "is_ref",
+    "join",
+    "keys",
+    "lc",
+    "lcfirst",
+    "length",
+    "lower",
+    "ltrim",
+    "match",
+    "open",
+    "open_fd",
+    "ord",
+    "pop",
+    "print",
+    "printf",
+    "push",
+    "readline",
+    "refcount",
+    "refto",
+    "reftype",
+    "repeat",
+    "replace",
+    "replace_all",
+    "reverse",
+    "rindex",
+    "rtrim",
+    "say",
+    "sb_append",
+    "sb_clear",
+    "sb_free",
+    "sb_length",
+    "sb_new",
+    "sb_to_string",
+    "scalar",
+    "shift",
+    "size",
+    "slurp",
+    "socket_accept",
+    "socket_client",
+    "socket_close",
+    "socket_recv",
+    "socket_send",
+    "socket_server",
+    "spew",
+    "split",
+    "sprintf",
+    "stacktrace",
+    "substr",
+    "substr_bytes",
+    "trim",
+    "typeof",
+    "uc",
+    "ucfirst",
+    "undef",
+    "unlink",
+    "unshift",
+    "upper",
+    "values",
+    "warn",
+    "write_fd",
+    NULL
+};
+/* a call the bootstrap emits as a builtin, not as a call to the program's
+ * function of that name */
+static int is_bootstrap_builtin(const char *n) {
+    for (int i = 0; bootstrap_builtin_names[i]; i++)
+        if (strcmp(bootstrap_builtin_names[i], n) == 0) return 1;
+    return 0;
+}
+
 
 CodeGen* codegen_new(FILE *output) {
     CodeGen *cg = malloc(sizeof(CodeGen));
+    g_owned_cg = cg;
     cg->output = output;
     cg->indent_level = 0;
     cg->current_func_is_extern = 0;
     cg->try_depth = 0;
     cg->loop_try_depth = 0;
+    cg->loop_scope_depth = -1;
+    cg->loop_fe_var = NULL;
+    cg->fe_depth = 0;
     
     // Initialize package support
     cg->current_package = NULL;
@@ -251,7 +368,10 @@ static void emit_indent(CodeGen *cg) {
 
 /* Forward declarations */
 static int expr_is_owned(ASTNode *expr);
+static int lookup_function(CodeGen *cg, const char *name, int *param_count, int *min_args);
+static int lookup_function_is_void(CodeGen *cg, const char *name);
 static void gen_str_arg(CodeGen *cg, ASTNode *expr);
+static void gen_conv_arg(CodeGen *cg, const char *fn, const char *ctype, ASTNode *expr);
 static void gen_expression(CodeGen *cg, ASTNode *expr);
 
 /* Emit an expression as a numeric value, optimizing literal ints/nums
@@ -267,9 +387,8 @@ static void gen_as_num(CodeGen *cg, ASTNode *expr) {
         gen_expression(cg, expr);
         emit(cg, "; double __nd = strada_to_num(__nv); strada_decref(__nv); __nd; })");
     } else {
-        emit(cg, "strada_to_num(");
-        gen_expression(cg, expr);
-        emit(cg, ")");
+        gen_conv_arg(cg, "strada_to_num", "double", expr);
+        emit(cg, "");
     }
 }
 
@@ -341,6 +460,20 @@ static void gen_str_arg(CodeGen *cg, ASTNode *expr) {
     emit(cg, expr_is_owned(expr) ? "strada_to_str_take(" : "strada_to_str(");
     gen_expression(cg, expr);
     emit(cg, ")");
+}
+
+/* FN(ARG) (strada_to_int / _num / _bool) for an argument: an owned
+ * temporary is released after conversion (it leaked) */
+static void gen_conv_arg(CodeGen *cg, const char *fn, const char *ctype, ASTNode *expr) {
+    if (expr_is_owned(expr) && expr->type != NODE_INT_LITERAL && expr->type != NODE_NUM_LITERAL) {
+        emit(cg, "({ StradaValue *__cv = ");
+        gen_expression(cg, expr);
+        emit(cg, "; %s __cr = %s(__cv); strada_decref(__cv); __cr; })", ctype, fn);
+    } else {
+        emit(cg, "%s(", fn);
+        gen_expression(cg, expr);
+        emit(cg, ")");
+    }
 }
 
 /* Emit a string comparison with proper cleanup of strada_to_str() allocations */
@@ -425,12 +558,29 @@ static int expr_is_owned(ASTNode *expr) {
             /* builtins whose generated code returns a fresh value (a user
              * function's result may be borrowed, so calls default to not owned) */
             const char *cn = expr->data.call.name;
-            if (expr->data.call.package_name || !cn) return 0;
+            const char *cpk = expr->data.call.package_name;
+            if (!cn) return 0;
+            /* sys::/core:: builtins dispatch by name like the bare ones */
+            if (cpk && strcmp(cpk, "sys") != 0 && strcmp(cpk, "core") != 0) return 0;
             if (strcmp(cn, "size") == 0 || strcmp(cn, "scalar") == 0 || strcmp(cn, "length") == 0 ||
                 strcmp(cn, "substr") == 0 || strcmp(cn, "join") == 0 || strcmp(cn, "sprintf") == 0 ||
                 strcmp(cn, "reftype") == 0 || strcmp(cn, "uc") == 0 || strcmp(cn, "lc") == 0 ||
                 strcmp(cn, "index") == 0 || strcmp(cn, "keys") == 0 || strcmp(cn, "values") == 0)
                 return 1;
+            {
+                /* more builtins whose generated code returns a fresh value
+                 * (or, for shift/pop, hands over the removed element) */
+                static const char *fresh[] = { "bytes", "chr", "exists", "is_ref", "lcfirst", "lower", "ord", "refcount", "repeat", "replace", "replace_all", "reverse", "rindex", "rtrim", "ltrim", "trim", "split", "typeof", "ucfirst", "upper", "match", "capture", "slurp", "sb_new", "refto", "char_at", "substr_bytes", "sb_to_string", "sb_length", "cast_int", "cast_num", "cast_str", "defined", "getenv", "hires_time", "readline", "shift", "pop", "array_from_ref", "hash_from_ref", NULL };
+                for (int fi = 0; fresh[fi]; fi++)
+                    if (strcmp(cn, fresh[fi]) == 0) return 1;
+            }
+            /* a non-void function of this program: every return hands the
+             * caller its own reference (see NODE_RETURN_STMT) */
+            if (g_owned_cg && !cpk && !is_bootstrap_builtin(cn)) {
+                int pc = 0, ma = 0;
+                if (lookup_function(g_owned_cg, cn, &pc, &ma) && !lookup_function_is_void(g_owned_cg, cn))
+                    return 1;
+            }
             return 0;
         }
         default:
@@ -445,9 +595,8 @@ static void gen_condition(CodeGen *cg, ASTNode *expr) {
         gen_expression(cg, expr);
         emit(cg, "; int __b = strada_to_bool(__cond); strada_decref(__cond); __b; })");
     } else {
-        emit(cg, "strada_to_bool(");
-        gen_expression(cg, expr);
-        emit(cg, ")");
+        gen_conv_arg(cg, "strada_to_bool", "int", expr);
+        emit(cg, "");
     }
 }
 
@@ -582,6 +731,36 @@ static void scope_emit_all_cleanup(CodeGen *cg, const char *skip_var) {
             emit_indent(cg);
             emit(cg, "strada_decref(%s);\n", cg->scope_stack.names[d][i]);
         }
+    }
+    /* return from inside foreach loops: their variables' references and
+     * fresh lists */
+    for (int f = cg->fe_depth - 1; f >= 0; f--) {
+        if (!(skip_var && strcmp(cg->fe_vars[f], skip_var) == 0)) {
+            emit_indent(cg);
+            emit(cg, "strada_decref(%s);\n", cg->fe_vars[f]);
+        }
+        if (cg->fe_arr_ids[f] >= 0) {
+            emit_indent(cg);
+            emit(cg, "strada_decref(__fe_arr_%d);\n", cg->fe_arr_ids[f]);
+        }
+    }
+}
+
+/* next/last leave the loop body: release the tracked locals of every scope
+ * from the loop body inward, and a foreach variable's reference (C
+ * continue/break skipped them, so each next/last leaked them) */
+static void emit_loop_exit_cleanup(CodeGen *cg) {
+    if (cg->current_func_is_extern || cg->loop_scope_depth < 0) return;
+    for (int d = cg->scope_stack.depth - 1; d >= cg->loop_scope_depth; d--) {
+        for (int i = cg->scope_stack.counts[d] - 1; i >= 0; i--) {
+            if (cg->scope_stack.is_struct[d][i]) continue;
+            emit_indent(cg);
+            emit(cg, "strada_decref(%s);\n", cg->scope_stack.names[d][i]);
+        }
+    }
+    if (cg->loop_fe_var) {
+        emit_indent(cg);
+        emit(cg, "strada_decref(%s);\n", cg->loop_fe_var);
     }
 }
 
@@ -1055,6 +1234,9 @@ static void gen_function(CodeGen *cg, ASTNode *func) {
     cg->current_func_is_main = is_main;      // Track if this is main
     cg->try_depth = 0;
     cg->loop_try_depth = 0;
+    cg->loop_scope_depth = -1;
+    cg->loop_fe_var = NULL;
+    cg->fe_depth = 0;
 
     // Reset and push function-level scope for variable tracking
     scope_reset(cg);
@@ -1200,6 +1382,20 @@ static void gen_function(CodeGen *cg, ASTNode *func) {
         }
     }
     
+    /* Parameters own their values like locals: a reference is taken on
+     * entry and released on exit, so `$param = $other_local` cannot leave
+     * the parameter pointing at a value the local releases */
+    if (!is_extern && strcmp(func->data.function.name, "main") != 0) {
+        for (int i = 0; i < func->data.function.param_count; i++) {
+            ASTNode *param = func->data.function.params[i];
+            if (param->data.param.param_type == TYPE_STRUCT && param->data.param.struct_name) continue;
+            if (strcmp(type_to_c(param->data.param.param_type), "StradaValue*") != 0) continue;
+            emit_indent(cg);
+            emit(cg, "strada_incref(%s);\n", param->data.param.name);
+            scope_track_var(cg, param->data.param.name, 0);
+        }
+    }
+
     // Generate body
     ASTNode *body = func->data.function.body;
     for (int i = 0; i < body->data.block.statement_count; i++) {
@@ -1209,6 +1405,14 @@ static void gen_function(CodeGen *cg, ASTNode *func) {
     // Pop function scope (emits cleanup for void/fall-through paths)
     if (!is_extern) {
         scope_pop_emit(cg);
+        /* a value function whose end is reachable returns a fresh undef:
+         * callers own (and release) every result, so falling off the end
+         * must not hand back whatever was in the return register */
+        if (!cg->current_func_is_main && func->data.function.return_type != TYPE_VOID &&
+            strcmp(type_to_c(func->data.function.return_type), "StradaValue*") == 0) {
+            emit_indent(cg);
+            emit(cg, "return strada_new_undef();\n");
+        }
     }
 
     cg->indent_level--;
@@ -1335,7 +1539,11 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
         
         case NODE_WHILE_STMT: {
             int saved_ltd = cg->loop_try_depth;
+            int saved_lsd = cg->loop_scope_depth;
+            const char *saved_lfv = cg->loop_fe_var;
             cg->loop_try_depth = cg->try_depth;
+            cg->loop_scope_depth = cg->scope_stack.depth;
+            cg->loop_fe_var = NULL;
             emit_indent(cg);
             emit(cg, "while (");
             gen_condition(cg, stmt->data.while_stmt.condition);
@@ -1343,12 +1551,18 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             gen_block(cg, stmt->data.while_stmt.body);
             emit(cg, "\n");
             cg->loop_try_depth = saved_ltd;
+            cg->loop_scope_depth = saved_lsd;
+            cg->loop_fe_var = saved_lfv;
             break;
         }
             
         case NODE_FOR_STMT: {
             int saved_ltd = cg->loop_try_depth;
+            int saved_lsd = cg->loop_scope_depth;
+            const char *saved_lfv = cg->loop_fe_var;
             cg->loop_try_depth = cg->try_depth;
+            cg->loop_scope_depth = cg->scope_stack.depth;
+            cg->loop_fe_var = NULL;
             emit_indent(cg);
             emit(cg, "for (");
             
@@ -1383,6 +1597,8 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             gen_block(cg, stmt->data.for_stmt.body);
             emit(cg, "\n");
             cg->loop_try_depth = saved_ltd;
+            cg->loop_scope_depth = saved_lsd;
+            cg->loop_fe_var = saved_lfv;
             break;
         }
 
@@ -1395,6 +1611,8 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             static int foreach_id = 0;
             int fid = foreach_id++;
             int saved_ltd = cg->loop_try_depth;
+            int saved_lsd = cg->loop_scope_depth;
+            const char *saved_lfv = cg->loop_fe_var;
             cg->loop_try_depth = cg->try_depth;
             emit_indent(cg);
             emit(cg, "{ StradaValue *__fe_arr_%d = ", fid);
@@ -1412,6 +1630,15 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             // Generate body statements inline (not via gen_block to avoid extra
             // braces), in their own scope: the body's owned locals are released
             // at the end of each iteration, inside the C block that declares them
+            cg->loop_scope_depth = cg->scope_stack.depth;
+            cg->loop_fe_var = stmt->data.foreach_stmt.var_name;
+            int fe_pushed = 0;
+            if (cg->fe_depth < 256) {
+                cg->fe_vars[cg->fe_depth] = stmt->data.foreach_stmt.var_name;
+                cg->fe_arr_ids[cg->fe_depth] = expr_is_owned(stmt->data.foreach_stmt.array) ? fid : -1;
+                cg->fe_depth++;
+                fe_pushed = 1;
+            }
             scope_push(cg);
             if (stmt->data.foreach_stmt.body && stmt->data.foreach_stmt.body->type == NODE_BLOCK) {
                 for (int i = 0; i < stmt->data.foreach_stmt.body->data.block.statement_count; i++) {
@@ -1419,6 +1646,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 }
             }
             scope_pop_emit(cg);
+            if (fe_pushed) cg->fe_depth--;
             emit_indent(cg);
             emit(cg, "strada_decref(%s);\n", stmt->data.foreach_stmt.var_name);
             cg->indent_level--;
@@ -1429,6 +1657,8 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             else
                 emit(cg, "} }\n");
             cg->loop_try_depth = saved_ltd;
+            cg->loop_scope_depth = saved_lsd;
+            cg->loop_fe_var = saved_lfv;
             break;
         }
 
@@ -1452,7 +1682,21 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                     if (stmt->data.return_stmt.value->type == NODE_VARIABLE) {
                         skip_var = stmt->data.return_stmt.value->data.variable.name;
                     }
+                    /* the caller always receives its own reference: a tracked
+                     * local (or foreach variable) hands its reference over;
+                     * anything borrowed (a parameter, a global, an element)
+                     * is incref'd */
+                    int skip_owned = 0;
                     if (skip_var) {
+                        skip_owned = scope_is_tracked(cg, skip_var);
+                        for (int f = 0; f < cg->fe_depth; f++)
+                            if (strcmp(cg->fe_vars[f], skip_var) == 0) skip_owned = 1;
+                    }
+                    if (skip_var) {
+                        if (!skip_owned) {
+                            emit_indent(cg);
+                            emit(cg, "strada_incref(%s);\n", skip_var);
+                        }
                         scope_emit_all_cleanup(cg, skip_var);
                         emit_try_pops(cg, cg->try_depth);
                         emit_indent(cg);
@@ -1462,6 +1706,10 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                         emit(cg, "{ StradaValue *__retval = ");
                         gen_expression(cg, stmt->data.return_stmt.value);
                         emit(cg, ";\n");
+                        if (!expr_is_owned(stmt->data.return_stmt.value)) {
+                            emit_indent(cg);
+                            emit(cg, "strada_incref(__retval);\n");
+                        }
                         cg->indent_level++;
                         scope_emit_all_cleanup(cg, NULL);
                         emit_try_pops(cg, cg->try_depth);
@@ -1481,8 +1729,16 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
             
         case NODE_EXPR_STMT:
             emit_indent(cg);
-            gen_expression(cg, stmt->data.expr_stmt.expr);
-            emit(cg, ";\n");
+            if (stmt->data.expr_stmt.expr && stmt->data.expr_stmt.expr->type == NODE_CALL &&
+                expr_is_owned(stmt->data.expr_stmt.expr)) {
+                /* a call's result that nothing uses */
+                emit(cg, "strada_decref(");
+                gen_expression(cg, stmt->data.expr_stmt.expr);
+                emit(cg, ");\n");
+            } else {
+                gen_expression(cg, stmt->data.expr_stmt.expr);
+                emit(cg, ";\n");
+            }
             break;
             
         case NODE_BLOCK:
@@ -1497,6 +1753,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 emit(cg, "{\n");
                 cg->indent_level++;
                 emit_try_pops(cg, cg->try_depth - cg->loop_try_depth);
+                emit_loop_exit_cleanup(cg);
                 emit_indent(cg);
                 emit(cg, "break;\n");
                 cg->indent_level--;
@@ -1504,7 +1761,14 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 emit(cg, "}\n");
             } else {
                 emit_indent(cg);
+                emit(cg, "{\n");
+                cg->indent_level++;
+                emit_loop_exit_cleanup(cg);
+                emit_indent(cg);
                 emit(cg, "break;\n");
+                cg->indent_level--;
+                emit_indent(cg);
+                emit(cg, "}\n");
             }
             break;
             
@@ -1514,6 +1778,7 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 emit(cg, "{\n");
                 cg->indent_level++;
                 emit_try_pops(cg, cg->try_depth - cg->loop_try_depth);
+                emit_loop_exit_cleanup(cg);
                 emit_indent(cg);
                 emit(cg, "continue;\n");
                 cg->indent_level--;
@@ -1521,7 +1786,14 @@ static void gen_statement(CodeGen *cg, ASTNode *stmt) {
                 emit(cg, "}\n");
             } else {
                 emit_indent(cg);
+                emit(cg, "{\n");
+                cg->indent_level++;
+                emit_loop_exit_cleanup(cg);
+                emit_indent(cg);
                 emit(cg, "continue;\n");
+                cg->indent_level--;
+                emit_indent(cg);
+                emit(cg, "}\n");
             }
             break;
 
@@ -1856,80 +2128,80 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                             // For floating point fields
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = strada_to_num(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = ");
+                            gen_conv_arg(cg, "strada_to_num", "double", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_I64:
                         case TYPE_LONG:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (int64_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (int64_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_U64:
                         case TYPE_ULONG:
                         case TYPE_SIZE:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (uint64_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (uint64_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_PTR:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (void*)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (void*)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_BOOL:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (bool)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (bool)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_CHAR:
                         case TYPE_I8:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (int8_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (int8_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_UCHAR:
                         case TYPE_U8:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (uint8_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (uint8_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_SHORT:
                         case TYPE_I16:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (int16_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (int16_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_USHORT:
                         case TYPE_U16:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (uint16_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (uint16_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_UINT:
                         case TYPE_U32:
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = (uint32_t)strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = (uint32_t)");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                         case TYPE_FUNC:
                             // Function pointer assignment - direct assignment
@@ -1941,9 +2213,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                         default:  // TYPE_INT, TYPE_I32
                             gen_expression(cg, ma->data.member_access.object);
                             emit(cg, "->%s", ma->data.member_access.field_name);
-                            emit(cg, " = strada_to_int(");
-                            gen_expression(cg, expr->data.assign.value);
-                            emit(cg, ")");
+                            emit(cg, " = ");
+                            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.assign.value);
+                            emit(cg, "");
                             break;
                     }
                 }
@@ -2045,9 +2317,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                         gen_expression(cg, cont);
                         emit(cg, "->value.av");
                     }
-                    emit(cg, ", strada_to_int(");
-                    gen_expression(cg, idx_node);
-                    emit(cg, "), ");
+                    emit(cg, ", ");
+                    gen_conv_arg(cg, "strada_to_int", "int64_t", idx_node);
+                    emit(cg, ", ");
                     gen_expression(cg, expr->data.assign.value);
                     emit(cg, ")");
                 } else {
@@ -2140,6 +2412,62 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 strcmp(expr->data.call.package_name, "core") == 0) {
                 free(expr->data.call.package_name);
                 expr->data.call.package_name = strdup("sys");
+            }
+            /* A builtin borrows its arguments, so an owned computed argument
+             * (an operator result, a fresh call result) leaked. Evaluate each
+             * such argument into a temporary, let the builtin see a plain
+             * variable, and release the temporary afterwards. Literals and
+             * %{}/@{} derefs keep their special emission. */
+            {
+                const char *bpk = expr->data.call.package_name;
+                int is_bi = bpk ? (strcmp(bpk, "sys") == 0) : is_bootstrap_builtin(expr->data.call.name);
+                int nwrap = 0;
+                if (is_bi) {
+                    for (int i = 0; i < expr->data.call.arg_count; i++) {
+                        ASTNode *ba = expr->data.call.args[i];
+                        if (ba && expr_is_owned(ba) && ba->type != NODE_INT_LITERAL && ba->type != NODE_NUM_LITERAL &&
+                            ba->type != NODE_STR_LITERAL && ba->type != NODE_DEREF_TO_HASH && ba->type != NODE_DEREF_TO_ARRAY)
+                            nwrap++;
+                    }
+                }
+                if (nwrap > 0) {
+                    static int bw_id = 0;
+                    int bid = bw_id++;
+                    int n = expr->data.call.arg_count;
+                    ASTNode **saved = malloc(sizeof(ASTNode*) * (size_t)n);
+                    emit(cg, "({ ");
+                    for (int i = 0; i < n; i++) {
+                        ASTNode *ba = expr->data.call.args[i];
+                        saved[i] = ba;
+                        if (ba && expr_is_owned(ba) && ba->type != NODE_INT_LITERAL && ba->type != NODE_NUM_LITERAL &&
+                            ba->type != NODE_STR_LITERAL && ba->type != NODE_DEREF_TO_HASH && ba->type != NODE_DEREF_TO_ARRAY) {
+                            char vn[48];
+                            snprintf(vn, sizeof(vn), "__bw%d_%d", bid, i);
+                            emit(cg, "StradaValue *%s = ", vn);
+                            gen_expression(cg, ba);
+                            emit(cg, "; ");
+                            expr->data.call.args[i] = ast_new_variable(vn, '$');
+                        }
+                    }
+                    const char *bn = expr->data.call.name;
+                    int bvoid = (strcmp(bn, "say") == 0 || strcmp(bn, "print") == 0 || strcmp(bn, "printf") == 0 ||
+                                 strcmp(bn, "die") == 0 || strcmp(bn, "warn") == 0 || strcmp(bn, "spew") == 0 ||
+                                 strcmp(bn, "exit") == 0 || strcmp(bn, "free") == 0);
+                    if (bvoid) emit(cg, "(void)(");
+                    else emit(cg, "StradaValue *__bwr%d = (", bid);
+                    gen_expression(cg, expr);
+                    emit(cg, "); ");
+                    for (int i = 0; i < n; i++) {
+                        if (expr->data.call.args[i] != saved[i]) {
+                            emit(cg, "strada_decref(__bw%d_%d); ", bid, i);
+                            expr->data.call.args[i] = saved[i];
+                        }
+                    }
+                    if (bvoid) emit(cg, "strada_undef_static(); })");
+                    else emit(cg, "__bwr%d; })", bid);
+                    free(saved);
+                    break;
+                }
             }
             // Built-in functions
             if (strcmp(expr->data.call.name, "say") == 0) {
@@ -2356,13 +2684,13 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                     gen_str_arg(cg, ha->data.subscript.index);
                     emit(cg, "; strada_hash_delete(");
                     gen_expression(cg, ha->data.subscript.array);
-                    emit(cg, "->value.hv, __k); free(__k); strada_new_undef(); })");
+                    emit(cg, "->value.hv, __k); free(__k); strada_undef_static(); })");
                 } else {
                     emit(cg, "({ char *__k = ");
                     gen_str_arg(cg, expr->data.call.args[1]);
                     emit(cg, "; strada_hash_delete(");
                     gen_expression(cg, expr->data.call.args[0]);
-                    emit(cg, "->value.hv, __k); free(__k); strada_new_undef(); })");
+                    emit(cg, "->value.hv, __k); free(__k); strada_undef_static(); })");
                 }
             } else if (strcmp(expr->data.call.name, "char_at") == 0) {
                 /* Fast char access by byte index - returns int char code */
@@ -2374,13 +2702,12 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "substr") == 0) {
                 emit(cg, "strada_substr(");
                 gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "), ");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[1]);
+                emit(cg, ", ");
                 if (expr->data.call.arg_count > 2) {
-                    emit(cg, "strada_to_int(");
-                    gen_expression(cg, expr->data.call.args[2]);
-                    emit(cg, ")");
+                    gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                    emit(cg, "");
                 } else {
                     emit(cg, "-1");
                 }
@@ -2388,13 +2715,12 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "substr_bytes") == 0) {
                 emit(cg, "strada_substr_bytes(");
                 gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "), ");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[1]);
+                emit(cg, ", ");
                 if (expr->data.call.arg_count > 2) {
-                    emit(cg, "strada_to_int(");
-                    gen_expression(cg, expr->data.call.args[2]);
-                    emit(cg, ")");
+                    gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                    emit(cg, "");
                 } else {
                     emit(cg, "-1");
                 }
@@ -2434,13 +2760,13 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "repeat") == 0) {
                 emit(cg, "({ char *__s = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; StradaValue *__r = strada_new_str_take(strada_repeat(__s, strada_to_int(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "))); free(__s); __r; })");
+                emit(cg, "; StradaValue *__r = strada_new_str_take(strada_repeat(__s, ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[1]);
+                emit(cg, ")); free(__s); __r; })");
             } else if (strcmp(expr->data.call.name, "chr") == 0) {
-                emit(cg, "strada_new_str_take(strada_chr(strada_to_int(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, ")))");
+                emit(cg, "strada_new_str_take(strada_chr(");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[0]);
+                emit(cg, "))");
             } else if (strcmp(expr->data.call.name, "ord") == 0) {
                 if (expr->data.call.arg_count == 1 &&
                     expr->data.call.args[0]->type == NODE_STR_LITERAL &&
@@ -2465,15 +2791,15 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "index") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__r = strada_new_int(strada_index(__s0, __s1)); free(__s0); free(__s1); __r; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__r = strada_new_int(strada_index(__s0, __s1)); free(__s0); free(__s1); __r; })");
             } else if (strcmp(expr->data.call.name, "rindex") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__r = strada_new_int(strada_rindex(__s0, __s1)); free(__s0); free(__s1); __r; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__r = strada_new_int(strada_rindex(__s0, __s1)); free(__s0); free(__s1); __r; })");
             } else if (strcmp(expr->data.call.name, "join") == 0) {
                 emit(cg, "({ char *__s = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
@@ -2525,9 +2851,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, "))");
             } else if (strcmp(expr->data.call.name, "exit") == 0) {
-                emit(cg, "strada_exit(strada_to_int(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "))");
+                emit(cg, "strada_exit(");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[0]);
+                emit(cg, ")");
             } else if (strcmp(expr->data.call.name, "free") == 0) {
                 emit(cg, "strada_free(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2547,9 +2873,8 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "caller") == 0) {
                 emit(cg, "strada_new_str(strada_caller(");
                 if (expr->data.call.arg_count > 0) {
-                    emit(cg, "strada_to_int(");
-                    gen_expression(cg, expr->data.call.args[0]);
-                    emit(cg, ")");
+                    gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[0]);
+                    emit(cg, "");
                 } else {
                     emit(cg, "1");
                 }
@@ -2557,9 +2882,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "open") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__r = strada_open(__s0, __s1); free(__s0); free(__s1); __r; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__r = strada_open(__s0, __s1); free(__s0); free(__s1); __r; })");
             } else if (strcmp(expr->data.call.name, "close") == 0) {
                 emit(cg, "strada_close(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2621,9 +2946,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "spew") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); strada_spew(__s0, __s1); free(__s0); free(__s1); })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; strada_spew(__s0, __s1); free(__s0); free(__s1); })");
             } else if (strcmp(expr->data.call.name, "sb_new") == 0) {
                 if (expr->data.call.arg_count > 0) {
                     emit(cg, "strada_sb_new_cap(");
@@ -2633,11 +2958,20 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                     emit(cg, "strada_sb_new()");
                 }
             } else if (strcmp(expr->data.call.name, "sb_append") == 0) {
-                emit(cg, "(strada_sb_append(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, ", ");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "), strada_new_undef())");
+                if (expr_is_owned(expr->data.call.args[1])) {
+                    /* an owned text (substr_bytes, a concat) is released */
+                    emit(cg, "({ StradaValue *__sbt = ");
+                    gen_expression(cg, expr->data.call.args[1]);
+                    emit(cg, "; strada_sb_append(");
+                    gen_expression(cg, expr->data.call.args[0]);
+                    emit(cg, ", __sbt); strada_decref(__sbt); strada_undef_static(); })");
+                } else {
+                    emit(cg, "(strada_sb_append(");
+                    gen_expression(cg, expr->data.call.args[0]);
+                    emit(cg, ", ");
+                    gen_expression(cg, expr->data.call.args[1]);
+                    emit(cg, "), strada_undef_static())");
+                }
             } else if (strcmp(expr->data.call.name, "sb_to_string") == 0) {
                 emit(cg, "strada_sb_to_string(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2649,55 +2983,55 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "sb_clear") == 0) {
                 emit(cg, "(strada_sb_clear(");
                 gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "), strada_new_undef())");
+                emit(cg, "), strada_undef_static())");
             } else if (strcmp(expr->data.call.name, "sb_free") == 0) {
                 emit(cg, "(strada_sb_free(");
                 gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "), strada_new_undef())");
+                emit(cg, "), strada_undef_static())");
             } else if (strcmp(expr->data.call.name, "match") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__r = strada_new_int(strada_regex_match(__s0, __s1)); free(__s0); free(__s1); __r; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__r = strada_new_int(strada_regex_match(__s0, __s1)); free(__s0); free(__s1); __r; })");
             } else if (strcmp(expr->data.call.name, "replace") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); char *__s2 = ");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; char *__s2 = ");
                 gen_str_arg(cg, expr->data.call.args[2]);
                 emit(cg, "; StradaValue *__r = strada_new_str_take(strada_regex_replace(__s0, __s1, __s2)); free(__s0); free(__s1); free(__s2); __r; })");
             } else if (strcmp(expr->data.call.name, "replace_all") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); char *__s2 = ");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; char *__s2 = ");
                 gen_str_arg(cg, expr->data.call.args[2]);
                 emit(cg, "; StradaValue *__r = strada_new_str_take(strada_regex_replace_all(__s0, __s1, __s2)); free(__s0); free(__s1); free(__s2); __r; })");
             } else if (strcmp(expr->data.call.name, "split") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__sv = strada_new_array(); __sv->value.av = strada_regex_split(__s0, __s1); free(__s0); free(__s1); __sv; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__sv = strada_new_array(); __sv->value.av = strada_regex_split(__s0, __s1); free(__s0); free(__s1); __sv; })");
             } else if (strcmp(expr->data.call.name, "capture") == 0) {
                 emit(cg, "({ char *__s0 = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; char *__s1 = strada_to_str(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "); StradaValue *__sv = strada_new_array(); __sv->value.av = strada_regex_capture(__s0, __s1); free(__s0); free(__s1); __sv; })");
+                emit(cg, "; char *__s1 = ");
+                gen_str_arg(cg, expr->data.call.args[1]);
+                emit(cg, "; StradaValue *__sv = strada_new_array(); __sv->value.av = strada_regex_capture(__s0, __s1); free(__s0); free(__s1); __sv; })");
             } else if (strcmp(expr->data.call.name, "socket_server") == 0) {
-                emit(cg, "strada_socket_server(strada_to_int(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "))");
+                emit(cg, "strada_socket_server(");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[0]);
+                emit(cg, ")");
             } else if (strcmp(expr->data.call.name, "socket_client") == 0) {
                 emit(cg, "({ char *__s = ");
                 gen_str_arg(cg, expr->data.call.args[0]);
-                emit(cg, "; StradaValue *__r = strada_socket_client(__s, strada_to_int(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, ")); free(__s); __r; })");
+                emit(cg, "; StradaValue *__r = strada_socket_client(__s, ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[1]);
+                emit(cg, "); free(__s); __r; })");
             } else if (strcmp(expr->data.call.name, "socket_accept") == 0) {
                 emit(cg, "strada_socket_accept(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2711,17 +3045,17 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             } else if (strcmp(expr->data.call.name, "socket_recv") == 0) {
                 emit(cg, "strada_socket_recv(");
                 gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[1]);
-                emit(cg, "))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[1]);
+                emit(cg, ")");
             } else if (strcmp(expr->data.call.name, "socket_close") == 0) {
                 emit(cg, "strada_socket_close(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ")");
             } else if (strcmp(expr->data.call.name, "cstruct_new") == 0) {
-                emit(cg, "strada_cstruct_new(\"\", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[0]);
-                emit(cg, "))");
+                emit(cg, "strada_cstruct_new(\"\", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[0]);
+                emit(cg, ")");
             } else if (strcmp(expr->data.call.name, "cstruct_ptr") == 0) {
                 emit(cg, "strada_cpointer_new(strada_cstruct_ptr(");
                 gen_expression(cg, expr->data.call.args[0]);
@@ -2731,45 +3065,45 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), &(int){strada_to_int(");
-                gen_expression(cg, expr->data.call.args[3]);
-                emit(cg, ")}, sizeof(int))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", &(int){");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[3]);
+                emit(cg, "}, sizeof(int))");
             } else if (strcmp(expr->data.call.name, "cstruct_get_int") == 0) {
                 emit(cg, "strada_new_int(*(int*)strada_cstruct_get_field(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), sizeof(int)))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", sizeof(int)))");
             } else if (strcmp(expr->data.call.name, "cstruct_set_double") == 0) {
                 emit(cg, "strada_cstruct_set_field(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), &(double){strada_to_num(");
-                gen_expression(cg, expr->data.call.args[3]);
-                emit(cg, ")}, sizeof(double))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", &(double){");
+                gen_conv_arg(cg, "strada_to_num", "double", expr->data.call.args[3]);
+                emit(cg, "}, sizeof(double))");
             } else if (strcmp(expr->data.call.name, "cstruct_get_double") == 0) {
                 emit(cg, "strada_new_num(*(double*)strada_cstruct_get_field(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), sizeof(double)))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", sizeof(double)))");
             } else if (strcmp(expr->data.call.name, "cstruct_set_string") == 0) {
                 emit(cg, "strada_cstruct_set_field(");
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), (void*)");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", (void*)");
                 gen_str_arg(cg, expr->data.call.args[3]);
                 emit(cg, ", 64)");
             } else if (strcmp(expr->data.call.name, "cstruct_get_string") == 0) {
@@ -2777,9 +3111,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 gen_expression(cg, expr->data.call.args[0]);
                 emit(cg, ", ");
                 gen_str_arg(cg, expr->data.call.args[1]);
-                emit(cg, ", strada_to_int(");
-                gen_expression(cg, expr->data.call.args[2]);
-                emit(cg, "), 64))");
+                emit(cg, ", ");
+                gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.call.args[2]);
+                emit(cg, ", 64))");
             } else {
                 // User-defined function (possibly from another package)
                 int param_count = 0;
@@ -2878,9 +3212,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
         case NODE_SUBSCRIPT:
             emit(cg, "strada_array_get(");
             gen_expression(cg, expr->data.subscript.array);
-            emit(cg, "->value.av, strada_to_int(");
-            gen_expression(cg, expr->data.subscript.index);
-            emit(cg, "))");
+            emit(cg, "->value.av, ");
+            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.subscript.index);
+            emit(cg, ")");
             break;
         
         case NODE_HASH_ACCESS:
@@ -2906,25 +3240,50 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             emit(cg, ", '%c')", expr->data.ref_expr.ref_type);
             break;
         
-        case NODE_ANON_HASH: {
-            // { key => value, ... } - anonymous hash reference
-            emit(cg, "strada_anon_hash(%d", expr->data.anon_hash.pair_count);
-            for (int i = 0; i < expr->data.anon_hash.pair_count; i++) {
-                emit(cg, ", \"%s\", ", expr->data.anon_hash.keys[i]);
-                gen_expression(cg, expr->data.anon_hash.values[i]);
-            }
-            emit(cg, ")");
-            break;
-        }
-        
+        case NODE_ANON_HASH:
         case NODE_ANON_ARRAY: {
-            // [ elem, ... ] - anonymous array reference
-            emit(cg, "strada_anon_array(%d", expr->data.anon_array.element_count);
-            for (int i = 0; i < expr->data.anon_array.element_count; i++) {
-                emit(cg, ", ");
-                gen_expression(cg, expr->data.anon_array.elements[i]);
+            /* { key => value, ... } / [ elem, ... ]. The constructors take
+             * their own reference to each value, so owned values (nested
+             * { } / [ ], literals, call results) are captured and released
+             * after the call; they leaked. */
+            static int anon_id = 0;
+            int is_h = (expr->type == NODE_ANON_HASH);
+            int n = is_h ? expr->data.anon_hash.pair_count : expr->data.anon_array.element_count;
+            int aid = anon_id++;
+            int any_owned = 0;
+            for (int i = 0; i < n; i++) {
+                ASTNode *v = is_h ? expr->data.anon_hash.values[i] : expr->data.anon_array.elements[i];
+                if (expr_is_owned(v)) any_owned = 1;
+            }
+            if (any_owned) {
+                emit(cg, "({ ");
+                for (int i = 0; i < n; i++) {
+                    ASTNode *v = is_h ? expr->data.anon_hash.values[i] : expr->data.anon_array.elements[i];
+                    emit(cg, "StradaValue *__an%d_%d = ", aid, i);
+                    gen_expression(cg, v);
+                    emit(cg, "; ");
+                }
+                emit(cg, "StradaValue *__anr%d = ", aid);
+            }
+            emit(cg, is_h ? "strada_anon_hash(%d" : "strada_anon_array(%d", n);
+            for (int i = 0; i < n; i++) {
+                if (is_h) emit(cg, ", \"%s\", ", expr->data.anon_hash.keys[i]);
+                else emit(cg, ", ");
+                if (any_owned) {
+                    emit(cg, "__an%d_%d", aid, i);
+                } else {
+                    gen_expression(cg, is_h ? expr->data.anon_hash.values[i] : expr->data.anon_array.elements[i]);
+                }
             }
             emit(cg, ")");
+            if (any_owned) {
+                emit(cg, "; ");
+                for (int i = 0; i < n; i++) {
+                    ASTNode *v = is_h ? expr->data.anon_hash.values[i] : expr->data.anon_array.elements[i];
+                    if (expr_is_owned(v)) emit(cg, "strada_decref(__an%d_%d); ", aid, i);
+                }
+                emit(cg, "__anr%d; })", aid);
+            }
             break;
         }
         
@@ -2948,9 +3307,9 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
             // $ref->[index] - dereference array reference
             emit(cg, "strada_array_get(strada_deref_array(");
             gen_expression(cg, expr->data.deref_array.ref);
-            emit(cg, "), strada_to_int(");
-            gen_expression(cg, expr->data.deref_array.index);
-            emit(cg, "))");
+            emit(cg, "), ");
+            gen_conv_arg(cg, "strada_to_int", "int64_t", expr->data.deref_array.index);
+            emit(cg, ")");
             break;
         
         case NODE_DEREF_SCALAR:

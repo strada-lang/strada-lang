@@ -57,6 +57,11 @@ typedef struct {
 
     int try_depth;              // Current nested try-block depth in function
     int loop_try_depth;         // try_depth at entry to innermost enclosing loop
+    int loop_scope_depth;       // scope depth where the innermost loop's body starts (-1: none)
+    const char *loop_fe_var;    // foreach loop variable holding a reference (NULL: none)
+    int fe_depth;               // active foreach loops (released on return)
+    const char *fe_vars[256];
+    int fe_arr_ids[256];        // owned list temp id, or -1
 } CodeGen;
 
 /* Code generator functions */
