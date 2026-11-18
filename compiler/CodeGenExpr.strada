@@ -9499,7 +9499,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if (($true_owned == 0 || $false_owned == 0) && $cg->{"cleanup_enabled"} == 1) {
             if ($true_owned == 0 && $false_owned == 0) {
                 emit($cg, "({ StradaValue *__tern_tmp = (");
-                emit_condition($cg, $expr->{"condition"});
+                emit_condition($cg, $expr->{"condition"}, 1);
                 emit($cg, " ? ");
                 gen_expression($cg, $expr->{"true_expr"});
                 emit($cg, " : ");
@@ -9507,7 +9507,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "); __tern_tmp = strada_copy_scalar_il(__tern_tmp); __tern_tmp; })");
             } else {
                 emit($cg, "({ StradaValue *__tern_tmp; if (");
-                emit_condition($cg, $expr->{"condition"});
+                emit_condition($cg, $expr->{"condition"}, 0);
                 emit($cg, ") { __tern_tmp = ");
                 gen_expression($cg, $expr->{"true_expr"});
                 emit($cg, ";");
@@ -9524,7 +9524,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         } else {
             emit($cg, "(");
-            emit_condition($cg, $expr->{"condition"});
+            emit_condition($cg, $expr->{"condition"}, 1);
             emit($cg, " ? ");
             gen_expression($cg, $expr->{"true_expr"});
             emit($cg, " : ");

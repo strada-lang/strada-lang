@@ -1290,7 +1290,6 @@ static StradaValue* strada_new_str_share_ss_flag(StradaString *ss, int key_bytes
     strada_memprof_alloc(STRADA_STR, sizeof(StradaValue));
     return sv;
 }
-static inline StradaValue* strada_new_str_share_ss(StradaString *ss) { return strada_new_str_share_ss_flag(ss, 0); }
 /* A hash key as a string SV, with the UTF-8-ness it was stored with */
 #define strada_new_str_share_key(E) strada_new_str_share_ss_flag((E)->key, (E)->key_bytes)
 
@@ -13893,7 +13892,6 @@ int strada_udp_sendto_sv(StradaValue *sock, StradaValue *data, const char *host,
  * sentinel — empty strings still fall through to strlen, which returns 0. */
 static STRADA_TLS size_t strada_regex_subject_len = 0;
 static StradaArray* strada_string_split_raw_n(const char *str, const char *delim, size_t delim_len);
-static inline StradaArray* strada_string_split_raw(const char *str, const char *delim);
 /* Thread-local hint: when set, the next regex match's subject is a
  * UTF-8 char-oriented string. Used by pcre2_get_or_compile to enable
  * PCRE2_UTF/PCRE2_UCP so `\w`/`\b` etc. recognize multibyte chars.
@@ -13912,7 +13910,7 @@ static inline StradaValue *strada_regex_new_capture(const char *s, size_t n) {
 
 /* One piece of a split subject: by length (it may hold NUL bytes), keeping
  * the subject's UTF-8 flag. Lives outside HAVE_PCRE2 so both regex split
- * and literal strada_string_split_raw share it. */
+ * and literal strada_string_split_raw_n share it. */
 static inline StradaValue *split_piece(const char *p, size_t n) {
     return strada_regex_subject_utf8 ? strada_new_str_len_utf8(p, n) : strada_new_str_len(p, n);
 }
@@ -15770,7 +15768,7 @@ static int has_regex_meta(const char *s) {
 static StradaArray* strada_regex_split_raw(const char *str, const char *pattern) {
     /* Fast path: if pattern has no regex metacharacters, use plain string split */
     if (!has_regex_meta(pattern)) {
-        return strada_string_split_raw(str, pattern);
+        return strada_string_split_raw_n(str, pattern, strlen(pattern));
     }
 
     StradaArray *parts = strada_array_new();
@@ -15786,7 +15784,6 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
     pcre2_match_data *match_data = strada_md_acquire(re);
     PCRE2_SIZE offset = 0;       /* chunk-start position */
     PCRE2_SIZE search_off = 0;   /* next search-start (= offset, +1 after zero-width) */
-    int first_iter = 1;
 
     while (search_off <= subject_length) {
         int rc = pcre2_match(re, (PCRE2_SPTR)str, subject_length, search_off, 0, match_data, NULL);
@@ -15804,7 +15801,6 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
          * (a, "", b), and there is no leading "" at position 0. Retry one
          * character further without splitting or emitting captures. */
         int skip_part = (match_end == match_start && match_start == offset);
-        first_iter = 0;
         if (skip_part) {
             search_off = regex_advance_utf8_char(str, match_end, subject_length);
             if (search_off <= match_end) break;
@@ -15876,7 +15872,6 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
     pcre2_match_data *match_data = strada_md_acquire(re);
     PCRE2_SIZE offset = 0;
     PCRE2_SIZE search_off = 0;
-    int first_iter = 1;
     int chunks = 0;  /* count of non-capture chunks already pushed; LIMIT is
                       * a cap on chunks, captures fill in between freely
                       * (Perl semantics). */
@@ -15892,7 +15887,6 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
          * (a, "", b), and there is no leading "" at position 0. Retry one
          * character further without splitting or emitting captures. */
         int skip_part = (match_end == match_start && match_start == offset);
-        first_iter = 0;
         if (skip_part) {
             search_off = regex_advance_utf8_char(str, match_end, subject_length);
             if (search_off <= match_end) break;
@@ -39483,11 +39477,19 @@ StradaValue* strada_coro_create(StradaValue *closure) {
     strada_incref(closure);
     c->state = 0;
     c->wait_fd = -1;
+    /* macOS deprecates ucontext, which still backs stackful coroutines. */
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
     getcontext(&c->ctx);
     c->ctx.uc_stack.ss_sp = c->stack;
     c->ctx.uc_stack.ss_size = STRADA_CORO_STACK_SIZE;
     c->ctx.uc_link = &c->ret_ctx;
     makecontext(&c->ctx, strada_coro_tramp, 0);
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     return strada_new_int((int64_t)(intptr_t)c);
 }
 
@@ -39561,7 +39563,14 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
         goto restore_host;
     }
 
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
     swapcontext(&c->ret_ctx, &c->ctx);
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
     if (c->state == 3) {
         /* finished: unwind any remaining locals + pending cleanups + unconsumed exception.
@@ -39699,7 +39708,14 @@ StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValu
     if (ms) free(ms);
     c->wait_timeout_ms = wt;
     c->state = 2;
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
     swapcontext(&c->ctx, &c->ret_ctx);
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     /* resumed */
     c->state = 1;
     c->entry_try_depth = strada_try_depth;
@@ -40101,10 +40117,6 @@ static StradaArray* strada_split_awk(const char *str, int limit) {
         }
     }
     return parts;
-}
-
-static inline StradaArray* strada_string_split_raw(const char *str, const char *delim) {
-    return strada_string_split_raw_n(str, delim, delim ? strlen(delim) : 0);
 }
 
 StradaArray* strada_string_split_n(const char *str, const char *delim, size_t delim_len) {

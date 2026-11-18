@@ -3916,9 +3916,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 gen_expression($cg, $case_expr);
                 emit($cg, "; int __case_eq = (strada_sv_strcmp(" . $switch_var . ", __case_sv) == 0); strada_decref(__case_sv); __case_eq; })");
             } else {
-                emit($cg, "(strada_sv_strcmp(" . $switch_var . ", ");
+                emit($cg, "strada_sv_strcmp(" . $switch_var . ", ");
                 gen_expression($cg, $case_expr);
-                emit($cg, ") == 0)");
+                emit($cg, ") == 0");
             }
             emit($cg, ") {\n");
             indent($cg);

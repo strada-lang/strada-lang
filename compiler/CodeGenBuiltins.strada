@@ -6173,6 +6173,11 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        if ($name eq "strada_dl_call_export_info") {
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_export_info", $expr->{"args"}, 1);
+            return 1;
+        }
+
         # dl_sym - get symbol from library
         if ($name eq "sys::dl_sym") {
             gen_call_with_arg_cleanup($cg, "strada_dl_sym", $expr->{"args"}, 2);

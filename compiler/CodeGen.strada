@@ -5791,30 +5791,30 @@ func raw_int_has_terminating_return(scalar $cg, scalar $block, scalar $raw_map, 
     return 0;
 }
 
-func gen_raw_int_cond(scalar $cg, scalar $expr, str $cur_pkg) void {
+func gen_raw_int_cond(scalar $cg, scalar $expr, str $cur_pkg, int $group_cmp) void {
     my int $t = $expr->{"type"} + 0;
     if ($t == NODE_BINARY_OP()) {
         my str $op = $expr->{"op"};
         if ($op eq "&&" || $op eq "||") {
             emit($cg, "(");
-            gen_raw_int_cond($cg, $expr->{"left"}, $cur_pkg);
+            gen_raw_int_cond($cg, $expr->{"left"}, $cur_pkg, 1);
             emit($cg, " " . $op . " ");
-            gen_raw_int_cond($cg, $expr->{"right"}, $cur_pkg);
+            gen_raw_int_cond($cg, $expr->{"right"}, $cur_pkg, 1);
             emit($cg, ")");
             return;
         }
         if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
-            emit($cg, "(");
+            if ($group_cmp == 1) { emit($cg, "("); }
             gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
             emit($cg, " " . $op . " ");
             gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
-            emit($cg, ")");
+            if ($group_cmp == 1) { emit($cg, ")"); }
             return;
         }
     }
     if ($t == NODE_UNARY_OP() && $expr->{"op"} eq "!") {
         emit($cg, "!(");
-        gen_raw_int_cond($cg, $expr->{"operand"}, $cur_pkg);
+        gen_raw_int_cond($cg, $expr->{"operand"}, $cur_pkg, 0);
         emit($cg, ")");
         return;
     }
@@ -5896,7 +5896,7 @@ func gen_raw_int_expr(scalar $cg, scalar $expr, str $cur_pkg) void {
     }
     if ($t == NODE_TERNARY()) {
         emit($cg, "(");
-        gen_raw_int_cond($cg, $expr->{"condition"}, $cur_pkg);
+        gen_raw_int_cond($cg, $expr->{"condition"}, $cur_pkg, 1);
         emit($cg, " ? ");
         gen_raw_int_expr($cg, $expr->{"true_expr"}, $cur_pkg);
         emit($cg, " : ");
@@ -5982,7 +5982,7 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
     if ($st_t == NODE_IF_STMT()) {
         emit_indent($cg);
         emit($cg, "if (");
-        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg, 0);
         emit($cg, ") ");
         gen_raw_int_block($cg, $st->{"then_block"}, $cur_pkg);
         my scalar $econds = $st->{"elsif_conditions"};
@@ -5991,7 +5991,7 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
         my int $ei = 0;
         while ($ei < $ec) {
             emit($cg, " else if (");
-            gen_raw_int_cond($cg, $econds->[$ei], $cur_pkg);
+            gen_raw_int_cond($cg, $econds->[$ei], $cur_pkg, 0);
             emit($cg, ") ");
             gen_raw_int_block($cg, $eblocks->[$ei], $cur_pkg);
             $ei = $ei + 1;
@@ -6006,7 +6006,7 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
     if ($st_t == NODE_WHILE_STMT()) {
         emit_indent($cg);
         emit($cg, "while (");
-        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg, 0);
         emit($cg, ") ");
         gen_raw_int_block($cg, $st->{"body"}, $cur_pkg);
         emit($cg, "\n");
@@ -6029,7 +6029,7 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
         }
         emit($cg, "; ");
         if ($st->{"condition"}) {
-            gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+            gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg, 0);
         }
         emit($cg, "; ");
         if ($st->{"update"}) {
@@ -6815,18 +6815,18 @@ func cond_cse_collect(scalar $cg, scalar $expr) void {
 # Expression-position conditions (ternaries) keep plain emit_condition.
 func emit_condition_cse(scalar $cg, scalar $expr) void {
     if ($cg->{"uses_tie"} == 1 || $cg->{"has_overloads"} == 1 || $cg->{"cleanup_enabled"} != 1) {
-        emit_condition($cg, $expr);
+        emit_condition($cg, $expr, 0);
         return;
     }
     if (cond_cse_pure($expr) == 0) {
-        emit_condition($cg, $expr);
+        emit_condition($cg, $expr, 0);
         return;
     }
     $cg->{"cse_n"} = 0;
     cond_cse_collect($cg, $expr);
     my int $n = $cg->{"cse_n"};
     if ($n < 2) {
-        emit_condition($cg, $expr);
+        emit_condition($cg, $expr, 0);
         return;
     }
     my scalar $ids = $cg->{"cse_ids"};
@@ -6875,11 +6875,11 @@ func emit_condition_cse(scalar $cg, scalar $expr) void {
         $i = $i + 1;
     }
     if ($opened == 0) {
-        emit_condition($cg, $expr);
+        emit_condition($cg, $expr, 0);
         return;
     }
     emit($cg, "int __cse_c = ");
-    emit_condition($cg, $expr);
+    emit_condition($cg, $expr, 0);
     emit($cg, "; ");
     $i = $temp_count - 1;
     while ($i >= 0) {
@@ -6902,8 +6902,9 @@ func emit_condition_cse(scalar $cg, scalar $expr) void {
 }
 
 # Helper: emit a condition as raw C boolean (avoids strada_new_int allocation)
-# Used for while/for/if conditions to prevent memory leaks
-func emit_condition(scalar $cg, scalar $expr) void {
+# Statement conditions already have delimiters. Group comparisons nested
+# inside other expressions to preserve their structure.
+func emit_condition(scalar $cg, scalar $expr, int $group_cmp) void {
     my int $type = $expr->{"type"};
 
     # Literals: emit 0 or 1 directly
@@ -6937,20 +6938,18 @@ func emit_condition(scalar $cg, scalar $expr) void {
                 return;
             }
             if ($cg->{"has_overloads"} == 0 || check_overload_binary($cg, $expr->{"left"}, $expr->{"right"}, $op) == 0) {
+                if ($group_cmp == 1) { emit($cg, "("); }
                 # Use int64_t path when both sides are int-typed (preserves full 64-bit precision!)
                 if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
-                    emit($cg, "(");
                     emit_int_operand($cg, $expr->{"left"});
                     emit($cg, " " . $op . " ");
                     emit_int_operand($cg, $expr->{"right"});
-                    emit($cg, ")");
                 } else {
-                    emit($cg, "(");
                     emit_num_operand($cg, $expr->{"left"});
                     emit($cg, " " . $op . " ");
                     emit_num_operand($cg, $expr->{"right"});
-                    emit($cg, ")");
                 }
+                if ($group_cmp == 1) { emit($cg, ")"); }
                 return;
             }
         }
@@ -6958,9 +6957,9 @@ func emit_condition(scalar $cg, scalar $expr) void {
         # Logical AND: recurse on both sides
         if ($op eq "&&") {
             emit($cg, "(");
-            emit_condition($cg, $expr->{"left"});
+            emit_condition($cg, $expr->{"left"}, 1);
             emit($cg, " && ");
-            emit_condition($cg, $expr->{"right"});
+            emit_condition($cg, $expr->{"right"}, 1);
             emit($cg, ")");
             return;
         }
@@ -6968,9 +6967,9 @@ func emit_condition(scalar $cg, scalar $expr) void {
         # Logical OR: recurse on both sides
         if ($op eq "||") {
             emit($cg, "(");
-            emit_condition($cg, $expr->{"left"});
+            emit_condition($cg, $expr->{"left"}, 1);
             emit($cg, " || ");
-            emit_condition($cg, $expr->{"right"});
+            emit_condition($cg, $expr->{"right"}, 1);
             emit($cg, ")");
             return;
         }
@@ -6989,7 +6988,7 @@ func emit_condition(scalar $cg, scalar $expr) void {
             }
             if ($bang_ovl == 0) {
                 emit($cg, "!(");
-                emit_condition($cg, $expr->{"operand"});
+                emit_condition($cg, $expr->{"operand"}, 0);
                 emit($cg, ")");
                 return;
             }
@@ -7355,6 +7354,7 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::dl_sym"} = 1;
     $owned_set{"sys::dl_error"} = 1;
     $owned_set{"sys::dl_call_export_info"} = 1;
+    $owned_set{"strada_dl_call_export_info"} = 1;
     $owned_set{"strada_read_meta_section"} = 1;
     $owned_set{"strada_file_mtime_ns"} = 1;
     $owned_set{"strada_call_named_guarded"} = 1;

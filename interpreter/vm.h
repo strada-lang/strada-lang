@@ -10,6 +10,9 @@
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -1065,7 +1068,7 @@ typedef struct {
     int *var_slots;        /* corresponding local slot indices */
     int var_count;
     void *dl_handle;       /* cached dlopen handle (NULL = not yet compiled) */
-    void (*fn)(void**);    /* cached function pointer (takes StradaValue** at runtime) */
+    struct StradaValue *(*fn)(struct StradaValue **); /* cached entry point */
 } VMCBlock;
 
 /* VM program — collection of compiled functions */
