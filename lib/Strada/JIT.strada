@@ -233,6 +233,10 @@ my str $g_current_package = "";
 my int $g_debug = 0;
 my int $g_cdebug = 0;
 my array @g_open_libs = ();
+my array @g_retired_libs = ();
+my array @g_our_decls = ();
+my hash %g_our_decl_idx = ();
+my hash %g_prev_var_types = ();
 my array @g_so_files = ();
 my array @g_constants = ();
 my hash %g_constant_idx = ();
@@ -699,8 +703,48 @@ private func jit_skip_slash_token(str $input, int $pos, int $len, int $can_regex
     return $pos + 1;
 }
 
-# Extract function definition from input, returns array: [func_def, remainder]
+# Extract function definition from input, returns array: [func_def, remainder].
+# Brace matching runs on strip_strings_and_comments() output (same length,
+# strings / comments / regexes / quote-ops / heredoc bodies blanked), so a `}`
+# inside any of those never closes the body (V5-14). Falls back to the older
+# token scanner if the stripper could not close something.
 private func extract_function_def(str $input) array {
+    my str $cleaned = strip_strings_and_comments($input);
+    my int $len = length($input);
+    if ($g_strip_unclosed == 0 && length($cleaned) == $len) {
+        my int $brace_pos = index($cleaned, "{");
+        if ($brace_pos >= 0) {
+            my int $depth = 0;
+            my int $i = $brace_pos;
+            my int $end_pos = -1;
+            while ($i < $len) {
+                my str $c = substr($cleaned, $i, 1);
+                if ($c eq "{") {
+                    $depth = $depth + 1;
+                } elsif ($c eq "}") {
+                    $depth = $depth - 1;
+                    if ($depth == 0) { $end_pos = $i; last; }
+                }
+                $i = $i + 1;
+            }
+            if ($end_pos >= 0) {
+                my array @res = ("", "");
+                $res[0] = substr($input, 0, $end_pos + 1);
+                if ($end_pos + 1 < $len) {
+                    my str $remainder = substr($input, $end_pos + 1, $len - $end_pos - 1);
+                    $remainder =~ s/^\s*;\s*//;
+                    $remainder =~ s/^\s+//;
+                    $remainder =~ s/\s+$//;
+                    $res[1] = $remainder;
+                }
+                return @res;
+            }
+        }
+    }
+    return extract_function_def_scan($input);
+}
+
+private func extract_function_def_scan(str $input) array {
     my array @result = ("", "");
     my int $len = length($input);
     my int $in_str = 0;
@@ -1502,6 +1546,78 @@ private func register_variables(str $input) void {
     }
 }
 
+# Record top-level `our [TYPE] SIGILname` / `our (...)` declarations. They are
+# re-declared at package level in every later eval's source, so later
+# snippets (and functions) see the variable; the value lives in the global
+# registry and persists by itself (V5-11).
+private func register_our_decls(str $input) void {
+    my str $cleaned = strip_strings_and_comments($input);
+    my int $len = length($cleaned);
+    my int $i = 0;
+    my int $depth = 0;
+    my str $pkg = get_target_package();
+    while ($i < $len) {
+        my str $c = substr($cleaned, $i, 1);
+        if ($c eq "{" || $c eq "(" || $c eq "[") { $depth = $depth + 1; $i = $i + 1; next; }
+        if ($c eq "}" || $c eq ")" || $c eq "]") { $depth = $depth - 1; $i = $i + 1; next; }
+        if ($depth == 0 && $c eq "o" && $i + 3 < $len && substr($cleaned, $i, 3) eq "our"
+            && jit_is_ws(substr($cleaned, $i + 3, 1)) == 1
+            && ($i == 0 || jit_is_ident_char(substr($cleaned, $i - 1, 1)) == 0)) {
+            my int $pos = $i + 3;
+            while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) { $pos = $pos + 1; }
+            my str $type = "";
+            my int $ws = $pos;
+            while ($pos < $len && jit_is_ident_char(substr($cleaned, $pos, 1)) == 1) { $pos = $pos + 1; }
+            my str $word = substr($cleaned, $ws, $pos - $ws);
+            if ($word eq "int" || $word eq "num" || $word eq "str" || $word eq "scalar" || $word eq "array" || $word eq "hash") {
+                $type = $word;
+                while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) { $pos = $pos + 1; }
+            } else {
+                $pos = $ws;
+            }
+            my array @found = ();
+            if ($pos < $len && substr($cleaned, $pos, 1) eq "(") {
+                my scalar $pd = jit_parse_my_paren($cleaned, $pos);
+                if (defined($pd)) {
+                    foreach my scalar $v (@{$pd->{"vars"}}) {
+                        push(@found, [$v->{"sigil"}, $v->{"name"}, ""]);
+                    }
+                    $i = $pd->{"end"};
+                }
+            } elsif ($pos < $len) {
+                my str $sg = substr($cleaned, $pos, 1);
+                if ($sg eq "\$" || $sg eq "@" || $sg eq "%") {
+                    my int $ns = $pos + 1;
+                    my int $ne = $ns;
+                    while ($ne < $len && jit_is_ident_char(substr($cleaned, $ne, 1)) == 1) { $ne = $ne + 1; }
+                    if ($ne > $ns) {
+                        push(@found, [$sg, substr($cleaned, $ns, $ne - $ns), $type]);
+                    }
+                    $i = $ne;
+                }
+            }
+            foreach my scalar $f (@found) {
+                my str $sg = $f->[0];
+                my str $t = $f->[2];
+                if ($sg eq "@") { $t = "array"; }
+                elsif ($sg eq "%") { $t = "hash"; }
+                elsif ($t eq "" || $t eq "array" || $t eq "hash") { $t = "scalar"; }
+                my str $key = $pkg . "::" . $sg . $f->[1];
+                my str $entry = "package " . $pkg . ";\nour " . $t . " " . $sg . $f->[1] . ";";
+                if (exists($g_our_decl_idx{$key})) {
+                    $g_our_decls[$g_our_decl_idx{$key}] = $entry;
+                } else {
+                    $g_our_decl_idx{$key} = scalar(@g_our_decls);
+                    push(@g_our_decls, $entry);
+                }
+            }
+            if ($i < $pos) { $i = $pos; }
+            next;
+        }
+        $i = $i + 1;
+    }
+}
+
 # Convert my declarations to our in user code for variable persistence
 # Only converts at brace depth 0 — declarations inside blocks stay as 'my'
 private func convert_my_to_our(str $input) str {
@@ -2000,6 +2116,14 @@ private func generate_source(str $input) str {
         $src = $src . "\n";
     }
 
+    # Package-level declarations of `our` variables from earlier evals
+    foreach my str $our_decl (@g_our_decls) {
+        $src = $src . $our_decl . "\n";
+    }
+    if (scalar(@g_our_decls) > 0) {
+        $src = $src . "\n";
+    }
+
     # User-defined functions
     foreach my str $fndef (@g_functions) {
         $src = $src . $fndef . "\n\n";
@@ -2042,7 +2166,14 @@ private func generate_source(str $input) str {
             $src = $src . "    my scalar \$" . $vname . " = undef;\n";
         }
 
-        if ($redecl == 0) {
+        # A redeclaration of the same type still restores: the new `my` is not
+        # in scope in its own initializer, so `my $n = $n * 2` reads the
+        # previous $n (Perl; V5-15). A type change starts fresh.
+        my int $restore = ($redecl == 0) ? 1 : 0;
+        if ($redecl == 1 && exists($g_prev_var_types{$vname}) && $g_prev_var_types{$vname} eq $type) {
+            $restore = 1;
+        }
+        if ($restore == 1) {
             my str $cname = jit_escape_c_keyword($vname);
             $restore_code = $restore_code . "        if (strada_global_exists(strada_new_str(\"repl::" . $vname . "\"))) {\n";
             $restore_code = $restore_code . "            StradaValue *__saved_" . $cname . " = strada_global_get_cstr(\"repl::" . $vname . "\");\n";
@@ -2358,7 +2489,9 @@ private func eval_one(str $input) scalar {
 
     # Register any new variables (snapshot for rollback if compilation/load fails)
     my scalar $saved_vtypes = snapshot_var_types();
+    %g_prev_var_types = %{$saved_vtypes};
     register_variables($input);
+    register_our_decls($input);
 
     # Generate Strada source
     my str $strada_src = generate_source($input);
@@ -2421,6 +2554,7 @@ private func eval_one(str $input) scalar {
     }
 
     my scalar $result = undef;
+    my int $tcc_init_fn = 0;
 
     # Step 2: C → .so
     if ($g_compiler eq "tcc") {
@@ -2443,6 +2577,16 @@ private func eval_one(str $input) scalar {
                 $c_content = substr($c_content, 0, $hpos + 1) . $tcc_line
                     . substr($c_content, $after_h, length($c_content) - $after_h);
             }
+        }
+        # tcc silently drops __attribute__((constructor)), so the .so's
+        # __strada_init_globals (OOP method/inherit registration, globals)
+        # would never run (V5-10): export it and call it after dlopen.
+        my str $ctor_decl = "__attribute__((constructor))\nstatic void __strada_init_globals(void) {";
+        my int $cpos = index($c_content, $ctor_decl);
+        if ($cpos >= 0) {
+            $c_content = substr($c_content, 0, $cpos) . "void __strada_init_globals(void) {"
+                . substr($c_content, $cpos + length($ctor_decl), length($c_content) - $cpos - length($ctor_decl));
+            $tcc_init_fn = 1;
         }
         core::spew($c_file, $c_content);
 
@@ -2544,6 +2688,16 @@ private func eval_one(str $input) scalar {
     }
     if (core::is_file($so_file) == 1) {
         core::unlink($so_file);
+    }
+
+    if ($tcc_init_fn == 1) {
+        my int $init_fn = core::dl_sym($lib, "__strada_init_globals");
+        if ($init_fn != 0) {
+            __C__ {
+                void (*jit_init_p)(void) = (void (*)(void))(intptr_t)strada_to_int(init_fn);
+                if (jit_init_p) jit_init_p();
+            }
+        }
     }
 
     my int $fn = core::dl_sym($lib, "repl_eval");
@@ -2670,6 +2824,9 @@ private func snapshot_jit_state() scalar {
     $snap{"functions"} = \@funcs;
     $snap{"oop_packages"} = \%oops;
     $snap{"current_package"} = $g_current_package;
+    my array @ourd = ();
+    foreach my str $od (@g_our_decls) { push(@ourd, $od); }
+    $snap{"our_decls"} = \@ourd;
     return \%snap;
 }
 
@@ -2751,6 +2908,20 @@ private func restore_jit_state(scalar $snap) void {
         $oi = $oi + 1;
     }
     $g_current_package = $snap->{"current_package"};
+    # our declarations: drop the ones this failed eval added
+    my scalar $sod = $snap->{"our_decls"};
+    my int $keep = defined($sod) ? size($sod) : 0;
+    while (scalar(@g_our_decls) > $keep) {
+        pop(@g_our_decls);
+    }
+    my array @odk = keys(%g_our_decl_idx);
+    foreach my str $ok (@odk) {
+        if ($g_our_decl_idx{$ok} >= $keep) {
+            delete($g_our_decl_idx{$ok});
+        } else {
+            $g_our_decls[$g_our_decl_idx{$ok}] = $sod->[$g_our_decl_idx{$ok}];
+        }
+    }
 }
 
 private func jit_strip_leading_ws_comments(str $s) str {
@@ -2964,8 +3135,68 @@ private func eval_inner(str $code, scalar $flags) scalar {
         return undef;
     }
 
+    # Named functions after other statements (`my $x = 1; func f() {...} f()`)
+    # are hoisted like Perl's compile-time subs (V5-13).
+    my str $hoisted = jit_hoist_named_funcs($input, $flags);
+    if ($hoisted ne $input) {
+        return eval_inner($hoisted, $flags);
+    }
+
     $flags->{"did_compile"} = 1;
     return eval_one($input);
+}
+
+# Remove the first top-level named `func`/`fn` definition that starts a
+# statement (after `;` or a block's `}`), registering it; returns the input
+# unchanged when there is none.
+private func jit_hoist_named_funcs(str $input, scalar $flags) str {
+    my str $cleaned = strip_strings_and_comments($input);
+    if ($g_strip_unclosed == 1 || length($cleaned) != length($input)) {
+        return $input;
+    }
+    my int $len = length($cleaned);
+    my int $depth = 0;
+    my int $i = 0;
+    my int $stmt_start = 1;
+    while ($i < $len) {
+        my str $c = substr($cleaned, $i, 1);
+        if ($c eq "{" || $c eq "(" || $c eq "[") {
+            $depth = $depth + 1;
+            $stmt_start = 0;
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "}" || $c eq ")" || $c eq "]") {
+            $depth = $depth - 1;
+            $stmt_start = ($depth == 0 && $c eq "}") ? 1 : 0;
+            $i = $i + 1;
+            next;
+        }
+        if ($depth == 0 && $c eq ";") {
+            $stmt_start = 1;
+            $i = $i + 1;
+            next;
+        }
+        if (jit_is_ws($c) == 1) {
+            $i = $i + 1;
+            next;
+        }
+        if ($depth == 0 && $stmt_start == 1 && $i > 0) {
+            my str $rest = substr($input, $i, length($input) - $i);
+            if (is_function_def($rest) == 1) {
+                my array @parts = extract_function_def($rest);
+                register_function($parts[0]);
+                $flags->{"added_decl"} = 1;
+                my str $before = substr($input, 0, $i);
+                $before =~ s/\s+$//;
+                if ($parts[1] eq "") { return $before; }
+                return $before . "\n" . $parts[1];
+            }
+        }
+        $stmt_start = 0;
+        $i = $i + 1;
+    }
+    return $input;
 }
 
 func eval(str $code) scalar {
@@ -3124,7 +3355,10 @@ func reset() void {
     @g_constants = ();
     @g_imports = ();
     $g_current_package = "";
-    $g_eval_count = 0;
+    @g_our_decls = ();
+    %g_our_decl_idx = ();
+    # $g_eval_count keeps counting: a reused .so path could make dlopen hand
+    # back a still-mapped (retired) library instead of the new one.
 
     # Now delete globals using the saved key list
     while ($vi < $var_count) {
@@ -3154,10 +3388,14 @@ func reset() void {
         $opi = $opi + 1;
     }
 
+    # The libraries are NOT dlclose'd: closures (and blessed objects whose
+    # methods live there) obtained from earlier evals may still be held by the
+    # host, and calling one into an unmapped .so segfaulted (V5-12). The
+    # mappings stay until exit; the files are already unlinked.
     my int $li = 0;
     my int $lib_count = scalar(@libs_to_close);
     while ($li < $lib_count) {
-        core::dl_close($libs_to_close[$li]);
+        push(@g_retired_libs, $libs_to_close[$li]);
         $li = $li + 1;
     }
     my int $fi = 0;
@@ -3290,6 +3528,36 @@ func is_balanced(str $input) int {
     }
 
     if ($braces == 0 && $parens == 0 && $brackets == 0) {
+        if (jit_ends_with_operator($cleaned) == 1) {
+            return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+# 1 when the (string/comment-stripped) input ends in a binary operator, so
+# the statement continues on the next line: `my $s = "a" .` (V5-17).
+private func jit_ends_with_operator(str $cleaned) int {
+    my str $t = $cleaned;
+    $t =~ s/\s+$//;
+    my int $n = length($t);
+    if ($n == 0) { return 0; }
+    if ($n >= 2) {
+        my str $l2 = substr($t, $n - 2, 2);
+        if ($l2 eq "++" || $l2 eq "--") { return 0; }
+        if ($l2 eq "->" || $l2 eq "=>" || $l2 eq "::") { return 1; }
+    }
+    my str $lc = substr($t, $n - 1, 1);
+    if ($lc eq ">") {
+        # <STDIN> / <$fh> readline is a complete term
+        if ($t =~ /<\$?[A-Za-z_][A-Za-z0-9_]*>$/) { return 0; }
+        return 1;
+    }
+    if (index(".+-*/%=,<&|!?:~^\\", $lc) >= 0) {
+        return 1;
+    }
+    if ($t =~ /(?:^|[^\$\@\%\&A-Za-z0-9_:>])(and|or|not|xor|x|eq|ne|lt|gt|le|ge|cmp)$/) {
         return 1;
     }
     return 0;

@@ -1,0 +1,68 @@
+# Audit Cycle 20 V5: Strada::JIT regressions (run with the tcc backend).
+# Prints AUDIT_R20_JIT_V5_OK when every check passes.
+use lib "lib";
+use Strada::JIT;
+
+my int $fails = 0;
+
+func check(int $cond, str $msg) void {
+    if (!$cond) {
+        say("FAIL: " . $msg);
+        $fails = $fails + 1;
+    }
+}
+
+func ev(str $code) scalar {
+    return Strada::JIT::eval($code);
+}
+
+func ev_s(str $code) str {
+    try {
+        my scalar $r = ev($code);
+        return defined($r) ? ("" . $r) : "undef";
+    } catch ($e) {
+        return "ERR " . $e;
+    }
+    return "";
+}
+
+func main(int $argc, array @argv) int {
+    Strada::JIT::init($argc > 1 ? $argv[1] : "tcc");
+
+    # V5-10: methods registered by a tcc-built .so (constructor was dropped)
+    ev("package V5Obj; func new() scalar { return bless({\"n\"=>1}, \"V5Obj\"); } func n(scalar \$s) int { return \$s->{\"n\"}; } package main;");
+    check(ev_s("V5Obj::new()->n()") eq "1", "V5-10 method of a JIT class");
+
+    # V5-11: our variables persist into later evals
+    ev("our \$gv = 5;");
+    check(ev_s("\$gv") eq "5", "V5-11 our variable in a later eval");
+    check(ev_s("func gvf() { return \$gv + 1; } gvf()") eq "6", "V5-11 our variable in a later function");
+
+    # V5-13: a named func after another statement
+    check(ev_s("my \$dv = 10; func g4() { return 1; } \$dv / 2 / g4()") eq "5", "V5-13 func after a statement");
+
+    # V5-14: `}` inside a heredoc inside a func body
+    my str $hd = ev_s("func g6() str { return <<EOT;\n}\nEOT\n} g6()");
+    check(index($hd, "}") == 0, "V5-14 heredoc with } in a func (" . $hd . ")");
+
+    # V5-15: the new my is not in scope in its own initializer
+    ev("my \$n15 = 5;");
+    ev("my \$n15 = \$n15 * 2;");
+    check(ev_s("\$n15") eq "10", "V5-15 my \$n = \$n * 2");
+
+    # V5-17: a trailing binary operator / open heredoc is incomplete
+    check(Strada::JIT::is_balanced("my \$s = \"a\" .") == 0, "V5-17 trailing .");
+    check(Strada::JIT::is_balanced("my \$n = 1 +") == 0, "V5-17 trailing +");
+    check(Strada::JIT::is_balanced("my \$h = <<EOT;") == 0, "V5-17 open heredoc");
+    check(Strada::JIT::is_balanced("\$i++") == 1, "V5-17 postfix ++ is complete");
+    check(Strada::JIT::is_balanced("my \$l = <STDIN>") == 1, "V5-17 <STDIN> is complete");
+
+    # V5-12: a closure from JIT code still works after reset()
+    my scalar $c = ev("fn (\$x) { return \$x * 2; }");
+    check($c->(2) == 4, "V5-12 closure before reset");
+    Strada::JIT::reset();
+    check($c->(3) == 6, "V5-12 closure after reset");
+
+    if ($fails == 0) { say("AUDIT_R20_JIT_V5_OK"); }
+    return $fails == 0 ? 0 : 1;
+}

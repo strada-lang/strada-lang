@@ -121,7 +121,9 @@ static void eval_vm_init_once(void) {
 }
 static inline void eval_vm_lock(void) {
     pthread_once(&g_eval_vm_once, eval_vm_init_once);
-    pthread_mutex_lock(&g_eval_vm_mutex);
+    /* GC-safe while waiting: the holder may start a stop-the-world cycle
+     * collection, which must not wait for us (V5-1). */
+    strada_gc_mutex_lock(&g_eval_vm_mutex);
 }
 static inline void eval_vm_unlock(void) {
     pthread_mutex_unlock(&g_eval_vm_mutex);
@@ -151,78 +153,121 @@ static EvalActiveStack *eval_active_stack_get(void) {
 }
 #endif
 
-static int eval_sv_equal(StradaValue *a, StradaValue *b, int depth) {
-    if (a == b) return 1;
-    if (depth > 32) return 0;
-    if (!a || !b) return 0;
-    if (STRADA_IS_TAGGED_INT(a) || STRADA_IS_TAGGED_INT(b)) return a == b;
-    if (a->type != b->type) return 0;
-    switch (a->type) {
-    case STRADA_UNDEF: return 1;
-    case STRADA_INT: return a->value.iv == b->value.iv;
-    case STRADA_NUM: return memcmp(&a->value.nv, &b->value.nv, sizeof(double)) == 0;
-    case STRADA_STR: {
-        size_t al = STRADA_STR_BYTELEN(a), bl = STRADA_STR_BYTELEN(b);
-        if (al != bl || STRADA_STR_IS_UTF8(a) != STRADA_STR_IS_UTF8(b)) return 0;
-        if (al == 0) return 1;
-        return memcmp(a->value.pv ? a->value.pv : "", b->value.pv ? b->value.pv : "", al) == 0;
+/* ---- Session sync for closures / methods of non-active eval VMs ----
+ * Every eval runs in its own VM, seeded from and exported back to the
+ * session store (%g_eval_vm_globals). A closure or object made by an earlier
+ * eval still runs in that earlier VM, so around such a call the VM is synced
+ * with the store (V5-6): before, the running eval (if any) is exported and
+ * the target seeded when it is behind; after, the target is exported and the
+ * running eval re-seeded. g_eval_store_gen counts store updates; a VM whose
+ * eval_sync_gen matches is current. reset() starts a new epoch: VMs of an
+ * older epoch keep their own state and never touch the new session. */
+static StradaValue *g_eval_store_sv = NULL;   /* ref to %g_eval_vm_globals */
+static uint64_t g_eval_store_gen = 1;
+static uint32_t g_eval_epoch = 1;
+static VM *g_eval_host_vm = NULL;             /* latest eval's VM: host method dispatch */
+static VMProgram *g_eval_host_prog = NULL;
+
+static void eval_foreign_vm_hook(VM *target, int phase) {
+    if (!target || !g_eval_store_sv) return;
+    eval_vm_lock();
+    if (target->eval_epoch != g_eval_epoch || target->eval_running) {
+        eval_vm_unlock();
+        return;
     }
-    case STRADA_ARRAY: {
-        StradaArray *aa = a->value.av, *ba = b->value.av;
-        if (!aa || !ba) return aa == ba;
-        if (aa->size != ba->size) return 0;
-        for (size_t i = 0; i < aa->size; i++) {
-            if (!eval_sv_equal(aa->elements[i], ba->elements[i], depth + 1)) return 0;
+    EvalActiveStack *es = eval_active_stack_get();
+    VM *cur = (es->depth > 0) ? es->vms[es->depth - 1] : NULL;
+    if (cur == target || (cur && cur->eval_epoch != g_eval_epoch)) cur = NULL;
+    if (phase == 0) {
+        if (cur) {
+            vm_export_globals(cur, g_eval_store_sv);
+            g_eval_store_gen++;
+            cur->eval_sync_gen = g_eval_store_gen;
         }
-        return 1;
-    }
-    case STRADA_HASH: {
-        StradaHash *ah = a->value.hv, *bh = b->value.hv;
-        if (!ah || !bh) return ah == bh;
-        if (ah->num_entries != bh->num_entries) return 0;
-        for (size_t i = 0; i < ah->next_slot; i++) {
-            if (!ah->entries[i].key) continue;
-            StradaValue *ksv = strada_new_str_len(ah->entries[i].key->data, ah->entries[i].key->len);
-            int ex = strada_hash_exists_sv(bh, ksv);
-            StradaValue *bv = ex ? strada_hash_get_sv(bh, ksv) : NULL;
-            strada_decref(ksv);
-            if (!ex || !eval_sv_equal(ah->entries[i].value, bv, depth + 1)) return 0;
+        if (target->eval_sync_gen != g_eval_store_gen) {
+            vm_seed_globals(target, g_eval_store_sv, NULL);
+            target->eval_sync_gen = g_eval_store_gen;
         }
-        return 1;
+    } else {
+        vm_export_globals(target, g_eval_store_sv);
+        g_eval_store_gen++;
+        target->eval_sync_gen = g_eval_store_gen;
+        if (cur) {
+            vm_seed_globals(cur, g_eval_store_sv, NULL);
+            cur->eval_sync_gen = g_eval_store_gen;
+        }
     }
-    case STRADA_REF:
-        return eval_sv_equal(a->value.rv, b->value.rv, depth + 1);
-    default:
-        return 0;
-    }
+    eval_vm_unlock();
 }
 
-static void eval_seed_changed_globals(VM *parent_vm, StradaValue *pre_snap, StradaValue *post_ref) {
-    if (!parent_vm || !post_ref || STRADA_IS_TAGGED_INT(post_ref)) return;
-    if (post_ref->type == STRADA_REF && !strada_is_slot_ref(post_ref) && post_ref->value.rv) post_ref = post_ref->value.rv;
-    if (!post_ref || post_ref->type != STRADA_HASH || !post_ref->value.hv) return;
-    StradaValue *pre_h = pre_snap;
-    if (pre_h && !STRADA_IS_TAGGED_INT(pre_h) && pre_h->type == STRADA_REF && !strada_is_slot_ref(pre_h) && pre_h->value.rv) {
-        pre_h = pre_h->value.rv;
+/* AUTOLOAD registered in the host for classes defined in eval code: a method
+ * call on such an object from host code runs the method in the latest eval
+ * VM (whose program has every class of the session) -- V5-9. */
+static StradaValue *eval_host_autoload(StradaValue *self, StradaValue *args) {
+    char mname[256];
+    mname[0] = 0;
+    StradaArray *aa = (args && !STRADA_IS_TAGGED_INT(args) && args->type == STRADA_ARRAY) ? args->value.av : NULL;
+    size_t an = aa ? aa->size : 0;
+    if (an > 0) {
+        char *m = strada_to_str(strada_array_get(aa, 0));
+        if (m) { snprintf(mname, sizeof(mname), "%s", m); free(m); }
     }
-    StradaHash *pre_hv = (pre_h && !STRADA_IS_TAGGED_INT(pre_h) && pre_h->type == STRADA_HASH) ? pre_h->value.hv : NULL;
-    StradaHash *post_hv = post_ref->value.hv;
-    StradaValue *delta = strada_new_hash();
-    for (size_t i = 0; i < post_hv->next_slot; i++) {
-        if (!post_hv->entries[i].key) continue;
-        StradaValue *ksv = strada_new_str_len(post_hv->entries[i].key->data, post_hv->entries[i].key->len);
-        int changed = 1;
-        if (pre_hv && strada_hash_exists_sv(pre_hv, ksv)) {
-            StradaValue *pv = strada_hash_get_sv(pre_hv, ksv);
-            if (eval_sv_equal(pv, post_hv->entries[i].value, 0)) changed = 0;
+    const char *cls = (self && !STRADA_IS_TAGGED_INT(self) && self->meta) ? self->meta->blessed_package : NULL;
+    if (strcmp(mname, "DESTROY") == 0) return strada_new_undef();
+    eval_vm_lock();
+    VM *hv = g_eval_host_vm;
+    if (hv) vm_retain(hv);
+    eval_vm_unlock();
+    StradaValue *res = NULL;
+    if (hv && cls) {
+        int argc = (int)(an > 0 ? an : 1);
+        StradaValue *sbuf[16];
+        StradaValue **argv = (argc > 16) ? malloc((size_t)argc * sizeof(StradaValue *)) : sbuf;
+        argv[0] = self;
+        for (size_t i = 1; i < an; i++) argv[i] = strada_array_get(aa, (int64_t)i);
+        int cm = strada_cleanup_mark();
+        if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+            res = vm_host_method_call(hv, cls, mname, argc, argv);
+            STRADA_TRY_POP();
+        } else {
+            STRADA_TRY_POP();
+            strada_cleanup_drain_to(cm);
+            StradaValue *ex = strada_get_exception();
+            if (ex) strada_incref(ex);
+            strada_clear_exception();
+            if (argv != sbuf) free(argv);
+            vm_free(hv);
+            strada_throw_value(ex ? ex : strada_new_str("eval method failed"));
+            return strada_new_undef();
         }
-        if (changed) {
-            strada_hash_set_sv(delta->value.hv, ksv, post_hv->entries[i].value);
-        }
-        strada_decref(ksv);
+        if (argv != sbuf) free(argv);
     }
-    vm_seed_globals(parent_vm, delta, NULL);
-    strada_decref(delta);
+    if (hv) vm_free(hv);
+    if (!res) {
+        char msg[640];
+        snprintf(msg, sizeof(msg), "Can't locate method \"%s\" via package \"%s\" or its parents", mname, cls ? cls : "");
+        strada_throw(msg);
+        return strada_new_undef();
+    }
+    return res;
+}
+
+/* Make the classes of an eval program known to host dispatch: inheritance
+ * (typed catch / isa) and an AUTOLOAD into the VM for their methods. */
+static void eval_register_host_classes(VMProgram *p, StradaValue *pkgs) {
+    if (!p) return;
+    for (int i = 0; i < p->inherit_count; i++) {
+        if (p->inherits[i].child && p->inherits[i].parent)
+            strada_inherit(p->inherits[i].child, p->inherits[i].parent);
+    }
+    if (pkgs && !STRADA_IS_TAGGED_INT(pkgs) && pkgs->type == STRADA_REF) pkgs = pkgs->value.rv;
+    if (!pkgs || STRADA_IS_TAGGED_INT(pkgs) || pkgs->type != STRADA_ARRAY) return;
+    for (size_t i = 0; i < pkgs->value.av->size; i++) {
+        char *pkg = strada_to_str(strada_array_get(pkgs->value.av, (int64_t)i));
+        if (pkg && pkg[0] && strada_method_lookup_package(pkg, "AUTOLOAD") == NULL)
+            strada_method_register(pkg, "AUTOLOAD", eval_host_autoload);
+        free(pkg);
+    }
 }
 }
 
@@ -712,6 +757,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
     my int $has_body = 0;
     my array @body_segs = ();
     my str $last_seg_pkg = "";
+    my array @top_parts = ();
 
     my int $len = length($code);
     my int $pos = eval_skip_ws_cmt($code, 0, $len);
@@ -763,6 +809,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
             if (!($skip_main == 1 && $cur_pkg eq "main" && $func_name eq "main")) {
                 my str $chunk = substr($code, $pos, $end - $pos);
                 $top = $top . $chunk . "\n";
+                push(@top_parts, [$chunk, $pos]);
                 if ($is_oneshot == 0) {
                     $top_persist = $top_persist . $chunk . "\n";
                 }
@@ -777,6 +824,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
             $chunk =~ s/\s+$//;
             $chunk = eval_append_trailing_semi($chunk);
             $top = $top . $chunk . "\n";
+            push(@top_parts, [$chunk, $pos]);
             if ($kw eq "our") {
                 $top_persist = $top_persist . eval_strip_our_init($chunk) . "\n";
             } else {
@@ -858,11 +906,15 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
                 my hash %seg = ();
                 $seg{"pkg"} = $cur_pkg;
                 $seg{"body"} = $chunk . "\n";
+                my array @sparts = ();
+                push(@sparts, [$chunk, $pos]);
+                $seg{"parts"} = \@sparts;
                 push(@body_segs, \%seg);
                 $last_seg_pkg = $cur_pkg;
             } else {
                 my scalar $lseg = $body_segs[size(@body_segs) - 1];
                 $lseg->{"body"} = $lseg->{"body"} . $chunk . "\n";
+                push(@{$lseg->{"parts"}}, [$chunk, $pos]);
             }
         }
         $pos = eval_skip_ws_cmt($code, $end, $len);
@@ -877,6 +929,7 @@ func split_eval_units_ex(str $code, str $start_pkg, int $skip_main) scalar {
     $res{"last_pkg"} = $cur_pkg;
     $res{"body_pkg"} = $body_pkg;
     $res{"segments"} = \@body_segs;
+    $res{"top_parts"} = \@top_parts;
     return \%res;
 }
 
@@ -903,6 +956,13 @@ func reset() void {
         $g_eval_vm_pkg = "main";
         $g_eval_vm_decls = "";
         $g_eval_vm_decls_globals = 0;
+        __C__ {
+            /* closures from before reset() keep their own VM state */
+            g_eval_epoch++;
+            g_eval_store_gen++;
+            if (g_eval_host_vm) { vm_free(g_eval_host_vm); g_eval_host_vm = NULL; }
+            if (g_eval_host_prog) { vm_program_free(g_eval_host_prog); g_eval_host_prog = NULL; }
+        }
         core::gc_collect();
     } finally {
         __C__ { eval_vm_unlock(); }
@@ -961,6 +1021,23 @@ func eval_vm_make_return_undef() scalar {
     return \%ret_u;
 }
 
+# The value of an eval is a scalar: a trailing `@a` / `%h` (or `my @a = ...`)
+# yields its count, as Perl's eval in scalar context does. (A container value
+# otherwise reaches the host as a reference.)
+func eval_vm_scalar_ctx(scalar $e) scalar {
+    if (!defined($e) || ref($e) ne "HASH") { return $e; }
+    if ($e->{"type"} == NI::VARIABLE) {
+        my str $sg = defined($e->{"sigil"}) ? ("" . $e->{"sigil"}) : "";
+        if ($sg eq "@" || $sg eq "%") {
+            my scalar $call = ast_new_call("scalar");
+            ast_add_arg($call, $e);
+            if (defined($e->{"line"})) { $call->{"line"} = $e->{"line"}; }
+            return $call;
+        }
+    }
+    return $e;
+}
+
 func eval_vm_rewrite_tail_return(scalar $block) void {
     if (!defined($block)) { return; }
     my scalar $stmts = $block->{"statements"};
@@ -981,7 +1058,7 @@ func eval_vm_rewrite_tail_return(scalar $block) void {
     if ($ltype == NI::EXPR_STMT) {
         my hash %ret_node = ();
         $ret_node{"type"} = NI::RETURN_STMT;
-        $ret_node{"value"} = $last_stmt->{"expr"};
+        $ret_node{"value"} = eval_vm_scalar_ctx($last_stmt->{"expr"});
         $stmts->[$scnt - 1] = \%ret_node;
         return;
     }
@@ -1003,7 +1080,7 @@ func eval_vm_rewrite_tail_return(scalar $block) void {
         $var_node{"sigil"} = $vsig;
         my hash %ret_v = ();
         $ret_v{"type"} = NI::RETURN_STMT;
-        $ret_v{"value"} = \%var_node;
+        $ret_v{"value"} = eval_vm_scalar_ctx(\%var_node);
         push($stmts, \%ret_v);
         $block->{"statement_count"} = $scnt + 1;
         return;
@@ -1066,12 +1143,17 @@ func eval_vm_rewrite_tail_return(scalar $block) void {
     $block->{"statement_count"} = $scnt + 1;
 }
 
-private func eval_vm_record_our(str $vn, str $vsig, int $vt, str $seg_pkg, scalar $program, scalar $prom_state) void {
+private func eval_vm_record_our(str $vn, str $vsig, int $vt, str $seg_pkg, scalar $program, scalar $prom_state, int $has_init) void {
     if (length($vn) == 0) { return; }
     my scalar $nd_ref = $prom_state->{"newly_declared"};
+    my scalar $sk_ref = $prom_state->{"skip_seed"};
     my scalar $ao_ref = $prom_state->{"added_our"};
     my str $qvn = ($seg_pkg ne "" && $seg_pkg ne "main" && index($vn, "::") < 0) ? ($seg_pkg . "::" . $vn) : $vn;
     $nd_ref->{$qvn} = 1;
+    # Only a declaration without initializer starts from undef. With one, the
+    # old value stays visible to the initializer (`my $n = $n * 2`: the new
+    # `my` is not in scope in its own initializer -- Perl; V5-15).
+    if ($has_init == 0) { $sk_ref->{$qvn} = 1; }
     if (!exists(%g_eval_vm_our_names, $qvn) && !defined($ao_ref->{$qvn})) {
         $ao_ref->{$qvn} = 1;
         $prom_state->{"added_our_stubs"} = $prom_state->{"added_our_stubs"} . "package " . $seg_pkg . ";\nour " . $vsig . $vn . ";\n";
@@ -1095,7 +1177,8 @@ private func eval_vm_promote_body(scalar $body, str $seg_pkg, scalar $program, s
             my int $vt = $st->{"var_type"};
             $st->{"type"} = NI::OUR_DECL;
             $st->{"package"} = $seg_pkg;
-            eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state);
+            my int $vinit = (defined($st->{"init"}) && (length(ref($st->{"init"})) > 0 || $st->{"init"} != 0)) ? 1 : 0;
+            eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state, $vinit);
         } elsif (defined($st) && $st->{"type"} == NI::DESTRUCTURE && $st->{"is_decl"} == 1) {
             $st->{"is_decl"} = 0;
             my scalar $dvars = $st->{"vars"};
@@ -1106,7 +1189,7 @@ private func eval_vm_promote_body(scalar $body, str $seg_pkg, scalar $program, s
                 my str $vn = $dv->{"name"};
                 my str $vsig = defined($dv->{"sigil"}) ? $dv->{"sigil"} : "\$";
                 my int $vt = defined($dv->{"var_type"}) ? $dv->{"var_type"} : 0;
-                eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state);
+                eval_vm_record_our($vn, $vsig, $vt, $seg_pkg, $program, $prom_state, 1);
                 $dvi = $dvi + 1;
             }
         }
@@ -1114,6 +1197,95 @@ private func eval_vm_promote_body(scalar $body, str $seg_pkg, scalar $program, s
     }
     if ($rewrite_tail == 1) {
         eval_vm_rewrite_tail_return($body);
+    }
+}
+
+# "VM compile error (line N): MSG" lines -> "FILE:N: MSG" (one per line);
+# the "N error(s) during compilation" summary is dropped.
+private func eval_vm_compile_error_text(str $msgs, str $fname) str {
+    my array @out = ();
+    foreach my str $ln (split("\n", $msgs)) {
+        if ($ln =~ /^\s*$/) { next; }
+        if ($ln =~ /^\d+ errors? during compilation/) { next; }
+        if ($ln =~ /^VM compile error \(line (\d+)\): (.*)$/) {
+            push(@out, $fname . ":" . $1 . ": " . $2);
+        } elsif ($ln =~ /^VM compile error: (.*)$/) {
+            push(@out, $fname . ": " . $1);
+        } else {
+            push(@out, $ln);
+        }
+    }
+    if (size(@out) == 0) { return "VM compilation failed"; }
+    return join("\n", @out);
+}
+
+# Source builder for eval_string_vm_ex: append wrapper TEXT
+private func eval_sb_add(scalar $sb, str $text) void {
+    if (length($text) == 0) { return; }
+    my int $nl = 0;
+    my int $p = index($text, "\n");
+    while ($p >= 0) { $nl = $nl + 1; $p = index($text, "\n", $p + 1); }
+    $sb->{"src"} = $sb->{"src"} . $text;
+    $sb->{"line"} = $sb->{"line"} + $nl;
+}
+
+# Append user chunks ([text, offset-in-trimmed-code] pairs), each on a fresh
+# line, recording which source lines hold which user line / column.
+private func eval_sb_add_parts(scalar $sb, scalar $parts) void {
+    if (!defined($parts)) { return; }
+    my str $code = $sb->{"code"};
+    my int $n = size($parts);
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $pt = $parts->[$i];
+        my str $text = $pt->[0];
+        my int $pos = $pt->[1];
+        my int $cline = 1;
+        my int $q = index($code, "\n");
+        while ($q >= 0 && $q < $pos) { $cline = $cline + 1; $q = index($code, "\n", $q + 1); }
+        my int $lnl = ($pos > 0) ? rindex($code, "\n", $pos - 1) : -1;
+        my int $ucol = $pos - $lnl;
+        my str $cur = $sb->{"src"};
+        if (length($cur) > 0 && substr($cur, length($cur) - 1, 1) ne "\n") {
+            eval_sb_add($sb, "\n");
+        }
+        my int $start = $sb->{"line"};
+        my int $tnl = 0;
+        my int $tp = index($text, "\n");
+        while ($tp >= 0) { $tnl = $tnl + 1; $tp = index($text, "\n", $tp + 1); }
+        push(@{$sb->{"map"}}, [$start, $tnl + 1, $cline + $sb->{"lead"}, $ucol]);
+        eval_sb_add($sb, $text . "\n");
+        $i = $i + 1;
+    }
+}
+
+# Rewrite token lines (and first-line columns) from wrapped-source positions
+# to the user's code; wrapper tokens take the nearest preceding user line.
+private func eval_sb_renumber_tokens(scalar $sb, scalar $tokens) void {
+    my scalar $map = $sb->{"map"};
+    my int $mn = size($map);
+    if ($mn == 0) { return; }
+    my int $mi = 0;
+    my int $last_user = 1;
+    my int $tn = size($tokens);
+    my int $ti = 0;
+    while ($ti < $tn) {
+        my scalar $tok = $tokens->[$ti];
+        my int $ln = defined($tok->{"line"}) ? $tok->{"line"} : 0;
+        while ($mi < $mn && $map->[$mi]->[0] + $map->[$mi]->[1] <= $ln) {
+            $last_user = $map->[$mi]->[2] + $map->[$mi]->[1] - 1;
+            $mi = $mi + 1;
+        }
+        if ($mi < $mn && $ln >= $map->[$mi]->[0]) {
+            my scalar $me = $map->[$mi];
+            $tok->{"line"} = $me->[2] + ($ln - $me->[0]);
+            if ($ln == $me->[0] && defined($tok->{"column"})) {
+                $tok->{"column"} = $tok->{"column"} + $me->[3] - 1;
+            }
+        } else {
+            $tok->{"line"} = $last_user;
+        }
+        $ti = $ti + 1;
     }
 }
 
@@ -1144,6 +1316,8 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             EvalActiveStack *es_pre = eval_active_stack_get();
             if (es_pre->depth > 0 && es_pre->vms[es_pre->depth - 1]) {
                 vm_export_globals(es_pre->vms[es_pre->depth - 1], globals_ref);
+                g_eval_store_gen++;
+                es_pre->vms[es_pre->depth - 1]->eval_sync_gen = g_eval_store_gen;
             }
         }
         my str $prev_vm_pkg = $g_eval_vm_pkg;
@@ -1154,12 +1328,30 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         my scalar $segs = $units->{"segments"};
         my int $seg_cnt = ($is_load == 1 || !defined($segs)) ? 0 : size($segs);
 
-        my str $source = $g_eval_vm_decls;
-        if (length($g_eval_vm_decls) > 0) {
-            $source = $source . "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n";
+        # The wrapped source is built piece by piece; every chunk of the
+        # user's code is recorded with its line/column in that code, and the
+        # tokens are renumbered after lexing, so parse and compile errors (and
+        # __LINE__) report the user's lines, not the wrapper's (V5-8).
+        my int $lead_nl = 0;
+        if ($code =~ /^(\s+)/) {
+            my str $lead_ws = $1;
+            my int $lwp = index($lead_ws, "\n");
+            while ($lwp >= 0) { $lead_nl = $lead_nl + 1; $lwp = index($lead_ws, "\n", $lwp + 1); }
         }
+        my hash %sb = ();
+        $sb{"src"} = "";
+        $sb{"line"} = 1;
+        my array @sb_map = ();
+        $sb{"map"} = \@sb_map;
+        $sb{"code"} = $trimmed;
+        $sb{"lead"} = $lead_nl;
+        eval_sb_add(\%sb, $g_eval_vm_decls);
+        if (length($g_eval_vm_decls) > 0) {
+            eval_sb_add(\%sb, "package __strada_eval_sep__;\nfunc __strada_eval_top_start__() void {}\n");
+        }
+        eval_sb_add(\%sb, "package " . $prev_vm_pkg . ";\n");
+        eval_sb_add_parts(\%sb, $units->{"top_parts"});
         if ($seg_cnt > 1) {
-            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\n";
             my str $dispatch_calls = "";
             my int $sgi = 0;
             while ($sgi < $seg_cnt) {
@@ -1167,7 +1359,9 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                 my str $spkg = $sg->{"pkg"};
                 my str $sfn = "__eval_seg_" . $sgi . "__";
                 my str $sret = ($sgi == $seg_cnt - 1) ? "scalar" : "void";
-                $source = $source . "package " . $spkg . ";\nfunc " . $sfn . "() " . $sret . " {\n" . $sg->{"body"} . "\n}\n";
+                eval_sb_add(\%sb, "package " . $spkg . ";\nfunc " . $sfn . "() " . $sret . " {\n");
+                eval_sb_add_parts(\%sb, $sg->{"parts"});
+                eval_sb_add(\%sb, "\n}\n");
                 my str $qcall = $spkg . "::" . $sfn . "()";
                 if ($sgi == $seg_cnt - 1) {
                     $dispatch_calls = $dispatch_calls . "    return " . $qcall . ";\n";
@@ -1176,12 +1370,19 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                 }
                 $sgi = $sgi + 1;
             }
-            $source = $source . "package " . $next_vm_pkg . ";\nfunc __eval__() scalar {\n" . $dispatch_calls . "}\n";
+            eval_sb_add(\%sb, "package " . $next_vm_pkg . ";\nfunc __eval__() scalar {\n" . $dispatch_calls . "}\n");
         } elsif (length($body_src) > 0) {
-            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
+            eval_sb_add(\%sb, "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n");
+            my int $bsi = 0;
+            while ($bsi < $seg_cnt) {
+                eval_sb_add_parts(\%sb, $segs->[$bsi]->{"parts"});
+                $bsi = $bsi + 1;
+            }
+            eval_sb_add(\%sb, "\n}\n");
         } else {
-            $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
+            eval_sb_add(\%sb, "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n");
         }
+        my str $source = $sb{"src"};
 
         my array @lib_paths = ();
         if (defined($extra_libs)) {
@@ -1201,6 +1402,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
 
         # Parse
         my scalar $tokens = lex_tokenize($source);
+        eval_sb_renumber_tokens(\%sb, $tokens);
         my scalar $parser = parser_new($tokens);
         parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");
         my array @empty = ();
@@ -1208,6 +1410,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
 
         # Collect global declarations introduced by this call (after prior persistent decls)
         my hash %newly_declared = ();
+        my hash %skip_seed = ();
         my scalar $pglobals = $program->{"globals"};
         my int $pglobal_cnt = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
         my int $top_new_globals = $pglobal_cnt - $g_eval_vm_decls_globals;
@@ -1225,6 +1428,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                     my int $has_init = (defined($pg->{"init"}) && (length(ref($pg->{"init"})) > 0 || $pg->{"init"} != 0)) ? 1 : 0;
                     if (!($pg->{"type"} == NI::OUR_DECL && exists(%g_eval_vm_our_names, $gn) && $has_init == 0)) {
                         $newly_declared{$gn} = 1;
+                        if ($has_init == 0) { $skip_seed{$gn} = 1; }
                     }
                 }
             }
@@ -1237,6 +1441,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         my hash %new_funcs = ();
         my hash %prom_state = ();
         $prom_state{"newly_declared"} = \%newly_declared;
+        $prom_state{"skip_seed"} = \%skip_seed;
         $prom_state{"added_our"} = \%added_our;
         $prom_state{"added_our_stubs"} = "";
         $prom_state{"added_our_cnt"} = 0;
@@ -1251,6 +1456,13 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             my scalar $pfn = $pfuncs->[$pfi];
             my str $fn_name = $pfn->{"name"};
             my str $bare = defined($pfn->{"bare_name"}) ? ("" . $pfn->{"bare_name"}) : "";
+            if ($bare eq "") {
+                # functions of package main carry no bare_name (V5-7: the last
+                # segment of `package A; ...; package main; EXPR` was never
+                # promoted / tail-rewritten, so the eval returned undef)
+                my int $bcp = rindex($fn_name, "::");
+                $bare = ($bcp >= 0) ? substr($fn_name, $bcp + 2, length($fn_name) - $bcp - 2) : $fn_name;
+            }
             if ($fn_name eq "__eval__" || $bare eq "__eval__") {
                 $eval_entry_name = $fn_name;
                 if ($seg_cnt <= 1) {
@@ -1278,11 +1490,61 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         }
 
         # Compile to bytecode under lock, commit persistent declarations before execution so nested/threaded eval sees them
-        my scalar $skip_ref = \%newly_declared;
+        my scalar $skip_ref = \%skip_seed;
+        my array @class_list = ();
+        {
+            my hash %cl_seen = ();
+            my int $cfi = 0;
+            while ($cfi < $pfcount) {
+                my scalar $cfn = $pfuncs->[$cfi];
+                my str $cpk = defined($cfn->{"package"}) ? ("" . $cfn->{"package"}) : "";
+                if ($cpk ne "" && $cpk ne "main" && index($cpk, "__strada_eval") != 0 && !exists($cl_seen{$cpk})) {
+                    $cl_seen{$cpk} = 1;
+                    push(@class_list, $cpk);
+                }
+                $cfi = $cfi + 1;
+            }
+        }
+        my scalar $class_list_ref = \@class_list;
         my int $compiled_ok = 0;
         my int $vprog_handle = 0;
+        my str $compile_msgs = "";
         __C__ {
-            VMProgram *vprog = vm_compile_program(program);
+            /* The VM compiler reports errors on stderr only; capture them so
+             * the exception carries the real message (V5-8). */
+            VMProgram *vprog = NULL;
+            {
+                FILE *cap = tmpfile();
+                int saved_fd = -1;
+                if (cap) {
+                    fflush(stderr);
+                    saved_fd = dup(2);
+                    if (saved_fd < 0 || dup2(fileno(cap), 2) < 0) {
+                        if (saved_fd >= 0) close(saved_fd);
+                        saved_fd = -1;
+                    }
+                }
+                vprog = vm_compile_program(program);
+                if (saved_fd >= 0) {
+                    fflush(stderr);
+                    dup2(saved_fd, 2);
+                    close(saved_fd);
+                    long cn = ftell(cap);
+                    if (cn > 0) {
+                        if (cn > 65536) cn = 65536;
+                        char *cbuf = malloc((size_t)cn + 1);
+                        if (cbuf) {
+                            rewind(cap);
+                            size_t got = fread(cbuf, 1, (size_t)cn, cap);
+                            cbuf[got] = 0;
+                            strada_decref(compile_msgs);
+                            compile_msgs = strada_new_str(cbuf);
+                            free(cbuf);
+                        }
+                    }
+                }
+                if (cap) fclose(cap);
+            }
             if (vprog) {
                 /* Locate runtime header path for __C__ blocks compiled inside VM eval */
                 {
@@ -1325,7 +1587,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             }
         }
         if ($compiled_ok == 0) {
-            throw("VM compilation failed");
+            throw(eval_vm_compile_error_text($compile_msgs, length($filename) > 0 ? $filename : "<eval-vm>"));
         }
         my str $rb_pkg = $g_eval_vm_pkg;
         my str $rb_decls = $g_eval_vm_decls;
@@ -1373,10 +1635,17 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
             else if (vm_program_find_func(exec_vprog, "main") >= 0) entry = "main";
             if (entry) {
                 EvalActiveStack *es_run = eval_active_stack_get();
-                StradaValue *pre_snap = (es_run->depth > 0) ? strada_clone(globals_ref) : NULL;
+                if (!g_eval_store_sv) {
+                    strada_incref(globals_ref);
+                    g_eval_store_sv = globals_ref;
+                    vm_foreign_vm_call_hook = eval_foreign_vm_hook;
+                }
+                eval_register_host_classes(exec_vprog, class_list_ref);
                 VM *vvm = vm_new(exec_vprog);
                 vvm->trap_uncaught = 1;
+                vvm->eval_epoch = g_eval_epoch;
                 vm_seed_globals(vvm, globals_ref, skip_ref);
+                vvm->eval_sync_gen = g_eval_store_gen;
                 int pushed = 0;
                 if (es_run->depth < EVAL_ACTIVE_MAX) {
                     es_run->vms[es_run->depth++] = vvm;
@@ -1387,22 +1656,29 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                     strada_decref(locked);
                     locked = STRADA_MAKE_TAGGED_INT(0);
                 }
+                /* The result and the exported globals convert under one
+                 * memo, so a returned container IS the one a global holds
+                 * (no VM code may run inside: only when there are no END
+                 * blocks). */
+                volatile int conv_span = 0;
                 int __cm = strada_cleanup_mark();
                 int __lm = strada_local_depth_get();
+                vvm->eval_running++;
                 if (setjmp(*STRADA_TRY_PUSH()) == 0) {
                     vm_run_globals_init(vvm);
                     if (!vvm->has_exception) {
                         VMValue vres = vm_execute(vvm, entry);
                         if (!vvm->has_exception) {
+                            if (exec_vprog->end_count == 0) { vm_conv_begin(); conv_span = 1; }
                             strada_decref(vm_result);
-                            vm_result = vm_value_to_sv(vres);
+                            vm_result = vm_value_to_sv_scalar(vres);
                         }
                     }
                     if (vvm->has_exception) {
                         strada_decref(had_vm_exc);
                         had_vm_exc = STRADA_MAKE_TAGGED_INT(1);
                         strada_decref(vm_exc);
-                        vm_exc = vm_value_to_sv(vvm->current_exception);
+                        vm_exc = vm_value_to_sv_scalar(vvm->current_exception);
                         vvm->has_exception = 0;
                     }
                     vm_run_end_blocks(vvm);
@@ -1410,12 +1686,13 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                         strada_decref(had_vm_exc);
                         had_vm_exc = STRADA_MAKE_TAGGED_INT(1);
                         strada_decref(vm_exc);
-                        vm_exc = vm_value_to_sv(vvm->current_exception);
+                        vm_exc = vm_value_to_sv_scalar(vvm->current_exception);
                         vvm->has_exception = 0;
                     }
                     STRADA_TRY_POP();
                 } else {
                     STRADA_TRY_POP();
+                    if (conv_span) { vm_conv_end(); conv_span = 0; }
                     strada_local_restore_to(__lm);
                     strada_cleanup_drain_to(__cm);
                     StradaValue *__ce = strada_get_exception();
@@ -1425,6 +1702,7 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                     strada_decref(vm_exc);
                     vm_exc = __ce ? __ce : strada_new_str("C exception");
                 }
+                vvm->eval_running--;
                 eval_vm_lock();
                 strada_decref(locked);
                 locked = STRADA_MAKE_TAGGED_INT(1);
@@ -1433,11 +1711,29 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
                 }
                 if (!strada_to_int(had_vm_exc)) {
                     vm_export_globals(vvm, globals_ref);
-                    if (es_run->depth > 0 && es_run->vms[es_run->depth - 1]) {
-                        eval_seed_changed_globals(es_run->vms[es_run->depth - 1], pre_snap, globals_ref);
-                    }
+                    g_eval_store_gen++;
+                    vvm->eval_sync_gen = g_eval_store_gen;
                 }
-                if (pre_snap) strada_decref(pre_snap);
+                if (conv_span) { vm_conv_end(); conv_span = 0; }
+                if (!strada_to_int(had_vm_exc)) {
+                    /* a nested eval: the enclosing eval's VM picks up what
+                     * this one changed */
+                    if (es_run->depth > 0 && es_run->vms[es_run->depth - 1]) {
+                        VM *pvm = es_run->vms[es_run->depth - 1];
+                        vm_seed_globals(pvm, globals_ref, NULL);
+                        pvm->eval_sync_gen = g_eval_store_gen;
+                    }
+                    /* keep the latest VM: host calls of eval-defined methods
+                     * run there */
+                    VM *old_hv = g_eval_host_vm;
+                    VMProgram *old_hp = g_eval_host_prog;
+                    vm_retain(vvm);
+                    vm_program_retain(exec_vprog);
+                    g_eval_host_vm = vvm;
+                    g_eval_host_prog = exec_vprog;
+                    if (old_hv) vm_free(old_hv);
+                    if (old_hp) vm_program_free(old_hp);
+                }
                 vm_suspend(vvm);
                 vm_free(vvm);
             }

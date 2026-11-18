@@ -3427,14 +3427,131 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
 static void vm_exported_closure_free(void *raw);
 static VMValue vm_tied_scalar_fetch(VM *vm, VMValue ts_val);
 
-/* Convert VMValue to StradaValue* for passing to __C__ blocks.
- * Depth-capped: cyclic VM structures (e.g. the weak-ref tests' two-hash
- * cycles) previously recursed until the C stack corrupted the heap. */
-static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
+/* ===== Identity-preserving VM <-> StradaValue conversion (lib/Eval) =====
+ * Every conversion runs with a pointer memo (VM object -> SV container and
+ * SV container -> VM object), so shared substructure stays shared, cycles
+ * terminate, and DAGs convert in linear time instead of once per path
+ * (V5-2/V5-3/V5-4). vm_conv_begin()/vm_conv_end() widen the memo over several
+ * conversions -- lib/Eval converts all globals of a VM (and the eval result)
+ * in one span, so two globals holding the same container still do after the
+ * round trip. Nested containers convert to REFs (an element holding an array
+ * is an array reference in the compiled runtime; V5-5). */
+#ifndef STRADA_NO_TLS
+#define VM_CONV_TLS __thread
+#else
+#define VM_CONV_TLS
+#endif
+typedef struct { const void *k; uintptr_t v; } VMConvSlot;
+typedef struct { VMConvSlot *t; size_t cap, n; } VMConvMap;
+static VM_CONV_TLS VMConvMap g_conv_v2s;   /* VM object -> StradaValue* (memo holds a ref) */
+static VM_CONV_TLS VMConvMap g_conv_s2v;   /* SV container -> VMValue */
+static VM_CONV_TLS int g_conv_depth = 0;
+#define VM_CONV_MAX_DEPTH 10000
+
+static inline size_t vm_conv_hash(const void *k, size_t mask) {
+    uintptr_t x = (uintptr_t)k;
+    x ^= x >> 17; x *= (uintptr_t)0xed5ad4bbU; x ^= x >> 11;
+    return (size_t)x & mask;
+}
+static int vm_conv_get(VMConvMap *m, const void *k, uintptr_t *out) {
+    if (g_conv_depth <= 0 || !m->t || !k) return 0;
+    size_t mask = m->cap - 1;
+    for (size_t i = vm_conv_hash(k, mask);; i = (i + 1) & mask) {
+        if (!m->t[i].k) return 0;
+        if (m->t[i].k == k) { *out = m->t[i].v; return 1; }
+    }
+}
+static void vm_conv_put(VMConvMap *m, const void *k, uintptr_t v) {
+    if (g_conv_depth <= 0 || !k) return;
+    if (!m->t || (m->n + 1) * 2 > m->cap) {
+        size_t ncap = m->cap ? m->cap * 2 : 64;
+        VMConvSlot *nt = calloc(ncap, sizeof(VMConvSlot));
+        if (!nt) return;
+        for (size_t j = 0; j < m->cap; j++) {
+            if (!m->t[j].k) continue;
+            size_t i = vm_conv_hash(m->t[j].k, ncap - 1);
+            while (nt[i].k) i = (i + 1) & (ncap - 1);
+            nt[i] = m->t[j];
+        }
+        free(m->t);
+        m->t = nt;
+        m->cap = ncap;
+    }
+    size_t mask = m->cap - 1;
+    size_t i = vm_conv_hash(k, mask);
+    while (m->t[i].k && m->t[i].k != k) i = (i + 1) & mask;
+    if (!m->t[i].k) m->n++;
+    m->t[i].k = k;
+    m->t[i].v = v;
+}
+void vm_conv_begin(void) { g_conv_depth++; }
+void vm_conv_end(void) {
+    if (g_conv_depth <= 0 || --g_conv_depth > 0) return;
+    if (g_conv_v2s.t) {
+        for (size_t i = 0; i < g_conv_v2s.cap; i++)
+            if (g_conv_v2s.t[i].k) strada_decref((StradaValue *)g_conv_v2s.t[i].v);
+        free(g_conv_v2s.t);
+    }
+    free(g_conv_s2v.t);
+    memset(&g_conv_v2s, 0, sizeof(g_conv_v2s));
+    memset(&g_conv_s2v, 0, sizeof(g_conv_s2v));
+}
+static void vm_conv_remember_sv(const void *vobj, StradaValue *sv) {
+    if (g_conv_depth <= 0) return;
+    strada_incref(sv);
+    vm_conv_put(&g_conv_v2s, vobj, (uintptr_t)sv);
+}
+/* A converted container as the caller wants it: the container itself at the
+ * top level (globals export, __C__ arguments), a fresh ref to it (blessed like
+ * the container) when it is an element of another container. */
+static StradaValue *vm_conv_container_out(StradaValue *c, int nested) {
+    if (!nested) { strada_incref(c); return c; }
+    StradaValue *r = strada_ref_create(c);
+    if (c->meta && c->meta->blessed_package) strada_bless(r, c->meta->blessed_package);
+    return r;
+}
+/* Is CLS a class of the active VM program (methods or inheritance)? A
+ * blessed host ref of such a class converts to a VM object, so an object
+ * that went out of an eval comes back as one (pointer-identity cache: the
+ * runtime's blessed package names are interned sticky). */
+static int vm_prog_has_class(VMProgram *p, const char *cls) {
+    if (!p || !cls || !cls[0]) return 0;
+    static VM_CONV_TLS VMProgram *c_prog;
+    static VM_CONV_TLS const char *c_cls;
+    static VM_CONV_TLS int c_res;
+    if (c_prog == p && c_cls == cls) return c_res;
+    int res = 0;
+    size_t cl = strlen(cls);
+    /* methods are named CLS_method (CLS with :: as _), or CLS::method */
+    char san[256];
+    size_t sl = 0;
+    for (size_t k = 0; cls[k] && sl < sizeof(san) - 1; k++) {
+        if (cls[k] == ':' && cls[k + 1] == ':') { san[sl++] = '_'; k++; }
+        else san[sl++] = cls[k];
+    }
+    san[sl] = 0;
+    for (size_t i = 0; i < p->func_count && !res; i++) {
+        const char *fn = p->func_names ? p->func_names[i] : NULL;
+        if (!fn) continue;
+        if (strncmp(fn, cls, cl) == 0 && fn[cl] == ':' && fn[cl + 1] == ':') res = 1;
+        else if (strncmp(fn, san, sl) == 0 && fn[sl] == '_' && fn[sl + 1]) res = 1;
+    }
+    for (int i = 0; i < p->inherit_count && !res; i++) {
+        if (p->inherits[i].child && strcmp(p->inherits[i].child, cls) == 0) res = 1;
+    }
+    for (int i = 0; i < p->attr_count && !res; i++) {
+        if (p->attrs[i].class_name && strcmp(p->attrs[i].class_name, cls) == 0) res = 1;
+    }
+    c_prog = p; c_cls = cls; c_res = res;
+    return res;
+}
+
+/* Convert VMValue to StradaValue* for passing to __C__ blocks / the host. */
+static StradaValue *vm_to_sv_depth(VMValue v, int depth, int nested) {
     if (VM_IS_ANY_INT(v)) return strada_new_int(VM_ANY_INT_VAL(v));
     if (VM_IS_FLOAT(v)) return strada_new_num(VM_FLOAT_VAL(v));
     if (VM_IS_UNDEF(v)) return strada_new_undef();
-    if (depth >= 32) return strada_new_undef();
+    if (depth >= VM_CONV_MAX_DEPTH) return strada_new_undef();
     if (VM_IS_PTR(v)) {
         switch (VM_PTR_TYPE(v)) {
         case VM_OBJ_UINT64: return strada_new_uint(VM_AS_UINT64(v)->val);
@@ -3443,30 +3560,36 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
             if (VM_AS_STR(v)->hdr.is_utf8) STRADA_SET_UTF8_FLAG(r);
             return r;
         }
-        case VM_OBJ_ARRAY: {
-            /* Convert VM array to Strada array */
-            VMArray *va = VM_AS_ARRAY(v);
-            StradaValue *sa = strada_new_array();
-            for (int i = 0; i < va->size; i++)
-                strada_array_push_take(sa->value.av, vm_to_sv_depth(va->items[i], depth + 1));
-            if (va->class_name) strada_bless(sa, va->class_name);
-            return sa;
-        }
+        case VM_OBJ_ARRAY:
         case VM_OBJ_HASH: {
-            VMHash *vh = VM_AS_HASH(v);
-            StradaValue *sh = strada_new_hash();
-            for (int i = 0; i < vh->capacity; i++)
-                if (vh->entries[i].occupied == 1) {
-                    StradaValue *ksv = strada_new_str_len(vh->entries[i].key, vh->entries[i].keylen);
-                    StradaValue *vsv = vm_to_sv_depth(vh->entries[i].value, depth + 1);
-                    strada_hash_set_sv(sh->value.hv, ksv, vsv);
-                    strada_decref(ksv);
-                    strada_decref(vsv);
-                }
-            if (vh->class_name) {
-                strada_bless(sh, vh->class_name);
+            uintptr_t hit;
+            if (vm_conv_get(&g_conv_v2s, VM_TO_PTR(v), &hit))
+                return vm_conv_container_out((StradaValue *)hit, nested);
+            StradaValue *c;
+            if (VM_PTR_TYPE(v) == VM_OBJ_ARRAY) {
+                VMArray *va = VM_AS_ARRAY(v);
+                c = strada_new_array();
+                if (va->class_name) strada_bless(c, va->class_name);
+                vm_conv_remember_sv(va, c);
+                for (int i = 0; i < va->size; i++)
+                    strada_array_push_take(c->value.av, vm_to_sv_depth(va->items[i], depth + 1, 1));
+            } else {
+                VMHash *vh = VM_AS_HASH(v);
+                c = strada_new_hash();
+                if (vh->class_name) strada_bless(c, vh->class_name);
+                vm_conv_remember_sv(vh, c);
+                for (int i = 0; i < vh->capacity; i++)
+                    if (vh->entries[i].occupied == 1) {
+                        StradaValue *ksv = strada_new_str_len(vh->entries[i].key, vh->entries[i].keylen);
+                        StradaValue *vsv = vm_to_sv_depth(vh->entries[i].value, depth + 1, 1);
+                        strada_hash_set_sv(c->value.hv, ksv, vsv);
+                        strada_decref(ksv);
+                        strada_decref(vsv);
+                    }
             }
-            return sh;
+            StradaValue *out = vm_conv_container_out(c, nested);
+            strada_decref(c);
+            return out;
         }
         case VM_OBJ_STRBUF: {
             StradaValue *r = strada_new_str_len(VM_AS_STRBUF(v)->data, VM_AS_STRBUF(v)->len);
@@ -3479,14 +3602,14 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
             return nsv->sv;
         }
         case VM_OBJ_CELL:
-            return vm_to_sv_depth(VM_AS_CELL(v)->val, depth + 1);
+            return vm_to_sv_depth(VM_AS_CELL(v)->val, depth + 1, nested);
         case VM_OBJ_WEAKREF:
-            return vm_to_sv_depth(VM_AS_WEAKREF(v)->target, depth + 1);
+            return vm_to_sv_depth(VM_AS_WEAKREF(v)->target, depth + 1, nested);
         case VM_OBJ_TIED_SCALAR: {
             if (!g_active_vm || g_active_vm->has_pending_exc) return strada_new_undef();
             VMValue fv = vm_tied_scalar_fetch(g_active_vm, v);
             if (g_active_vm->has_pending_exc) return strada_new_undef();
-            return vm_to_sv_depth(fv, depth + 1);
+            return vm_to_sv_depth(fv, depth + 1, nested);
         }
         case VM_OBJ_FILEHANDLE: {
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(v);
@@ -3496,6 +3619,11 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
         }
         case VM_OBJ_CLOSURE: {
             if (!g_active_vm || !g_active_vm->program) return strada_new_undef();
+            uintptr_t hit;
+            if (vm_conv_get(&g_conv_v2s, VM_TO_PTR(v), &hit)) {
+                strada_incref((StradaValue *)hit);
+                return (StradaValue *)hit;
+            }
             VMExportedClosureCtx *ctx = malloc(sizeof(VMExportedClosureCtx));
             if (!ctx) return strada_new_undef();
             ctx->vm = g_active_vm;
@@ -3507,6 +3635,7 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
             vm_program_retain(ctx->prog);
             StradaValue *csv = strada_custom_closure_new(vm_exported_closure_call, vm_exported_closure_free, ctx);
             if (ctx->vcl->class_name && csv) strada_bless(csv, ctx->vcl->class_name);
+            if (csv) vm_conv_remember_sv(ctx->vcl, csv);
             return csv;
         }
         case VM_OBJ_SREF: {
@@ -3519,7 +3648,7 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
             } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
                 tv = VM_AS_CELL(sr->cell)->val;
             }
-            StradaValue *rv = strada_ref_create_take(vm_to_sv_depth(tv, depth + 1));
+            StradaValue *rv = strada_ref_create_take(vm_to_sv_depth(tv, depth + 1, 1));
             if (sr->class_name) strada_bless(rv, sr->class_name);
             return rv;
         }
@@ -3530,11 +3659,23 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
 }
 
 static StradaValue *vm_to_sv(VMValue v) {
-    return vm_to_sv_depth(v, 0);
+    vm_conv_begin();
+    StradaValue *r = vm_to_sv_depth(v, 0, 0);
+    vm_conv_end();
+    return r;
 }
 
 struct StradaValue *vm_value_to_sv(VMValue v) {
     return vm_to_sv(v);
+}
+
+/* Like vm_value_to_sv, but a container comes back as a reference to it (a
+ * value handed to the host as a scalar: eval results, exceptions). */
+struct StradaValue *vm_value_to_sv_scalar(VMValue v) {
+    vm_conv_begin();
+    StradaValue *r = vm_to_sv_depth(v, 0, 1);
+    vm_conv_end();
+    return r;
 }
 
 /* Convert StradaValue* back to VMValue.
@@ -3542,7 +3683,40 @@ struct StradaValue *vm_value_to_sv(VMValue v) {
  * containers so element access works — the VM's index/hash-get paths do not
  * understand wrapped native SVs. Opaque types (sockets, regexes, pointers)
  * still wrap as VMNativeSV and round-trip through vm_to_sv by identity.
- * Depth-capped: cyclic structures fall back to wrapping. */
+ * Memoized (see vm_conv_begin): shared containers stay shared, cycles close. */
+static VMValue sv_to_vm_depth(StradaValue *sv, int depth);
+static VMValue sv_to_vm_container(StradaValue *c, const char *cls, int depth) {
+    uintptr_t hit;
+    if (vm_conv_get(&g_conv_s2v, c, &hit)) return (VMValue)hit;
+    if (!cls && c->meta && c->meta->blessed_package) cls = c->meta->blessed_package;
+    if (c->type == STRADA_ARRAY) {
+        StradaArray *av = c->value.av;
+        VMArray *va = vm_array_new((int)(av ? av->size : 0) + 1);
+        if (cls) va->class_name = strdup(cls);
+        vm_conv_put(&g_conv_s2v, c, (uintptr_t)VM_MAKE_PTR(va));
+        if (av) {
+            for (size_t i = 0; i < av->size; i++)
+                vm_array_push(va, sv_to_vm_depth(strada_array_get(av, (int64_t)i), depth + 1));
+        }
+        return VM_MAKE_PTR(va);
+    }
+    StradaHash *hv = c->value.hv;
+    VMHash *h = vm_hash_new(16);
+    if (cls) h->class_name = strdup(cls);
+    vm_conv_put(&g_conv_s2v, c, (uintptr_t)VM_MAKE_PTR(h));
+    if (hv && hv->entries) {
+        /* entries[] is initialized only up to next_slot (the append
+         * high-water mark); beyond it is uninitialized memory. Deleted
+         * slots inside the region have key == NULL. */
+        for (size_t i = 0; i < hv->next_slot; i++) {
+            if (hv->entries[i].key == NULL) continue;
+            vm_hash_set_n(h, hv->entries[i].key->data, hv->entries[i].key->len,
+                          sv_to_vm_depth(hv->entries[i].value, depth + 1));
+        }
+    }
+    return VM_MAKE_PTR(h);
+}
+
 static VMValue sv_to_vm_depth(StradaValue *sv, int depth) {
     if (!sv) return VM_UNDEF_VAL;
     if (STRADA_IS_TAGGED_INT(sv)) return VM_MAKE_INT(STRADA_TAGGED_INT_VAL(sv));
@@ -3560,48 +3734,29 @@ static VMValue sv_to_vm_depth(StradaValue *sv, int depth) {
         return vm_make_str_flag(sv->value.pv, STRADA_STR_BYTELEN(sv), STRADA_STR_IS_UTF8(sv) != 0);
     }
     case STRADA_UNDEF: return VM_UNDEF_VAL;
-    case STRADA_ARRAY: {
-        if (depth >= 32) break;
-        StradaArray *av = sv->value.av;
-        VMArray *va = vm_array_new((int)(av ? av->size : 0) + 1);
-        if (av) {
-            for (size_t i = 0; i < av->size; i++)
-                vm_array_push(va, sv_to_vm_depth(strada_array_get(av, (int64_t)i), depth + 1));
-        }
-        if (sv->meta && sv->meta->blessed_package)
-            va->class_name = strdup(sv->meta->blessed_package);
-        return VM_MAKE_PTR(va);
-    }
-    case STRADA_HASH: {
-        if (depth >= 32) break;
-        StradaHash *hv = sv->value.hv;
-        VMHash *h = vm_hash_new(16);
-        if (hv && hv->entries) {
-            /* entries[] is initialized only up to next_slot (the append
-             * high-water mark); beyond it is uninitialized memory. Deleted
-             * slots inside the region have key == NULL. */
-            for (size_t i = 0; i < hv->next_slot; i++) {
-                if (hv->entries[i].key == NULL) continue;
-                vm_hash_set_n(h, hv->entries[i].key->data, hv->entries[i].key->len,
-                              sv_to_vm_depth(hv->entries[i].value, depth + 1));
-            }
-        }
-        if (sv->meta && sv->meta->blessed_package)
-            h->class_name = strdup(sv->meta->blessed_package);
-        return VM_MAKE_PTR(h);
-    }
+    case STRADA_ARRAY:
+    case STRADA_HASH:
+        if (depth >= VM_CONV_MAX_DEPTH) break;
+        return sv_to_vm_container(sv, NULL, depth);
     case STRADA_REF: {
-        /* Keep slot refs and blessed refs wrapped as VMNativeSV so native
-         * slot references keep variable linkage and OOP objects dispatch. */
+        /* Keep slot refs wrapped as VMNativeSV so native slot references
+         * keep variable linkage. */
         if (strada_is_slot_ref(sv)) break;
-        if (sv->meta && sv->meta->blessed_package) break;
+        if (depth >= VM_CONV_MAX_DEPTH) break;
+        StradaValue *rv = sv->value.rv;
+        int is_cont = (rv && !STRADA_IS_TAGGED_INT(rv) &&
+                       (rv->type == STRADA_ARRAY || rv->type == STRADA_HASH));
+        /* A blessed ref stays wrapped (host objects dispatch to host
+         * methods) unless its class lives in the VM program: then it is a
+         * VM object that went out to the host and comes back. */
+        if (sv->meta && sv->meta->blessed_package) {
+            if (is_cont && g_active_vm && vm_prog_has_class(g_active_vm->program, sv->meta->blessed_package))
+                return sv_to_vm_container(rv, sv->meta->blessed_package, depth + 1);
+            break;
+        }
         /* Deref to the container so VM `->[i]` / `->{k}` access works;
          * refs to scalars and opaque targets stay wrapped. */
-        if (depth >= 32) break;
-        StradaValue *rv = sv->value.rv;
-        if (rv && !STRADA_IS_TAGGED_INT(rv) &&
-            (rv->type == STRADA_ARRAY || rv->type == STRADA_HASH))
-            return sv_to_vm_depth(rv, depth + 1);
+        if (is_cont) return sv_to_vm_container(rv, NULL, depth + 1);
         break;
     }
     case STRADA_FILEHANDLE: {
@@ -3629,15 +3784,25 @@ static VMValue sv_to_vm_depth(StradaValue *sv, int depth) {
     default: break;
     }
     /* Wrap remaining types (REF-to-scalar, SOCKET, REGEX, etc.) as VMNativeSV */
+    uintptr_t whit;
+    if (vm_conv_get(&g_conv_s2v, sv, &whit)) return (VMValue)whit;
     strada_incref(sv);
     VMNativeSV *nsv = malloc(sizeof(VMNativeSV));
     vm_gc_init_hdr(&nsv->hdr, VM_OBJ_NATIVE_SV);
     nsv->sv = sv;
+    vm_conv_put(&g_conv_s2v, sv, (uintptr_t)VM_MAKE_PTR(nsv));
     return VM_MAKE_PTR(nsv);
 }
 
 static VMValue sv_to_vm(StradaValue *sv) {
-    return sv_to_vm_depth(sv, 0);
+    vm_conv_begin();
+    VMValue r = sv_to_vm_depth(sv, 0);
+    vm_conv_end();
+    return r;
+}
+
+VMValue vm_value_from_sv(struct StradaValue *sv) {
+    return sv_to_vm(sv);
 }
 
 static VMValue vm_abs_val(VMValue v) {
@@ -4984,15 +5149,23 @@ static void vm_exported_closure_free(void *raw) {
     if (prog) vm_program_free(prog);
 }
 
-static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **argv) {
-    VMExportedClosureCtx *ctx = (VMExportedClosureCtx *)raw;
-    if (!ctx || !ctx->vm || !ctx->vcl) return strada_new_undef();
-    int use_worker = !(!ctx->vm->is_worker_vm && pthread_equal(pthread_self(), ctx->vm->owner_thread));
+/* lib/Eval: called before (phase 0) and after (phase 1) host code runs a
+ * closure or method of an eval-session VM that is not the active one, so the
+ * VM's globals are synced with the session (V5-6). NULL outside lib/Eval. */
+void (*vm_foreign_vm_call_hook)(VM *target, int phase) = NULL;
+
+/* Run VM code (closure VCL, or function FUNC_IDX when VCL is NULL) of VM
+ * with host arguments; the result (or the thrown value) converts as a
+ * scalar: a container comes back as a reference. */
+static StradaValue *vm_foreign_call(VM *vm, VMClosure *vcl, int func_idx, int argc, StradaValue **argv) {
+    int hook = (vm_foreign_vm_call_hook && vm->eval_epoch != 0 && vm != g_active_vm) ? 1 : 0;
+    if (hook) vm_foreign_vm_call_hook(vm, 0);
+    int use_worker = !(!vm->is_worker_vm && pthread_equal(pthread_self(), vm->owner_thread));
     /* a green task (coroutine) gets its own worker VM: it may suspend in
      * the middle of its VM code while the main VM keeps running */
     int coro_worker = 0;
     if (!use_worker && strada_coro_in_task()) { use_worker = 1; coro_worker = 1; }
-    VM *run_vm = use_worker ? vm_new_worker(ctx->vm) : ctx->vm;
+    VM *run_vm = use_worker ? vm_new_worker(vm) : vm;
     /* a coroutine worker shares this OS thread: hand back the VM that was
      * active when the task started */
     VM *prev_active = coro_worker ? g_active_vm : (use_worker ? run_vm->saved_active_vm : g_active_vm);
@@ -5003,11 +5176,14 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
     run_vm->gc_pause++;
     VMValue vargs_buf[16];
     VMValue *vargs = (argc > 16) ? malloc((size_t)argc * sizeof(VMValue)) : vargs_buf;
+    vm_conv_begin();
     for (int i = 0; i < argc; i++) {
         vargs[i] = argv[i] ? sv_to_vm(argv[i]) : VM_UNDEF_VAL;
     }
+    vm_conv_end();
     run_vm->gc_pause--;
-    VMValue vres = vm_invoke_closure(run_vm, ctx->vcl, vargs, argc);
+    VMValue vres = vcl ? vm_invoke_closure(run_vm, vcl, vargs, argc)
+                       : vm_execute_call(run_vm, func_idx, vargs, argc);
     if (vargs != vargs_buf) free(vargs);
     int had_exc = (run_vm->has_exception || run_vm->has_pending_exc) ? 1 : 0;
     StradaValue *out_sv = NULL;
@@ -5018,11 +5194,11 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
         run_vm->has_pending_exc = 0;
         run_vm->pending_exc = VM_UNDEF_VAL;
         run_vm->gc_pause++;
-        out_sv = vm_to_sv(vexc);
+        out_sv = vm_value_to_sv_scalar(vexc);
         run_vm->gc_pause--;
     } else {
         run_vm->gc_pause++;
-        out_sv = vm_to_sv(vres);
+        out_sv = vm_value_to_sv_scalar(vres);
         run_vm->gc_pause--;
     }
     if (!use_worker && run_vm->gc_count >= run_vm->gc_threshold &&
@@ -5036,10 +5212,27 @@ static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **
         vm_free(run_vm);
     }
     g_active_vm = prev_active;
+    if (hook) vm_foreign_vm_call_hook(vm, 1);
     if (had_exc) {
         strada_throw_value(out_sv);
     }
     return out_sv;
+}
+
+static StradaValue* vm_exported_closure_call(void *raw, int argc, StradaValue **argv) {
+    VMExportedClosureCtx *ctx = (VMExportedClosureCtx *)raw;
+    if (!ctx || !ctx->vm || !ctx->vcl) return strada_new_undef();
+    return vm_foreign_call(ctx->vm, ctx->vcl, 0, argc, argv);
+}
+
+/* lib/Eval: host dispatch of a method of a class defined in eval code (V5-9).
+ * Returns NULL when VM's program has no such method. SELF_AND_ARGS[0] is the
+ * invocant. Throws what the method throws. */
+StradaValue *vm_host_method_call(VM *vm, const char *cls, const char *method, int argc, StradaValue **self_and_args) {
+    if (!vm || !vm->program || !cls || !method) return NULL;
+    int idx = vm_find_method(vm->program, cls, method);
+    if (idx < 0) return NULL;
+    return vm_foreign_call(vm, NULL, idx, argc, self_and_args);
 }
 
 /* async call / async::spawn: a runtime closure that calls the exported VM
@@ -20585,6 +20778,7 @@ void vm_seed_globals(VM *vm, StradaValue *hash_sv, StradaValue *skip_hash_sv) {
     StradaHash *skip = (skip_hash_sv && !STRADA_IS_TAGGED_INT(skip_hash_sv) && skip_hash_sv->type == STRADA_HASH) ? skip_hash_sv->value.hv : NULL;
     VM *prev_vm = g_active_vm;
     g_active_vm = vm;
+    vm_conv_begin();   /* one memo: globals sharing a container still do */
     for (size_t i = 0; i < hv->next_slot; i++) {
         if (!hv->entries[i].key) continue;
         const char *k = hv->entries[i].key->data;
@@ -20597,6 +20791,7 @@ void vm_seed_globals(VM *vm, StradaValue *hash_sv, StradaValue *skip_hash_sv) {
         }
         vm_globals_set_n(vm, k, klen, sv_to_vm(hv->entries[i].value));
     }
+    vm_conv_end();
     g_active_vm = prev_vm;
 }
 
@@ -20630,6 +20825,7 @@ void vm_export_globals(VM *vm, StradaValue *hash_sv) {
         }
     }
     if (glk) pthread_mutex_unlock(glk);
+    vm_conv_begin();   /* one memo: globals sharing a container still do */
     for (size_t i = 0; i < snap_n; i++) {
         StradaValue *sv = vm_to_sv(snap_v[i]);
         if (vm->has_pending_exc) {
@@ -20646,6 +20842,7 @@ void vm_export_globals(VM *vm, StradaValue *hash_sv) {
         if (sv) strada_decref(sv);
         free(snap_k[i]);
     }
+    vm_conv_end();
     free(snap_k);
     free(snap_kl);
     free(snap_v);

@@ -18578,6 +18578,21 @@ unsigned long strada_gc_collections(void)   { return 0; }
 unsigned long strada_gc_objects_freed(void) { return 0; }
 #endif /* STRADA_CYCLE_GC */
 
+/* Blocking regions for C code outside the runtime (e.g. lib/Eval's session
+ * mutex): a thread blocked in pthread_mutex_lock() is not at a safepoint, so a
+ * stop-the-world collection started by the mutex holder would wait for it until
+ * the STW timeout -- on every trigger (V5-1). strada_gc_mutex_lock() counts the
+ * caller as safe while it waits. No-ops without the collector. */
+void strada_gc_blocking_enter(void) { cc_blocking_enter(); }
+void strada_gc_blocking_leave(void) { cc_blocking_leave(); }
+void strada_gc_mutex_lock(pthread_mutex_t *mtx) {
+    if (!mtx) return;
+    if (pthread_mutex_trylock(mtx) == 0) return;
+    cc_blocking_enter();
+    pthread_mutex_lock(mtx);
+    cc_blocking_leave_mutex(mtx);
+}
+
 /* ===== Request arena teardown + control (STRADA_ARENA) ===== */
 #ifdef STRADA_ARENA
 /* Release one arena value's BACKBONE storage (and meta) without decref'ing its

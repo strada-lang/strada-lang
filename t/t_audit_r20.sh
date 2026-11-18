@@ -105,3 +105,19 @@ out=$("$PROJECT_DIR/bootstrap/stradac" "$d/kw.strada" "$d/kw.c" > "$d/boot.log" 
       && "$d/kw" 2>&1)
 [ "$out" = "21" ]
 r20_record $? "bootstrap accepts \$lt/\$gt/\$eq/\$ne/\$le/\$ge variables" "$out $(cat "$d/boot.log" | grep -i error)"
+
+# V5: lib/Eval (Strada::Interpreter) -- threads + GC, identity of values
+# across evals and the host, error lines, eval classes in host dispatch.
+out=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$SCRIPT_DIR/audit_r20/eval_v5.strada" -lpthread -o "$r20_dir/eval_v5" 2>&1 \
+      && STRADA_HOME="$PROJECT_DIR" timeout 60 "$r20_dir/eval_v5" 2>&1)
+printf '%s\n' "$out" | grep -qx "AUDIT_R20_EVAL_V5_OK"
+r20_record $? "V5 lib/Eval regressions (V5-1..V5-9, V5-15)" "$out"
+
+# V5: Strada::JIT with tcc -- constructors, our, hoisted funcs, heredocs,
+# redeclaration, is_balanced, closures after reset().
+if command -v tcc > /dev/null 2>&1; then
+    out=$("$PROJECT_DIR/strada" -O0 -L "$PROJECT_DIR/lib" "$SCRIPT_DIR/audit_r20/jit_v5.strada" -o "$r20_dir/jit_v5" 2>&1 \
+          && cd "$r20_dir" && PATH="$PROJECT_DIR:$PATH" STRADA_HOME="$PROJECT_DIR" timeout 120 ./jit_v5 tcc 2>&1)
+    printf '%s\n' "$out" | grep -qx "AUDIT_R20_JIT_V5_OK"
+    r20_record $? "V5 Strada::JIT regressions (V5-10..V5-17, tcc)" "$out"
+fi
