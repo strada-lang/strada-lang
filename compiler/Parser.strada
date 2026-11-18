@@ -167,6 +167,15 @@ func friendly_expected(str $type) str {
 # Format and die with error message including file:line:col plus a
 # source-line + caret snippet (rendered from the file; skipped for
 # synthetic/unreadable sources).
+# A parse error located at the token with index $at (e.g. a filename already
+# consumed together with its `;`).
+func parser_error_at(scalar $parser, int $at, str $msg) void {
+    my int $pea_saved = $parser->{"pos"};
+    if ($at >= 0 && $at < $parser->{"token_count"}) { $parser->{"pos"} = $at; }
+    parser_error($parser, $msg);
+    $parser->{"pos"} = $pea_saved;
+}
+
 func parser_error(scalar $parser, str $msg) void {
     my str $filename = $parser->{"filename"};
     # a token from an #include'd file names that file
@@ -1024,6 +1033,19 @@ func parse_hash_key_expr(scalar $parser, int $allow_comma) scalar {
 
 # Primary expressions: literals, variables, parenthesized, etc.
 # Builtins Perl parses as named unary operators (usable without parens).
+# The current token is a named unary operator word that itself takes an
+# operand without parentheses (`defined ref $x`, `uc lc $s`, `scalar keys %h`).
+func parser_next_is_named_unary(scalar $parser) int {
+    if (!parser_check($parser, "IDENT")) { return 0; }
+    my scalar $nt = $parser->{"tokens"}->[$parser->{"pos"}];
+    if (parser_is_named_unary("" . $nt->{"value"}) == 0) { return 0; }
+    my scalar $nt2 = $parser->{"tokens"}->[$parser->{"pos"} + 1];
+    if (!defined($nt2)) { return 0; }
+    my str $t2 = "" . $nt2->{"type"};
+    if ($t2 eq "DOLLAR" || $t2 eq "AT" || $t2 eq "PERCENT" || $t2 eq "BACKSLASH" || $t2 eq "LPAREN") { return 1; }
+    return 0;
+}
+
 func parser_is_named_unary(str $n) int {
     if ($n eq "delete" || $n eq "exists" || $n eq "defined" || $n eq "keys" || $n eq "values" ||
         $n eq "each" || $n eq "scalar" || $n eq "shift" || $n eq "pop" || $n eq "ref" ||
@@ -1717,6 +1739,20 @@ func parse_primary(scalar $parser) scalar {
     # Reference operator
     if ($type eq "BACKSLASH") {
         parser_advance($parser);
+        # \&f / \&Pkg::f: a code reference (a bare &f is a call, as in Perl)
+        if (parser_check($parser, "AMPERSAND")) {
+            parser_advance($parser);
+            my scalar $rf_tok = parser_current($parser);
+            parser_expect_ident_like($parser);
+            my str $rf_name = $rf_tok->{"value"};
+            while (parser_check($parser, "DOUBLE_COLON")) {
+                parser_advance($parser);
+                my scalar $rf_seg = parser_current($parser);
+                parser_expect_ident_like($parser);
+                $rf_name = $rf_name . "::" . $rf_seg->{"value"};
+            }
+            return ast_new_ref(ast_new_func_ref($rf_name), "&");
+        }
         my scalar $target = parse_primary($parser);
 
         # Determine reference type from target
@@ -2147,7 +2183,7 @@ func parse_primary(scalar $parser) scalar {
             (parser_check($parser, "DOLLAR") || parser_check($parser, "AT") || parser_check($parser, "PERCENT") ||
              parser_check($parser, "BACKSLASH") || parser_check($parser, "STR_LITERAL") ||
              parser_check($parser, "INTERP_STRING") || parser_check($parser, "INT_LITERAL") ||
-             parser_check($parser, "NUM_LITERAL"))) {
+             parser_check($parser, "NUM_LITERAL") || parser_next_is_named_unary($parser) == 1)) {
             my scalar $nu_arg = parse_shift($parser);
             my scalar $nu_call = ast_new_call($name);
             ast_set_line($nu_call, $call_line);
@@ -2227,7 +2263,10 @@ func parse_primary(scalar $parser) scalar {
             return $call;
         }
         # `scalar @a` / `scalar %h` / `scalar $x` (named unary, no parens)
-        if (parser_check($parser, "AT") || parser_check($parser, "PERCENT") || parser_check($parser, "DOLLAR")) {
+        # `scalar keys %h` / `scalar f()` / `scalar reverse(...)`: any
+        # operand expression at named-unary precedence
+        if (parser_check($parser, "AT") || parser_check($parser, "PERCENT") || parser_check($parser, "DOLLAR") ||
+            parser_check($parser, "IDENT") || parser_check($parser, "BACKSLASH")) {
             my scalar $sc_arg = parse_shift($parser);
             my scalar $sc_call = ast_new_call("scalar");
             ast_set_line($sc_call, $call_line);
@@ -2251,9 +2290,12 @@ func parse_primary(scalar $parser) scalar {
         return ast_new_unary_op("!", $operand);
     }
     
-    # Function reference (&func_name or &Pkg::func_name)
+    # &f(args) / &Pkg::f(args): a call (Perl). A bare &f calls f with the
+    # caller's @_. (\&f, the code reference, is parsed by the \ branch.)
     if ($type eq "AMPERSAND") {
+        my int $amp_line = parser_current_line($parser);
         parser_advance($parser);
+        my int $amp_name_pos = $parser->{"pos"};
         my scalar $func_tok = parser_current($parser);
         parser_expect_ident_like($parser);
         my str $fn_name = $func_tok->{"value"};
@@ -2263,7 +2305,15 @@ func parse_primary(scalar $parser) scalar {
             parser_expect_ident_like($parser);
             $fn_name = $fn_name . "::" . $seg_tok->{"value"};
         }
-        return ast_new_func_ref($fn_name);
+        if (parser_check($parser, "LPAREN")) {
+            $parser->{"pos"} = $amp_name_pos;
+            return parse_primary($parser);
+        }
+        my scalar $amp_call = ast_new_call($fn_name);
+        ast_set_line($amp_call, $amp_line);
+        ast_add_arg($amp_call, ast_new_spread(ast_new_variable("_", "@")));
+        $amp_call->{"amp_call"} = 1;
+        return $amp_call;
     }
 
     # map { block } @array - transforms each element using $_
@@ -2330,6 +2380,7 @@ func parse_primary(scalar $parser) scalar {
                     parser_check($parser, "SWITCH")) {
                     my scalar $stmt = parse_statement($parser);
                     ast_add_statement($block, $stmt);
+                    if (length(reftype($stmt)) > 0 && defined($stmt->{"low_tail"})) { ast_add_statement($block, $stmt->{"low_tail"}); }
                     next;
                 }
                 my scalar $expr = parse_expression($parser);
@@ -3157,7 +3208,89 @@ func parse_assignment(scalar $parser) scalar {
 
 # Top-level expression
 func parse_expression(scalar $parser) scalar {
+    return parse_low_or($parser);
+}
+
+# Perl's low-precedence logical operators, below assignment:
+# `not` > `and` > `or`/`xor`. `open(...) or die(...)`, `$x = f() or die(...)`
+# (the assignment happens first), `return 0 unless $a and $b`.
+# They are the words `and`/`or`/`xor`/`not` (IDENT tokens), never followed
+# by `=>` (then they are hash keys / pair names).
+func parser_low_word(scalar $parser, str $w) int {
+    if (!parser_check($parser, "IDENT")) { return 0; }
+    my scalar $lt = parser_current($parser);
+    if (("" . $lt->{"value"}) ne $w) { return 0; }
+    my scalar $ln = $parser->{"tokens"}->[$parser->{"pos"} + 1];
+    if (defined($ln) && ("" . $ln->{"type"}) eq "FAT_ARROW") { return 0; }
+    return 1;
+}
+
+func parse_low_or(scalar $parser) scalar {
+    my scalar $left = parse_low_and($parser);
+    while (1) {
+        if (parser_low_word($parser, "or") == 1) {
+            parser_advance($parser);
+            my scalar $right = parse_low_and($parser);
+            $left = ast_new_binary_op("||", $left, $right);
+        } elsif (parser_low_word($parser, "xor") == 1) {
+            parser_advance($parser);
+            my scalar $xright = parse_low_and($parser);
+            # logical xor: true when exactly one side is true (1 or "")
+            $left = ast_new_binary_op("!=", ast_new_unary_op("!", ast_new_unary_op("!", $left)), ast_new_unary_op("!", ast_new_unary_op("!", $xright)));
+        } else {
+            last;
+        }
+    }
+    return $left;
+}
+
+func parse_low_and(scalar $parser) scalar {
+    my scalar $left = parse_low_not($parser);
+    while (parser_low_word($parser, "and") == 1) {
+        parser_advance($parser);
+        my scalar $right = parse_low_not($parser);
+        $left = ast_new_binary_op("&&", $left, $right);
+    }
+    return $left;
+}
+
+func parse_low_not(scalar $parser) scalar {
+    if (parser_low_word($parser, "not") == 1) {
+        my scalar $nn = $parser->{"tokens"}->[$parser->{"pos"} + 1];
+        my str $nt = "";
+        if (defined($nn)) { $nt = "" . $nn->{"type"}; }
+        # `not` alone (end of a list / statement) is the bareword
+        if ($nt ne "SEMI" && $nt ne "COMMA" && $nt ne "RPAREN" && $nt ne "RBRACE" && $nt ne "RBRACKET" && $nt ne "EOF") {
+            parser_advance($parser);
+            my scalar $operand = parse_low_not($parser);
+            return ast_new_unary_op("!", $operand);
+        }
+    }
     return parse_assignment($parser);
+}
+
+# The rest of a low-precedence chain whose first operand is already parsed.
+func parse_low_tail(scalar $parser, scalar $first) scalar {
+    my scalar $left = $first;
+    while (parser_low_word($parser, "and") == 1) {
+        parser_advance($parser);
+        my scalar $ar = parse_low_not($parser);
+        $left = ast_new_binary_op("&&", $left, $ar);
+    }
+    while (1) {
+        if (parser_low_word($parser, "or") == 1) {
+            parser_advance($parser);
+            my scalar $or_r = parse_low_and($parser);
+            $left = ast_new_binary_op("||", $left, $or_r);
+        } elsif (parser_low_word($parser, "xor") == 1) {
+            parser_advance($parser);
+            my scalar $xr = parse_low_and($parser);
+            $left = ast_new_binary_op("!=", ast_new_unary_op("!", ast_new_unary_op("!", $left)), ast_new_unary_op("!", ast_new_unary_op("!", $xr)));
+        } else {
+            last;
+        }
+    }
+    return $left;
 }
 
 # ============================================================
@@ -3263,6 +3396,7 @@ func parse_block(scalar $parser) scalar {
     while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
         my scalar $stmt = parse_statement($parser);
         ast_add_statement($block, $stmt);
+        if (length(reftype($stmt)) > 0 && defined($stmt->{"low_tail"})) { ast_add_statement($block, $stmt->{"low_tail"}); }
     }
     
     parser_expect($parser, "RBRACE");
@@ -3415,7 +3549,12 @@ func parse_var_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = ast_regex_value(parse_expression($parser));
+        $decl->{"init"} = ast_regex_value(parse_assignment($parser));
+        if (parser_low_word($parser, "and") == 1 || parser_low_word($parser, "or") == 1 || parser_low_word($parser, "xor") == 1) {
+            # `my $x = f() or die(...)`: the assignment happens first (Perl);
+            # the `or ...` tail is a statement after the declaration
+            $decl->{"low_tail"} = ast_new_expr_stmt(parse_low_tail($parser, ast_new_variable($decl->{"name"}, $decl->{"sigil"})));
+        }
     }
 
     parser_expect($parser, "SEMI");
@@ -3501,7 +3640,12 @@ func parse_our_decl(scalar $parser) scalar {
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
-        $decl->{"init"} = ast_regex_value(parse_expression($parser));
+        $decl->{"init"} = ast_regex_value(parse_assignment($parser));
+        if (parser_low_word($parser, "and") == 1 || parser_low_word($parser, "or") == 1 || parser_low_word($parser, "xor") == 1) {
+            # `my $x = f() or die(...)`: the assignment happens first (Perl);
+            # the `or ...` tail is a statement after the declaration
+            $decl->{"low_tail"} = ast_new_expr_stmt(parse_low_tail($parser, ast_new_variable($decl->{"name"}, $decl->{"sigil"})));
+        }
     }
 
     parser_expect($parser, "SEMI");
@@ -5443,6 +5587,7 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             parse_link_lib($mod_parser, $mod_program);
         } elsif (parser_check($mod_parser, "MY")) {
             my scalar $var = parse_var_decl($mod_parser);
+            if (defined($var->{"low_tail"})) { parser_error($mod_parser, "a file-scope declaration cannot end in and/or/xor (put the test in a function)"); }
             $var->{"source_module"} = $current_mod_pkg;
             ast_add_global($mod_program, $var);
         } elsif (parser_check($mod_parser, "CONST")) {
@@ -5451,6 +5596,7 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             ast_add_global($mod_program, $const_decl);
         } elsif (parser_check($mod_parser, "OUR")) {
             my scalar $our_decl = parse_our_decl($mod_parser);
+            if (defined($our_decl->{"low_tail"})) { parser_error($mod_parser, "a file-scope declaration cannot end in and/or/xor (put the test in a function)"); }
             $our_decl->{"package"} = $current_mod_pkg;
             $our_decl->{"source_module"} = $current_mod_pkg;
             ast_add_global($mod_program, $our_decl);
@@ -6195,7 +6341,7 @@ func parse_import_lib(scalar $parser, scalar $program) void {
     # Find the .so file in lib paths
     my str $so_path = find_so_file($program, $lib_file);
     if (length($so_path) == 0) {
-        parser_error($parser, "cannot find shared library: " . $lib_file);
+        parser_error_at($parser, $parser->{"pos"} - 2, "cannot find shared library: " . $lib_file);
     }
 
     # Extract package name by stripping .so extension
@@ -7332,7 +7478,7 @@ func parse_import_object(scalar $parser, scalar $program) void {
     # Find the .o file in lib paths
     my str $o_path = find_o_file($program, $obj_file);
     if (length($o_path) == 0) {
-        parser_error($parser, "cannot find object file: " . $obj_file);
+        parser_error_at($parser, $parser->{"pos"} - 2, "cannot find object file: " . $obj_file);
     }
 
     do_import_object_at($parser, $program, $obj_file, $o_path);
@@ -7578,7 +7724,7 @@ func parse_import_archive(scalar $parser, scalar $program) void {
     # Find the .a file in lib paths
     my str $a_path = find_a_file($program, $arch_file);
     if (length($a_path) == 0) {
-        parser_error($parser, "cannot find archive file: " . $arch_file);
+        parser_error_at($parser, $parser->{"pos"} - 2, "cannot find archive file: " . $arch_file);
     }
 
     do_import_archive_at($parser, $program, $arch_file, $a_path);
@@ -8395,6 +8541,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             parse_link_lib($parser, $program);
         } elsif (parser_check($parser, "MY")) {
             my scalar $var = parse_var_decl($parser);
+            if (defined($var->{"low_tail"})) { parser_error($parser, "a file-scope declaration cannot end in and/or/xor (put the test in a function)"); }
             my str $main_mod = $program->{"package"};
             if (length($main_mod) == 0) { $main_mod = "main"; }
             $var->{"source_module"} = $main_mod;
@@ -8407,6 +8554,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             ast_add_global($program, $const_decl);
         } elsif (parser_check($parser, "OUR")) {
             my scalar $our_decl = parse_our_decl($parser);
+            if (defined($our_decl->{"low_tail"})) { parser_error($parser, "a file-scope declaration cannot end in and/or/xor (put the test in a function)"); }
             $our_decl->{"package"} = $program->{"package"};
             my str $main_mod = $program->{"package"};
             if (length($main_mod) == 0) { $main_mod = "main"; }

@@ -1811,6 +1811,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         scope_pop($cg);
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_continue; ");
             emit($cg, $label);
             emit($cg, "_continue: ;\n");
         }
@@ -1820,6 +1821,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_break; ");
             emit($cg, $label);
             emit($cg, "_break: ;\n");
         }
@@ -1946,6 +1948,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         scope_pop($cg);
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_continue; ");
             emit($cg, $label);
             emit($cg, "_continue: ;\n");
         }
@@ -1957,6 +1960,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_break; ");
             emit($cg, $label);
             emit($cg, "_break: ;\n");
         }
@@ -2128,6 +2132,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         scope_pop($cg);
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_continue; ");
             emit($cg, $label);
             emit($cg, "_continue: ;\n");
         }
@@ -2137,6 +2142,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_break; ");
             emit($cg, $label);
             emit($cg, "_break: ;\n");
         }
@@ -2422,6 +2428,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             scope_pop($cg);
             if (length($label) > 0) {
                 emit_indent($cg);
+                emit($cg, "if (0) goto " . $label . "_continue; ");
                 emit($cg, $label);
                 emit($cg, "_continue: ;\n");
             }
@@ -2454,6 +2461,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             if (length($label) > 0) {
                 emit_indent($cg);
+                emit($cg, "if (0) goto " . $label . "_break; ");
                 emit($cg, $label);
                 emit($cg, "_break: ;\n");
             }
@@ -2805,6 +2813,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         scope_pop($cg);
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_continue; ");
             emit($cg, $label);
             emit($cg, "_continue: ;\n");
         }
@@ -2841,6 +2850,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         if (length($label) > 0) {
             emit_indent($cg);
+            emit($cg, "if (0) goto " . $label . "_break; ");
             emit($cg, $label);
             emit($cg, "_break: ;\n");
         }

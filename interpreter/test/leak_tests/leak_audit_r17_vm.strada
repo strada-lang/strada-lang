@@ -101,7 +101,8 @@ func main() int {
     }
 VM_LK_FWD:
     my scalar $zcl = func () int { return 5; };
-    if (vm_zf(1, 2, 3) != 11 || $zcl->(4, 5) != 5) { return 5; }
+    my scalar $zfr = \&vm_zf;
+    if ($zfr->(1, 2, 3) != 11 || $zcl->(4, 5) != 5) { return 5; }
 
     # B13: tied hash UTF-8 & NUL keys
     my hash %th = ();

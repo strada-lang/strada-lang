@@ -198,7 +198,9 @@ All 53 Perla tests pass in VM mode, matching the compiled path. This enables run
 
 ## Limitations
 
-- **Async/await is not supported.** The thread pool runtime is part of the compiled backend.
+- **DESTROY runs at GC time**, not when the last reference goes away (the VM uses a tracing GC).
+- **Raw pointers into variables** (`core::int_ptr`, `core::num_ptr`) are compiled-only; the VM raises an error.
+- **`extern "C"` functions** cannot be called from the VM; the call raises an error. Use a `__C__` block.
 - **Performance is slower** than compiled execution, though the VM is 4-5x faster than Perl 5.38.
 
 ## Testing
@@ -206,12 +208,12 @@ All 53 Perla tests pass in VM mode, matching the compiled path. This enables run
 Two suites cover the interpreter:
 
 ```bash
-# Interpreter's own suite (47 tests, bytecode VM)
+# Interpreter's own suite (61 tests, bytecode VM)
 cd interpreter/test && bash run_tests.sh
 
 # Compiler test suite executed through the VM (parity check):
 # 108 pass / 0 fail / 12 skipped (the skips need .so/.o compilation,
-# compile-only checks, or compiled-format stack traces)
+# compile-only checks, SQLite linking, or core::int_ptr)
 cd interpreter/test && bash run_compiler_tests.sh
 ```
 
@@ -226,7 +228,7 @@ Strada offers three execution modes:
 | Startup time | Fast | Moderate (per-eval compile) | Slow (one-time compile) |
 | Runtime speed | Fast (4-5x Perl) | Fast (native code) | Fastest |
 | `__C__` blocks | JIT-compiled + cached | Supported | Supported |
-| Async/await | No | Yes | Yes |
+| Async/await, threads, green tasks | Yes | Yes | Yes |
 | Interactive use | Persistent VM REPL | eval() | No |
 | Best for | Scripts, file execution, REPL, embedded `eval` | Plugin systems, runtime eval | Production, performance |
 

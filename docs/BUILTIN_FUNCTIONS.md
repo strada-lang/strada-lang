@@ -87,7 +87,7 @@ are based on POSIX threads underneath.
 | `async::all(@futures)` | `array → array` | Wait for all futures; returns array of results in order. |
 | `async::race(@futures)` | `array → scalar` | Wait for first future to complete; returns its value. |
 | `async::timeout(future, ms)` | `scalar, int → scalar` | Wait up to ms milliseconds; returns value or undef on timeout. |
-| `async::cancel(future)` | `scalar → int` | Request cancellation. Returns 1 if it was running, 0 otherwise. |
+| `async::cancel(future)` | `scalar → undef` | Request cancellation (cooperative: the task sees it through `async::cancelled()` / `async::sleep`). Returns undef. |
 | `async::is_cancelled(future)` | `scalar → int` | 1 if cancellation has been requested. |
 | `async::is_done(future)` | `scalar → int` | 1 if future has completed (success or failure). |
 | `async::pool_init(n)` | `int → void` | Initialize the thread pool with n workers. |
@@ -117,7 +117,7 @@ are based on POSIX threads underneath.
 |---|---|---|
 | `async::mutex()` | `→ scalar` | Create a new mutex. |
 | `async::lock(mtx)` | `scalar → void` | Acquire the mutex (blocks). |
-| `async::try_lock(mtx)` | `scalar → int` | Non-blocking lock; returns 1 if acquired, 0 otherwise. |
+| `async::try_lock(mtx)` | `scalar → int` | Non-blocking lock; returns 0 if acquired, 16 (EBUSY) if the mutex is held (the `pthread_mutex_trylock` result). |
 | `async::unlock(mtx)` | `scalar → void` | Release the mutex. |
 | `async::mutex_destroy(mtx)` | `scalar → void` | Free mutex resources. |
 
@@ -640,7 +640,7 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `utf8::nfd(s)` | `str → str` | UAX#15 canonical decomposition (NFD). |
 | `utf8::nfkc(s)` | `str → str` | UAX#15 compatibility composition (NFKC). |
 | `utf8::nfkd(s)` | `str → str` | UAX#15 compatibility decomposition (NFKD). |
-| `utf8::normalize(form, s)` | `str, str → str` | Generic entry; `form` = `"NFC"`/`"NFD"`/`"NFKC"`/`"NFKD"`. |
+| `utf8::normalize(s, form)` | `str, str → str` | Generic entry; `form` = `"NFC"`/`"NFD"`/`"NFKC"`/`"NFKD"`. |
 
 Normalization runs the full UAX#15 pipeline (recursive decomposition → canonical reorder by combining class → optional canonical composition) backed by Unicode 15.0.0 tables. Hangul is handled algorithmically.
 

@@ -1,0 +1,9 @@
+# COMPILE-ERROR: already declared in this scope
+# VM-COMPILE-ERROR: already declared in this scope
+# Redeclaring a variable in the same block is an error in both backends.
+func main() int {
+    my $c = 1;
+    my $c = 2;
+    say($c);
+    return 0;
+}

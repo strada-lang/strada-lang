@@ -1,0 +1,37 @@
+# EXPECT: line=24 st=lvl2,lvl1,main et=f,g:21,main:28 ty=ref,ref,array,hash pr=q |
+# caller() lines, stacktrace_str(), exception_trace() after die, typeof of a
+# reference held in a scalar, and print with a non-handle first argument:
+# the VM must agree with the compiled backend.
+func shape(str $t) str {
+    my array @out = ();
+    foreach my str $l (split("\n", $t)) {
+        if ($l =~ /^\s+at (\w+) \([^:)]*(:(\d+))?\)/) { push(@out, $1 . (defined($3) ? ":" . $3 : "")); }
+        elsif ($l =~ /^\s+(\w+)$/) { push(@out, $1); }
+    }
+    return join(",", @out);
+}
+func who() int { my $c = core::caller(0); return $c->{"line"}; }
+func lvl2() str { return shape(stacktrace_str()); }
+func lvl1() str {
+    my $s = lvl2();
+    return $s;
+}
+func f() void { die("boom"); }
+func g() void {
+    f();
+}
+func main() int {
+    my $ln = who();
+    my $st = lvl1();
+    my $et = "";
+    try {
+        g();
+    } catch ($e) {
+        $et = shape(core::exception_trace());
+    }
+    my $r = [1]; my $h = {}; my @a = (1); my %hh = ();
+    my $v = "q";
+    print("line=" . $ln . " st=" . $st . " et=" . $et . " ty=" . join(",", typeof($r), typeof($h), typeof(@a), typeof(%hh)) . " pr=");
+    print($v, " |\n");
+    return 0;
+}

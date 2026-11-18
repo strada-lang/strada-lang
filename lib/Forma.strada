@@ -1821,7 +1821,7 @@ func exec_each(str $collection_name, str $loop_var, scalar $body_nodes, scalar $
 
 # Compiled-body counterpart of process_if.
 func exec_if(str $condition, scalar $then_nodes, scalar $else_nodes, scalar $vars) str {
-    my scalar $val = Forma::get_var($condition, $vars);
+    my scalar $val = Forma::cond_value($condition, $vars);
     if (Forma::is_truthy($val) == 1) {
         return Forma::execute($then_nodes, $vars);
     }
@@ -2526,8 +2526,21 @@ func process_each_named(str $collection_name, str $loop_var, str $body, scalar $
 }
 
 # Process an #if block
+# The value an #if/#unless condition tests: a variable, or a parenthesized
+# helper call -- {{#if (contains name "x")}} -- whose output is tested
+# ("" and "0" are false).
+func cond_value(str $condition, scalar $vars) scalar {
+    my str $c = trim($condition);
+    if (length($c) >= 2 && substr($c, 0, 1) eq "(" && substr($c, length($c) - 1, 1) eq ")") {
+        my str $inner = trim(substr($c, 1, length($c) - 2));
+        if (length($inner) == 0) { return ""; }
+        return Forma::render_string("{{" . $inner . "}}", $vars);
+    }
+    return Forma::get_var($condition, $vars);
+}
+
 func process_if(str $condition, str $if_body, str $else_body, scalar $vars) str {
-    my scalar $val = Forma::get_var($condition, $vars);
+    my scalar $val = Forma::cond_value($condition, $vars);
     my int $truthy = Forma::is_truthy($val);
 
     if ($truthy == 1) {
@@ -3922,7 +3935,12 @@ func helper_repeat(str $args, scalar $vars) str {
     my array @parts = Forma::parse_two_args($args);
     if (scalar(@parts) < 2) { return ""; }
     my str $text = $parts[0];
-    my int $count = $parts[1] + 0;
+    my str $count_s = "" . $parts[1];
+    if (!Forma::looks_like_number($count_s)) {
+        # {{repeat "*" count}}: the count is a variable
+        $count_s = "" . Forma::resolve_var($count_s, $vars);
+    }
+    my int $count = $count_s + 0;
     # Check if original was a quoted literal (starts with " or ')
     my int $pos = 0;
     while ($pos < length($args) && substr($args, $pos, 1) eq " ") { $pos = $pos + 1; }
@@ -4335,7 +4353,15 @@ func helper_currency(str $args, scalar $vars) str {
     elsif ($currency eq "CNY") { $symbol = "¥"; }
     elsif ($currency eq "INR") { $symbol = "₹"; }
     elsif ($currency eq "BTC") { $symbol = "₿"; }
+    elsif ($currency eq "KRW") { $symbol = "₩"; }
 
+    # currencies without a minor unit: rounded to a whole amount
+    if ($currency eq "JPY" || $currency eq "KRW") {
+        my num $whole = ($amount < 0) ? 0 - math::floor(0 - $amount + 0.5) : math::floor($amount + 0.5);
+        my str $f2 = Forma::format_fixed2($whole, $symbol);
+        if (length($f2) >= 3 && substr($f2, length($f2) - 3, 3) eq ".00") { $f2 = substr($f2, 0, length($f2) - 3); }
+        return $f2;
+    }
     return Forma::format_fixed2($amount, $symbol);
 }
 

@@ -578,7 +578,13 @@ enum {
     BUILTIN_FE_LISTIFY,   /* foreach over a call result: scalar -> 1-element list */
     BUILTIN_REV_LISTIFY,  /* reverse(X), list context: array as is, else [X] */
     BUILTIN_REV_JOINSTR,  /* reverse(LIST), scalar context: joined string, reversed */
-    BUILTIN_CALL_NAMED_GUARDED, /* strada_call_named_guarded(NAME, ARG) on the VM's own function */    /* () -> call stack captured at the latest throw */
+    BUILTIN_CALL_NAMED_GUARDED, /* strada_call_named_guarded(NAME, ARG) on the VM's own function */
+    BUILTIN_SAY_ARG,      /* say/print's single argument: an array -> its elements joined */
+    BUILTIN_TYPEOF_TO_REF,
+    BUILTIN_STACKTRACE_STR, /* stacktrace_str(): plain frame names */
+    BUILTIN_LIST_LAST,      /* a slice in scalar context: its last element */
+    BUILTIN_DUMP_R,         /* dump of a scalar expression: an array/hash in it is a reference */
+    BUILTIN_DUMPER_STR_R, /* typeof of a scalar expression: "array"/"hash" -> "ref" */    /* () -> call stack captured at the latest throw */
     BUILTIN_CORO_OP,      /* (subop, ...): core::coro_* over the runtime coroutines */
     BUILTIN_ASYNC_OP,     /* (subop, ...): futures over the runtime pool (see vm.c) */
     BUILTIN_NUMIFY_EXACT, /* (str) -> exact int / uint64 / double */
@@ -954,6 +960,11 @@ typedef struct {
     size_t dt_code_len_src;
     uint16_t *dt_aux;
     size_t dt_aux_len;
+    uint32_t *dt_pc;        /* threaded insn index -> bytecode offset (line lookup) */
+    uint32_t *ln_pc;        /* line table: bytecode offset where ln_line[i] starts */
+    int *ln_line;
+    int ln_count, ln_cap;
+    char *src_file;         /* source file of the function (traces, caller()) */
     void *jit_code;
     size_t jit_size;
     uint32_t *jit_offs;
@@ -971,6 +982,7 @@ typedef struct {
                               * uses it: fused-op slow paths truncate it), or NULL */
     int is_async;          /* async func: calls return a future */
     int has_variadic;
+    int arity_known;       /* fixed_param_count/has_variadic come from a declared parameter list */
     int return_type;
     int int_only;
     char *name;
@@ -1200,6 +1212,7 @@ typedef struct VM {
     uint64_t gc_freed_total;     /* core::gc_freed(): objects reclaimed */
     int gc_user_disabled;        /* core::gc_disable(): no automatic runs */
     char *exc_trace;             /* core::exception_trace(): call stack at the latest throw */
+    int exc_from_die;            /* the pending exception came from die() (uncaught: bare message) */
     size_t gc_threshold;
     int gc_pause;
     int has_weakrefs;

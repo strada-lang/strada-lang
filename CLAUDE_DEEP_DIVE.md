@@ -66,7 +66,7 @@ Every AST node in Strada. The number is the return value of the `NODE_*()` funct
 | 28 | `NODE_STRUCT` | Struct definition | `name`, `fields`, `field_count` |
 | 29 | `NODE_USE` | Use statement | (module name stored in program) |
 | 30 | `NODE_FIELD_ACCESS` | Field access `$s->f` | `object`, `field` |
-| 31 | `NODE_FUNC_REF` | Function reference `&f` | `name` |
+| 31 | `NODE_FUNC_REF` | Function name inside `\&f` (always wrapped in a `NODE_REF`; a bare `&f` is a call) | `name` |
 | 32 | `NODE_METHOD_CALL` | Method call `$o->m()` | `object`, `method`, `args`, `arg_count` |
 | 33 | `NODE_DUNDER_PACKAGE` | `__PACKAGE__` | (none) |
 | 34 | `NODE_REGEX_MATCH` | Regex match `=~` | `op`, `target`, `pattern`, `flags` |

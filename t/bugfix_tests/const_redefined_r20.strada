@@ -1,0 +1,9 @@
+# COMPILE-ERROR: constant 'LIMIT' already defined
+# VM-COMPILE-ERROR: constant 'LIMIT' already defined
+# Defining the same constant twice is an error (the later value used to win silently).
+const int LIMIT = 50;
+const int LIMIT = 60;
+func main() int {
+    say(LIMIT);
+    return 0;
+}

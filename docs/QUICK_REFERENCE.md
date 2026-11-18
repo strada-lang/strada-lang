@@ -134,7 +134,10 @@ $a == $b   $a != $b   $a < $b   $a > $b   $a <= $b   $a >= $b
 $s1 eq $s2   $s1 ne $s2   $s1 lt $s2   $s1 gt $s2
 
 # Logical
-$a && $b   $a || $b   !$a
+$a && $b   $a || $b   !$a   $a // $b
+# low precedence (below assignment, as in Perl)
+$a and $b   $a or $b   not $a   $a xor $b
+my $fh = core::open($p, "r") or die("cannot open $p");
 
 # Assignment
 $x = 1   $x += 1   $x -= 1   $s .= "!"

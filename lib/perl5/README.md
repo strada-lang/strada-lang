@@ -21,12 +21,13 @@ The `perl5` module provides a bridge from Strada to Perl, enabling you to:
 
 ### Build Steps
 
-```bash
-cd lib/perl5
-make
-```
+No separate library build is needed: `lib/perl5.strada` embeds libperl
+through `__C__` blocks. Compile a program that uses it with Perl's
+embedding flags:
 
-This creates `libstrada_perl5.so` which is loaded dynamically by the `perl5` Strada module.
+```bash
+./strada myapp.strada $(perl -MExtUtils::Embed -e ccopts -e ldopts)
+```
 
 ## Usage in Strada
 
@@ -220,12 +221,11 @@ needed.
 lib/perl5.strada          # Strada wrapper module (high-level API)
 lib/perl5/strada_perl5.c  # C implementation using libperl
 lib/perl5/strada_perl5.h  # Header file (optional)
-lib/perl5/Makefile        # Build with perl embedding flags
-lib/perl5/libstrada_perl5.so  # Compiled shared library
+lib/perl5/Makefile        # Standalone build of strada_perl5.c (optional)
 ```
 
-The Strada wrapper (`lib/perl5.strada`) uses FFI to load and call functions
-from the C library (`libstrada_perl5.so`), which embeds the Perl interpreter.
+The Strada module (`lib/perl5.strada`) embeds the Perl interpreter itself
+in `__C__` blocks; it does not load `libstrada_perl5.so`.
 
 ## Limitations
 

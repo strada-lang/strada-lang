@@ -8142,6 +8142,15 @@ func return_needs_incref(scalar $cg, scalar $expr) int {
 # arg_count: number of arguments
 # Returns nothing, emits code directly
 func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $arg_count) void {
+    # Too few arguments for a builtin: a located Strada error (the missing
+    # argument used to reach gcc as a broken C call)
+    my int $have_args = 0;
+    if (defined($args)) { $have_args = size($args); }
+    if ($have_args < $arg_count) {
+        my str $ba_name = "" . $cg->{"builtin_call_name"};
+        if (index($ba_name, "sys::") == 0) { $ba_name = "core::" . substr($ba_name, 5, length($ba_name) - 5); }
+        die($cg->{"filename"} . ":" . $cg->{"builtin_call_line"} . ": error: too few arguments to " . $ba_name . "(): expected " . $arg_count . ", got " . $have_args);
+    }
     if ($cg->{"cleanup_enabled"} == 0 || $arg_count == 0) {
         # No cleanup needed - emit simple call
         emit($cg, $c_func_name . "(");

@@ -565,7 +565,10 @@ func run_repl() void {
 func run_vm_program(scalar $program, str $script_name, scalar $argv, str $restore_cwd) int {
     my int $result = 0;
     __C__ {
+        extern int g_vm_whole_program;
+        g_vm_whole_program = 1;
         VMProgram *vprog = vm_compile_program(program);
+        g_vm_whole_program = 0;
         {
             char *__scwd = strada_to_str(restore_cwd);
             if (__scwd && __scwd[0]) { int __rc = chdir(__scwd); (void)__rc; }

@@ -1,0 +1,31 @@
+# EXPECT: S L 1 1 5 sq=9 refcall=9 st=4 cnt=5 ctr=3 g=5/localhost
+# Perl forms: bare wantarray(), `scalar keys %h`, `defined ref $r`, &f(args) and
+# bare &f (a call with the caller's @_), \&f (a reference), a local named like
+# a function, labeled loops (no gcc warnings), core::global_get("main::x").
+our int $count = 5;
+package Config;
+our str $host = "localhost";
+package main;
+func ctx() { if (wantarray()) { return "L"; } return "S"; }
+func sq(int $x) int { return $x * $x; }
+func total { my $t = 0; foreach my $v (@_) { $t += $v; } return $t; }
+func pass_through { return &total; }
+func cnt() { return 5; }
+func main() int {
+    my $s = ctx();
+    my @l = ctx();
+    my %h = ("a" => 1);
+    my $r = [1];
+    my $k = scalar keys %h;
+    my $d = defined ref $r;
+    my $fr = \&sq;
+    my $st = pass_through(1, 3);
+    my $cnt = cnt();
+    my $ctr = 0;
+    OUTER: for (my int $i = 0; $i < 3; $i++) {
+        INNER: for (my int $j = 0; $j < 3; $j++) { if ($j == 1) { next OUTER; } $ctr++; }
+    }
+    my $g = core::global_get("main::count") . "/" . core::global_get("Config::host");
+    say($s . " " . $l[0] . " " . $k . " " . $d . " " . (sq(2) + 1) . " sq=" . &sq(3) . " refcall=" . $fr->(3) . " st=" . $st . " cnt=" . $cnt . " ctr=" . $ctr . " g=" . $g);
+    return 0;
+}

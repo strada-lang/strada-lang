@@ -1096,6 +1096,51 @@ func sem_our_cname(str $opkg, str $sigil, str $name) str {
     return "__our_" . $sp . "__" . $name;
 }
 
+# A local named like a user function of package main (same C identifier)
+# hides the function from calls in its scope. Renamed, unless the enclosing
+# function has a __C__ block (which refers to locals by their Strada name).
+func sem_local_hides_func(scalar $ctx, str $name) int {
+    my scalar $fns = $ctx->{"functions"};
+    if (!defined($fns)) { return 0; }
+    my scalar $fi = $fns->{$name};
+    if (!defined($fi)) { return 0; }
+    if (($fi->{"is_registered"} + 0) != 1) { return 0; }
+    my scalar $cf = $ctx->{"current_func"};
+    if (is_valid_node($cf) == 0) { return 0; }
+    if (!exists($cf->{"__has_cblock"})) {
+        my hash %cb_seen = ();
+        $cf->{"__has_cblock"} = sem_has_cblock($cf->{"body"}, \%cb_seen);
+    }
+    if (($cf->{"__has_cblock"} + 0) == 1) { return 0; }
+    return 1;
+}
+
+func sem_has_cblock(scalar $n, scalar $seen) int {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = size($n);
+        for (my int $i = 0; $i < $len; $i = $i + 1) {
+            my scalar $e = $n->[$i];
+            if (length(reftype($e)) > 0) {
+                if (sem_has_cblock($e, $seen) == 1) { return 1; }
+            }
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    my str $id = "" . $n;
+    if (exists($seen->{$id})) { return 0; }
+    $seen->{$id} = 1;
+    if (exists($n->{"type"}) && ($n->{"type"} + 0) == NODE_C_BLOCK()) { return 1; }
+    foreach my str $k (keys(%{$n})) {
+        my scalar $v = $n->{$k};
+        if (length(reftype($v)) > 0) {
+            if (sem_has_cblock($v, $seen) == 1) { return 1; }
+        }
+    }
+    return 0;
+}
+
 func sem_alloc_local_cname(scalar $ctx, scalar $scope, str $name) str {
     my scalar $p = $scope->{"parent"};
     while (is_valid_scope($p) == 1) {
@@ -1132,6 +1177,17 @@ func register_globals(scalar $ctx, scalar $ast) void {
         if ($gvar_type == NODE_VAR_DECL() || $gvar_type == NODE_OUR_DECL()) {
             $sigil = $gvar->{"sigil"};
             sem_scalar_decl_count($ctx, $gvar);
+        }
+        if ($gvar_type == NODE_CONST_DECL()) {
+            # the same constant twice in one package and file is an error
+            # (it was silently replaced by the later value)
+            my str $cd_key = ("" . $gvar->{"file"}) . "\x01" . ("" . $gvar->{"package"}) . "\x01" . $name;
+            if (!defined($ctx->{"const_seen"})) { my hash %cs0 = (); $ctx->{"const_seen"} = \%cs0; }
+            if (exists($ctx->{"const_seen"}->{$cd_key})) {
+                semantic_error($ctx, "constant '" . $name . "' already defined (previous definition at line " . $ctx->{"const_seen"}->{$cd_key} . ")", $line);
+            } else {
+                $ctx->{"const_seen"}->{$cd_key} = $line;
+            }
         }
         $gvar->{"orig_name"} = $name;
         if ($gvar_type == NODE_OUR_DECL()) {
@@ -1611,6 +1667,8 @@ func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
 func sem_rev_scalar(scalar $n) void {
     if (is_valid_node($n) == 0) { return; }
     if ($n->{"type"} == NODE_CALL() && ("" . $n->{"name"}) eq "reverse") { $n->{"scalar_ctx"} = 1; }
+    # a slice in scalar context is its last element (Perl): "" . @a[0]
+    if ($n->{"type"} == NODE_ARRAY_SLICE() || $n->{"type"} == NODE_HASH_SLICE()) { $n->{"scalar_ctx"} = 1; }
 }
 
 # keys/values/split calls: Perl gives their count in scalar context
@@ -1885,6 +1943,18 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
             $ctx->{"uses_tie"} = 1;
         }
+        # bare `&f` passes the caller's @_; where there is none (main, a
+        # function with a parameter list) it passes nothing (Perl: empty)
+        if (($expr->{"amp_call"} + 0) == 1) {
+            my scalar $amp_lk = scope_lookup_var_sigil($ctx->{"scope"}, "_", "@");
+            if (($amp_lk->{"found"} + 0) != 1) {
+                my array @amp_none = ();
+                $expr->{"args"} = \@amp_none;
+                $expr->{"arg_count"} = 0;
+                $args = $expr->{"args"};
+                $arg_count = 0;
+            }
+        }
         # a function that asks for its calling context: callers set it
         # (otherwise only `dynamic` functions get it)
         if ($name eq "core::wantarray" || $name eq "sys::wantarray" || $name eq "wantarray" ||
@@ -2034,6 +2104,11 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     for (my int $ai = 0; $ai < $arg_count; $ai = $ai + 1) {
                         analyze_expression($ctx, $args->[$ai]);
                     }
+                    return;
+                }
+                if ($is_reg == 0 && ($name eq "wantarray" || $name eq "wanthash")) {
+                    # Perl's bare wantarray() (a user function of that name wins)
+                    $expr->{"name"} = "core::" . $name;
                     return;
                 }
                 if ($is_reg == 0 && ($name eq "hex" || $name eq "oct")) {
@@ -2751,6 +2826,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
         my str $c_alias = sem_alloc_local_cname($ctx, $current_scope, $name);
+        if (length($c_alias) == 0 && $other_sigil == 0 && sem_local_hides_func($ctx, $name) == 1) {
+            # `my $cnt = cnt();`: in C the local would hide the function
+            $c_alias = $name . "__fnv";
+        }
         if ($other_sigil == 1) {
             my str $sg_tag = "s";
             if ($sigil eq "@") { $sg_tag = "a"; }

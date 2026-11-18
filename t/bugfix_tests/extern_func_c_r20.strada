@@ -1,0 +1,25 @@
+# EXPECT: 126 2.5 4 hi 7
+# A body-less `extern func` names a C function (here from a __C__ block):
+# arguments and the result are converted to and from C types. The VM used to
+# return undef; it now calls the function through its __C__ JIT.
+__C__ {
+#include <string.h>
+int my_c_function(int x) { return x * 3; }
+double half(double d) { return d / 2; }
+int mylen(char *s) { return (int)strlen(s); }
+char *greet(void) { return "hi"; }
+static int g_last = 0;
+void remember(int x) { g_last = x; }
+int last_value(void) { return g_last; }
+}
+extern func my_c_function(int $arg) int;
+extern func half(num $d) num;
+extern func mylen(str $s) int;
+extern func greet() str;
+extern func remember(int $x) void;
+extern func last_value() int;
+func main() int {
+    remember(7);
+    say(my_c_function(42) . " " . half(5) . " " . mylen("abcd") . " " . greet() . " " . last_value());
+    return 0;
+}

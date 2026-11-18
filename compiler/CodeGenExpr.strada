@@ -6730,7 +6730,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
 
-        # Built-in functions
+        # Built-in functions (the call's line/name: arity errors in
+        # gen_call_with_arg_cleanup)
+        $cg->{"builtin_call_line"} = $expr->{"line"} + 0;
+        $cg->{"builtin_call_name"} = $name;
         if (gen_builtin_g1($cg, $expr, $name) == 1) { return; }
         if (gen_builtin_g2($cg, $expr, $name) == 1) { return; }
         if (gen_builtin_g3($cg, $expr, $name) == 1) { return; }
@@ -6932,6 +6935,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             emit($cg, "__hget_r; })");
         }
+        return;
+    }
+
+    # A slice in scalar context: its last element (Perl), e.g. "" . @a[0]
+    if (($type == NODE_ARRAY_SLICE() || $type == NODE_HASH_SLICE()) && ($expr->{"scalar_ctx"} + 0) == 1 && ($expr->{"__sc_in"} + 0) == 0) {
+        $expr->{"__sc_in"} = 1;
+        emit($cg, "strada_list_last_take(");
+        gen_expression($cg, $expr);
+        emit($cg, ")");
+        $expr->{"__sc_in"} = 0;
         return;
     }
 

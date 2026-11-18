@@ -163,7 +163,7 @@ skip_test "import_object variadic" "requires .o compilation"
 run_test "$EXAMPLES_DIR/negative_index.strada" "negative_index" "Negative index" "run" ""
 run_test "$EXAMPLES_DIR/test_try_catch.strada" "test_try_catch" "Try/catch" "run" ""
 run_test "$T_DIR/test_exception_rethrow.strada" "test_exception_rethrow" "Exception re-throw" "contains" "PASS: All 5 exceptions caught"
-skip_test "Stack traces" "interpreter stack traces differ from compiled"
+run_test "$EXAMPLES_DIR/test_stacktrace.strada" "test_stacktrace" "Stack traces" "run" ""
 run_test "$T_DIR/test_const.strada" "test_const" "Const declarations" "contains" "All const tests passed"
 run_test "$T_DIR/test_recursion_limit.strada" "test_recursion_limit" "Recursion limit" "contains" "All recursion limit tests passed"
 run_test "$EXAMPLES_DIR/test_goto.strada" "test_goto" "Goto" "run" ""
@@ -263,13 +263,14 @@ for src in "$EXAMPLES_DIR"/deref_expr.strada \
            "$EXAMPLES_DIR"/pass_by_ref.strada \
            "$EXAMPLES_DIR"/test_qq.strada \
            "$EXAMPLES_DIR"/test_extern_packages.strada \
-           "$EXAMPLES_DIR"/test_modules.strada \
-           "$EXAMPLES_DIR"/test_ffi.strada; do
+           "$EXAMPLES_DIR"/test_modules.strada; do
     name=$(basename "$src" .strada)
     if [ -f "$src" ]; then
         run_test "$src" "$name" "$name" "run" "" 5
     fi
 done
+
+skip_test "test_ffi" "uses core::int_ptr (raw pointers into variables are compiled-only)"
 
 echo ""
 echo "--- Special Tests ---"

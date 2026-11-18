@@ -1,4 +1,5 @@
 # EXPECT: nonzero 42
+# VM-SKIP: core::int_ptr is compiled-only (the VM raises an error)
 # core::int_ptr(\$x) returned 0: `\$x` is a slot reference, which the
 # pointer functions read as an ordinary reference.
 func main() int {

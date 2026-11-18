@@ -461,6 +461,17 @@ func format_pod(str $pod_content, int $raw_mode) str {
         if ($line =~ /^=item\s+(.+)$/) {
             my array @caps = captures();
             my str $item = $caps[1];
+            # `=item * text` / `=item *`: POD's own bullet (it printed "* * text");
+            # `=item 1.` keeps its number instead of a bullet
+            my str $bullet = "* ";
+            if ($item =~ /^\*\s*(.*)$/) {
+                my array @bc = captures();
+                $item = $bc[1];
+            } elsif ($item =~ /^(\d+)\.?\s*(.*)$/) {
+                my array @nc = captures();
+                $bullet = $nc[1] . ". ";
+                $item = $nc[2];
+            }
             my str $formatted = format_pod_inline($item);
             $output = $output . "\n";
 
@@ -472,7 +483,7 @@ func format_pod(str $pod_content, int $raw_mode) str {
                 $j = $j + 1;
             }
 
-            $output = $output . $indent_str . "* " . color_bold() . $formatted . color_reset() . "\n";
+            $output = $output . $indent_str . $bullet . color_bold() . $formatted . color_reset() . "\n";
             $i = $i + 1;
             next;
         }

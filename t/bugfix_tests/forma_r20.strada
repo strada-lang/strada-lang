@@ -1,0 +1,12 @@
+# EXPECT: C no U [***] [abab] ¥1,235 -¥3 $1,234.56 last=y
+# Forma: a parenthesized helper call as an #if/#unless condition, a variable
+# repeat count, and whole amounts for JPY. Also a slice in scalar context is
+# its last element (Perl): "" . @a[0, 1] is "y".
+use lib "lib";
+use Forma;
+func main() int {
+    my scalar $v = {"name" => "alice", "count" => 3, "p" => 1234.56, "n" => -2.5};
+    my array @a = ("x", "y");
+    say(Forma::render_string("{{#if (contains name \"lic\")}}C{{else}}no{{/if}} {{#if (contains name \"zz\")}}C{{else}}no{{/if}} {{#unless (starts_with name \"x\")}}U{{/unless}} [{{repeat \"*\" count}}] [{{repeat \"ab\" 2}}] {{currency p \"JPY\"}} {{currency n \"JPY\"}} {{currency p}}", $v) . " last=" . @a[0, 1]);
+    return 0;
+}

@@ -1,0 +1,21 @@
+# EXPECT: and or-ran x=0 1 1|0 123 d mod open-failed
+# Perl's low-precedence and / or / xor / not: below assignment, so
+# `my $x = f() or ...` assigns first; words before `=>` are still keys.
+func f() { return 0; }
+func main() int {
+    my array @out = ();
+    my $a1 = 1;
+    if ($a1 and 1) { push(@out, "and"); }
+    my $x = f() or push(@out, "or-ran");
+    push(@out, "x=" . $x);
+    push(@out, not 0);
+    push(@out, (1 xor 0) . "|" . (1 xor 1));
+    my %h = (and => 1, or => 2, not => 3);
+    push(@out, $h{and} . $h{or} . $h{not});
+    my $v = 0 || "d" and "e";
+    push(@out, $v);
+    push(@out, "mod") if $a1 and not 0;
+    my $fh = core::open("/nonexistent/dir/x", "r") or push(@out, "open-failed");
+    say(join(" ", @out));
+    return 0;
+}

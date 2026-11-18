@@ -1,0 +1,9 @@
+# COMPILE-ERROR: too many arguments to 'sum'
+# VM-COMPILE-ERROR: too many arguments to 'sum'
+# Too many arguments to a function with a fixed parameter list (the VM used
+# to drop the extras: sum(1, 2, 3) into `array @n` returned 0).
+func sum(array @n) int { my int $t = 0; foreach my int $x (@n) { $t += $x; } return $t; }
+func main() int {
+    say(sum(1, 2, 3));
+    return 0;
+}

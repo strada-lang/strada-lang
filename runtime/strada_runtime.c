@@ -22930,6 +22930,28 @@ StradaValue* strada_reverse_list1(StradaValue *sv) {
 
 /* reverse(LIST) in scalar context: the list joined, then the string
  * reversed (Perl). A single non-array value is reversed as a string. */
+/* A slice in scalar context (Perl): its last element, or undef when empty.
+ * Takes ownership of the list (an array or an array reference). */
+StradaValue* strada_list_last_take(StradaValue *list) {
+    if (!list) return strada_new_undef();
+    StradaValue *av = list;
+    if (!STRADA_IS_TAGGED_INT(av) && av->type == STRADA_REF && av->value.rv &&
+        !STRADA_IS_TAGGED_INT(av->value.rv) && av->value.rv->type == STRADA_ARRAY) av = av->value.rv;
+    StradaValue *r = NULL;
+    if (!STRADA_IS_TAGGED_INT(av) && av->type == STRADA_ARRAY) {
+        size_t n = strada_array_length(av->value.av);
+        if (n > 0) {
+            StradaValue *e = strada_array_get(av->value.av, (int64_t)(n - 1));
+            if (e) { strada_incref(e); r = e; }
+        }
+    } else {
+        strada_incref(list);
+        r = list;
+    }
+    strada_decref(list);
+    return r ? r : strada_new_undef();
+}
+
 StradaValue* strada_reverse_scalar(StradaValue *sv) {
     if (sv && !STRADA_IS_TAGGED_INT(sv) && !SV_BLESSED(sv) && strada_sv_is_array_or_aref(sv)) {
         StradaValue *sep = strada_new_str("");

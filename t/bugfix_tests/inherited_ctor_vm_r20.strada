@@ -1,0 +1,14 @@
+# COMPILE-ERROR: undefined function 'Kid::new'
+# VM-COMPILE-ERROR: undefined function 'Kid::new'
+# Pkg::new is not looked up through inheritance (Perl); a class without a
+# constructor takes name => value pairs, so an odd count is an error.
+package Base;
+func new(str $t) scalar { my %s = ("t" => $t); return bless(\%s, "Base"); }
+package Kid;
+extends Base;
+package main;
+func main() int {
+    my $k = Kid::new("x");
+    say(ref($k));
+    return 0;
+}

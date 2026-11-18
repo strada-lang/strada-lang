@@ -5,6 +5,7 @@
 #   # EXPECT: text            stdout must equal text exactly
 #   # EXPECT-STDERR: text     the program must fail and its output contain text
 #   # COMPILE-ERROR: text     `stradac --check` must fail with a message containing text
+#                             (optional `# VM-COMPILE-ERROR: text`: strada-interp must fail too)
 # The comment below that line says what used to go wrong.
 #
 # EXPECT tests also run through the bytecode VM (interpreter/strada-interp)
@@ -69,6 +70,21 @@ if [ -x "$BF_INTERP" ]; then
     for bf_src in "$SCRIPT_DIR"/bugfix_tests/*.strada; do
         [ -f "$bf_src" ] || continue
         bf_head=$(head -1 "$bf_src")
+        # `# VM-COMPILE-ERROR: text` (in the first 5 lines of a COMPILE-ERROR
+        # test): the VM must also reject the program, saying text
+        bf_vmce=$(head -5 "$bf_src" | grep -m1 "^# VM-COMPILE-ERROR: " | sed 's/^# VM-COMPILE-ERROR: //')
+        if [ -n "$bf_vmce" ]; then
+            bf_desc="bugfix-vm: $(basename "$bf_src" .strada)"
+            TOTAL=$((TOTAL + 1))
+            bf_got=$(cd "$PROJECT_DIR" && timeout 30 "$BF_INTERP" "$bf_src" 2>&1)
+            bf_rc=$?
+            if [ $bf_rc -ne 0 ] && echo "$bf_got" | grep -qF -- "$bf_vmce"; then
+                PASSED=$((PASSED + 1)); log_pass "$bf_desc"
+            else
+                FAILED=$((FAILED + 1)); log_fail "$bf_desc" "exit $bf_rc; wanted a failure with: $bf_vmce; got: $(echo "$bf_got" | head -2 | tr '\n' '|')"
+            fi
+            continue
+        fi
         case "$bf_head" in "# EXPECT: "*|"# EXPECT:") ;; *) continue ;; esac
         if head -5 "$bf_src" | grep -q "^# VM-SKIP:"; then continue; fi
         bf_desc="bugfix-vm: $(basename "$bf_src" .strada)"

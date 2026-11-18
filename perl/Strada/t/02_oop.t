@@ -5,17 +5,20 @@ use Test::More;
 use FindBin qw($Bin);
 use lib "$Bin/../blib/lib", "$Bin/../blib/arch";
 
-BEGIN { use_ok('Strada') }
+# Skip before use_ok: a skip_all after a test has run is "Bad plan".
+BEGIN {
+    unless (-f "$Bin/../example/math_lib.so") {
+        plan skip_all =>
+        "example/math_lib.so not built " .
+        "(cd example && ../../../strada --shared math_lib.strada)";
+    }
+    use_ok('Strada');
+}
 
 # Uses the current example library (single-underscore C naming, built from
 # example/math_lib.strada). Build it with:
 #   cd example && ../../../strada --shared math_lib.strada
 my $lib_path = "$Bin/../example/math_lib.so";
-unless (-f $lib_path) {
-    plan skip_all =>
-        "example/math_lib.so not built " .
-        "(cd example && ../../../strada --shared math_lib.strada)";
-}
 
 my $lib = Strada::Library->new($lib_path);
 

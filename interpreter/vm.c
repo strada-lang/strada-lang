@@ -1253,6 +1253,7 @@ void vm_program_free(VMProgram *p) {
     for (size_t i = 0; i < p->func_count; i++) {
         vm_chunk_free_jit(&p->funcs[i]);
         free(p->funcs[i].code); free(p->funcs[i].dt_code); free(p->funcs[i].dt_aux);
+        free(p->funcs[i].dt_pc); free(p->funcs[i].ln_pc); free(p->funcs[i].ln_line); free(p->funcs[i].src_file);
         free(p->funcs[i].name); free(p->funcs[i].int_consts); free(p->funcs[i].rawint_slots);
         for (size_t j = 0; j < p->funcs[i].str_const_count; j++) {
             free(p->funcs[i].str_consts[j]);
@@ -1323,6 +1324,72 @@ VMChunk *vm_program_add_func(VMProgram *p, const char *name) {
     p->funcs[idx] = vm_chunk_new(name);
     p->func_names[idx] = strdup(name);
     return &p->funcs[idx];
+}
+
+/* A converted scalar that holds an array/hash: the compiled backend's
+ * value there is a reference to it. Takes and returns ownership. */
+static StradaValue *vm_sv_container_as_ref(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return sv;
+    if (SV_BLESSED(sv)) return sv;   /* an object already prints as bless(...) */
+    if (sv->type == STRADA_ARRAY) return strada_new_ref_take(sv, '@');
+    if (sv->type == STRADA_HASH) return strada_new_ref_take(sv, '%');
+    return sv;
+}
+
+/* Source line a frame is executing (its call site, for a caller frame). */
+static int vm_frame_line(VMFrame *f) {
+    VMChunk *c = f ? f->chunk : NULL;
+    if (!c || !c->dt_pc || !c->dt_code || !f->ip || c->ln_count == 0) return 0;
+    long idx = (long)(f->ip - c->dt_code);
+    if (idx > 0) idx--;                 /* ip is past the executing instruction */
+    if (idx < 0) idx = 0;
+    if ((size_t)idx > c->dt_len) idx = (long)c->dt_len;
+    uint32_t pc = c->dt_pc[idx];
+    int lo = 0, hi = c->ln_count - 1, best = -1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (c->ln_pc[mid] <= pc) { best = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return best >= 0 ? c->ln_line[best] : 0;
+}
+
+/* Call stack in the compiled backend's format, innermost first:
+ *   "  at NAME (FILE)" for the innermost frame, "  at NAME (FILE:LINE)" for
+ * the others (the line of their call). Caller frees. */
+static char *vm_build_trace(VM *vm, int top, int plain) {
+    size_t cap = 256, pos = 0;
+    char *t = malloc(cap);
+    if (!t) return NULL;
+    t[0] = 0;
+    for (int i = top; i >= 0; i--) {
+        VMFrame *f = &vm->frames[i];
+        const char *nm = (f->chunk && f->chunk->name) ? f->chunk->name : "(unknown)";
+        if (nm[0] == '_' && nm[1] == '_') continue;          /* __globals_init, __import_calls ... */
+        const char *file = (f->chunk && f->chunk->src_file) ? f->chunk->src_file : "?";
+        char cname[256];
+        size_t ci = 0;
+        for (const char *p = nm; *p && ci + 1 < sizeof(cname); p++) {
+            if (p[0] == ':' && p[1] == ':') { cname[ci++] = '_'; p++; } else cname[ci++] = *p;
+        }
+        cname[ci] = 0;
+        char line[1024];
+        int ln = (i == top) ? 0 : vm_frame_line(f);
+        int n = plain ? snprintf(line, sizeof(line), "  %s\n", cname)
+              : ln > 0 ? snprintf(line, sizeof(line), "  at %s (%s:%d)\n", cname, file, ln)
+                       : snprintf(line, sizeof(line), "  at %s (%s)\n", cname, file);
+        if (n < 0) continue;
+        if ((size_t)n >= sizeof(line)) n = (int)sizeof(line) - 1;
+        if (pos + (size_t)n + 1 > cap) {
+            while (pos + (size_t)n + 1 > cap) cap *= 2;
+            char *nt = realloc(t, cap);
+            if (!nt) { free(t); return NULL; }
+            t = nt;
+        }
+        memcpy(t + pos, line, (size_t)n);
+        pos += (size_t)n;
+        t[pos] = 0;
+    }
+    return t;
 }
 
 int vm_program_find_func(VMProgram *p, const char *name) {
@@ -1523,6 +1590,15 @@ static inline int vm_globals_exists(VM *vm, const char *name) {
     if (lk) pthread_mutex_unlock(lk);
     return r;
 }
+
+/* core::global_*("main::x"): the VM registers package main's `our`
+ * variables under the bare name; the compiled registry uses "main::x". */
+static const char *vm_global_key_main(VM *vm, const char *key) {
+    if (key && strncmp(key, "main::", 6) == 0 && !vm_globals_exists(vm, key) && vm_globals_exists(vm, key + 6))
+        return key + 6;
+    return key;
+}
+
 
 static inline void vm_globals_delete(VM *vm, const char *name) {
     pthread_mutex_t *lk = vm_globals_lock_ptr(vm);
@@ -2042,8 +2118,6 @@ void vm_free(VM *vm) {
     if (__sync_sub_and_fetch(&vm->refcount, 1) > 0) return;
     free(vm->cur_package);
     vm->cur_package = NULL;
-    free(vm->exc_trace);
-    vm->exc_trace = NULL;
     if (!vm->is_worker_vm && vm->program && vm->gc_objects && vm->frame_count == 0 && vm->exec_base == 0 &&
         vm->global_save_count == 0 && vm->gc_pause == 0) {
         for (int pass = 0; pass < 4; pass++) {
@@ -2126,6 +2200,9 @@ void vm_free(VM *vm) {
     pthread_cond_destroy(&vm->gc_start_cond);
     pthread_cond_destroy(&vm->gc_parked_cond);
     pthread_mutex_destroy(&vm->globals_mutex);
+    /* last: DESTROY methods run above may throw and record a trace */
+    free(vm->exc_trace);
+    vm->exc_trace = NULL;
     VM *root = vm->root_vm;
     free(vm);
     if (root) vm_free(root);
@@ -4166,7 +4243,8 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     /* Run eviction once per process */
     if (!eviction_done) { cache_evict_stale(cache_dir); eviction_done = 1; }
 
-    uint64_t hash = 14695981039346656037ULL ^ (uint64_t)n;
+    /* "v2": entry functions return StradaValue* (a `return` in the block) */
+    uint64_t hash = (14695981039346656037ULL ^ 0x7632ULL) ^ (uint64_t)n;
     for (int bi = 0; bi < n; bi++)
         hash = hash * 1099511628211ULL ^ cblock_hash(cbs[bi].code, cbs[bi].var_names, cbs[bi].var_count);
     if (prelude) {
@@ -4210,7 +4288,7 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     }
     for (int bi = 0; bi < n; bi++) {
         VMCBlock *cb = &cbs[bi];
-        fprintf(f, "void __cblock_entry_%d(StradaValue **__vars) {\n", bi);
+        fprintf(f, "StradaValue *__cblock_entry_%d(StradaValue **__vars) {\n", bi);
         /* Declare local variables from the __vars array */
         for (int i = 0; i < cb->var_count; i++) {
             fprintf(f, "    StradaValue *%s = __vars[%d];\n", cb->var_names[i], i);
@@ -4221,6 +4299,7 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
         for (int i = 0; i < cb->var_count; i++) {
             fprintf(f, "    __vars[%d] = %s;\n", i, cb->var_names[i]);
         }
+        fprintf(f, "    return NULL;   /* no `return` in the block */\n");
         fprintf(f, "}\n");
     }
     fclose(f);
@@ -4488,13 +4567,13 @@ static int vm_c_call_closure(VM *vm, StradaValue *cl_sv, StradaValue *packed_arg
 }
 
 __attribute__((noinline))
-static int vm_c_call_cblock(VM *vm, void (*fn)(StradaValue**), StradaValue **sv_vars, VMValue *out_exc) {
+static int vm_c_call_cblock(VM *vm, StradaValue *(*fn)(StradaValue**), StradaValue **sv_vars, VMValue *out_exc, StradaValue **out_ret) {
     int cm = strada_cleanup_mark();
     int lm = strada_local_depth_get();
     vm->gc_pause++;
     volatile int _prev_safe = vm_worker_enter_safe(vm);
     if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-        fn(sv_vars);
+        *out_ret = fn(sv_vars);
         STRADA_TRY_POP();
         vm_worker_leave_safe(vm, _prev_safe);
         vm->gc_pause--;
@@ -7931,7 +8010,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         case BUILTIN_CORE_GLOBAL_SET: {
             if (argc >= 2) {
                 char kbuf[256];
-                const char *key = vm_to_cstr(args[0], kbuf, 256);
+                const char *key = vm_global_key_main(vm, vm_to_cstr(args[0], kbuf, 256));
                 vm_globals_set(vm, key, vm_val_copy(args[1]));
             }
             SP_PUSH(VM_UNDEF_VAL);
@@ -7940,7 +8019,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         case BUILTIN_CORE_GLOBAL_GET: {
             if (argc >= 1) {
                 char kbuf[256];
-                const char *key = vm_to_cstr(args[0], kbuf, 256);
+                const char *key = vm_global_key_main(vm, vm_to_cstr(args[0], kbuf, 256));
                 VMValue v = vm_globals_get_raw(vm, key);
                 if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_WEAKREF) {
                     vm->stack_top = sp;
@@ -7954,7 +8033,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         case BUILTIN_CORE_GLOBAL_EXISTS: {
             if (argc >= 1) {
                 char kbuf[256];
-                const char *key = vm_to_cstr(args[0], kbuf, 256);
+                const char *key = vm_global_key_main(vm, vm_to_cstr(args[0], kbuf, 256));
                 SP_PUSH(VM_MAKE_INT(vm_globals_exists(vm, key)));
             } else SP_PUSH(VM_MAKE_INT(0));
             break;
@@ -7962,7 +8041,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         case BUILTIN_CORE_GLOBAL_DELETE: {
             if (argc >= 1) {
                 char kbuf[256];
-                const char *key = vm_to_cstr(args[0], kbuf, 256);
+                const char *key = vm_global_key_main(vm, vm_to_cstr(args[0], kbuf, 256));
                 vm_globals_delete(vm, key);
             }
             SP_PUSH(VM_UNDEF_VAL);
@@ -8412,6 +8491,46 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             SP_PUSH(VM_MAKE_PTR(gres));
             break;
         }
+        case BUILTIN_TYPEOF_TO_REF: {
+            /* typeof($r) with $r holding an array/hash ref is "ref" (compiled);
+             * the VM keeps the container itself in the scalar */
+            char tb[16];
+            const char *tn = vm_to_cstr(argc >= 1 ? args[0] : VM_UNDEF_VAL, tb, sizeof(tb));
+            if (strcmp(tn, "array") == 0 || strcmp(tn, "hash") == 0) SP_PUSH(vm_str("ref"));
+            else SP_PUSH(vm_val_copy(argc >= 1 ? args[0] : VM_UNDEF_VAL));
+            break;
+        }
+        case BUILTIN_SAY_ARG: {
+            /* say(@a) / say(f()) when f may return a list: an (unblessed)
+             * array prints its elements, any other value prints as is */
+            VMValue sv0 = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            if (!(VM_IS_PTR(sv0) && VM_PTR_TYPE(sv0) == VM_OBJ_ARRAY && vm_obj_class_name(sv0) == NULL)) {
+                SP_PUSH(vm_val_copy(sv0));
+                break;
+            }
+            VMArray *sa = VM_AS_ARRAY(sv0);
+            StradaValue *acc = strada_new_str("");
+            vm->stack_top = sp;
+            vm->gc_pause++;
+            for (int si = 0; si < sa->size; si++) {
+                VMValue piece = vm_stringify_ov(vm, sa->items[si]);
+                if (vm->has_pending_exc) break;
+                StradaValue *psv = vm_to_sv(piece);
+                acc = strada_concat_inplace(acc, psv);
+                strada_decref(psv);
+            }
+            vm->gc_pause--;
+            stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                strada_decref(acc);
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_builtin_throw_exc;
+            }
+            VMValue jout = sv_to_vm(acc);
+            strada_decref(acc);
+            SP_PUSH(jout);
+            break;
+        }
         case BUILTIN_REV_LISTIFY: {
             VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
             if (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_CELL) rv = VM_AS_CELL(rv)->val;
@@ -8422,6 +8541,12 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 vm_array_push(one, vm_val_copy(rv));
                 SP_PUSH(VM_MAKE_PTR(one));
             }
+            break;
+        }
+        case BUILTIN_LIST_LAST: {
+            VMArray *ll = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            if (ll) SP_PUSH(ll->size > 0 ? vm_val_copy(vm_array_get(ll, (int64_t)ll->size - 1)) : VM_UNDEF_VAL);
+            else SP_PUSH(argc >= 1 ? vm_val_copy(args[0]) : VM_UNDEF_VAL);
             break;
         }
         case BUILTIN_REV_JOINSTR: {
@@ -9611,41 +9736,16 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             VMFrame *cf = &vm->frames[idx];
             if (cf->chunk && cf->chunk->name) vm_hash_set(info, "function", vm_str(cf->chunk->name));
             else vm_hash_set(info, "function", vm_str("(unknown)"));
-            vm_hash_set(info, "file", vm_str("(unknown)"));
-            vm_hash_set(info, "line", VM_MAKE_INT(0));
+            vm_hash_set(info, "file", vm_str((cf->chunk && cf->chunk->src_file) ? cf->chunk->src_file : "(unknown)"));
+            vm_hash_set(info, "line", VM_MAKE_INT(vm_frame_line(cf)));
             SP_PUSH(VM_MAKE_PTR(info));
             break;
         }
         case BUILTIN_CORE_STACK_TRACE: {
-            /* Build stack trace string */
-            size_t cap = 1024;
-            char *trace = malloc(cap);
-            if (!trace) { SP_PUSH(vm_str("")); break; }
-            trace[0] = '\0';
-            size_t pos = 0;
-            for (int i = vm->frame_count - 1; i >= 0; i--) {
-                VMFrame *f = &vm->frames[i];
-                const char *fname = (f->chunk && f->chunk->name) ? f->chunk->name : "(unknown)";
-                size_t flen = strlen(fname);
-                size_t need = pos + flen + 4;
-                if (need > cap) {
-                    while (cap < need) cap *= 2;
-                    char *nt = realloc(trace, cap);
-                    if (!nt) { free(trace); trace = NULL; break; }
-                    trace = nt;
-                }
-                memcpy(trace + pos, "  ", 2);
-                memcpy(trace + pos + 2, fname, flen);
-                trace[pos + 2 + flen] = '\n';
-                pos += 3 + flen;
-                trace[pos] = '\0';
-            }
-            if (trace) {
-                SP_PUSH(VM_MAKE_STR_N(trace, pos));
-                free(trace);
-            } else {
-                SP_PUSH(vm_str(""));
-            }
+            /* the active frames (the dispatch loop synced frame->ip) */
+            char *trace = vm_build_trace(vm, (int)vm->frame_count - 1, 0);
+            if (trace) { SP_PUSH(vm_str(trace)); free(trace); }
+            else SP_PUSH(vm_str(""));
             break;
         }
         case BUILTIN_CORE_PACK: {
@@ -10745,6 +10845,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
 
         /* === Common bare functions === */
         case BUILTIN_DIE: {
+            vm->exc_from_die = 2;    /* L_vm_throw_exc: the uncaught report is the bare message */
             if (argc == 0) {
                 throw_exc = vm_str("Died");
             } else if (argc == 1 && VM_IS_PTR(args[0]) &&
@@ -11134,9 +11235,11 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             } else SP_PUSH(VM_MAKE_INT(-1));
             break;
         }
-        case BUILTIN_DUMPER_STR: {
+        case BUILTIN_DUMPER_STR:
+        case BUILTIN_DUMPER_STR_R: {
             if (argc >= 1) {
                 StradaValue *sv = vm_to_sv(args[0]);
+                if (bid == BUILTIN_DUMPER_STR_R) sv = vm_sv_container_as_ref(sv);
                 StradaValue *r = strada_dumper(sv);
                 char *s = strada_to_str(r);
                 SP_PUSH(vm_str(s));
@@ -11727,9 +11830,11 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             break;
         }
 
-        case BUILTIN_DUMP: {
+        case BUILTIN_DUMP:
+        case BUILTIN_DUMP_R: {
             if (argc >= 1) {
                 StradaValue *sv = vm_to_sv(args[0]);
+                if (bid == BUILTIN_DUMP_R) sv = vm_sv_container_as_ref(sv);
                 int ind = (argc >= 2) ? (int)vm_to_int(args[1]) : 0;
                 strada_dump(sv, ind);
                 strada_decref(sv);
@@ -11800,6 +11905,13 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             break;
         }
 
+        case BUILTIN_STACKTRACE_STR: {
+            /* stacktrace_str(): "  NAME" per frame, innermost first (compiled) */
+            char *trace = vm_build_trace(vm, (int)vm->frame_count - 1, 1);
+            if (trace) { SP_PUSH(vm_str(trace)); free(trace); }
+            else SP_PUSH(vm_str(""));
+            break;
+        }
         case BUILTIN_STACKTRACE: {
             fprintf(stderr, "Stack trace:\n");
             for (int i = vm->frame_count - 1; i >= 0; i--) {
@@ -11886,6 +11998,8 @@ static inline uint16_t vm_dt_map_jump(uint16_t byte_off, size_t code_len, const 
 static void vm_chunk_build_dt_locked(VMChunk *c, const void * const *dt) {
     free(c->dt_code);
     c->dt_code = NULL;
+    free(c->dt_pc);
+    c->dt_pc = NULL;
     free(c->dt_aux);
     c->dt_aux = NULL;
     c->dt_aux_len = 0;
@@ -12107,6 +12221,16 @@ static void vm_chunk_build_dt_locked(VMChunk *c, const void * const *dt) {
 
     arr[cnt].op = OP_HALT;
     arr[cnt].handler = dt ? dt[OP_HALT] : NULL;
+    {
+        /* insn index -> bytecode offset, for source-line lookups */
+        uint32_t *i2b = calloc(cnt + 1, sizeof(uint32_t));
+        if (i2b) {
+            for (size_t bp = 0; bp < clen; bp++)
+                if (b2i[bp] != UINT32_MAX && b2i[bp] <= cnt) i2b[b2i[bp]] = (uint32_t)bp;
+            i2b[cnt] = (uint32_t)clen;
+        }
+        c->dt_pc = i2b;
+    }
     free(b2i);
 
     c->dt_aux = aux;
@@ -16952,6 +17076,22 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             strada_decref(ssv);
             vm_val_free(&str);
         } else {
+            /* `say(A, B)` where A is not a handle: both are data for stdout
+             * (the compiled backend decides at run time the same way) */
+            if (__builtin_expect(vm_has_stringify(vm->program, fhv), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                SP_PUSH(str); vm->stack_top = sp;
+                fhv = vm_stringify_ov(vm, fhv);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_vm_throw_exc;
+                }
+                str = SP_POP();
+            }
+            vm_write_val(stdout, fhv, 0);
+            vm_write_val(stdout, str, 1);
+            fflush(stdout);
             vm_val_free(&str);
         }
         DISPATCH();
@@ -16991,6 +17131,22 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             strada_decref(ssv);
             vm_val_free(&str);
         } else {
+            /* `print(A, B)` where A is not a handle: both are data for stdout
+             * (the compiled backend decides at run time the same way) */
+            if (__builtin_expect(vm_has_stringify(vm->program, fhv), 0)) {
+                frame->ip = ip; vm->stack_top = sp;
+                SP_PUSH(str); vm->stack_top = sp;
+                fhv = vm_stringify_ov(vm, fhv);
+                stack = vm->stack; RELOAD();
+                if (__builtin_expect(vm->has_pending_exc, 0)) {
+                    throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                    goto L_vm_throw_exc;
+                }
+                str = SP_POP();
+            }
+            vm_write_val(stdout, fhv, 0);
+            vm_write_val(stdout, str, 0);
+            fflush(stdout);
             vm_val_free(&str);
         }
         DISPATCH();
@@ -20323,33 +20479,19 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 
     CASE(OP_THROW): {
         throw_exc = SP_POP();
-        /* core::exception_trace(): the frames active at this throw */
-        {
-            size_t tcap = 256, tpos = 0;
-            char *tr = malloc(tcap);
-            if (tr) {
-                tr[0] = 0;
-                for (int ti = (int)vm->frame_count - 1; ti >= 0; ti--) {
-                    VMFrame *tf = &vm->frames[ti];
-                    const char *tn = (tf->chunk && tf->chunk->name) ? tf->chunk->name : "(unknown)";
-                    size_t tl = strlen(tn);
-                    if (tpos + tl + 8 >= tcap) {
-                        tcap = (tpos + tl + 8) * 2;
-                        char *nt = realloc(tr, tcap);
-                        if (!nt) break;
-                        tr = nt;
-                    }
-                    tpos += (size_t)sprintf(tr + tpos, "  at %s\n", tn);
-                }
-                free(vm->exc_trace);
-                vm->exc_trace = tr;
-            }
-        }
+        vm->exc_from_die = 0;
         goto L_vm_throw_exc;
     }
 
     L_vm_throw_exc: {
         vm->pending_call_context = 0;
+        /* core::exception_trace() / the uncaught trace: the frames active at
+         * this throw (every throw -- throw, die, runtime errors -- comes here
+         * before any frame is unwound) */
+        frame->ip = ip;
+        free(vm->exc_trace);
+        vm->exc_trace = vm_build_trace(vm, (int)vm->frame_count - 1, 0);
+        vm->exc_from_die = (vm->exc_from_die == 2) ? 1 : 0;
         if (vm->exc_top > 0) {
             VMExcHandler eh_copy = vm->exc_stack[vm->exc_top - 1];
             if (vm->exec_base > 0 && eh_copy.frame_count <= vm->exec_base) {
@@ -20417,8 +20559,18 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             vm->has_exception = 1;
             vm->current_exception = throw_exc;
             if (!vm->trap_uncaught) {
-                char buf[256];
-                fprintf(stderr, "Uncaught exception: %s\n", vm_to_cstr(throw_exc, buf, 256));
+                /* as the compiled backend: die() prints its message; a throw
+                 * prints "Uncaught exception: MSG" and the stack trace */
+                StradaValue *usv = vm_to_sv(throw_exc);
+                char *umsg = strada_to_str(usv);
+                if (vm->exc_from_die == 1) {
+                    fprintf(stderr, "%s\n", umsg ? umsg : "");
+                } else {
+                    fprintf(stderr, "Uncaught exception: %s\n", umsg ? umsg : "");
+                    if (vm->exc_trace && vm->exc_trace[0]) fprintf(stderr, "Stack trace:\n%s", vm->exc_trace);
+                }
+                free(umsg);
+                strada_decref(usv);
                 vm->stack_top = 0;
                 vm_run_end_blocks(vm);
             }
@@ -21234,7 +21386,8 @@ for (int i = 0; i < cb->var_count; i++) {
         }
 
         /* Call the compiled C block */
-        if (vm_c_call_cblock(vm, (void(*)(StradaValue**))cb->fn, sv_vars, &throw_exc)) {
+        StradaValue *cb_ret = NULL;
+        if (vm_c_call_cblock(vm, (StradaValue *(*)(StradaValue**))cb->fn, sv_vars, &throw_exc, &cb_ret)) {
             stack = vm->stack;
             RELOAD();
             for (int i = 0; i < cb->var_count; i++) {
@@ -21337,6 +21490,14 @@ for (int i = 0; i < cb->var_count; i++) {
         }
         if (orig_vars != orig_buf) { free(orig_vars); free(sv_vars); free(orig_sv); }
 
+        if (cb_ret) {
+            /* `return EXPR;` inside the block returns from the Strada
+             * function (as in the compiled backend); the value is owned */
+            VMValue crv = sv_to_vm(cb_ret);
+            strada_decref(cb_ret);
+            SP_PUSH(crv);
+            goto L_OP_RETURN;
+        }
         DISPATCH();
     }
 
