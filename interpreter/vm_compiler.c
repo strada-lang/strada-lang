@@ -8639,9 +8639,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else if (init && !STRADA_IS_TAGGED_INT(init)) {
             compile_expr(ctx, init);
         } else {
-            /* `our int $n;` is undef until assigned (compiled backend: the
-             * global registry holds no value); it used to read as 0 / "" */
-            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+            /* `our int $n;` holds its type's empty value (0, 0.0, ""), like
+             * `my int $n;`; OP_INIT_GLOBAL keeps a value already there */
+            emit_default_scalar_init(ctx, (sigil[0] == '$') ? ast_int(node, "var_type") : 0);
         }
         vm_chunk_emit(ctx->chunk, (init && !STRADA_IS_TAGGED_INT(init)) ? OP_STORE_GLOBAL : OP_INIT_GLOBAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);

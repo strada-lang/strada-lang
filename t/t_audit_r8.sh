@@ -119,7 +119,7 @@ line1
 EOF1
 line2
 EOF2
-    if ($cval == 33 && $after_c == 9 && index($both, "  EOF1\n#ifdef R8_NOT_A_DIRECTIVE_IN_HEREDOCline2") >= 0) {
+    if ($cval == 33 && $after_c == 9 && index($both, "  EOF1\n#ifdef R8_NOT_A_DIRECTIVE_IN_HEREDOC\nline2\n") >= 0) {
         say("PP_R8_OK");
         return 0;
     }

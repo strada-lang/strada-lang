@@ -1,15 +1,14 @@
-# EXPECT: undef undef 1 a
-# `our int $n;` / `our str $s;` without an initializer are undef until
-# assigned (compiled backend); the VM initialized them to 0 / "".
+# EXPECT: 0 [] 1 a 0 def
+# `our int $n;` / `our str $s;` / `our num $f;` without an initializer hold
+# their type's empty value (0, "", 0), like `my int $n;`.
 our int $n;
 our str $s;
 our int $c;
 our str $t;
+our num $f;
 func main() int {
-    my str $a = defined($n) ? "def" : "undef";
-    my str $b = defined($s) ? "def" : "undef";
     $c++;
     $t .= "a";
-    say($a . " " . $b . " " . $c . " " . $t);
+    say($n . " [" . $s . "] " . $c . " " . $t . " " . $f . " " . (defined($n) ? "def" : "undef"));
     return 0;
 }

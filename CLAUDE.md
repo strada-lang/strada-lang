@@ -1530,7 +1530,8 @@ compiler:
   drivers as `#define`s), so `use DBI;` compiled from source has the drivers.
 - **Loose ends closed (2026-11-18)**: a typed scalar declared without a
   value holds its type's empty value (`my int $x;` 0, `my num` 0, `my str`
-  "") in both backends; `$u->{k} = v` / `$u->[i] = v` on an undef scalar
+  "") in both backends, and so does `our` (set only while the global is
+  undef, so another `our` of the same variable keeps its value); `$u->{k} = v` / `$u->[i] = v` on an undef scalar
   autovivify it (`strada_autoviv_slot_ref` from `gen_assign_container`; VM
   `compile_viv_container` root case); `$h{k} = @a` stores the count;
   `stacktrace_str()` returns the tracked Strada frames. VM: `our @x` / `our %x`
@@ -1615,7 +1616,7 @@ compiler:
     as an integer (its address) -- `vm_hash_new` looped forever; now a
     constant capacity is a hint (`vm_decl_capacity`), anything else ignored.
   - VM: `$s =~ $str` / `!~` with a string pattern, `core::sprintf`,
-    `our int $x;` is undef, `is_ref(@a)` / `is_ref(%h)` are 0, clone() caps
+    `our int $x;` is 0 like `my int $x;` (2026-11; it was undef), `is_ref(@a)` / `is_ref(%h)` are 0, clone() caps
     at 128 nested containers (= the compiled 256 ref+container levels) with
     the same warning, `__C__` JIT adds `-I<runtime>/../interpreter` (vm.h).
 - **Website-check fixes (2026-11-18)** -- bugs found while verifying the
@@ -1982,7 +1983,23 @@ Same as bare <<EOT (double-quoted).
 EOT
 ```
 
-Semicolon goes on the `<<EOT;` line. Supports bare `<<EOT`, single-quoted `<<'EOT'`, double-quoted `<<"EOT"`.
+Semicolon goes on the `<<EOT;` line. Heredocs follow Perl exactly (2026-11):
+- **Every body line keeps its newline**, the last one too: `<<EOT` with the
+  single line `hi` is `"hi\n"`. Before, the final newline was dropped.
+- **Forms**:
+  - `<<EOT` and `<<"EOT"` process escapes and `${name}` interpolation.
+  - `<<'EOT'` and `<<\EOT` are literal.
+  - `<< "EOT"` may have spaces before a quoted delimiter, and a quoted
+    delimiter may contain any characters (`<<"END OF TEXT"`). `<<""` ends at
+    the first empty line.
+  - `<<~EOT` (and `<<~"EOT"` / `<<~'EOT'`) is indented: the terminator may be
+    indented, and its indentation is removed from every body line. A
+    non-blank line without that indentation is a compile error ("Indentation
+    on line N of here-doc doesn't match delimiter").
+- The lexer (`compiler/Lexer.strada`, the `<<` branch of `lex_next_token`),
+  its preprocessor skip scanner, the REPL's `is_balanced`
+  (`interpreter/Main.strada`) and Strada::JIT's `strip_strings_and_comments`
+  all recognize these forms.
 
 ### Perl Compatibility
 

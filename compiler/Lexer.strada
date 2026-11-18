@@ -1180,6 +1180,9 @@ func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_els
                 } elsif ($cc == '<' && $sc + 1 < $len && char_at($src, $sc + 1) == '<' && $can_regex == 1) {
                     my int $hj = $sc + 2;
                     my int $hq = 0;
+                    my str $h_tilde = "";
+                    if ($hj < $len && char_at($src, $hj) == '~') { $h_tilde = "~"; $hj = $hj + 1; }
+                    if ($hj < $len && char_at($src, $hj) == '\\') { $hj = $hj + 1; }
                     if ($hj < $len && (char_at($src, $hj) == '\'' || char_at($src, $hj) == '"')) {
                         $hq = char_at($src, $hj);
                         $hj = $hj + 1;
@@ -1199,7 +1202,7 @@ func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_els
                     }
                     if (length($hdelim) > 0) {
                         my array @hdelims = ();
-                        push(\@hdelims, $hdelim);
+                        push(\@hdelims, $h_tilde . $hdelim);
                         # Skip rest of opening line (and collect any extra heredoc tags on same line)
                         my int $h_in_cmt = 0;
                         my int $h_dq = 0;
@@ -1253,6 +1256,9 @@ func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_els
                                 } elsif ($hc == '<' && $sc + 1 < $len && char_at($src, $sc + 1) == '<' && $h_can == 1) {
                                     my int $ehj = $sc + 2;
                                     my int $ehq = 0;
+                                    my str $eh_tilde = "";
+                                    if ($ehj < $len && char_at($src, $ehj) == '~') { $eh_tilde = "~"; $ehj = $ehj + 1; }
+                                    if ($ehj < $len && char_at($src, $ehj) == '\\') { $ehj = $ehj + 1; }
                                     if ($ehj < $len && (char_at($src, $ehj) == '\'' || char_at($src, $ehj) == '"')) {
                                         $ehq = char_at($src, $ehj);
                                         $ehj = $ehj + 1;
@@ -1265,7 +1271,7 @@ func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_els
                                             $ehj = $ehj + 1;
                                         }
                                         if ($ehq == 0 || ($ehj < $len && char_at($src, $ehj) == $ehq)) {
-                                            push(\@hdelims, substr_bytes($src, $ehds, $ehj - $ehds));
+                                            push(\@hdelims, $eh_tilde . substr_bytes($src, $ehds, $ehj - $ehds));
                                             if ($ehq != 0) { $ehj = $ehj + 1; }
                                             $sc = $ehj;
                                             $h_can = 0;
@@ -1300,6 +1306,13 @@ func lex_pp_skip_e(scalar $lexer, int $stop_else, int $start_line, int $seen_els
                                 my str $hline = substr_bytes($src, $hls, $sc - $hls);
                                 if ($hline eq $want) {
                                     last;
+                                }
+                                if (substr_bytes($want, 0, 1) eq "~") {
+                                    # <<~TAG: the terminator may be indented
+                                    my int $hti = 0;
+                                    my int $htl = bytes($hline);
+                                    while ($hti < $htl && (char_at($hline, $hti) == ' ' || char_at($hline, $hti) == '\t')) { $hti = $hti + 1; }
+                                    if (substr_bytes($hline, $hti, $htl - $hti) eq substr_bytes($want, 1, bytes($want) - 1)) { last; }
                                 }
                                 if ($sc < $len && char_at($src, $sc) == '\n') {
                                     $sc = $sc + 1;
@@ -4357,34 +4370,64 @@ func lex_next_token(scalar $lexer) scalar {
         lex_advance($lexer);
         lex_advance($lexer);
         my int $hd_code = lex_current_code($lexer);
-        # Check if followed by alpha/underscore or quote — indicates heredoc
+        # Perl heredocs: <<EOT, <<"EOT", <<'EOT', <<\EOT (literal), << "EOT"
+        # (spaces before a quoted delimiter), and the indented forms <<~EOT /
+        # <<~"EOT" / <<~'EOT' (the terminator's indentation is removed from
+        # every body line).
         my int $is_heredoc = 0;
         my int $hd_quoted = 0;
+        my int $hd_indent = 0;
         if ($lexer->{"after_value"} == 0) {
-            if (($hd_code >= 'A' && $hd_code <= 'Z') || ($hd_code >= 'a' && $hd_code <= 'z') || $hd_code == '_') {
+            my int $hp = $lexer->{"pos"};
+            my int $hsrc_len = $lexer->{"length"};
+            if ($hd_code == '~') { $hd_indent = 1; $hp = $hp + 1; }
+            my int $hq_c = 0;
+            if ($hp < $hsrc_len) { $hq_c = char_at($source, $hp); }
+            my int $hp2 = $hp;
+            while ($hp2 < $hsrc_len && (char_at($source, $hp2) == ' ' || char_at($source, $hp2) == '\t')) { $hp2 = $hp2 + 1; }
+            my int $hq_c2 = 0;
+            if ($hp2 < $hsrc_len) { $hq_c2 = char_at($source, $hp2); }
+            if (($hq_c >= 'A' && $hq_c <= 'Z') || ($hq_c >= 'a' && $hq_c <= 'z') || $hq_c == '_') {
                 $is_heredoc = 1;
-            } elsif ($hd_code == '\'' || $hd_code == '"') {
+            } elsif ($hq_c == '\\' && $hp + 1 < $hsrc_len) {
+                my int $bsn = char_at($source, $hp + 1);
+                if (($bsn >= 'A' && $bsn <= 'Z') || ($bsn >= 'a' && $bsn <= 'z') || $bsn == '_') {
+                    $is_heredoc = 1;
+                    $hd_quoted = '\'';
+                    $hp = $hp + 1;
+                    $hd_code = 0;
+                }
+            } elsif ($hq_c2 == '\'' || $hq_c2 == '"') {
                 $is_heredoc = 1;
-                $hd_quoted = $hd_code;
-                lex_advance($lexer);
+                $hd_quoted = $hq_c2;
+                $hp = $hp2;
+            }
+            if ($is_heredoc == 1) {
+                while ($lexer->{"pos"} < $hp) { lex_advance($lexer); }
+                if ($hd_quoted != 0 && $hd_code != 0) { lex_advance($lexer); }
             }
         }
 
         if ($is_heredoc == 1) {
-            # Read delimiter identifier
+            # Read delimiter: an identifier, or anything up to the closing quote
             my str $delim = "";
             my int $dc = lex_current_code($lexer);
-            while (($dc >= 'A' && $dc <= 'Z') || ($dc >= 'a' && $dc <= 'z') || ($dc >= '0' && $dc <= '9') || $dc == '_') {
-                $delim = $delim . chr($dc);
-                lex_advance($lexer);
-                $dc = lex_current_code($lexer);
-            }
-            # Skip closing quote if quoted
-            if ($hd_quoted != 0) {
+            if ($hd_quoted != 0 && $hd_code != 0) {
+                while (!lex_at_end($lexer) && $dc != $hd_quoted && $dc != '\n') {
+                    $delim = $delim . chr($dc);
+                    lex_advance($lexer);
+                    $dc = lex_current_code($lexer);
+                }
                 if (lex_current_code($lexer) != $hd_quoted) {
                     lex_error($lexer, "Unterminated heredoc delimiter quote", $token_line, $token_col);
                 }
                 lex_advance($lexer);
+            } else {
+                while (($dc >= 'A' && $dc <= 'Z') || ($dc >= 'a' && $dc <= 'z') || ($dc >= '0' && $dc <= '9') || $dc == '_') {
+                    $delim = $delim . chr($dc);
+                    lex_advance($lexer);
+                    $dc = lex_current_code($lexer);
+                }
             }
             # Keep lexing the remainder of the opening line (e.g. `<<EOT . " world";`
             # or `say(<<EOT);` or multiple heredocs on one line): scan forward from
@@ -4405,9 +4448,12 @@ func lex_next_token(scalar $lexer) scalar {
                 $scan_pos = $scan_pos + 1;
                 $scan_line = $lexer->{"line"} + 1 + $extra_lines;
             }
-            # Read lines until we find the delimiter on its own line
-            my scalar $body_sb = sb_new();
+            # Read lines until we find the delimiter on its own line (for <<~,
+            # after optional leading whitespace). Every body line keeps its
+            # newline, as in Perl: <<EOT with one line "x" is "x\n".
+            my array @hd_lines = ();
             my int $found = 0;
+            my str $hd_term_indent = "";
             while ($scan_pos < $src_len) {
                 my int $lstart = $scan_pos;
                 while ($scan_pos < $src_len && char_at($source, $scan_pos) != '\n') {
@@ -4423,8 +4469,17 @@ func lex_next_token(scalar $lexer) scalar {
                     $found = 1;
                     last;
                 }
-                sb_append($body_sb, $hd_line);
-                sb_append($body_sb, "\n");
+                if ($hd_indent == 1) {
+                    my int $wi = 0;
+                    my int $hl_len = bytes($hd_line);
+                    while ($wi < $hl_len && (char_at($hd_line, $wi) == ' ' || char_at($hd_line, $wi) == '\t')) { $wi = $wi + 1; }
+                    if (substr_bytes($hd_line, $wi, $hl_len - $wi) eq $delim) {
+                        $hd_term_indent = substr_bytes($hd_line, 0, $wi);
+                        $found = 1;
+                        last;
+                    }
+                }
+                push(@hd_lines, $hd_line);
             }
             if ($found == 0) {
                 lex_error($lexer, "Unterminated heredoc (missing '" . $delim . "')", $token_line, $token_col);
@@ -4432,12 +4487,34 @@ func lex_next_token(scalar $lexer) scalar {
             $lexer->{"heredoc_resume_pos"} = $scan_pos;
             $lexer->{"heredoc_resume_line"} = $scan_line;
 
-            # Remove trailing newline using byte length (NOT character length!)
-            my str $body = sb_to_string($body_sb);
-            my int $blen = bytes($body);
-            if ($blen > 0 && char_at($body, $blen - 1) == '\n') {
-                $body = substr_bytes($body, 0, $blen - 1);
+            my scalar $body_sb = sb_new();
+            my int $ti_len = bytes($hd_term_indent);
+            my int $hli = 0;
+            my int $hln = size(@hd_lines);
+            while ($hli < $hln) {
+                my str $bl = $hd_lines[$hli];
+                if ($hd_indent == 1 && $ti_len > 0) {
+                    my int $bl_len = bytes($bl);
+                    if ($bl_len >= $ti_len && substr_bytes($bl, 0, $ti_len) eq $hd_term_indent) {
+                        $bl = substr_bytes($bl, $ti_len, $bl_len - $ti_len);
+                    } else {
+                        # a line of only whitespace (or empty) may be shorter (Perl)
+                        my int $bw = 0;
+                        while ($bw < $bl_len && (char_at($bl, $bw) == ' ' || char_at($bl, $bw) == '\t')) { $bw = $bw + 1; }
+                        if ($bw == $bl_len) {
+                            $bl = "";
+                        } else {
+                            my int $hd_bad_n = $hli + 1;
+                            my int $hd_bad_line = $token_line + 1 + $hli;
+                            lex_error($lexer, "Indentation on line " . $hd_bad_n . " of here-doc doesn't match delimiter", $hd_bad_line, 1);
+                        }
+                    }
+                }
+                sb_append($body_sb, $bl);
+                sb_append($body_sb, "\n");
+                $hli = $hli + 1;
             }
+            my str $body = sb_to_string($body_sb);
             # Single-quoted heredoc (<<'EOT', $hd_quoted == '\'') stays literal.
             # Bare <<EOT and double-quoted <<"EOT" are "double-quoted": run the
             # body through the same escape + ${...} interpolation machinery as a

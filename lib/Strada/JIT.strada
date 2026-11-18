@@ -1317,6 +1317,9 @@ private func strip_strings_and_comments(str $input) str {
                     if ($hline eq $htag) {
                         last;
                     }
+                    if (substr($htag, 0, 1) eq "~" && trim($hline) eq substr($htag, 1, length($htag) - 1)) {
+                        last;
+                    }
                 }
                 if ($g_strip_unclosed == 1) {
                     last;
@@ -1346,6 +1349,11 @@ private func strip_strings_and_comments(str $input) str {
             my int $hp = $i + 2;
             my int $hend = -1;
             my str $htag = "";
+            # <<~TAG: the terminator may be indented (tag kept as "~TAG");
+            # <<\TAG: literal
+            my str $h_tl = "";
+            if ($hp < $len && substr($input, $hp, 1) eq "~") { $h_tl = "~"; $hp = $hp + 1; }
+            if ($hp < $len && substr($input, $hp, 1) eq "\\") { $hp = $hp + 1; }
             if ($hp < $len) {
                 my str $hc0 = substr($input, $hp, 1);
                 if (jit_is_ident_char($hc0) == 1 && !($hc0 ge "0" && $hc0 le "9")) {
@@ -1376,7 +1384,7 @@ private func strip_strings_and_comments(str $input) str {
                 }
             }
             if ($hend > $i) {
-                push(@heredoc_tags, $htag);
+                push(@heredoc_tags, $h_tl . $htag);
                 $out = $out . (" " x ($hend - $i));
                 $prev_non_ws = "\"";
                 $cur_word = "";

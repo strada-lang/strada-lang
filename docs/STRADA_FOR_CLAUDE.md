@@ -359,7 +359,7 @@ Same as bare <<EOT.
 EOT
 ```
 
-The semicolon goes on the `<<EOT;` line. Bare and double-quoted heredocs interpolate `${name}` like double-quoted strings. The value has no trailing newline after its last line (`$body` above is `"Multi-line\ntext here."`).
+The semicolon goes on the `<<EOT;` line. Bare and double-quoted heredocs interpolate `${name}` like double-quoted strings. As in Perl, the value keeps the newline of every line, the last one too (`$body` above is `"Multi-line\ntext here.\n"`). `<<~EOT` allows an indented body and terminator, and `<<\EOT` is literal like `<<'EOT'`.
 
 ### Common string operations
 

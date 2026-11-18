@@ -1,4 +1,4 @@
-# EXPECT: inline_hd|4:4:4:4:1|hello world|3:a,b|A:35|-4|p1:bbc|k=10:42|99:0:1:77|sub_err|10,20|\|\|A:(
+# EXPECT: inline_hd|4:4:4:5:1|hello\n world|3:a,b|A:35|-4|p1:bbc|k=10:42|99:0:1:77|sub_err|10,20|\|\|A:(
 # Lexer & Parser fixes:
 # - UTF-8 in q(café), qq(café), qw(café), heredoc, and /café/
 # - `<<EOT . " world"` and `say(<<EOT);`
@@ -40,8 +40,8 @@ func pair(str $k, int $v) str {
 }
 
 func main() int {
-    # 1. Inline `say(<<EOT);` (no trailing newline if chomped? Heredoc includes newline — wait: say adds newline; let's print(<<EOT); or test say!)
-    # Let's use print() with inline heredoc so output stays on one line for # EXPECT:!
+    # 1. An inline heredoc as a call argument. A heredoc keeps its final
+    # newline (Perl), so chomp() it to keep the output on one line.
     my str $hd_inline = chomp(<<EOT);
 inline_hd
 EOT
@@ -119,7 +119,7 @@ EOT
         $interp_b . "|" . $pw . "|" . $sub_res . "|" . $pair_res . "|" .
         $moose_res . "|" . $caught_ns . "|" . $arr_res . "|" . $bs . "|" .
         qq(\x41) . ":" . $qparen;
-    say(<<EOT);
+    print(<<EOT);
 ${out_line}
 EOT
     return 0;

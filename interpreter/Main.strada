@@ -223,6 +223,9 @@ func is_balanced(str $input) int {
                 # <<'TAG' (the lexer's rule), else a shift
                 my int $hj = $i + 2;
                 my int $hq = 0;
+                # <<~TAG (indented) and <<\TAG (literal)
+                if ($hj < $len && char_at($input, $hj) == 126) { $hj = $hj + 1; }
+                if ($hj < $len && char_at($input, $hj) == 92) { $hj = $hj + 1; }
                 if ($hj < $len && (char_at($input, $hj) == 34 || char_at($input, $hj) == 39)) {
                     $hq = char_at($input, $hj);
                     $hj = $hj + 1;

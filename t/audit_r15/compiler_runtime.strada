@@ -293,7 +293,7 @@ ml2") . "|" . <<'R15C1_END';
 h1
 h2
 R15C1_END
-    check($c1_s eq "ml1\nml2|h1\nh2", "R15-C1 multiline + // on heredoc opener");
+    check($c1_s eq "ml1\nml2|h1\nh2\n", "R15-C1 multiline + // on heredoc opener");
 
     # R15-C3: goto_hoist_stmts_decls for NODE_DESTRUCTURE and @/% our
     check(r15_goto_destructure_fwd(1) == 101 && r15_goto_destructure_fwd(0) == 100, "R15-C3 goto fwd destructure/our");

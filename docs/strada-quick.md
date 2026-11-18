@@ -364,6 +364,10 @@ This is a second line.
 EOT
 ```
 
+As in Perl, the value keeps the newline of every line, the last one too
+(`"Hello, ...\nThis is a second line.\n"`). `<<~EOT` allows an indented
+body and terminator, and `<<'EOT'` / `<<\EOT` are literal.
+
 Regex syntax is Perl-like and uses PCRE2 where configured:
 
 ```strada

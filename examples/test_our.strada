@@ -34,9 +34,9 @@ func check_name() void {
 }
 
 func check_no_init() void {
-    # our without init should return undef
-    if (defined($no_init) == 0) {
-        say("ok 3 - our without init is undef");
+    # `our int` without init holds 0, like `my int`
+    if (defined($no_init) && $no_init == 0) {
+        say("ok 3 - our int without init is 0");
     } else {
         say("not ok 3");
     }

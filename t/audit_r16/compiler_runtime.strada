@@ -156,10 +156,10 @@ HD3
 line4
 HD4
     check($m_ok == 1, "S2-7 sanity");
-    check($r1 eq "line1|p:q", "S2-7 heredoc + qw[] on same line");
-    check($r2 eq "line2|def", "S2-7 heredoc + // defined-or on same line");
-    check($r3 eq "line3|re", "S2-7 heredoc + /regex/ + #comment on same line");
-    check($r4 eq "line4|q\"test", "S2-7 heredoc + string literal on same line");
+    check($r1 eq "line1\n|p:q", "S2-7 heredoc + qw[] on same line");
+    check($r2 eq "line2\n|def", "S2-7 heredoc + // defined-or on same line");
+    check($r3 eq "line3\n|re", "S2-7 heredoc + /regex/ + #comment on same line");
+    check($r4 eq "line4\n|q\"test", "S2-7 heredoc + string literal on same line");
 }
 
 func test_s3_9_shr() void {

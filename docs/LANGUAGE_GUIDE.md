@@ -1653,6 +1653,25 @@ EOT
 ```
 
 The semicolon goes on the `<<EOT;` line. The terminator must appear on its own line.
+Heredocs work exactly as in Perl:
+
+- **The newline at the end of every body line is kept**, the last one too:
+  `$text` above is `"This is a multi-line\nstring literal.\n"`. Use
+  `chomp()` if you don't want the final one.
+- **Literal forms**: `<<\EOT` is literal like `<<'EOT'`.
+- **Delimiters**: a quoted delimiter may contain spaces (`<<"END OF TEXT"`).
+- **Indented heredocs**: `<<~EOT` lets you indent the body and the
+  terminator. The terminator's indentation is removed from each line:
+
+```strada
+func usage() str {
+    return <<~EOT;
+        usage: tool [options]
+          -v  verbose
+        EOT
+}
+# "usage: tool [options]\n  -v  verbose\n"
+```
 
 ### chomp
 

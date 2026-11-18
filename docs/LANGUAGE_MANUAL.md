@@ -270,7 +270,7 @@ The `our` keyword declares variables backed by the global registry. Unlike `my` 
 our int $count = 0;
 our str $name = "hello";
 our $bar = "untyped";       # Type optional (defaults to scalar)
-our int $no_init;           # Defaults to undef
+our int $no_init;           # 0, like my int (num: 0, str: "")
 
 package Config;
 our str $host = "localhost";

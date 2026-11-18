@@ -634,6 +634,10 @@ EOT
 my str $raw = <<'EOT';
 no escape sequences
 EOT
+# the body keeps every line's newline: $text is "multi-line string\n"
+my str $ind = <<~EOT;
+    indented body; the terminator's indentation is removed
+    EOT
 ```
 
 ## Binary Data

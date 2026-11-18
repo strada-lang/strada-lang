@@ -149,11 +149,11 @@ func main() int {
     my scalar $j_hd = Strada::JIT::eval(
         "my str \$jh = <<'R17_J1';\nfirst;\nsecond\nR17_J1\nreturn \$jh;"
     );
-    check($j_hd eq "first;\nsecond", "B16 JIT heredoc statement got=" . $j_hd);
+    check($j_hd eq "first;\nsecond\n", "B16 JIT heredoc statement got=" . $j_hd);
     my scalar $j_hd2 = Strada::JIT::eval(
         "my str \$k = <<'R17_J2';\nsemi;\nR17_J2\n\$k . \"!\""
     );
-    check($j_hd2 eq "semi;!", "B16 JIT trailing expr after heredoc got=" . $j_hd2);
+    check($j_hd2 eq "semi;\n!", "B16 JIT trailing expr after heredoc got=" . $j_hd2);
     Strada::JIT::reset();
 
     # B19: YAML block scalar trailing comment / doc markers vs under-indent error

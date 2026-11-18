@@ -1188,6 +1188,22 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 gen_expression($cg, $stmt->{"init"});
             }
             emit($cg, ");\n");
+        } else {
+            # `our int $x;` holds its type's empty value, like `my int $x;`
+            # (0, 0.0, ""), unless the variable already has a value (another
+            # `our` of the same variable only declares it, as in Perl)
+            my int $ovt = $stmt->{"var_type"} + 0;
+            my str $o_dflt = "";
+            if ($ovt == TYPE_INT()) { $o_dflt = "STRADA_MAKE_TAGGED_INT(0)"; }
+            if ($ovt == TYPE_NUM()) { $o_dflt = "strada_new_num(0.0)"; }
+            if ($ovt == TYPE_STR()) { $o_dflt = "strada_new_str(\"\")"; }
+            if (length($o_dflt) > 0) {
+                emit_indent($cg);
+                emit($cg, "{ StradaValue *__our_chk = strada_global_get_cstr(" . c_str_lit($our_key) . "); ");
+                emit($cg, "if (!STRADA_IS_TAGGED_INT(__our_chk) && __our_chk->type == STRADA_UNDEF) { ");
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $o_dflt . "); ");
+                emit($cg, "} strada_decref(__our_chk); }\n");
+            }
         }
         # No scope_track_var - our scalar variables are not locally owned
         return;
@@ -4244,6 +4260,12 @@ func gen_function(scalar $cg, scalar $fn) void {
                         emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", strada_new_array());\n");
                     } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
                         emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", strada_new_hash());\n");
+                    } elsif ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $var_type == TYPE_STR()) {
+                        # `our int $x;` holds its type's empty value, like `my int $x;`
+                        my str $og_dflt = "STRADA_MAKE_TAGGED_INT(0)";
+                        if ($var_type == TYPE_NUM()) { $og_dflt = "strada_new_num(0.0)"; }
+                        if ($var_type == TYPE_STR()) { $og_dflt = "strada_new_str(\"\")"; }
+                        emit($cg, "    { StradaValue *__our_chk = strada_global_get_cstr(" . c_str_lit($our_key) . "); if (!STRADA_IS_TAGGED_INT(__our_chk) && __our_chk->type == STRADA_UNDEF) { strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $og_dflt . "); } strada_decref(__our_chk); }\n");
                     }
                     # Register in our_vars for codegen
                     my scalar $our_vars_ref2 = $cg->{"our_vars"};
@@ -7412,6 +7434,12 @@ func gen_global_constructor(scalar $cg) void {
                     emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", strada_new_array());\n");
                 } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
                     emit($cg, "    strada_global_set_cstr(" . c_str_lit($our_key) . ", strada_new_hash());\n");
+                } elsif ($var_type == TYPE_INT() || $var_type == TYPE_NUM() || $var_type == TYPE_STR()) {
+                    # `our int $x;` holds its type's empty value, like `my int $x;`
+                    my str $og_dflt = "STRADA_MAKE_TAGGED_INT(0)";
+                    if ($var_type == TYPE_NUM()) { $og_dflt = "strada_new_num(0.0)"; }
+                    if ($var_type == TYPE_STR()) { $og_dflt = "strada_new_str(\"\")"; }
+                    emit($cg, "    { StradaValue *__our_chk = strada_global_get_cstr(" . c_str_lit($our_key) . "); if (!STRADA_IS_TAGGED_INT(__our_chk) && __our_chk->type == STRADA_UNDEF) { strada_global_set_cstr(" . c_str_lit($our_key) . ", " . $og_dflt . "); } strada_decref(__our_chk); }\n");
                 }
                 # Register in our_vars for codegen
                 my scalar $our_vars_ref3 = $cg->{"our_vars"};
