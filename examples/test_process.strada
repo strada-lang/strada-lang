@@ -22,8 +22,9 @@ func main() int {
     say("");
 
     # Test getpid
+    # (PIDs differ on every run, so the checks below print relations)
     my int $pid = sys::getpid();
-    say("Current PID: " . $pid);
+    say("Current PID is positive: " . ($pid > 0 ? "yes" : "no"));
 
     # Test usleep (100ms = 100000 microseconds)
     say("Sleeping for 100ms...");
@@ -36,17 +37,15 @@ func main() int {
     my int $child = sys::fork();
 
     if ($child == 0) {
-        # Child process
-        say("  Child: Hello from child! PID=" . sys::getpid() . " PPID=" . sys::getppid());
+        # Child process: it prints while the parent is blocked in wait()
+        say("  Child: Hello from child! PPID is the parent: " . (sys::getppid() == $pid ? "yes" : "no"));
         sys::usleep(50000);
         say("  Child: Exiting");
         exit(42);
     } elsif ($child > 0) {
-        # Parent process
-        say("  Parent: Forked child with PID=" . $child);
-        say("  Parent: Waiting for child...");
+        # Parent process: print only after wait(), so the output order is fixed
         my int $waited = sys::wait();
-        say("  Parent: Child " . $waited . " exited");
+        say("  Parent: Forked child and waited for it: " . ($waited == $child ? "yes" : "no"));
     } else {
         say("  Fork failed!");
         return 1;

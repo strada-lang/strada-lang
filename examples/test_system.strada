@@ -34,7 +34,9 @@ func main() int {
     # Test 2: getprocname/setprocname
     say("--- Test 2: Process name ---");
     my str $orig_name = sys::getprocname();
-    say("Original process name: " . $orig_name);
+    # (the original name is the executable's: it differs between a compiled
+    # binary and the interpreter, so only whether it was found is shown)
+    say("Original process name is set: " . (length($orig_name) > 0 ? "yes" : "no"));
 
     sys::setprocname("strada-test");
     my str $new_name = sys::getprocname();
@@ -48,7 +50,7 @@ func main() int {
     # Test 3: setproctitle/getproctitle - change what appears in ps
     say("--- Test 3: Process title ---");
     my str $orig_title = sys::getproctitle();
-    say("Original title: " . $orig_title);
+    say("Original title is set: " . (length($orig_title) > 0 ? "yes" : "no"));
 
     sys::setproctitle("strada: running test");
     my str $new_title = sys::getproctitle();
@@ -56,7 +58,7 @@ func main() int {
 
     # Show current process in ps
     say("Current process entry:");
-    sys::system("ps -p " . sys::getpid() . " -o pid,comm,args 2>/dev/null | tail -1");
+    sys::system("ps -p " . sys::getpid() . " -o args= 2>/dev/null");
 
     say("");
 
@@ -69,10 +71,10 @@ func main() int {
 
     # Test 5: system_argv - run with explicit arguments
     say("--- Test 5: system_argv() ---");
-    my array @args = ("ls", "-la", "/tmp");
     # Note: system_argv takes program name and args array
-    # For now let's use system with the command
-    $status = sys::system("ls -la /tmp 2>/dev/null | head -3");
+    # For now let's use system with the command (a pipeline with a fixed
+    # result, so the output is the same on every run)
+    $status = sys::system("printf 'alpha\\nbeta\\ngamma\\ndelta\\n' | head -3");
     say("Exit status: " . $status);
 
     say("");
@@ -90,10 +92,10 @@ func main() int {
         say("  Child: exec failed!");
         exit(1);
     } elsif ($pid > 0) {
-        # Parent
-        say("  Parent: Waiting for child " . $pid);
-        sys::wait();
-        say("  Parent: Child finished");
+        # Parent: wait first and print afterwards, so the output order does
+        # not depend on scheduling (and the child's PID is not printed)
+        my int $done = sys::wait();
+        say("  Parent: Child finished: " . ($done == $pid ? "yes" : "no"));
     } else {
         say("  Fork failed!");
     }

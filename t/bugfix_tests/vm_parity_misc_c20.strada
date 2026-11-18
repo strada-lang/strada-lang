@@ -1,0 +1,18 @@
+# EXPECT: yes no | 007 | 1, 2, 10, 20
+# VM parity fixes from the examples sweep:
+# - `$s =~ $pattern` / `!~` with a string-valued pattern was undef in the VM
+#   (the binary operator fell to the unknown-operator default);
+# - core::sprintf was "Undefined function" in the VM;
+# - `join(", ", nsort(@a))` joined an ARRAY(0x...) in both backends (nsort's
+#   list was not flattened into the call's arguments).
+# (The VM clone() depth cap is covered by examples/test_dumper_clone_depth:
+# its warning goes to stderr, which the VM half of this harness captures.)
+func main() int {
+    my str $text = "Hello World";
+    my str $pat = "l+o";
+    my str $m1 = ($text =~ $pat) ? "yes" : "no";
+    my str $m2 = ($text !~ $pat) ? "yes" : "no";
+    my array @n = (20, 1, 10, 2);
+    say($m1 . " " . $m2 . " | " . core::sprintf("%03d", 7) . " | " . join(", ", nsort(@n)));
+    return 0;
+}

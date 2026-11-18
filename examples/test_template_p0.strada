@@ -1,12 +1,19 @@
+# Template basics: render an inline template, then process a template file
+# found through INCLUDE_PATH.
 use Template;
 func main() int {
-    # Inline passthrough (no directives yet — P0).
+    # Inline passthrough (no directives).
     my str $out = Template::render("Hello, plain text.\nLine two.\n", {});
     say("INLINE=[" . $out . "]");
 
-    # File via INCLUDE_PATH.
-    my scalar $tt = Template::new({"INCLUDE_PATH" => "/tmp/ttp0"});
+    # File via INCLUDE_PATH: write a template into a scratch directory.
+    my str $dir = "/tmp/strada_ttp0_" . core::getpid();
+    core::mkdir($dir);
+    core::spew($dir . "/a.tt", "From a file.\n");
+    my scalar $tt = Template::new({"INCLUDE_PATH" => $dir});
     my str $f = $tt->process("a.tt", {});
     say("FILE=[" . $f . "]");
+    core::unlink($dir . "/a.tt");
+    core::rmdir($dir);
     return 0;
 }

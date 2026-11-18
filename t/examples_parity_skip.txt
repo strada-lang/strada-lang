@@ -1,0 +1,45 @@
+# Examples t/examples_parity.sh does not compare: NAME  REASON
+# Every entry needs a concrete reason; real compiled/VM differences are bugs,
+# not skips.
+
+# Library modules without main(): built by a companion example, not run
+VariadicLib                  library module (no main), built for test_import_variadic
+VariadicObjLib               library module (no main), built for test_import_object_variadic
+shared_lib_example           library module (no main), built with strada --shared
+test_shared_lib_globals      library module (no main), built for test_import_shared_globals
+test_variadic_lib            library module (no main), built with strada --shared
+
+# Need a companion build step first (import_lib / import_object / -l / extra .c)
+test_import_lib              needs MathLib.so built first (strada --shared)
+test_import_object_variadic  needs VariadicObjLib.o built first (strada -M)
+test_import_shared_globals   needs test_shared_lib_globals.so built first (strada --shared)
+test_import_variadic         needs VariadicLib.so built first (strada --shared)
+test_gettext                 needs lib/Gettext/gettext_wrapper.c compiled and linked (lib/Gettext/Makefile)
+test_perl5                   needs lib/perl5 built against the Perl headers/libperl (cd lib/perl5 && make)
+usb_list                     needs libusb linked (-lusb-1.0) and lists the host's USB hardware
+
+# Network servers that run until killed (both sides time out)
+dns_server                   UDP DNS server, runs until killed
+prefork_server               HTTP server, runs until killed (prints worker PIDs)
+simple_select_server         HTTP server, runs until killed
+static_file_server           HTTP server, runs until killed
+test_socket_server           echo server, waits for a client until killed
+web_server                   HTTP server, runs until killed
+
+# Output that legitimately differs per run or per backend
+bench_event_loop             benchmark: prints measured requests/second
+test_ssl                     connects to example.com / httpbin.org over the network
+test_signals                 interactive: prints its PID and waits ~10s for signals sent by hand
+test_argv                    argv[0] is the executable when compiled and the script path in the VM
+ls                           an ls utility: lists the current directory, which differs between the two runs
+ps                           a ps utility: lists the host's running processes (PIDs, CPU times), which change between the two runs
+
+# Compiled-only features the VM cannot model (CLAUDE.md "VM limits")
+test_ffi                     core::int_ptr/num_ptr: raw pointers into variables are compiled-only
+full_oop_test                checks DESTROY counts right after scope exit and refcount(); the VM runs DESTROY at GC time (rest of the output matches)
+oop_stress_test              checks refcount() and DESTROY counts at scope exit; VM: tracing GC, DESTROY at GC time (rest matches)
+test_free                    prints refcount() values; the VM has no reference counts (rest matches)
+test_weak_ref                prints refcount() of a weak ref target; the VM has no reference counts (rest matches)
+
+# Open VM bug (not a design difference)
+test_eval                    OPEN BUG: under the VM, Strada::Interpreter::eval("1 + 2") (lib/Eval) does not return within 400s (~70s CPU): suspected hang

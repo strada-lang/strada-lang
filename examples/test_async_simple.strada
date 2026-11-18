@@ -47,7 +47,8 @@ func main() int {
         sys::usleep(1000);  # 1ms
     }
     my int $poll_result = await $poll_future;
-    say("  Polled " . $polls . " times, result: " . $poll_result);
+    # $polls depends on thread scheduling, so it is not printed
+    say("  Polled until done, result: " . $poll_result);
     if ($poll_result == 84) {
         say("  PASS");
     } else {

@@ -1,0 +1,26 @@
+# EXPECT: 3 3 4 | 10 10 1 1 | 0 0 0 0
+# `$n = @{$r}` / `@$r` in scalar context is the element count (Perl); the
+# compiled backend used to alias the referenced array. `@a = deref_array($r)`
+# and `%h = deref_hash($r)` copy like `@{$r}` / `%{$r}` (they aliased too).
+# is_ref() of an array/hash value is 0 in both backends.
+func main() int {
+    my $r = [10, 20, 30];
+    my scalar $y = @{$r};
+    my $w = @$r;
+    push(@{$r}, 40);
+    my $v;
+    $v = @{$r};
+    my @c1 = deref_array($r);
+    my @c2;
+    @c2 = deref_array($r);
+    $c1[0] = 99; $c2[0] = 98;
+    my $hr = {"k" => 1};
+    my %d1 = deref_hash($hr);
+    my %d2;
+    %d2 = deref_hash($hr);
+    $d1{"k"} = 5; $d2{"k"} = 6;
+    say($y . " " . $w . " " . $v . " | " . $r->[0] . " " . $r->[0]
+        . " " . $hr->{"k"} . " " . $hr->{"k"} . " | " . is_ref(@c1) . " " . is_ref(%d1)
+        . " " . is_ref(@{$r}) . " " . is_ref(%{$hr}));
+    return 0;
+}

@@ -1,0 +1,20 @@
+# EXPECT: 1 2 0 3 500
+# `my hash %h[N]` / `my array @a[N]`: the VM read the capacity expression
+# node as an integer (its address), so vm_hash_new looped forever doubling an
+# int past 2^31 (memory_management hung) and arrays got huge capacities.
+func main() int {
+    my int $v1 = 1; my int $v2 = 2; my int $v3 = 3; my int $v4 = 4;
+    my int $v5 = 5; my int $v6 = 6; my int $v7 = 7; my int $v8 = 8;
+    my int $rows = 10;
+    my hash %large[500];
+    $large{"x"} = 1;
+    my array @a[1000];
+    push(@a, 2);
+    my array @m[$rows * 5];
+    my hash %h2[$rows];
+    $h2{"k"} = 3;
+    my int $sum = 0;
+    for (my int $i = 0; $i < 100; $i++) { $large{"i" . $i} = $i * 10; $sum = $sum + 1; }
+    say($large{"x"} . " " . $a[0] . " " . size(@m) . " " . $h2{"k"} . " " . ($large{"i50"} + $v8 - 8));
+    return 0;
+}

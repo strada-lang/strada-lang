@@ -43,7 +43,7 @@ func main() int {
     # Try resolving google.com (may fail without network)
     my scalar $google_ip = sys::gethostbyname("google.com");
     if (defined($google_ip)) {
-        say("google.com resolves to: " . $google_ip);
+        say("google.com resolved (its address varies: " . (length($google_ip) > 0 ? "non-empty" : "empty") . ")");
     } else {
         say("Could not resolve google.com (no network?)");
     }

@@ -5502,7 +5502,7 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
                 my str $bns = substr($nm, 0, $bci);
                 if ($bns eq "sys" || $bns eq "math" || $bns eq "re" || $bns eq "utf8" || $bns eq "str") { return 2; }
             }
-            if ($nm eq "captures" || $nm eq "sort" || $nm eq "glob") { return 2; }
+            if ($nm eq "captures" || $nm eq "sort" || $nm eq "nsort" || $nm eq "glob") { return 2; }
         }
     }
     return 0;

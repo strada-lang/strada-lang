@@ -34,7 +34,7 @@ func main() void {
     if ($libm == 0) {
         say("SKIP: Could not load libm");
     } else {
-        say("Loaded libm: " . $libm);
+        say("Loaded libm (handle is nonzero)");
         $passed = $passed + 1;
 
         # Test 2: Call sqrt(16.0) = 4.0

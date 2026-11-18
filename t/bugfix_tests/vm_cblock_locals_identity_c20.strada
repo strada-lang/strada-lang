@@ -1,0 +1,23 @@
+# EXPECT: 2 7 same
+# The VM marshalled every local of a function into a __C__ block and back;
+# the way back rebuilt the containers a local refers to, so a nested object
+# became a copy (`$outer->{in}` no longer was `$inner`). With lib/DBI that
+# made a second DBI::db object whose DESTROY freed the handle twice (the
+# dbi_* examples crashed at exit). Only locals the block names cross now.
+func f(scalar $outer) int {
+    my int $n = 0;
+    __C__ {
+        strada_decref(n);
+        n = strada_new_int(7);
+    }
+    return $n;
+}
+
+func main() int {
+    my $inner = {"v" => 1};
+    my $outer = {"in" => $inner};
+    my int $r = f($outer);
+    $inner->{"v"} = 2;
+    say($outer->{"in"}->{"v"} . " " . $r . " " . ($outer->{"in"} == $inner ? "same" : "copy"));
+    return 0;
+}

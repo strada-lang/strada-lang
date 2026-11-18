@@ -60,11 +60,11 @@ func transfer(scalar $dbh, str $from, str $to, int $amount) int {
     }
 
     # Deduct from source
-    DBI::do($dbh, "UPDATE accounts SET balance = balance - ? WHERE name = ?",
+    DBI::exec($dbh, "UPDATE accounts SET balance = balance - ? WHERE name = ?",
         [$amount, $from]);
 
     # Add to destination
-    DBI::do($dbh, "UPDATE accounts SET balance = balance + ? WHERE name = ?",
+    DBI::exec($dbh, "UPDATE accounts SET balance = balance + ? WHERE name = ?",
         [$amount, $to]);
 
     # Commit transaction
@@ -93,9 +93,9 @@ func main(int $argc, array @argv) int {
     ");
 
     # Create some accounts
-    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Alice", 1000]);
-    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Bob", 500]);
-    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Charlie", 250]);
+    DBI::exec($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Alice", 1000]);
+    DBI::exec($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Bob", 500]);
+    DBI::exec($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Charlie", 250]);
 
     say("Initial state:");
     show_all_balances($dbh);

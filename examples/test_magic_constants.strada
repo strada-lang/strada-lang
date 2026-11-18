@@ -18,15 +18,16 @@
 # Test __FILE__ and __LINE__ magic constants, plus hex literals
 
 func show_location() void {
-    say("Called from: " . __FILE__ . " at line " . __LINE__);
+    say("Called from: " . core::basename(__FILE__) . " at line " . __LINE__);
 }
 
 func main() int {
     say("=== Magic Constants and Hex Literals Demo ===");
     say("");
 
-    # __FILE__ returns the current source file name
-    say("Current file: " . __FILE__);
+    # __FILE__ is the current source file, as the path it was compiled or
+    # run with (relative or absolute); its last component is shown here
+    say("Current file: " . core::basename(__FILE__));
 
     # __LINE__ returns the current line number
     say("Current line: " . __LINE__);

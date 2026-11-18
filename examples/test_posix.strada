@@ -17,6 +17,14 @@
 
 # Test POSIX functions (built-in functions, no module import needed)
 
+# The temporary names below end in the PID (unique per run); show them
+# with that part replaced.
+func base_name(str $path) str {
+    my str $b = core::basename($path);
+    $b =~ s/_\d+/_<pid>/;
+    return $b;
+}
+
 func main() void {
     say("=== POSIX Functions Test ===");
     say("");
@@ -90,8 +98,9 @@ func main() void {
 
     # Test process functions
     say("Process info:");
-    say("  PID: " . sys::getpid());
-    say("  PPID: " . sys::getppid());
+    # (PIDs differ on every run: print relations, not the numbers)
+    say("  PID is positive: " . (sys::getpid() > 0 ? "yes" : "no"));
+    say("  PPID is positive: " . (sys::getppid() > 0 ? "yes" : "no"));
     say("  UID: " . sys::getuid());
     say("  GID: " . sys::getgid());
     say("  EUID: " . sys::geteuid());
@@ -110,7 +119,7 @@ func main() void {
     # Test time
     say("Time:");
     my int $now = sys::time();
-    say("  Current time (epoch): " . $now);
+    say("  Current time (epoch) is after 2020: " . ($now > 1577836800 ? "yes" : "no"));
     say("");
 
     # Test errno/strerror
@@ -124,7 +133,7 @@ func main() void {
     my str $testdir = "/tmp/strada_posix_test_" . sys::getpid();
     my int $result = sys::mkdir($testdir, 493);
     if ($result == 0) {
-        say("  Created " . $testdir);
+        say("  Created " . base_name($testdir));
 
         # Test access on new directory
         if (sys::access($testdir, 4) == 0) {
@@ -140,7 +149,7 @@ func main() void {
 
         $result = sys::rmdir($testdir);
         if ($result == 0) {
-            say("  Removed " . $testdir);
+            say("  Removed " . base_name($testdir));
         }
     } else {
         say("  mkdir failed: " . sys::strerror(sys::errno()));
@@ -151,7 +160,7 @@ func main() void {
     say("File operations:");
     my str $testfile = "/tmp/strada_test_file_" . sys::getpid();
     sys::spew($testfile, "test content");
-    say("  Created test file: " . $testfile);
+    say("  Created test file: " . base_name($testfile));
 
     my scalar $fst = sys::stat($testfile);
     if (defined($fst)) {
@@ -161,20 +170,21 @@ func main() void {
     # Test rename
     my str $newname = $testfile . ".renamed";
     if (sys::rename($testfile, $newname) == 0) {
-        say("  Renamed to: " . $newname);
+        say("  Renamed to: " . base_name($newname));
     }
 
     # Test unlink
     if (sys::unlink($newname) == 0) {
-        say("  Deleted: " . $newname);
+        say("  Deleted: " . base_name($newname));
     }
     say("");
 
     # Test rand
     say("Random numbers:");
-    say("  math::rand(): " . math::rand());
-    say("  math::rand(): " . math::rand());
-    say("  math::rand(): " . math::rand());
+    foreach my int $i (1..3) {
+        my num $r = math::rand();
+        say("  math::rand() is in [0, 1): " . ($r >= 0 && $r < 1 ? "yes" : "no"));
+    }
     say("");
 
     say("=== POSIX Functions Test Complete ===");

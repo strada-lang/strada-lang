@@ -3961,7 +3961,19 @@ static VMValue vm_clone_val_rec(VM *vm, VMValue v, VMCloneMap *m, int depth) {
     for (int i = 0; i < m->count; i++) {
         if (m->orig[i] == v) return m->clone[i];
     }
-    if (depth > 256) return vm_val_copy(v);
+    /* Depth cap, as the compiled strada_clone_rec: past its 256 levels the
+     * subtree becomes undef, with a one-time warning (it used to share the
+     * deeper subtree silently). The compiled clone spends two levels per
+     * nested container (the reference and the container); a VM container
+     * is both, so the cap here is 128 containers. */
+    if (depth >= 128) {
+        static int vm_clone_depth_warned = 0;
+        if (!vm_clone_depth_warned) {
+            vm_clone_depth_warned = 1;
+            fprintf(stderr, "Warning: clone() exceeded max depth %d; result truncated\n", 256);
+        }
+        return VM_UNDEF_VAL;
+    }
     switch (VM_PTR_TYPE(v)) {
     case VM_OBJ_INT64:
     case VM_OBJ_UINT64:
@@ -4219,10 +4231,20 @@ static int cblock_jit_compile_n(VMCBlock *cbs, int n, const char *runtime_inc, c
     shell_quote_arg(inc, q_inc, sizeof(q_inc));
     shell_quote_arg(tmp_so, q_so, sizeof(q_so));
     shell_quote_arg(src_path, q_src, sizeof(q_src));
-    char cmd[3600];
+    /* The VM's own headers (vm.h, vm_compiler.h) sit in interpreter/ next to
+     * runtime/ (dev tree and install): blocks that embed a VM, like lib/Eval's,
+     * include them. Their symbols resolve against this -rdynamic binary. */
+    char interp_inc[1024] = "", q_interp[1100] = "";
+    snprintf(interp_inc, sizeof(interp_inc), "%s/../interpreter", inc);
+    if (access(interp_inc, R_OK) == 0) {
+        char q_i[1024];
+        shell_quote_arg(interp_inc, q_i, sizeof(q_i));
+        snprintf(q_interp, sizeof(q_interp), " -I%s", q_i);
+    }
+    char cmd[4800];
     snprintf(cmd, sizeof(cmd),
-        "gcc -shared -fPIC -O2 -I%s -o %s %s -w%s 2>&1",
-        q_inc, q_so, q_src, link_flags ? link_flags : "");
+        "gcc -shared -fPIC -O2 -I%s%s -o %s %s -w%s 2>&1",
+        q_inc, q_interp, q_so, q_src, link_flags ? link_flags : "");
 
     FILE *proc = popen(cmd, "r");
     if (!proc) {
@@ -16768,6 +16790,9 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
             outfp = (FILE*)out_fh->fp;
         }
         vm_write_val(outfp, v, 1);
+        /* say to stdout flushes (compiled strada_say): output stays in
+         * program order with stderr, system() and fork() children */
+        if (outfp == stdout) fflush(stdout);
         vm_temp_free(&v);
         if (__builtin_expect(out_fh && out_fh->is_mem == 2 && VM_IS_PTR(out_fh->mem_sref), 0)) {
             frame->ip = ip; vm->stack_top = sp;
@@ -16820,6 +16845,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
         if (VM_IS_PTR(fhv) && VM_PTR_TYPE(fhv) == VM_OBJ_FILEHANDLE) {
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(fhv);
             vm_write_val((FILE*)fh->fp, str, 1);
+            if ((FILE*)fh->fp == stdout) fflush(stdout);
             vm_val_free(&str);
             if (__builtin_expect(fh->is_mem == 2 && VM_IS_PTR(fh->mem_sref), 0)) {
                 frame->ip = ip; vm->stack_top = sp;

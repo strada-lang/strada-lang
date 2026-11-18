@@ -44,7 +44,7 @@ func main() int {
     say("  Connected!");
 
     # Show connection info
-    say("  SSL Version: " . ssl::version($conn));
+    say("  SSL Version: " . ssl::get_version($conn));
     say("  Cipher: " . ssl::cipher($conn));
     say("  Peer Cert: " . ssl::peer_cert($conn));
 

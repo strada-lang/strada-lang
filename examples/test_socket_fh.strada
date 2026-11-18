@@ -1,33 +1,31 @@
 #!/usr/bin/env strada
 # Test diamond operator and print/say with sockets
 
-func run_server() void {
-    my scalar $server = sys::socket_server(19876);
-    if (!defined($server)) {
-        say("Server: Failed to create server socket");
-        return;
-    }
-
-    say("Server: Waiting for connection on port 19876...");
+func run_server(scalar $server) void {
     my scalar $client = sys::socket_accept($server);
     if (!defined($client)) {
         say("Server: Failed to accept connection");
         return;
     }
 
-    say("Server: Client connected, reading with diamond operator...");
-
-    # Read lines using diamond operator
+    # Read lines using diamond operator. (The connect message is printed
+    # once the first line has arrived: the client prints its own
+    # "Connected!" before sending, so the two lines always come in order.)
     my str $line = <$client>;
+    my int $first = 1;
     while (defined($line)) {
+        if ($first == 1) {
+            say("Server: Client connected, reading with diamond operator...");
+            $first = 0;
+        }
         say("Server: Received: " . $line);
 
         # Echo back with say()
         say($client, "Echo: " . $line);
 
-        if ($line eq "quit") {
-            last;
-        }
+        # After "quit" keep reading until the client closes its end (<$client>
+        # returns undef), so "Closing connection" always prints after the
+        # client's last line.
         $line = <$client>;
     }
 
@@ -39,17 +37,26 @@ func run_server() void {
 func main() int {
     say("=== Socket File Handle Test ===\n");
 
-    # Start a simple server in a child process
+    # Listen before forking, so the client can connect at once (no sleep,
+    # and the output order does not depend on scheduling)
+    my scalar $server = sys::socket_server(19876);
+    if (!defined($server)) {
+        say("Server: Failed to create server socket");
+        return 1;
+    }
+    say("Server: Waiting for connection on port 19876...");
+
+    # Serve in a child process
     my int $pid = sys::fork();
 
     if ($pid == 0) {
         # Child - run server
-        run_server();
+        run_server($server);
         exit(0);
     }
 
     # Parent - run client
-    sys::usleep(100000);  # Wait for server to start
+    sys::socket_close($server);
 
     say("Client: Connecting to localhost:19876...");
     my scalar $sock = sys::socket_client("127.0.0.1", 19876);

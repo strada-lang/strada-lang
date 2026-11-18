@@ -1,0 +1,15 @@
+# EXPECT: undef undef 1 a
+# `our int $n;` / `our str $s;` without an initializer are undef until
+# assigned (compiled backend); the VM initialized them to 0 / "".
+our int $n;
+our str $s;
+our int $c;
+our str $t;
+func main() int {
+    my str $a = defined($n) ? "def" : "undef";
+    my str $b = defined($s) ? "def" : "undef";
+    $c++;
+    $t .= "a";
+    say($a . " " . $b . " " . $c . " " . $t);
+    return 0;
+}

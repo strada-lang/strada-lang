@@ -50,7 +50,7 @@ func test_basic_operations() int {
     }
 
     # Insert data
-    $result = DBI::do($dbh, "INSERT INTO test (value) VALUES (?)", ["hello"]);
+    $result = DBI::exec($dbh, "INSERT INTO test (value) VALUES (?)", ["hello"]);
     if ($result >= 0) {
         say("OK: Inserted row");
     } else {
@@ -95,9 +95,9 @@ func test_multiple_rows() int {
     DBI::do_sql($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
 
     # Insert multiple rows
-    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30]);
-    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25]);
-    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Charlie", 35]);
+    DBI::exec($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30]);
+    DBI::exec($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25]);
+    DBI::exec($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Charlie", 35]);
 
     # Fetch all rows
     my scalar $sth = DBI::prepare($dbh, "SELECT name, age FROM users ORDER BY age");
@@ -145,11 +145,11 @@ func test_transactions() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)");
-    DBI::do($dbh, "INSERT INTO accounts (balance) VALUES (?)", [100]);
+    DBI::exec($dbh, "INSERT INTO accounts (balance) VALUES (?)", [100]);
 
     # Test rollback
     DBI::begin_work($dbh);
-    DBI::do($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [0, 1]);
+    DBI::exec($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [0, 1]);
     DBI::rollback($dbh);
 
     my scalar $row = DBI::selectrow_hashref($dbh, "SELECT balance FROM accounts WHERE id = ?", [1]);
@@ -161,7 +161,7 @@ func test_transactions() int {
 
     # Test commit
     DBI::begin_work($dbh);
-    DBI::do($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [50, 1]);
+    DBI::exec($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [50, 1]);
     DBI::commit($dbh);
 
     $row = DBI::selectrow_hashref($dbh, "SELECT balance FROM accounts WHERE id = ?", [1]);
@@ -211,9 +211,9 @@ func test_convenience_functions() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL)");
-    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Apple", 1.50]);
-    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Banana", 0.75]);
-    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Cherry", 2.00]);
+    DBI::exec($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Apple", 1.50]);
+    DBI::exec($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Banana", 0.75]);
+    DBI::exec($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Cherry", 2.00]);
 
     # Test selectall_hashref
     my scalar $items = DBI::selectall_hashref($dbh, "SELECT * FROM items ORDER BY price", []);
@@ -263,13 +263,13 @@ func test_column_names() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE products (product_id INTEGER, product_name TEXT, product_price REAL)");
-    DBI::do($dbh, "INSERT INTO products VALUES (?, ?, ?)", [1, "Widget", 9.99]);
+    DBI::exec($dbh, "INSERT INTO products VALUES (?, ?, ?)", [1, "Widget", 9.99]);
 
     my scalar $sth = DBI::prepare($dbh, "SELECT product_id, product_name, product_price FROM products");
     DBI::execute($sth, []);
 
     my scalar $cols = DBI::column_names($sth);
-    say("  Columns: " . join(", ", $cols));
+    say("  Columns: " . join(", ", @{$cols}));
 
     if (size($cols) == 3) {
         say("OK: Got 3 column names");
@@ -293,12 +293,12 @@ func test_update_delete() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE numbers (id INTEGER PRIMARY KEY, value INTEGER)");
-    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [10]);
-    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [20]);
-    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [30]);
+    DBI::exec($dbh, "INSERT INTO numbers (value) VALUES (?)", [10]);
+    DBI::exec($dbh, "INSERT INTO numbers (value) VALUES (?)", [20]);
+    DBI::exec($dbh, "INSERT INTO numbers (value) VALUES (?)", [30]);
 
     # Test UPDATE
-    my int $updated = DBI::do($dbh, "UPDATE numbers SET value = ? WHERE value < ?", [15, 25]);
+    my int $updated = DBI::exec($dbh, "UPDATE numbers SET value = ? WHERE value < ?", [15, 25]);
     say("  Updated " . $updated . " rows");
 
     # Verify
@@ -311,7 +311,7 @@ func test_update_delete() int {
     }
 
     # Test DELETE
-    my int $deleted = DBI::do($dbh, "DELETE FROM numbers WHERE value = ?", [15]);
+    my int $deleted = DBI::exec($dbh, "DELETE FROM numbers WHERE value = ?", [15]);
     say("  Deleted " . $deleted . " rows");
 
     my scalar $count = DBI::selectcol($dbh, "SELECT COUNT(*) FROM numbers", []);
@@ -336,8 +336,8 @@ func test_null_values() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE nullable (id INTEGER PRIMARY KEY, optional_value TEXT)");
-    DBI::do($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", ["has value"]);
-    DBI::do($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", [undef]);
+    DBI::exec($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", ["has value"]);
+    DBI::exec($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", [undef]);
 
     my scalar $rows = DBI::selectall_hashref($dbh, "SELECT * FROM nullable ORDER BY id", []);
 
@@ -377,7 +377,7 @@ func test_file_database() int {
     }
 
     DBI::do_sql($dbh, "CREATE TABLE persistent (id INTEGER PRIMARY KEY, data TEXT)");
-    DBI::do($dbh, "INSERT INTO persistent (data) VALUES (?)", ["saved data"]);
+    DBI::exec($dbh, "INSERT INTO persistent (data) VALUES (?)", ["saved data"]);
     DBI::disconnect($dbh);
     say("OK: Created and wrote to file database");
 

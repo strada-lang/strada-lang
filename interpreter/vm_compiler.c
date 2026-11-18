@@ -1447,6 +1447,20 @@ static void emit_reset_store_local(CompCtx *ctx, int slot) {
 }
 
 /* Extract container and key/index expressions from subscript or hash access nodes */
+/* Does C source CODE contain NAME as an identifier token? */
+static int vm_code_names_ident(const char *code, const char *name) {
+    if (!code || !name || !name[0]) return 0;
+    size_t nl = strlen(name);
+    for (const char *p = strstr(code, name); p; p = strstr(p + 1, name)) {
+        char before = (p == code) ? ' ' : p[-1];
+        char after = p[nl];
+        int bw = isalnum((unsigned char)before) || before == '_';
+        int aw = isalnum((unsigned char)after) || after == '_';
+        if (!bw && !aw) return 1;
+    }
+    return 0;
+}
+
 static int extract_cont_idx(StradaValue *node, int *is_hash, StradaValue **cont_node, StradaValue **idx_node) {
     int nt = (node && !STRADA_IS_TAGGED_INT(node)) ? (int)ast_int(node, "type") : 0;
     if (nt == NI_HASH_ACCESS) {
@@ -1488,6 +1502,7 @@ static void patch_u16(CompCtx *ctx, size_t off, uint16_t val) {
 
 /* Forward declarations */
 static void compile_expr(CompCtx *ctx, StradaValue *node);
+static void compile_viv_target_container(CompCtx *ctx, StradaValue *target, StradaValue *cont, int is_hash);
 
 /* Set per program: does any package declare `use overload`? String builtins
  * then emit OP_STR_OV after their string operands so an object with a ""
@@ -2195,6 +2210,20 @@ static int compile_regex_list(CompCtx *ctx, StradaValue *node) {
 }
 
 static int compile_readline_list(CompCtx *ctx, StradaValue *init);
+/* `my array @a[N]` / `my hash %h[N]`: the capacity hint. The parser stores
+ * an expression node; a constant one gives the hint (capped), anything else
+ * keeps the default. Reading the node with ast_int used its address as the
+ * capacity: vm_hash_new then looped forever doubling an int past 2^31. */
+static int64_t vm_decl_capacity(StradaValue *node) {
+    if (!node || STRADA_IS_TAGGED_INT(node)) return 0;
+    StradaValue *c = ast_get(node, "initial_capacity");
+    if (!c) return 0;
+    VMConstFold f;
+    if (!try_eval_const_ast(c, &f, 0) || f.kind != CF_INT) return 0;
+    if (f.iv <= 0) return 0;
+    return f.iv > (1 << 20) ? (1 << 20) : f.iv;
+}
+
 static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue *init, int shallow_copy) {
     int init_type = (init && !STRADA_IS_TAGGED_INT(init)) ? (int)ast_int(init, "type") : 0;
     if (init_type == NI_READLINE && compile_readline_list(ctx, init)) return;
@@ -2253,7 +2282,7 @@ static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue
             vm_chunk_emit(ctx->chunk, 1);
         }
     } else {
-        int64_t cap = node ? ast_int(node, "initial_capacity") : 0;
+        int64_t cap = vm_decl_capacity(node);
         vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
         vm_chunk_emit_u32(ctx->chunk, cap > 0 ? (uint32_t)cap : 4);
     }
@@ -2375,7 +2404,7 @@ static void compile_hash_init_expr(CompCtx *ctx, StradaValue *node, StradaValue 
             }
         }
     } else {
-        int64_t cap = node ? ast_int(node, "initial_capacity") : 0;
+        int64_t cap = vm_decl_capacity(node);
         vm_chunk_emit(ctx->chunk, OP_NEW_HASH);
         vm_chunk_emit_u32(ctx->chunk, cap > 0 ? (uint32_t)cap : 4);
     }
@@ -2442,7 +2471,7 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
         int k_slot = ctx_get_or_add_local(ctx, kbuf, '$');
         int v_slot = ctx_get_or_add_local(ctx, vbuf, '$');
 
-        compile_expr(ctx, cont);
+        compile_viv_target_container(ctx, t, cont, is_hash);
         emit_reset_store_local(ctx, c_slot);
 
         compile_idx_expr(ctx, idx, is_hash);
@@ -2587,6 +2616,8 @@ typedef struct {
     const char *global_name;
 } VMLValueTarget;
 
+static void compile_viv_target_container(CompCtx *ctx, StradaValue *target, StradaValue *cont, int is_hash);
+
 /* Prepare an lvalue target for read+writeback without re-evaluating container/index/ref side effects. */
 static VMLValueTarget compile_lvalue_prepare(CompCtx *ctx, StradaValue *target) {
     VMLValueTarget lv = {0};
@@ -2617,7 +2648,7 @@ static VMLValueTarget compile_lvalue_prepare(CompCtx *ctx, StradaValue *target) 
         lv.is_hash = is_hash;
         lv.depth_pushed = 1;
         lv.kind = LV_INDEX;
-        compile_expr(ctx, cont);
+        compile_viv_target_container(ctx, target, cont, is_hash);
         emit_reset_store_local(ctx, lv.slot);
         compile_idx_expr(ctx, idx, is_hash);
         emit_reset_store_local(ctx, lv.key_slot);
@@ -2730,6 +2761,100 @@ static void compile_lvalue_store_slot(CompCtx *ctx, const VMLValueTarget *lv, in
 
 static void compile_lvalue_finish(CompCtx *ctx, const VMLValueTarget *lv) {
     if (lv->depth_pushed) ctx->assign_depth--;
+}
+
+/* Push the container an element store writes into, autovivifying it (Perl,
+ * compiled backend): `$h{a}{b} = v`, `$a[1][2] = v`, `$r->{p}{q} = v` create
+ * the missing intermediate hash/array and store it back into its slot.
+ * CONT is the container node of an element access; CONT_IS_REF says it is
+ * the `ref` child of a ->/deref access, WANT_HASH what kind to create.
+ * Anything else compiles as a plain read -- including an undef scalar root
+ * (`my $u; $u->{k} = v`), which the compiled backend does not vivify
+ * either. */
+static void emit_viv_new(CompCtx *ctx, int want_hash) {
+    vm_chunk_emit(ctx->chunk, want_hash ? OP_NEW_HASH : OP_NEW_ARRAY);
+    vm_chunk_emit_u32(ctx->chunk, 4);
+}
+
+static void compile_viv_container(CompCtx *ctx, StradaValue *cont, int cont_is_ref, int want_hash) {
+    StradaValue *n = ast_deref(cont);
+    if (!n || STRADA_IS_TAGGED_INT(n)) { compile_expr(ctx, cont); return; }
+    int nt = (int)ast_int(n, "type");
+    StradaValue *icont = NULL, *iidx = NULL;
+    int ihash = 0;
+    if (extract_cont_idx(n, &ihash, &icont, &iidx)) {
+        int d = ctx->assign_depth++;
+        char cbuf[32], kbuf[32], vbuf[32];
+        snprintf(cbuf, sizeof(cbuf), "__av_c%d", d);
+        snprintf(kbuf, sizeof(kbuf), "__av_k%d", d);
+        snprintf(vbuf, sizeof(vbuf), "__av_v%d", d);
+        int cs = ctx_get_or_add_local(ctx, cbuf, '$');
+        int ks = ctx_get_or_add_local(ctx, kbuf, '$');
+        int vs = ctx_get_or_add_local(ctx, vbuf, '$');
+        compile_viv_container(ctx, icont, nt == NI_DEREF_HASH || nt == NI_DEREF_ARRAY, ihash);
+        emit_reset_store_local(ctx, cs);
+        size_t ckidx = 0;
+        if (ihash && try_const_str_key(ctx, iidx, &ckidx)) {
+            /* constant key (`$h{"a"}{"b"}`): no key local, const-key ops */
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)cs);
+            vm_chunk_emit(ctx->chunk, OP_HASH_GET_CONST);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)ckidx);
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            vm_chunk_emit(ctx->chunk, OP_IS_UNDEF);
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            size_t cdone = emit_patch_u16(ctx);
+            vm_chunk_emit(ctx->chunk, OP_POP);
+            emit_viv_new(ctx, want_hash);
+            emit_reset_store_local(ctx, vs);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)cs);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vs);
+            vm_chunk_emit(ctx->chunk, OP_HASH_SET_CONST);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)ckidx);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vs);
+            patch_u16(ctx, cdone, (uint16_t)ctx->chunk->code_len);
+            ctx->assign_depth--;
+            return;
+        }
+        compile_idx_expr(ctx, iidx, ihash);
+        emit_reset_store_local(ctx, ks);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)cs);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)ks);
+        vm_chunk_emit(ctx->chunk, ihash ? OP_HASH_GET : OP_ARRAY_GET);
+        vm_chunk_emit(ctx->chunk, OP_DUP);
+        vm_chunk_emit(ctx->chunk, OP_IS_UNDEF);
+        vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+        size_t done = emit_patch_u16(ctx);
+        vm_chunk_emit(ctx->chunk, OP_POP);
+        emit_viv_new(ctx, want_hash);
+        emit_reset_store_local(ctx, vs);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)cs);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)ks);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)vs);
+        vm_chunk_emit(ctx->chunk, ihash ? OP_HASH_SET : OP_ARRAY_SET);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)vs);
+        patch_u16(ctx, done, (uint16_t)ctx->chunk->code_len);
+        ctx->assign_depth--;
+        return;
+    }
+    (void)cont_is_ref; (void)want_hash;
+    compile_expr(ctx, cont);
+}
+
+/* The container of element-access TARGET, autovivified (see above). */
+static void compile_viv_target_container(CompCtx *ctx, StradaValue *target, StradaValue *cont, int is_hash) {
+    StradaValue *t = ast_deref(target);
+    int tt = (t && !STRADA_IS_TAGGED_INT(t)) ? (int)ast_int(t, "type") : 0;
+    compile_viv_container(ctx, cont, tt == NI_DEREF_HASH || tt == NI_DEREF_ARRAY, is_hash);
 }
 
 /* Compile tr/// — pushes the result value (count, or the modified copy when
@@ -3317,7 +3442,8 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
                     (nl == 2 && strncmp(check_nm, "re", 2) == 0))
                     return 2;
             }
-            if (strcmp(check_nm, "captures") == 0 || strcmp(check_nm, "sort") == 0 || strcmp(check_nm, "glob") == 0)
+            if (strcmp(check_nm, "captures") == 0 || strcmp(check_nm, "sort") == 0 ||
+                strcmp(check_nm, "nsort") == 0 || strcmp(check_nm, "glob") == 0)
                 return 2;
         }
     }
@@ -3468,6 +3594,21 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
         int op = ast_op_code(node);
+
+        /* `$s =~ $pattern` / `$s !~ EXPR`: the right side is a pattern
+         * string (compiled: strada_regex_match_with_capture). It used to
+         * fall to the unknown-operator default and yield undef. */
+        {
+            const char *bop = ast_str(node, "op");
+            if (bop && (strcmp(bop, "=~") == 0 || strcmp(bop, "!~") == 0)) {
+                compile_str_expr(ctx, ast_get(node, "left"));
+                compile_str_expr(ctx, ast_get(node, "right"));
+                vm_chunk_emit(ctx->chunk, bop[0] == '!' ? OP_REGEX_NOT_MATCH : OP_REGEX_MATCH);
+                vm_chunk_emit_u16(ctx->chunk, 0xFFFF);
+                vm_chunk_emit(ctx->chunk, 0);
+                break;
+            }
+        }
 
         /* Short-circuit: && */
         if (op == OP_AST_LOG_AND) {
@@ -4207,6 +4348,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
     case NI_CALL: {
         const char *name = ast_str(node, "name");
+        /* core::sprintf / sys::sprintf are the sprintf builtin (compiled:
+         * CodeGenBuiltins accepts both spellings) */
+        if (name && (strcmp(name, "core::sprintf") == 0 || strcmp(name, "sys::sprintf") == 0))
+            name = "sprintf";
         StradaValue *args = ast_get(node, "args");
         int argc = (int)ast_int(node, "arg_count");
 
@@ -5665,6 +5810,19 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "refto") == 0 && argc == 1) { compile_live_scalar_ref(ctx, ast_arr_get(args, 0)); break; }
         if (strcmp(name, "reftype") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REFTYPE); vm_chunk_emit(ctx->chunk, 1); break; }
         if ((strcmp(name, "deref") == 0 || strcmp(name, "derefto") == 0) && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DEREF); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "is_ref") == 0 && argc == 1) {
+            /* is_ref(@a) / is_ref(%h) / is_ref(@{$r}): an array or hash
+             * value is not a reference (compiled backend); the VM holds
+             * both as the same container object, so decide statically. */
+            StradaValue *ra = ast_deref(ast_arr_get(args, 0));
+            int rat = (ra && !STRADA_IS_TAGGED_INT(ra)) ? (int)ast_int(ra, "type") : 0;
+            const char *ras = (rat == NI_VARIABLE || rat == NI_DEREF_SCALAR) ? ast_str(ra, "sigil") : NULL;
+            if (ras && (ras[0] == '@' || ras[0] == '%')) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, 0);
+                break;
+            }
+        }
         if (strcmp(name, "is_ref") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_IS_REF); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "is_refto") == 0 && (argc == 1 || argc == 2)) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_IS_REFTO); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "dumper_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DUMPER_STR); vm_chunk_emit(ctx->chunk, 1); break; }
@@ -6161,7 +6319,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 const char *prefix; StradaValue *suffix;
                 size_t kidx = 0;
                 if (target_type == NI_HASH_ACCESS && is_concat_key(idx_node, &prefix, &suffix)) {
-                    compile_expr(ctx, cont_node);
+                    compile_viv_target_container(ctx, target, cont_node, is_hash);
                     compile_expr(ctx, suffix);
                     compile_expr(ctx, value);
                     vm_chunk_emit(ctx->chunk, OP_DUP);
@@ -6170,14 +6328,14 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_HASH_SET_CONCAT);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)pidx);
                 } else if (is_hash && try_const_str_key(ctx, idx_node, &kidx)) {
-                    compile_expr(ctx, cont_node);
+                    compile_viv_target_container(ctx, target, cont_node, is_hash);
                     compile_expr(ctx, value);
                     vm_chunk_emit(ctx->chunk, OP_DUP);
                     emit_reset_store_local(ctx, v_slot);
                     vm_chunk_emit(ctx->chunk, OP_HASH_SET_CONST);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)kidx);
                 } else {
-                    compile_expr(ctx, cont_node);
+                    compile_viv_target_container(ctx, target, cont_node, is_hash);
                     compile_idx_expr(ctx, idx_node, is_hash);
                     compile_expr(ctx, value);
                     vm_chunk_emit(ctx->chunk, OP_DUP);
@@ -6194,7 +6352,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 int c_slot = ctx_get_or_add_local(ctx, cbuf, '$');
                 int k_slot = ctx_get_or_add_local(ctx, kbuf, '$');
 
-                compile_expr(ctx, cont_node);
+                compile_viv_target_container(ctx, target, cont_node, is_hash);
                 emit_reset_store_local(ctx, c_slot);
 
                 compile_idx_expr(ctx, idx_node, is_hash);
@@ -6240,7 +6398,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 int c_slot = ctx_get_or_add_local(ctx, cbuf, '$');
                 int k_slot = ctx_get_or_add_local(ctx, kbuf, '$');
 
-                compile_expr(ctx, cont_node);
+                compile_viv_target_container(ctx, target, cont_node, is_hash);
                 emit_reset_store_local(ctx, c_slot);
 
                 compile_idx_expr(ctx, idx_node, is_hash);
@@ -6595,7 +6753,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             int o_slot = ctx_get_or_add_local(ctx, obuf, '$');
             int n_slot = ctx_get_or_add_local(ctx, nbuf, '$');
 
-            compile_expr(ctx, cont);
+            compile_viv_target_container(ctx, operand, cont, is_hash);
             emit_reset_store_local(ctx, c_slot);
 
             compile_idx_expr(ctx, idx, is_hash);
@@ -7819,7 +7977,7 @@ static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
                     size_t kidx = 0;
                     if (is_hash && (int)ast_int(t, "type") == NI_HASH_ACCESS &&
                         is_concat_key(idx_node, &prefix, &suffix)) {
-                        compile_expr(ctx, cont_node);
+                        compile_viv_target_container(ctx, t, cont_node, is_hash);
                         compile_expr(ctx, suffix);
                         compile_expr(ctx, value);
                         size_t pidx = vm_chunk_add_str_const(ctx->chunk, prefix);
@@ -7827,13 +7985,13 @@ static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)pidx);
                         return;
                     } else if (is_hash && try_const_str_key(ctx, idx_node, &kidx)) {
-                        compile_expr(ctx, cont_node);
+                        compile_viv_target_container(ctx, t, cont_node, is_hash);
                         compile_expr(ctx, value);
                         vm_chunk_emit(ctx->chunk, OP_HASH_SET_CONST);
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)kidx);
                         return;
                     } else {
-                        compile_expr(ctx, cont_node);
+                        compile_viv_target_container(ctx, t, cont_node, is_hash);
                         compile_idx_expr(ctx, idx_node, is_hash);
                         compile_expr(ctx, value);
                         vm_chunk_emit(ctx->chunk, is_hash ? OP_HASH_SET : OP_ARRAY_SET);
@@ -8058,7 +8216,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else if (init && !STRADA_IS_TAGGED_INT(init)) {
             compile_expr(ctx, init);
         } else {
-            emit_default_scalar_init(ctx, ast_int(node, "var_type"));
+            /* `our int $n;` is undef until assigned (compiled backend: the
+             * global registry holds no value); it used to read as 0 / "" */
+            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
         vm_chunk_emit(ctx->chunk, (init && !STRADA_IS_TAGGED_INT(init)) ? OP_STORE_GLOBAL : OP_INIT_GLOBAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
@@ -9285,6 +9445,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 for (int vj = vi + 1; vj < ctx->local_count; vj++)
                     if (strcmp(ctx->local_names[vi], ctx->local_names[vj]) == 0) { later = 1; break; }
                 if (later) continue;
+                /* Only locals the block names (as a C identifier) cross the
+                 * boundary. Every local used to be marshalled to a
+                 * StradaValue and back, and the way back rebuilt a
+                 * reference-holding local (an object, a hashref) as a new
+                 * copy: `$handle{"_dbh"} = $dbh` after a block then stored
+                 * a second DBI::db object whose DESTROY disconnected the
+                 * already-freed handle (dbi_* examples crashed at exit). */
+                if (!vm_code_names_ident(code, ctx->local_names[vi])) continue;
                 prog->cblocks[idx].var_names[vc] = strdup(ctx->local_names[vi]);
                 prog->cblocks[idx].var_slots[vc] = vi;
                 vc++;
