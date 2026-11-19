@@ -615,7 +615,12 @@ one page for all assistants is `docs/ai.html` (Claude Code, Codex, the Claude
 apps, and other tools via `claude/strada/reference/language.md`, which is
 served as raw Markdown because it has no front matter); `docs/claude.html` is
 a redirect to it, kept for old links and installed plugins' homepage. Keep
-SKILL.md free of assistant-specific instructions.
+SKILL.md free of assistant-specific instructions. `claude/install-skill.sh` is
+published as `claude/install.sh` (`curl -fsSL .../claude/install.sh | sh`): it
+downloads the tarball and installs it into `~/.claude/skills` (Claude Code,
+which does not read `~/.agents/skills`) and `~/.agents/skills` (Codex);
+`--claude`/`--codex` pick one, `--project` installs into the current
+directory. It must keep working when piped into `sh` (no `$0`, POSIX only).
 
 Publishing a new version:
 1. Commit the strada-lang changes first. The skill's `VERSION` file records
