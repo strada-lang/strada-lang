@@ -8,6 +8,8 @@
 #                                   or ~/.agents/skills/ (OpenAI Codex)
 #   OUT/plugins/strada/             the same skill as a Claude Code plugin
 #   OUT/marketplace.json            marketplace listing for that plugin
+# With --site, claude/install-skill.sh is also published as claude/install.sh
+# (curl ... | sh installs the skill for Claude Code and Codex).
 #
 # The reference files are copied from docs/ at build time, so the skill always
 # ships the current docs/STRADA_FOR_CLAUDE.md and docs/BUILTIN_FUNCTIONS.md.
@@ -110,6 +112,7 @@ if [ -n "$SITE" ]; then
     cp -R "$OUT/strada" "$SITE/claude/strada"
     cp -R "$OUT/plugins" "$SITE/claude/plugins"
     cp "$OUT/strada-skill.zip" "$OUT/strada-skill.tar.gz" "$SITE/claude/"
+    cp "$ROOT/claude/install-skill.sh" "$SITE/claude/install.sh"
     cp "$OUT/marketplace.json" "$SITE/.claude-plugin/marketplace.json"
     if [ -f "$SITE/docs/ai.html" ]; then
         sed -i "s|<code id=\"skill-version\">[^<]*</code>|<code id=\"skill-version\">$VERSION</code>|" \
