@@ -5,6 +5,7 @@
 #   OUT/strada/                     the skill folder (SKILL.md, scripts/, reference/)
 #   OUT/strada-skill.zip            upload in claude.ai: Settings > Capabilities > Skills
 #   OUT/strada-skill.tar.gz         unpack into ~/.claude/skills/ (Claude Code)
+#                                   or ~/.agents/skills/ (OpenAI Codex)
 #   OUT/plugins/strada/             the same skill as a Claude Code plugin
 #   OUT/marketplace.json            marketplace listing for that plugin
 #
@@ -37,7 +38,10 @@ cp -R "$ROOT/claude/skills/strada/." "$OUT/strada/"
 cp "$ROOT/docs/STRADA_FOR_CLAUDE.md" "$OUT/strada/reference/language.md"
 cp "$ROOT/docs/BUILTIN_FUNCTIONS.md" "$OUT/strada/reference/builtins.md"
 # The reference is written for the dev tree; installed users run `strada`.
-sed -i 's|\./strada |strada |g' "$OUT/strada/reference/language.md"
+# The skill serves Claude, Codex and other assistants, so the title names none.
+sed -i -e 's|\./strada |strada |g' \
+    -e '1s|^# Strada for Claude$|# Strada language reference for AI coding assistants|' \
+    "$OUT/strada/reference/language.md"
 printf 'Strada skill %s (strada-lang %s)\n' "$VERSION" "$COMMIT" > "$OUT/strada/VERSION"
 chmod +x "$OUT/strada/scripts/"*.sh
 
@@ -53,7 +57,7 @@ cat > "$P/.claude-plugin/plugin.json" <<EOF
   "version": "$VERSION",
   "description": "$DESC",
   "author": { "name": "Strada" },
-  "homepage": "https://strada-lang.github.io/docs/claude.html",
+  "homepage": "https://strada-lang.github.io/docs/ai.html",
   "repository": "https://github.com/strada-lang/strada-lang",
   "license": "GPL-2.0",
   "keywords": ["strada", "perl", "compiler", "language"]
@@ -79,7 +83,7 @@ or, on older Claude Code:
 
 The skill needs a Strada toolchain on the machine (\`strada\` on PATH, or a
 strada-lang checkout) and a C compiler. Details:
-https://strada-lang.github.io/docs/claude.html
+https://strada-lang.github.io/docs/ai.html
 EOF
 
 cat > "$OUT/marketplace.json" <<EOF
@@ -107,9 +111,9 @@ if [ -n "$SITE" ]; then
     cp -R "$OUT/plugins" "$SITE/claude/plugins"
     cp "$OUT/strada-skill.zip" "$OUT/strada-skill.tar.gz" "$SITE/claude/"
     cp "$OUT/marketplace.json" "$SITE/.claude-plugin/marketplace.json"
-    if [ -f "$SITE/docs/claude.html" ]; then
+    if [ -f "$SITE/docs/ai.html" ]; then
         sed -i "s|<code id=\"skill-version\">[^<]*</code>|<code id=\"skill-version\">$VERSION</code>|" \
-            "$SITE/docs/claude.html"
+            "$SITE/docs/ai.html"
     fi
     echo "installed into $SITE (claude/, .claude-plugin/marketplace.json)"
 fi

@@ -208,9 +208,12 @@ Bare `last`, `next`, `redo` apply to the innermost loop.
 say("verbose mode") if $verbose;
 return 0 unless $ok;
 $i = $i + 1 while $i < 10;
+print($_) for @arr;              # $_ is each element; foreach works too
 ```
 
-The modifiers are `if`, `unless`, `while`, `until`. There is no `for`/`foreach` statement modifier (`print($_) for @arr;` is a parse error — write a `foreach` loop). `throw EXPR if COND;` and `die(...) unless COND;` both work.
+The modifiers are `if`, `unless`, `while`, `until`, `for`, `foreach`. `throw EXPR if COND;` and `die(...) unless COND;` both work.
+
+A condition of `if`/`unless`/`elsif`/`while`/`until` may declare a variable with `my` anywhere inside it, scoped to that statement: `while (defined(my str $line = <$fh>)) { ... }`, `if ((my $n = f()) > 0) { ... }`. Elsewhere `my` is a statement, not an expression.
 
 ---
 

@@ -1,0 +1,25 @@
+# EXPECT: 123|x4x5|10|ab|10,20,30|keep|pq
+# `EXPR for LIST;` / `EXPR foreach LIST;` (Perl statement modifier) was a
+# parse error ("expected ';', got 'for'"). It runs EXPR once per element with
+# $_ aliased to it, and restores $_ afterwards.
+func main() int {
+    my @a = (1, 2, 3);
+    print($_) for @a;
+    print("|");
+    print("x" . $_) foreach (4, 5);
+    print("|");
+    my $sum = 0;
+    $sum += $_ for 1..4;
+    print($sum . "|");
+    foreach my $o (1..1) { print($_) for ("a", "b"); }
+    print("|");
+    $_ *= 10 for @a;
+    print(join(",", @a) . "|");
+    $_ = "keep";
+    print("never") for ();
+    print($_ . "|");
+    my @b = ();
+    push(@b, $_) for qw(p q);
+    print(join("", @b));
+    return 0;
+}

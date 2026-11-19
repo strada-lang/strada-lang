@@ -2509,6 +2509,10 @@
             },
             {
               "type": "STRING",
+              "value": "for"
+            },
+            {
+              "type": "STRING",
               "value": "foreach"
             }
           ]
@@ -3976,9 +3980,50 @@
         ]
       }
     },
+    "my_expression": {
+      "type": "PREC",
+      "value": -1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "my"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "FIELD",
+                "name": "type",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "type"
+                }
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          },
+          {
+            "type": "FIELD",
+            "name": "name",
+            "content": {
+              "type": "SYMBOL",
+              "name": "scalar_variable"
+            }
+          }
+        ]
+      }
+    },
     "_primary_expression": {
       "type": "CHOICE",
       "members": [
+        {
+          "type": "SYMBOL",
+          "name": "my_expression"
+        },
         {
           "type": "SYMBOL",
           "name": "number"
@@ -4074,6 +4119,10 @@
         {
           "type": "STRING",
           "value": "__FILE__"
+        },
+        {
+          "type": "STRING",
+          "value": "__LINE__"
         }
       ]
     },

@@ -555,11 +555,30 @@ say("warning: not ready") unless $ready;
 $i = $i + 1 while $i < 10;
 $count = $count + 1 until $count >= 5;
 
+# Postfix for/foreach: $_ is each element
+say($_) for @names;
+$total += $_ foreach (1..10);
+
 # Works with return, last, next, redo
 return 0 if $error;
 return $value unless $invalid;
 last if $done;
 next unless $valid;
+```
+
+### Declaring Variables in Conditions
+
+A condition of `if`, `unless`, `elsif`, `while` or `until` may declare a
+variable with `my` anywhere inside it. The variable is scoped to that
+statement:
+
+```strada
+while (defined(my str $line = <$fh>)) {
+    say("got: " . $line);
+}
+if ((my int $n = scalar(@items)) > 10) {
+    say("too many: " . $n);
+}
 ```
 
 ### Labeled Loops
