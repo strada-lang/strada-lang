@@ -13897,6 +13897,11 @@ static StradaArray* strada_string_split_raw_n(const char *str, const char *delim
  * PCRE2_UTF/PCRE2_UCP so `\w`/`\b` etc. recognize multibyte chars.
  * Cleared by strada_regex_clear_subject_len. */
 static STRADA_TLS int strada_regex_subject_utf8 = 0;
+/* The value.pv of the plain-string subject armed by strada_regex_set_subject_for_sv
+ * (NULL otherwise). A match whose subject pointer is exactly this one shares the
+ * string's refcounted buffer for lazy $`/$'/captures instead of copying it
+ * (pm_record); copy-on-write keeps the shared bytes unchanged. */
+static STRADA_TLS const char *strada_regex_subject_pv = NULL;
 
 /* Build a capture SV mirroring the current regex subject's
  * char-orientation. Called inline by the regex-match codegen sites
@@ -13917,7 +13922,7 @@ static inline StradaValue *split_piece(const char *p, size_t n) {
 
 void strada_regex_set_subject_len(size_t n) { strada_regex_subject_len = n; }
 void strada_regex_set_subject_utf8(int is_utf8) { strada_regex_subject_utf8 = is_utf8 ? 1 : 0; }
-void strada_regex_clear_subject_len(void)  { strada_regex_subject_len = 0; strada_regex_subject_utf8 = 0; }
+void strada_regex_clear_subject_len(void)  { strada_regex_subject_len = 0; strada_regex_subject_utf8 = 0; strada_regex_subject_pv = NULL; }
 
 /* Internal: subject length for current call. Honors the override if set,
  * else falls back to strlen for backward compatibility. */
@@ -13930,12 +13935,14 @@ static inline size_t strada_regex_subject_length(const char *str) {
  * int, and other types (falls back to strada_to_str + strlen). */
 void strada_regex_set_subject_for_sv(StradaValue *sv) {
     strada_regex_subject_utf8 = 0;
+    strada_regex_subject_pv = NULL;
     if (!sv || STRADA_IS_TAGGED_INT(sv)) { strada_regex_subject_len = 0; return; }
     if (sv->type == STRADA_STR && !SV_NEEDS_STR_DISPATCH(sv)) {
         /* BYTE length (not char count) — PCRE2 wants byte offsets. */
         size_t bl = STRADA_STR_BYTELEN(sv);
         if (bl == 0 && sv->value.pv) bl = strlen(sv->value.pv);
         strada_regex_subject_len = bl;
+        strada_regex_subject_pv = sv->value.pv;
         if (STRADA_STR_IS_UTF8(sv)) strada_regex_subject_utf8 = 1;
         return;
     }
@@ -14287,10 +14294,12 @@ static pthread_once_t regex_cleanup_once = PTHREAD_ONCE_INIT;
 static STRADA_TLS struct {
     uint64_t gen;            /* 0 = no lazy match yet; bumped on each success */
     int      external;       /* globals owned by an eager setter; skip lazy build */
-    char    *subject;        /* reusable buffer holding the matched subject bytes */
-    size_t   subject_cap;    /* allocated capacity of `subject` */
+    char    *subject;        /* the matched subject bytes: own_buf or shared_ss->data */
+    size_t   subject_cap;    /* allocated capacity of `own_buf` */
     size_t   subject_len;    /* byte length of the subject */
     int      utf8;           /* subject was UTF-8 */
+    StradaString *shared_ss; /* non-NULL: `subject` is this string's data (a held ref), not the own buffer */
+    char    *own_buf;        /* the reusable copy buffer (subject points here when not shared) */
     PCRE2_SIZE inline_ovec[2 * PM_OVEC_INLINE];
     PCRE2_SIZE *ovec;        /* points at inline_ovec or ovec_heap */
     PCRE2_SIZE *ovec_heap;   /* heap buffer used when ovec_count > PM_OVEC_INLINE */
@@ -14302,14 +14311,29 @@ static STRADA_TLS struct {
 /* Record a successful match's subject + ovector for later lazy build. */
 static void pm_record(const char *str, size_t subject_len, int utf8,
                       PCRE2_SIZE *ovector, uint32_t count) {
-    if (subject_len + 1 > pm_state.subject_cap) {
-        char *nb = realloc(pm_state.subject, subject_len + 1);
-        if (!nb) return;                 /* OOM: leave pm_state unchanged */
-        pm_state.subject = nb;
-        pm_state.subject_cap = subject_len + 1;
+    if (str && str == strada_regex_subject_pv && SS_FROM_PV(str)->len == subject_len) {
+        /* the subject is a plain string's buffer: keep a reference (O(1), so a
+         * //g loop is not O(length) per match); writers copy before changing
+         * a shared buffer */
+        StradaString *ss = SS_FROM_PV(str);
+        if (ss != pm_state.shared_ss) {
+            ss_incref(ss);
+            if (pm_state.shared_ss) ss_decref(pm_state.shared_ss);
+            pm_state.shared_ss = ss;
+        }
+        pm_state.subject = (char *)str;
+    } else {
+        if (subject_len + 1 > pm_state.subject_cap) {
+            char *nb = realloc(pm_state.own_buf, subject_len + 1);
+            if (!nb) return;                 /* OOM: leave pm_state unchanged */
+            pm_state.own_buf = nb;
+            pm_state.subject_cap = subject_len + 1;
+        }
+        if (pm_state.shared_ss) { ss_decref(pm_state.shared_ss); pm_state.shared_ss = NULL; }
+        memcpy(pm_state.own_buf, str, subject_len);
+        pm_state.own_buf[subject_len] = '\0';
+        pm_state.subject = pm_state.own_buf;
     }
-    memcpy(pm_state.subject, str, subject_len);
-    pm_state.subject[subject_len] = '\0';
     pm_state.subject_len = subject_len;
     pm_state.utf8 = utf8;
     if (count <= PM_OVEC_INLINE) {
@@ -14653,7 +14677,8 @@ static void strada_regex_thread_cleanup(void) {
     if (last_postmatch_sv) { strada_decref(last_postmatch_sv); last_postmatch_sv = NULL; }
     if (last_match_starts) { strada_decref(last_match_starts); last_match_starts = NULL; }
     if (last_match_ends) { strada_decref(last_match_ends); last_match_ends = NULL; }
-    free(pm_state.subject); pm_state.subject = NULL; pm_state.subject_cap = 0;
+    if (pm_state.shared_ss) { ss_decref(pm_state.shared_ss); pm_state.shared_ss = NULL; }
+    free(pm_state.own_buf); pm_state.own_buf = NULL; pm_state.subject = NULL; pm_state.subject_cap = 0;
     free(pm_state.ovec_heap); pm_state.ovec_heap = NULL; pm_state.ovec_heap_cap = 0;
     if (strada_md_cache && !strada_md_cache_busy) {
         pcre2_match_data_free(strada_md_cache);
@@ -14730,6 +14755,38 @@ static char *regex_dup_len(const char *str, size_t len) {
     return out;
 }
 
+/* After pm_record: patterns with named groups build %+ now, while the
+ * compiled `re` (needed for the name table) is guaranteed alive; a lazy build
+ * could race a cache eviction. Patterns without named groups leave %+ to build
+ * empty lazily (the common case allocates nothing). */
+static void pm_named_eager(pcre2_code *re, const char *str, PCRE2_SIZE *ovector, uint32_t count) {
+    uint32_t namecount = 0;
+    pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &namecount);
+    if (namecount == 0) return;
+    PCRE2_SPTR nametable;
+    uint32_t nameentrysize;
+    pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &nametable);
+    pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &nameentrysize);
+    StradaHash *named_hash = strada_hash_new();
+    PCRE2_SPTR tabptr = nametable;
+    for (uint32_t i = 0; i < namecount; i++) {
+        int group_num = (tabptr[0] << 8) | tabptr[1];
+        const char *group_name = (const char *)(tabptr + 2);
+        if (group_num < (int)count && ovector[2*group_num] != PCRE2_UNSET) {
+            PCRE2_SIZE start = ovector[2*group_num];
+            PCRE2_SIZE end = ovector[2*group_num + 1];
+            strada_hash_set_take(named_hash, group_name,
+                strada_regex_new_capture(str + start, (size_t)(end - start)));
+        }
+        tabptr += nameentrysize;
+    }
+    if (last_named_captures) strada_decref(last_named_captures);
+    StradaValue *nh = strada_value_alloc();
+    nh->type = STRADA_HASH; nh->refcount = 1; nh->value.hv = named_hash;
+    last_named_captures = nh;
+    pm_state.named_gen = pm_state.gen;   /* already materialized */
+}
+
 /* Match with /g position tracking. *pos is the current offset into str.
  * Returns 1 on match (updates *pos past the match), 0 when no more matches. */
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos) {
@@ -14759,67 +14816,11 @@ int strada_regex_match_global(const char *str, const char *pattern, const char *
             *pos = ovector[1];
         }
 
-        /* Set $` (prematch) and $' (postmatch) */
-        strada_set_match_pre_post(str, ovector[0], ovector[1]);
-
-        /* Store captures */
-        StradaArray *captures = strada_array_new();
-        StradaArray *ms = strada_array_new();
-        StradaArray *me = strada_array_new();
-        StradaHash *named_hash = strada_hash_new();
-        for (uint32_t i = 0; i < count; i++) {
-            if (ovector[2*i] != PCRE2_UNSET) {
-                PCRE2_SIZE start = ovector[2*i];
-                PCRE2_SIZE end = ovector[2*i + 1];
-                size_t len = end - start;
-                /* Use the capture helper so SVf_UTF8 propagates from
-                 * the subject string to $1..$N. */
-                strada_array_push_take(captures, strada_regex_new_capture(str + start, len));
-                if (strada_regex_subject_utf8) {
-                    size_t cs = utf8_walk_byte_to_char((const unsigned char *)str, 0, 0, (size_t)start);
-                    size_t ce = utf8_walk_byte_to_char((const unsigned char *)str, (size_t)start, cs, (size_t)end);
-                    strada_array_push_take(ms, STRADA_MAKE_TAGGED_INT((int64_t)cs));
-                    strada_array_push_take(me, STRADA_MAKE_TAGGED_INT((int64_t)ce));
-                } else {
-                    strada_array_push_take(ms, STRADA_MAKE_TAGGED_INT((int64_t)start));
-                    strada_array_push_take(me, STRADA_MAKE_TAGGED_INT((int64_t)end));
-                }
-            } else {
-                strada_array_push_take(captures, strada_new_undef());
-                strada_array_push_take(ms, strada_new_undef());
-                strada_array_push_take(me, strada_new_undef());
-            }
-        }
-        /* Extract named captures */
-        PCRE2_SPTR name_table;
-        uint32_t name_count, name_entry_size;
-        pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &name_count);
-        pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &name_table);
-        pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &name_entry_size);
-        for (uint32_t ni = 0; ni < name_count; ni++) {
-            PCRE2_SPTR entry = name_table + ni * name_entry_size;
-            int group_num = (entry[0] << 8) | entry[1];
-            const char *group_name = (const char *)(entry + 2);
-            if (group_num < (int)count && ovector[2*group_num] != PCRE2_UNSET) {
-                PCRE2_SIZE ns = ovector[2*group_num], ne = ovector[2*group_num + 1];
-                strada_hash_set_take(named_hash, group_name,
-                    strada_regex_new_capture(str + ns, (size_t)(ne - ns)));
-            }
-        }
-
-        if (last_regex_captures) strada_decref(last_regex_captures);
-        last_regex_captures = strada_new_array_from_av(captures);
-        if (last_match_starts) strada_decref(last_match_starts);
-        last_match_starts = strada_new_array_from_av(ms);
-        if (last_match_ends) strada_decref(last_match_ends);
-        last_match_ends = strada_new_array_from_av(me);
-        if (last_named_captures) strada_decref(last_named_captures);
-        StradaValue *nh = strada_value_alloc();
-        nh->type = STRADA_HASH;
-        nh->refcount = 1;
-        nh->value.hv = named_hash;
-        last_named_captures = nh;
-        pm_state.external = 1;   /* globals set directly; lazy build must defer */
+        /* Record lazily, as a single match does: $`/$', $1..$N, @-/@+ and %+
+         * are built only when read, so a //g loop costs no allocation or
+         * subject-length work per match beyond PCRE2 itself. */
+        pm_record(str, subject_length, strada_regex_subject_utf8, ovector, count);
+        pm_named_eager(re, str, ovector, count);
 
         strada_md_release(match_data);
         return 1;
@@ -14872,34 +14873,7 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
          * guaranteed alive here, whereas a lazy build could race a cache
          * eviction. Patterns without named groups leave %+ to lazily build
          * empty (the common case allocates nothing). */
-        uint32_t namecount = 0;
-        pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &namecount);
-        if (namecount > 0) {
-            PCRE2_SPTR nametable;
-            uint32_t nameentrysize;
-            pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &nametable);
-            pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &nameentrysize);
-
-            StradaHash *named_hash = strada_hash_new();
-            PCRE2_SPTR tabptr = nametable;
-            for (uint32_t i = 0; i < namecount; i++) {
-                int group_num = (tabptr[0] << 8) | tabptr[1];
-                const char *group_name = (const char *)(tabptr + 2);
-                if (group_num < (int)count && ovector[2*group_num] != PCRE2_UNSET) {
-                    PCRE2_SIZE start = ovector[2*group_num];
-                    PCRE2_SIZE end = ovector[2*group_num + 1];
-                    size_t len = (size_t)(end - start);
-                    strada_hash_set_take(named_hash, group_name,
-                        strada_regex_new_capture(str + start, len));
-                }
-                tabptr += nameentrysize;
-            }
-            if (last_named_captures) strada_decref(last_named_captures);
-            StradaValue *nh = strada_value_alloc();
-            nh->type = STRADA_HASH; nh->refcount = 1; nh->value.hv = named_hash;
-            last_named_captures = nh;
-            pm_state.named_gen = pm_state.gen;   /* already materialized */
-        }
+        pm_named_eager(re, str, ovector, count);
     }
 
     strada_md_release(match_data);
@@ -14979,6 +14953,7 @@ StradaValue* strada_regex_match_list(const char *str, const char *pattern, const
         int any = 0;
         while (strada_regex_match_global(str, pattern, flags, &pos)) {
             any = 1;
+            pm_build_captures();   /* lazy: this path reads last_regex_captures directly */
             if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY) {
                 StradaArray *src = last_regex_captures->value.av;
                 /* src has [$0, $1, ...]. If there are capture groups

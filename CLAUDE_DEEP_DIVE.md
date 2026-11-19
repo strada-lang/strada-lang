@@ -2898,3 +2898,31 @@ Test: `interpreter/test/test_vm_perf_c20d.strada` (recursion past 256 frames and
 - gc is 0.6% more instructions; not investigated.
 - Boxed-int ADD/MOD/MUL (sort's random-number setup) still go through the step helper.
 - The JIT's call frame still writes eight fields per call; fib spends most of its instructions on call/return.
+
+## Lazy `//g` match state (2026-11-19)
+
+Reported from Perla (`strada-bugs/001`): `strada_regex_match_global` built
+`` $` `` and `$'` (two copies of the subject), the captures / `@-` / `@+` arrays
+and a `%+` hash on every match, and walked the UTF-8 subject from byte 0 for
+each offset, so a `//g` loop was O(subject length) per match.
+
+- The success path is now `pm_record(...)` + `pm_named_eager(re, ...)`, the
+  same as `strada_regex_match_with_capture`; `pm_state.external` stays 0, so
+  the `pm_build_*` materializers run on first read.
+- `pm_state` keeps two subject sources: `own_buf` (the reusable copy) and
+  `shared_ss` (a held reference to the subject's `StradaString`). `pm_record`
+  shares when `str == strada_regex_subject_pv` (set by
+  `strada_regex_set_subject_for_sv` for a plain STR, cleared by
+  `strada_regex_clear_subject_len`) and `SS_FROM_PV(str)->len` equals the
+  subject length; otherwise it copies into `own_buf` and drops any shared
+  reference. Holding the reference makes in-place writers (concat, substr,
+  vec) clone first, so a later `` $` `` sees the matched text. Arena teardown only
+  decrefs string buffers, so the reference keeps them alive.
+- Thread cleanup releases `shared_ss` and frees `own_buf`.
+- `emit_regex_g_condition` (CodeGen.strada) takes `strada_to_str_sv` of the
+  target, arms it after building any interpolated pattern (that may match
+  too), passes `value.pv`, then clears and releases (cleanup stack when useful).
+  Side effects: binary subjects keep their NULs and UTF-8 subjects get
+  PCRE2_UTF/UCP in `//g`, as in single matches.
+- Callers that pass their own `char *` copy (Perla's `strada_to_str`) still
+  pay one memcpy per match; passing `value.pv` of the armed SV makes it O(1).
