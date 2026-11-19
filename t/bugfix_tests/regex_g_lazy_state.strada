@@ -1,0 +1,51 @@
+# EXPECT: a:1<|a1|-b22-c333>b:22<a1-|b22|-c333>c:333<a1-b22-|c333|> kv,xyy, 0-5=héllo=5,6-11=wörld=5 aXb/aXb/c/aXbXczzz 1q2 2 x1y2z3 one ||Qne two
+# VM-SKIP: reads the compiled runtime's match state through __C__ (the VM keeps its own)
+# `while ($s =~ /re/g)` built $`, $', $1..$N, @-, @+ and %+ on every match
+# (prematch and postmatch copies made a //g loop O(length) per match), and
+# passed the subject as a strdup'd C string: a NUL byte ended the subject and
+# the UTF-8 flag was lost, so \w missed é. The match state now records lazily
+# and shares the subject string; changing the string after the loop must not
+# change $`/$' (copy-on-write).
+func pre() scalar { my scalar $r; __C__ { strada_decref(r); r = strada_prematch(); } return $r; }
+func post() scalar { my scalar $r; __C__ { strada_decref(r); r = strada_postmatch(); } return $r; }
+func mstarts() scalar { my scalar $r; __C__ { strada_decref(r); r = strada_ref_create_take(strada_match_starts()); } return $r; }
+func mends() scalar { my scalar $r; __C__ { strada_decref(r); r = strada_ref_create_take(strada_match_ends()); } return $r; }
+func main() int {
+    my str $out = "";
+    my str $s = "a1-b22-c333";
+    while ($s =~ /([a-z])(\d+)/g) {
+        my array @c = captures();
+        $out .= $1 . ":" . $2 . "<" . pre() . "|" . $c[0] . "|" . post() . ">";
+    }
+    $out .= " ";
+    my str $t = "k=v;x=yy;";
+    while ($t =~ /(?<k>\w)=(?<v>\w+);/g) { my hash %n = named_captures(); $out .= $n{"k"} . $n{"v"} . ","; }
+    $out .= " ";
+    my str $u = "héllo wörld";
+    my array @st;
+    while ($u =~ /(\w+)/g) {
+        my array @a = @{mstarts()};
+        my array @b = @{mends()};
+        push(@st, $a[0] . "-" . $b[0] . "=" . $1 . "=" . length($1));
+    }
+    $out .= join(",", @st) . " ";
+    my str $w = "aXbXc";
+    my str $pre = "";
+    while ($w =~ /X/g) { $pre = pre(); }
+    $w .= "zzz";
+    $out .= $pre . "/" . pre() . "/" . post() . "/" . $w . " ";
+    my str $z = "p1q2";
+    my int $n = 0;
+    while ($z =~ /\d/g) { $n++; $z = "changed"; }
+    $out .= $n . post() . " ";
+    my str $bin = "a\x00b\x00c";
+    my int $nb = 0;
+    while ($bin =~ /\x00/g) { $nb++; }
+    my array @all = ("x1y2z3" =~ /([a-z])(\d)/g);
+    my str $sub = "one two";
+    while ($sub =~ /(\w+)/g) { }
+    substr($sub, 0, 1) = "Q";
+    $out .= $nb . " " . join("", @all) . " " . pre() . "|" . post() . "|" . $sub;
+    say($out);
+    return 0;
+}

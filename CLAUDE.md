@@ -1190,6 +1190,21 @@ analyzes the element (`regex_interp_elem`), stores it in the node's
 `s///` and `tr///` nodes carry their source line, so these diagnostics are
 located.
 
+**`//g` match state is lazy (2026-11-19)**: `strada_regex_match_global` records
+the subject and ovector in `pm_state` like a single match (`pm_record`), so
+`` $` ``, `$'`, `$1..$N`, `@-`/`@+` and `%+` are built only when read (named groups
+are still built at match time, `pm_named_eager`). When the subject pointer is
+the `value.pv` armed by `strada_regex_set_subject_for_sv` (and the buffer's
+length header matches), `pm_state` holds a reference to that `StradaString`
+(`shared_ss`) instead of copying it; copy-on-write keeps the bytes stable for
+later `` $` ``/`$'`. Other callers (`char *` copies, e.g. Perla) still get one copy
+per match. The compiled `while (S =~ /re/g)` now passes S's string value and
+arms it (it used to strdup S and `strlen` it per iteration, which also cut the
+subject at a NUL and lost the UTF-8 flag). 30k matches over a 90 KB string:
+0.16 s to 0.003 s. Code reading `last_regex_captures` directly after a `//g`
+match must call `pm_build_captures()` first (`strada_regex_match_list` does).
+Test: `t/bugfix_tests/regex_g_lazy_state.strada`.
+
 Transitive capture works: a closure nested inside another closure captures outer variables through the enclosing closure's `__captures` slots (gen at CodeGenExpr's capture-array emission forces the enclosing closure to capture pass-through names).
 
 ### Async/Await
