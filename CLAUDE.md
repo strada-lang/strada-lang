@@ -144,6 +144,22 @@ gcc -o output output.c runtime/strada_runtime.c -Iruntime -ldl -lm
 
 **LTO (Link-Time Optimization)**: At `-O2` and above, the `strada` script automatically adds `-flto` to the gcc invocation, enabling cross-function inlining across the generated C code and the runtime. At `-O3` and `-Ofast`, `-march=native` is also added for CPU-specific tuning. This dramatically improves function call performance by allowing GCC to inline small runtime functions.
 
+**LTO link cost and the GCC 15 cache (2026-11-19)**: an `-O2` link spends
+1-3.5 s recompiling, at `-O2`, the 100-200 runtime functions the program
+reaches; reading the runtime's bitcode takes 0.05 s. Flags don't change that
+(partitioning, `-flto=1`, uncompressed bitcode and gold were all within a few
+percent, and smaller partitions were slower), and splitting the runtime into
+per-feature objects would not either, since LTO already discards unreachable
+code cheaply. Linking `-O2` against the runtime's native code instead costs
+~10% more instructions (median over the benchmarks; hotpaths 22%), so `-O2`
+keeps LTO. With GCC 15+, the driver adds `-flto-incremental=DIR`
+(`lto_incremental_flag` in tools/strada-driver.strada; GCC major version
+parsed from the `--version` probe `cc_is_clang` already runs), so rebuilds
+reuse unchanged LTRANS partitions. Cache: `$STRADA_LTO_CACHE_DIR`, default
+`$XDG_CACHE_HOME/strada/lto` (~/.cache/strada/lto), created 0700;
+`STRADA_LTO_CACHE=0` disables it. GCC 13 (this dev box) is unaffected, so
+the GCC 15 path was tested with a fake compiler reporting version 15.
+
 **`-fno-lto` at `-O0`/`-O1`/`-Os` (fast dev links, 2026-06)**: the precompiled `runtime.o` is built `-ffat-lto-objects` (native code **and** LTO bitcode) so `-O2+` user builds can cross-inline it. But that bitcode means the *linker* invokes the LTO plugin (`lto1`) even on a non-optimizing `-O0` build — ~0.55s of pure overhead. So at non-LTO opt levels the driver now passes `-fno-lto` explicitly, making the link use the runtime's native code instead: a small/dev build's link drops ~0.57s → ~0.03s (`strada -O0 hello`: 0.59s → 0.04s, competitive with `go build`). No effect on `-O2+` (which still LTO). The link, not stradac or even gcc's compile, was the dominant cost of small builds.
 
 **`--tcc` (fast compile)**: Compiles the generated program with `tcc` (the Tiny C Compiler — ~10x faster than gcc, especially on large programs, at the cost of unoptimized output) and links the resulting object with `$CC`. Two constraints force this split: tcc can't parse the system headers the main runtime header pulls in (so the generated C's `#include` is swapped to the stripped `runtime/strada_runtime_tcc.h`, the same header the JIT uses), and tcc's own linker can't relocate the gcc-built runtime object — so `$CC` links the tcc-produced object against the full (gcc-built) runtime. Runtime features are fully preserved; only the program's own code is unoptimized. Good for edit/run iteration. Applies to executables and `--shared` (tcc compiles a PIC object, `$CC` links the .so — plus a `$CC`-compiled constructor shim, because tcc SILENTLY DROPS `__attribute__((constructor))` and the .so's `__strada_init_globals` would otherwise never run at dlopen: globals undef, OOP dispatch broken, build still succeeds; regression test `t/tcc_shared_test/run.sh`); `--object`/`--static-lib`/`--static` ignore it with a warning and compile with `$CC` (their outputs must match the gcc-built runtime ABI / bundle the runtime from source). `runtime/strada_runtime_tcc.h` must stay struct-for-struct in sync with `strada_runtime.h` (it shares the runtime ABI at run time).

@@ -734,11 +734,49 @@ func handle_doc() void {
 # spellings that clang (the default cc on macOS) rejects, so every LTO-flag
 # emission gates on this. Cached after first probe.
 our int $CC_IS_CLANG_CACHE = -1;
+our int $CC_GCC_MAJOR = 0;
 func cc_is_clang() int {
     if ($CC_IS_CLANG_CACHE >= 0) { return $CC_IS_CLANG_CACHE; }
     my str $v = core::qx(join(" ", map { sq($_) } @CC) . " --version 2>&1");
     if (index($v, "clang") >= 0) { $CC_IS_CLANG_CACHE = 1; } else { $CC_IS_CLANG_CACHE = 0; }
+    # GCC's major version, from the same probe: the first token of the first
+    # line that is exactly N.N or N.N.N ("gcc (Ubuntu 13.3.0-6ubuntu2) 13.3.0",
+    # "cc (GCC) 15.1.1 20250425 (Red Hat 15.1.1-1)").
+    if ($CC_IS_CLANG_CACHE == 0) {
+        my array @lines = split(/\n/, $v);
+        if (size(@lines) > 0) {
+            foreach my $tok (split(/\s+/, $lines[0])) {
+                if ($tok =~ /^(\d+)\.\d+(\.\d+)?$/) { $CC_GCC_MAJOR = int($1); last; }
+            }
+        }
+    }
     return $CC_IS_CLANG_CACHE;
+}
+
+# GCC 15+ can cache the link-time optimization step between builds
+# (-flto-incremental=DIR): a rebuild recompiles only the partitions whose
+# input changed, instead of the runtime code the program reaches every time.
+# Returns the flag, or "" when unavailable or disabled (STRADA_LTO_CACHE=0).
+# Cache: $STRADA_LTO_CACHE_DIR, default $XDG_CACHE_HOME/strada/lto
+# (~/.cache/strada/lto). GCC needs the directory to exist; it is created 0700.
+func lto_incremental_flag() str {
+    if (cc_is_clang() == 1 || $CC_GCC_MAJOR < 15) { return ""; }
+    if (env("STRADA_LTO_CACHE") eq "0") { return ""; }
+    my str $dir = env("STRADA_LTO_CACHE_DIR");
+    if (length($dir) == 0) {
+        my str $xdg = env("XDG_CACHE_HOME");
+        if (length($xdg) == 0) {
+            my str $home = env("HOME");
+            if (length($home) == 0) { return ""; }
+            $xdg = $home . "/.cache";
+        }
+        core::mkdir($xdg, 448);
+        core::mkdir($xdg . "/strada", 448);
+        $dir = $xdg . "/strada/lto";
+    }
+    core::mkdir($dir, 448);
+    if (!(-d $dir)) { return ""; }
+    return "-flto-incremental=" . $dir;
 }
 
 # ---------------------------------------------------------------------------
@@ -897,6 +935,8 @@ func build_gcc_flags() array {
         # clang is excluded: -flto=auto is a GCC spelling clang rejects, and the
         # runtime.o is native-only there, so a -O2+ clang build links non-LTO.
         @f = (@f, "-flto=auto");
+        my str $ltoinc = lto_incremental_flag();
+        if (length($ltoinc) > 0) { @f = (@f, $ltoinc); }
     } else {
         # Non-LTO opt levels (-O0/-O1/-Os): explicitly disable LTO. The
         # precompiled runtime.o is built -ffat-lto-objects (native code +

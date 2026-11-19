@@ -275,12 +275,16 @@ man stradac
 - **STRADA_MODULE_CACHE_DIR**
   Directory for the `--module-cache` artifacts (default `~/.cache/strada/modules`).
 
+- **STRADA_LTO_CACHE**, **STRADA_LTO_CACHE_DIR**
+  With GCC 15 or newer, **-O2** and higher builds cache the link-time optimization step (`-flto-incremental`), so a rebuild only redoes the parts whose input changed. The cache lives in **STRADA_LTO_CACHE_DIR** (default `~/.cache/strada/lto`, under `$XDG_CACHE_HOME` when set). `STRADA_LTO_CACHE=0` turns it off. Older GCC and clang are unaffected.
+
 - **CC**
   C compiler used for the final compile/link (default `gcc`; on macOS this is clang).
 
 ## FILES
 
 - *~/.cache/strada/modules* - Module cache (`--module-cache`)
+- *~/.cache/strada/lto* - Link-time optimization cache (GCC 15+)
 - */usr/local/lib/strada/lib* - System library directory
 - */usr/local/share/doc/strada* - Documentation files
 
