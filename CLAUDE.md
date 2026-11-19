@@ -969,15 +969,20 @@ signature (`int` -> `int64_t`, `num` -> `double`, `str` -> `char*`, a `str`
 result is a malloc'd copy the caller frees or NULL for undef,
 `scalar`/`array`/`hash` -> `StradaValue*`). The parser
 (`extern_split_body`) moves the body into an ordinary Strada function
-`[Pkg_]NAME__xbody` (`is_extern_body`, left out of export metadata), so it
-gets semantic analysis, `our`, cleanup and everything else; codegen emits NAME
-as a C wrapper (`gen_extern_wrapper`, types from `extern_abi_c_type`). Strada
-callers of NAME call `NAME__xbody` directly (its function info has
-`is_extern` 0 and `c_name` = the body function), in compiled code and the VM.
+(`is_extern_body`): in a package it is `Pkg::NAME`, an ordinary package
+function listed in the export metadata, so `import_lib` users call
+`Pkg::NAME`; in package main (where NAME is the C symbol) it is
+`NAME__xbody` (`extern_body_hidden`, left out of the metadata). The body gets
+semantic analysis, `our`, cleanup and everything else; codegen emits NAME as a
+C wrapper (`gen_extern_wrapper`, types from `extern_abi_c_type`). Strada
+callers of NAME call the body function directly (NAME's function info has
+`is_extern` 0 and `c_name` = the body function); the extern node keeps a
+one-line forwarding body for the VM. An extern and a `func` of the same name
+in one package are a "function already defined" error.
 Before, the body was compiled with raw C parameters standing in for Strada
 values and only arithmetic worked. A C program that loads such a `--shared`
-library links the runtime with `$(strada --embed-ldflags)`. `import_lib` does
-not see extern functions (it never did). Test: `t/extern_c_host_test/run.sh`.
+library links the runtime with `$(strada --embed-ldflags)`. Test:
+`t/extern_c_host_test/run.sh`.
 
 ### C Callbacks (`c::callback`, libffi trampolines)
 

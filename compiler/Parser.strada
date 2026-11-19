@@ -5115,21 +5115,29 @@ func parse_extern_function(scalar $parser) scalar {
 }
 
 # `extern func NAME(...) T { BODY }` is callable from C with C types. Its
-# body moves into an ordinary Strada function NAME__xbody (analyzed and
-# compiled like any other: `our`, strings, hashes, cleanup), and NAME becomes
-# a C wrapper that converts the C arguments to Strada values, calls it, and
-# converts the result back (gen_extern_function). Strada callers of NAME call
-# NAME__xbody directly. Returns the new function, or 0 for a declaration.
-# $c_pkg is the C package prefix to give it ("" when the caller prefixes).
+# body moves into an ordinary Strada function (analyzed and compiled like any
+# other: `our`, strings, hashes, cleanup), and NAME becomes a C wrapper that
+# converts the C arguments to Strada values, calls it, and converts the
+# result back (gen_extern_wrapper). Strada callers of NAME call the body
+# function directly. In a package the body function is Pkg::NAME, an
+# ordinary package function, so the library's export metadata lists it and
+# `import_lib` users call Pkg::NAME. In package main (where that name is the
+# C symbol itself) it is NAME__xbody, hidden from the metadata.
+# Returns the new function, or 0 for a declaration.
+# $c_pkg is the C package prefix to give it ("" when the caller prefixes:
+# the module merge qualifies it).
 func extern_split_body(scalar $fn, str $c_pkg) scalar {
     if (($fn->{"has_body"} + 0) != 1) { return 0; }
+    my str $xb_pkg = "" . $fn->{"package"};
+    my int $xb_public = 0;
+    if (length($xb_pkg) > 0 && $xb_pkg ne "main" && index("" . $fn->{"name"}, "::") < 0) { $xb_public = 1; }
     my str $xb_bare = "" . $fn->{"name"};
     my int $xb_ci = index($xb_bare, "::");
     while ($xb_ci >= 0) {
         $xb_bare = substr($xb_bare, 0, $xb_ci) . "_" . substr($xb_bare, $xb_ci + 2, length($xb_bare) - $xb_ci - 2);
         $xb_ci = index($xb_bare, "::");
     }
-    $xb_bare = $xb_bare . "__xbody";
+    if ($xb_public == 0) { $xb_bare = $xb_bare . "__xbody"; }
     my str $xb_name = $xb_bare;
     if (length($c_pkg) > 0) { $xb_name = $c_pkg . "_" . $xb_bare; }
     my scalar $impl = ast_new_function($xb_name, $fn->{"return_type"});
@@ -5145,11 +5153,14 @@ func extern_split_body(scalar $fn, str $c_pkg) scalar {
     $impl->{"line"} = $fn->{"line"};
     $impl->{"package"} = $fn->{"package"};
     $impl->{"is_extern_body"} = 1;
+    if ($xb_public == 0) { $impl->{"extern_body_hidden"} = 1; }
     $fn->{"impl_fn"} = $impl;
     # The extern keeps a one-line body that calls the body function. The
     # compiled backend ignores it (it emits the C wrapper); the bytecode VM
     # compiles it as an ordinary function.
-    my scalar $xb_call = ast_new_call($xb_bare);
+    my str $xb_target = $xb_bare;
+    if ($xb_public == 1) { $xb_target = $xb_pkg . "::" . $xb_bare; }
+    my scalar $xb_call = ast_new_call($xb_target);
     $xb_i = 0;
     while ($xb_i < $fn->{"param_count"}) {
         my scalar $xb_ap = $xb_params->[$xb_i];

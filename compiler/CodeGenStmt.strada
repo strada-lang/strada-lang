@@ -7044,9 +7044,10 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
 
         # Skip main function, extern functions, and private functions
         my int $is_private = $fn->{"is_private"};
-        # An extern's body function (extern_split_body) is not part of the
-        # library's Strada interface.
-        if (($fn->{"is_extern_body"} + 0) == 1) { $is_private = 1; }
+        # An extern's body function in package main (NAME__xbody, see
+        # extern_split_body) is not part of the library's Strada interface;
+        # in a package it is Pkg::NAME and exported like any function.
+        if (($fn->{"extern_body_hidden"} + 0) == 1) { $is_private = 1; }
         if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC() && $is_private != 1) {
             my int $ret_type = $fn->{"return_type"};
             my int $param_count = $fn->{"param_count"};

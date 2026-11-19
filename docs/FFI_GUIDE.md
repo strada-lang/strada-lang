@@ -299,8 +299,11 @@ cc -o host host.c $(strada --embed-ldflags)
 ./host
 ```
 
-Strada code in the same program or module calls these functions like any
-other (`shout("x")`). An exception that escapes an `extern func` called from
+Strada code calls these functions like any other: `shout("x")` in the same
+file or package, `TextLib::shout("x")` from a program that pulls the file in
+with `use` or loads the compiled library with `import_lib "textlib.so"`. In a
+package, `extern func NAME` is also the ordinary function `Pkg::NAME`, so a
+package cannot define both an `extern func` and a `func` with the same name. An exception that escapes an `extern func` called from
 C ends the program with the usual uncaught-exception report; catch inside the
 function and return an error value if the C caller must continue.
 
