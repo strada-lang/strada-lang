@@ -962,6 +962,23 @@ func process(str $data) int {
 
 Variables are `StradaValue*` pointers. Use `strada_to_int/str/num()` to extract, `strada_new_int/str/num()` to create. Always `strada_decref()` before reassigning, `free()` after `strada_to_str()`.
 
+### `extern func` with a body (C-callable, 2026-11-19)
+
+`extern func NAME(int $a, str $s) str { ... }` exports NAME with a plain C
+signature (`int` -> `int64_t`, `num` -> `double`, `str` -> `char*`, a `str`
+result is a malloc'd copy the caller frees or NULL for undef,
+`scalar`/`array`/`hash` -> `StradaValue*`). The parser
+(`extern_split_body`) moves the body into an ordinary Strada function
+`[Pkg_]NAME__xbody` (`is_extern_body`, left out of export metadata), so it
+gets semantic analysis, `our`, cleanup and everything else; codegen emits NAME
+as a C wrapper (`gen_extern_wrapper`, types from `extern_abi_c_type`). Strada
+callers of NAME call `NAME__xbody` directly (its function info has
+`is_extern` 0 and `c_name` = the body function), in compiled code and the VM.
+Before, the body was compiled with raw C parameters standing in for Strada
+values and only arithmetic worked. A C program that loads such a `--shared`
+library links the runtime with `$(strada --embed-ldflags)`. `import_lib` does
+not see extern functions (it never did). Test: `t/extern_c_host_test/run.sh`.
+
 ### C Callbacks (`c::callback`, libffi trampolines)
 
 Pass a Strada closure to C code expecting a function pointer (qsort comparators, libcurl/GTK callbacks):

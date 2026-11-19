@@ -104,6 +104,9 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 - **--clear-module-cache**
   Wipe the module cache directory and exit. Always safe; the next `--module-cache` build regenerates it.
 
+- **--embed-ldflags**
+  Print the link flags a C program needs to load Strada **--shared** libraries (the runtime object, the libraries it uses, and `-rdynamic`), then exit: `cc -o host host.c $(strada --embed-ldflags)`. A `--shared` library does not contain the runtime. See `extern func` in the FFI guide.
+
 - **--strict-types**
   Enable stage-0 gradual type checking: compares declared types against a best-effort static expression type and emits warnings (never errors) on likely mismatches. `scalar`/`dynamic`/unannotated values never warn.
 

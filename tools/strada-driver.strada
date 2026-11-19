@@ -43,6 +43,7 @@ our int $MODULE_ONLY_MODE = 0;
 our str $MODULE_TARGET = "";
 our int $MODULE_CACHE = 0;
 our int $CLEAR_MODULE_CACHE = 0;
+our int $EMBED_LDFLAGS = 0;
 our int $STATIC_LINK = 0;
 our int $SHOW_WARNINGS = 0;
 our int $STRICT_TYPES = 0;
@@ -503,6 +504,7 @@ func parse_args(array @av) void {
         }
         elsif ($a eq "--module-cache") { $MODULE_CACHE = 1; core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
         elsif ($a eq "--clear-module-cache") { $CLEAR_MODULE_CACHE = 1; $i = $i + 1; }
+        elsif ($a eq "--embed-ldflags") { $EMBED_LDFLAGS = 1; $i = $i + 1; }
         elsif ($a eq "-w" || $a eq "--warnings") { $SHOW_WARNINGS = 1; $i = $i + 1; }
         elsif ($a eq "--strict-types") { $STRICT_TYPES = 1; $i = $i + 1; }
         elsif ($a eq "--check") { $CHECK_ONLY = 1; $i = $i + 1; }
@@ -586,6 +588,8 @@ func usage() void {
     say("  --import-lib PATH   Load a Strada-module .so at runtime (like import_lib \"PATH\")");
     say("  --module-cache      Use + warm the precompiled module cache");
     say("  --clear-module-cache  Wipe the module cache and exit");
+    say("  --embed-ldflags     Print the flags a C program needs to load Strada --shared");
+    say("                      libraries (the runtime and its libraries), and exit");
     say("");
     say("Diagnostics & profiling:");
     say("  -w, --warnings      Enable warnings (unused variables, etc.)");
@@ -664,6 +668,26 @@ func same_file_path(str $a, str $b) int {
     if (length($ra) == 0 || length($rb) == 0) { return 0; }
     if ($ra eq $rb) { return 1; }
     return 0;
+}
+
+# `strada --embed-ldflags`: the link flags for a C program that loads Strada
+# --shared libraries (which do not contain the runtime): the runtime object,
+# the libraries it needs, and -rdynamic so the libraries resolve the
+# runtime's symbols from the program.
+#   cc host.c $(strada --embed-ldflags)
+func handle_embed_ldflags() void {
+    if (!(-f $RUNTIME_OBJ)) { build_runtime(); }
+    my array @ef = ();
+    if ($IS_DARWIN != 1) { @ef = (@ef, "-rdynamic"); }
+    @ef = (@ef, $RUNTIME_OBJ);
+    if (env("STRADA_HAVE_PCRE2") eq "1") {
+        my array @ef_p = split_ws(env("STRADA_PCRE2_LIBS"));
+        @ef = (@ef, @ef_p);
+    }
+    @ef = (@ef, @DLOPEN_LIBS);
+    @ef = (@ef, "-lm", "-lpthread");
+    say(join(" ", @ef));
+    core::exit(0);
 }
 
 func handle_clear_cache() void {
@@ -1023,6 +1047,7 @@ func main() int {
     parse_args(@av);
 
     if ($CLEAR_MODULE_CACHE == 1) { handle_clear_cache(); }
+    if ($EMBED_LDFLAGS == 1) { handle_embed_ldflags(); }
     if ($REPL_MODE == 1) { handle_repl(); }
     if (length($SCRIPT_FILE) > 0) { handle_script(); }
     if ($DOC_MODE == 1) { handle_doc(); }

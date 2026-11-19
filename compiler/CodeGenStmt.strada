@@ -7044,6 +7044,9 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
 
         # Skip main function, extern functions, and private functions
         my int $is_private = $fn->{"is_private"};
+        # An extern's body function (extern_split_body) is not part of the
+        # library's Strada interface.
+        if (($fn->{"is_extern_body"} + 0) == 1) { $is_private = 1; }
         if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC() && $is_private != 1) {
             my int $ret_type = $fn->{"return_type"};
             my int $param_count = $fn->{"param_count"};
@@ -7547,8 +7550,111 @@ func type_to_export(int $type) str {
     return "scalar";
 }
 
+# C type of a parameter or result of an extern function WITH a body (the
+# C-callable wrapper of extern_split_body). Strada's int is 64-bit, and
+# scalar/array/hash values cross as StradaValue*.
+func extern_abi_c_type(int $type) str {
+    if ($type == TYPE_INT() || $type == TYPE_ENUM()) { return "int64_t"; }
+    if ($type == TYPE_SCALAR() || $type == TYPE_ARRAY() || $type == TYPE_HASH() || $type == TYPE_DYNAMIC()) {
+        return "StradaValue*";
+    }
+    return type_to_c_raw($type);
+}
+
+# 1 = integer C type, 2 = floating, 3 = char*, 4 = StradaValue*, 0 = void.
+func extern_abi_kind(int $type) int {
+    if ($type == TYPE_VOID()) { return 0; }
+    if ($type == TYPE_STR()) { return 3; }
+    if ($type == TYPE_NUM() || $type == TYPE_FLOAT32() || $type == TYPE_FLOAT64() || $type == TYPE_LONG_DOUBLE()) {
+        return 2;
+    }
+    if ($type == TYPE_INT() || $type == TYPE_ENUM() || $type == TYPE_BOOL() || $type == TYPE_INT8()
+        || $type == TYPE_INT16() || $type == TYPE_INT32() || $type == TYPE_INT64() || $type == TYPE_UINT8()
+        || $type == TYPE_UINT16() || $type == TYPE_UINT32() || $type == TYPE_UINT64() || $type == TYPE_SIZE_T()
+        || $type == TYPE_CHAR()) {
+        return 1;
+    }
+    return 4;
+}
+
+# The C wrapper of an extern function with a body: converts each C argument
+# to a Strada value, calls the body function (an ordinary Strada function,
+# see extern_split_body), releases the arguments and converts the result.
+# A str result is a malloc'd copy the C caller frees (NULL for undef); a
+# scalar/array/hash result is a new reference the caller releases with
+# strada_decref.
+func gen_extern_wrapper(scalar $cg, scalar $fn) void {
+    my int $rt = $fn->{"return_type"};
+    my int $rk = extern_abi_kind($rt);
+    my str $name = sanitize_name($fn->{"name"});
+    my str $iname = "" . $fn->{"impl_fn"}->{"name"};
+    my str $impl_c = mangle_c_func_ident(sanitize_name($iname), $iname, 0);
+    my scalar $params = $fn->{"params"};
+    my int $pc = $fn->{"param_count"};
+    emit($cg, extern_abi_c_type($rt) . " " . $name . "(");
+    my int $i = 0;
+    while ($i < $pc) {
+        if ($i > 0) { emit($cg, ", "); }
+        my scalar $p = $params->[$i];
+        emit($cg, extern_abi_c_type($p->{"param_type"}) . " " . escape_c_keyword($p->{"name"}));
+        $i = $i + 1;
+    }
+    if ($pc == 0) { emit($cg, "void"); }
+    emit($cg, ") {\n");
+    $i = 0;
+    while ($i < $pc) {
+        my scalar $p = $params->[$i];
+        my str $cp = escape_c_keyword($p->{"name"});
+        my int $pk = extern_abi_kind($p->{"param_type"});
+        emit($cg, "    StradaValue *__xa" . $i . " = ");
+        if ($pk == 1) {
+            emit($cg, "strada_new_int((int64_t)" . $cp . ");\n");
+        } elsif ($pk == 2) {
+            emit($cg, "strada_new_num((double)" . $cp . ");\n");
+        } elsif ($pk == 3) {
+            emit($cg, $cp . " ? strada_new_str(" . $cp . ") : strada_new_undef();\n");
+        } else {
+            emit($cg, $cp . " ? (strada_incref(" . $cp . "), " . $cp . ") : strada_new_undef();\n");
+        }
+        $i = $i + 1;
+    }
+    my str $call = $impl_c . "(";
+    $i = 0;
+    while ($i < $pc) {
+        if ($i > 0) { $call = $call . ", "; }
+        $call = $call . "__xa" . $i;
+        $i = $i + 1;
+    }
+    $call = $call . ")";
+    if ($rk == 0) {
+        emit($cg, "    " . $call . ";\n");
+    } else {
+        emit($cg, "    StradaValue *__xr = " . $call . ";\n");
+    }
+    $i = 0;
+    while ($i < $pc) {
+        emit($cg, "    strada_decref(__xa" . $i . ");\n");
+        $i = $i + 1;
+    }
+    my str $rc = extern_abi_c_type($rt);
+    if ($rk == 1) {
+        emit($cg, "    " . $rc . " __xo = (" . $rc . ")strada_to_int(__xr);\n    strada_decref(__xr);\n    return __xo;\n");
+    } elsif ($rk == 2) {
+        emit($cg, "    " . $rc . " __xo = (" . $rc . ")strada_to_num(__xr);\n    strada_decref(__xr);\n    return __xo;\n");
+    } elsif ($rk == 3) {
+        emit($cg, "    char *__xo = strada_defined_bool(__xr) ? strada_to_str(__xr) : NULL;\n    strada_decref(__xr);\n    return __xo;\n");
+    } elsif ($rk == 4) {
+        emit($cg, "    return __xr;\n");
+    }
+    emit($cg, "}\n\n");
+}
+
 # Generate extern function with body
 func gen_extern_function(scalar $cg, scalar $fn) void {
+    if ($fn->{"impl_fn"}) {
+        gen_extern_wrapper($cg, $fn);
+        return;
+    }
     my str $ret_type = type_to_c_raw($fn->{"return_type"});
     my str $name = sanitize_name($fn->{"name"});
 
@@ -7590,7 +7696,10 @@ func gen_extern_function(scalar $cg, scalar $fn) void {
 
 # Generate extern function declaration
 func gen_extern_decl(scalar $cg, scalar $fn) void {
+    my int $abi = 0;
+    if ($fn->{"impl_fn"}) { $abi = 1; }
     my str $ret_type = type_to_c_raw($fn->{"return_type"});
+    if ($abi == 1) { $ret_type = extern_abi_c_type($fn->{"return_type"}); }
     emit($cg, $ret_type . " " . sanitize_name($fn->{"name"}) . "(");
 
     my scalar $params = $fn->{"params"};
@@ -7600,7 +7709,9 @@ func gen_extern_decl(scalar $cg, scalar $fn) void {
             emit($cg, ", ");
         }
         my scalar $param = $params->[$i];
-        emit($cg, type_to_c_raw($param->{"param_type"}) . " " . escape_c_keyword($param->{"name"}));
+        my str $pct = type_to_c_raw($param->{"param_type"});
+        if ($abi == 1) { $pct = extern_abi_c_type($param->{"param_type"}); }
+        emit($cg, $pct . " " . escape_c_keyword($param->{"name"}));
         $i = $i + 1;
     }
 

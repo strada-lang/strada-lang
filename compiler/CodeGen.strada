@@ -1089,6 +1089,13 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
             $info{"is_extern"} = 0;
             $info{"is_c_extern"} = 0;
             $info{"is_strada_extern_decl"} = 1;
+        } elsif ($fn->{"impl_fn"}) {
+            # An extern with a body (extern_split_body): Strada callers call
+            # its body function NAME__xbody, an ordinary Strada function. Only
+            # C code goes through the C-typed wrapper.
+            $info{"is_extern"} = 0;
+            $info{"is_c_extern"} = 0;
+            $info{"is_strada_extern_decl"} = 0;
         } else {
             $info{"is_extern"} = 1;
             # Track if this is a C-style extern (raw C types, direct calls)
@@ -1121,6 +1128,10 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     }
 
     $info{"c_name"} = mangle_c_func_ident($name, "" . $fn->{"name"}, $info{"is_c_extern"});
+    if ($fn->{"type"} == NODE_EXTERN_FUNC() && $fn->{"impl_fn"}) {
+        my str $xb_iname = "" . $fn->{"impl_fn"}->{"name"};
+        $info{"c_name"} = mangle_c_func_ident(sanitize_name($xb_iname), $xb_iname, 0);
+    }
     $cg->{"functions"}->{$name} = \%info;
 }
 

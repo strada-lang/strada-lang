@@ -238,6 +238,74 @@ void strada_decref(StradaValue *sv);
 
 ## Calling Strada from C
 
+### With `extern func` (plain C types)
+
+An `extern func` with a body is exported under its own name with a plain C
+signature. Its body is ordinary Strada (strings, hashes, `our` variables,
+other functions, `try`/`throw`); the compiler adds a C wrapper that converts
+the arguments and the result.
+
+```strada
+# textlib.strada
+package TextLib;
+our int $calls = 0;
+
+extern func shout(str $s) str {
+    $calls++;
+    return uc($s) . "!";
+}
+extern func add(int $a, int $b) int { return $a + $b; }
+extern func calls() int { return $calls; }
+```
+
+| Strada type | C type | Notes |
+|-------------|--------|-------|
+| `int` | `int64_t` | |
+| `num` | `double` | |
+| `str` parameter | `char *` | copied, never modified; `NULL` arrives as undef |
+| `str` result | `char *` | a `malloc`'d copy: the caller frees it; `NULL` for undef |
+| `void` | `void` | |
+| `int8` ... `uint64`, `size_t`, `float`, `double` | the same C type | |
+| `scalar`, `array`, `hash` | `StradaValue *` | a result is a new reference: release it with `strada_decref` |
+
+Build the library with `--shared`. A `--shared` library does not contain the
+Strada runtime, so the C program links it: `strada --embed-ldflags` prints the
+flags (the runtime object, its libraries, and `-rdynamic` so the library finds
+the runtime in the program).
+
+```c
+/* host.c */
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <dlfcn.h>
+
+int main(void) {
+    void *lib = dlopen("./textlib.so", RTLD_NOW);
+    if (!lib) { fprintf(stderr, "%s\n", dlerror()); return 1; }
+    char *(*shout)(const char *) = (char *(*)(const char *))dlsym(lib, "shout");
+    int64_t (*add)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))dlsym(lib, "add");
+
+    char *s = shout("hello");
+    printf("%s %ld\n", s, (long)add(40, 2));   /* HELLO! 42 */
+    free(s);
+    return 0;
+}
+```
+
+```bash
+strada --shared textlib.strada
+cc -o host host.c $(strada --embed-ldflags)
+./host
+```
+
+Strada code in the same program or module calls these functions like any
+other (`shout("x")`). An exception that escapes an `extern func` called from
+C ends the program with the usual uncaught-exception report; catch inside the
+function and return an error value if the C caller must continue.
+
+### Low level: `StradaValue*` functions
+
 ### Basic Setup
 
 ```c

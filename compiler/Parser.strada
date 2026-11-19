@@ -5025,6 +5025,7 @@ func parse_function(scalar $parser) scalar {
 
 # Parse extern function declaration or definition
 func parse_extern_function(scalar $parser) scalar {
+    my int $ext_line = parser_current_line($parser);
     parser_expect($parser, "EXTERN");
     parser_expect_func($parser);
 
@@ -5049,7 +5050,8 @@ func parse_extern_function(scalar $parser) scalar {
     }
 
     my scalar $fn = ast_new_extern_func($__ext_name);
-    
+    ast_set_line($fn, $ext_line);
+
     parser_expect($parser, "LPAREN");
     
     # Parse parameters
@@ -5110,6 +5112,58 @@ func parse_extern_function(scalar $parser) scalar {
     }
 
     return $fn;
+}
+
+# `extern func NAME(...) T { BODY }` is callable from C with C types. Its
+# body moves into an ordinary Strada function NAME__xbody (analyzed and
+# compiled like any other: `our`, strings, hashes, cleanup), and NAME becomes
+# a C wrapper that converts the C arguments to Strada values, calls it, and
+# converts the result back (gen_extern_function). Strada callers of NAME call
+# NAME__xbody directly. Returns the new function, or 0 for a declaration.
+# $c_pkg is the C package prefix to give it ("" when the caller prefixes).
+func extern_split_body(scalar $fn, str $c_pkg) scalar {
+    if (($fn->{"has_body"} + 0) != 1) { return 0; }
+    my str $xb_bare = "" . $fn->{"name"};
+    my int $xb_ci = index($xb_bare, "::");
+    while ($xb_ci >= 0) {
+        $xb_bare = substr($xb_bare, 0, $xb_ci) . "_" . substr($xb_bare, $xb_ci + 2, length($xb_bare) - $xb_ci - 2);
+        $xb_ci = index($xb_bare, "::");
+    }
+    $xb_bare = $xb_bare . "__xbody";
+    my str $xb_name = $xb_bare;
+    if (length($c_pkg) > 0) { $xb_name = $c_pkg . "_" . $xb_bare; }
+    my scalar $impl = ast_new_function($xb_name, $fn->{"return_type"});
+    if (length($c_pkg) > 0) { $impl->{"bare_name"} = $xb_bare; }
+    my scalar $xb_params = $fn->{"params"};
+    my int $xb_i = 0;
+    while ($xb_i < $fn->{"param_count"}) {
+        my scalar $xb_p = $xb_params->[$xb_i];
+        ast_add_param($impl, ast_new_param($xb_p->{"name"}, $xb_p->{"param_type"}, $xb_p->{"sigil"}));
+        $xb_i = $xb_i + 1;
+    }
+    $impl->{"body"} = $fn->{"body"};
+    $impl->{"line"} = $fn->{"line"};
+    $impl->{"package"} = $fn->{"package"};
+    $impl->{"is_extern_body"} = 1;
+    $fn->{"impl_fn"} = $impl;
+    # The extern keeps a one-line body that calls the body function. The
+    # compiled backend ignores it (it emits the C wrapper); the bytecode VM
+    # compiles it as an ordinary function.
+    my scalar $xb_call = ast_new_call($xb_bare);
+    $xb_i = 0;
+    while ($xb_i < $fn->{"param_count"}) {
+        my scalar $xb_ap = $xb_params->[$xb_i];
+        ast_add_arg($xb_call, ast_new_variable($xb_ap->{"name"}, $xb_ap->{"sigil"}));
+        $xb_i = $xb_i + 1;
+    }
+    my scalar $xb_fwd = ast_new_block();
+    if (($fn->{"return_type"} + 0) == TYPE_VOID()) {
+        ast_add_statement($xb_fwd, ast_new_expr_stmt($xb_call));
+    } else {
+        ast_add_statement($xb_fwd, ast_new_return_stmt($xb_call));
+    }
+    $fn->{"body"} = $xb_fwd;
+    return $impl;
 }
 
 # Parse a single C-style extern function declaration (inside extern "C" block)
@@ -5630,6 +5684,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
                 my scalar $fn = parse_extern_function($mod_parser);
                 $fn->{"package"} = $current_mod_pkg;
                 ast_add_function($mod_program, $fn);
+                # The merge step package-qualifies the body function's name.
+                my scalar $mx_impl = extern_split_body($fn, "");
+                if ($mx_impl) { ast_add_function($mod_program, $mx_impl); }
             }
         } elsif (parser_check($mod_parser, "ENUM")) {
             my scalar $en = parse_enum($mod_parser);
@@ -8594,6 +8651,17 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
                 my str $pkg = $program->{"package"};
                 $fn->{"package"} = $pkg;
                 ast_add_function($program, $fn);
+                my str $xc_pkg = "";
+                if (length($pkg) > 0 && $pkg ne "main") {
+                    $xc_pkg = $pkg;
+                    my int $xc_ci = index($xc_pkg, "::");
+                    while ($xc_ci >= 0) {
+                        $xc_pkg = substr($xc_pkg, 0, $xc_ci) . "_" . substr($xc_pkg, $xc_ci + 2, length($xc_pkg) - $xc_ci - 2);
+                        $xc_ci = index($xc_pkg, "::");
+                    }
+                }
+                my scalar $x_impl = extern_split_body($fn, $xc_pkg);
+                if ($x_impl) { ast_add_function($program, $x_impl); }
             }
         } elsif (parser_check($parser, "ENUM")) {
             my scalar $en = parse_enum($parser);
