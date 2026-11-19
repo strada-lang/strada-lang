@@ -593,6 +593,33 @@ stamp in `docs/claude.html`); users then run
 `/plugin marketplace add strada-lang/strada-lang.github.io`. Rebuild and
 republish after doc or skill changes.
 
+Publishing a new version:
+1. Commit the strada-lang changes first. The skill's `VERSION` file records
+   the HEAD commit at build time.
+2. `make claude-skill SITE=../strada-lang.github.io`, then
+   `claude plugin validate ../strada-lang.github.io` and
+   `claude plugin validate build/claude-skill/plugins/strada`.
+3. In the website repo, commit `claude/`, `.claude-plugin/` and
+   `docs/claude.html`, and only those. The site often has unrelated uncommitted
+   edits. Push only with the user's approval.
+4. Check the live URLs once GitHub Pages has deployed (a minute or two):
+   `docs/claude.html`, `claude/strada-skill.zip`, `claude/strada-skill.tar.gz`.
+   To test a real install without touching your own setup, run
+   `CLAUDE_CONFIG_DIR=$(mktemp -d) claude plugin marketplace add strada-lang/strada-lang.github.io`,
+   then `claude plugin install strada@strada-lang` with the same variable.
+
+Gotchas:
+- The version is the UTC build date (`2026.11.19`). Two releases on one day
+  share a version, and `/plugin update` may not pick up the second one.
+- GitHub Pages runs Jekyll, so `claude/strada/SKILL.md` is served as
+  `SKILL.html` and the `.md` URL is a 404. Nothing links to it (the page
+  links to the files on GitHub). Adding `.nojekyll` to the website repo
+  would change how the whole site is built.
+- Testing the skill: give a fresh agent only the built folder
+  (`build/claude-skill/strada/`) and a few task descriptions, such as a CLI
+  tool, a class with typed exceptions, a test file run under `prove`, and a
+  `__C__` call into a C library. Fix whatever it had to guess.
+
 ## Key Documentation
 
 - **`CLAUDE_DEEP_DIVE.md`** - AST nodes, codegen patterns, runtime internals (read this first!)
