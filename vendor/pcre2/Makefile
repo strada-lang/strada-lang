@@ -58,11 +58,24 @@ setup:
 libpcre2-8.a: setup $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
+# Rebuild every object when the compiler or flags change (a different CC, a
+# CFLAGS from the environment, or an edit to this Makefile). Otherwise objects
+# from an older build survive a `git pull`: archives built before -fPIC was
+# added made the stage-1 link fail with "relocation R_X86_64_32S ... can not
+# be used when making a PIE object".
+FLAGS_STAMP = .build-flags
+BUILD_FLAGS := $(CC) $(CFLAGS) $(AR)
+$(FLAGS_STAMP): FORCE
+	@if [ "$$(cat $@ 2>/dev/null)" != '$(BUILD_FLAGS)' ]; then printf '%s\n' '$(BUILD_FLAGS)' > $@; fi
+$(OBJS): $(FLAGS_STAMP) Makefile
+FORCE:
+.PHONY: FORCE
+
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) libpcre2-8.a
+	rm -f $(OBJS) libpcre2-8.a $(FLAGS_STAMP)
 
 distclean: clean
 	rm -f config.h src/pcre2.h src/pcre2_chartables.c

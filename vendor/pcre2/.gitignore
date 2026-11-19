@@ -3,3 +3,5 @@
 config.h
 src/pcre2.h
 src/pcre2_chartables.c
+.build-flags
+.build-cc
