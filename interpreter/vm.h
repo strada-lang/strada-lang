@@ -1144,6 +1144,7 @@ typedef struct VM {
     size_t frame_count;
     size_t frame_cap;
     int recursion_limit;     /* core::set/get_recursion_limit; 0 = unlimited */
+    size_t jit_frame_limit;  /* min(frame_cap, recursion_limit or unlimited): JIT call fast-path bound (vm_frame_limit_update) */
     size_t exec_base;        /* frame watermark: vm_execute_call returns when
                               * frame_count pops back to this (re-entrancy) */
     VMProgram *program;

@@ -2853,3 +2853,48 @@ Test: `interpreter/test/test_vm_perf_c20c.strada`.
 - HASH_GET_CONST / HASH_SET_CONST misses (new keys, probe collisions) and BUILTIN still use the step helper.
 - `OP_WEAKEN_SLOT`, `OP_TR`, `OP_C_BLOCK`, interpolated regex patterns and tied/native operands still resume the interpreter.
 - JIT code keeps every value on the memory stack; fib still spends ~65 of its ~117 instructions per call on call/return.
+
+## VM performance, round 4 (2026-11-19)
+
+Instruction counts (callgrind), round 3 commit -> round 4:
+
+| Benchmark | Round 3 | Round 4 | Change |
+|---|---|---|---|
+| closures | 3032M | 2383M | -21% |
+| oop | 8103M | 6510M | -20% |
+| functions | 1652M | 1415M | -14% |
+| hotpaths | 26111M | 22701M | -13% |
+| compute | 109248M | 96259M | -12% |
+| binary_trees | 3766M | 3567M | -5% |
+| sort | 11872M | 11388M | -4% |
+| pipeline | 9251M | 9117M | -1% |
+| gc | 5670M | 5704M | +0.6% |
+| everything else | | | 0% |
+
+Where the time was: functions and compute (fib) are almost all JIT code, so the call/return protocol is what counts there. oop spent 20% in the step helper on constant-key hash misses, closures 28% in `vm_jit_closure_prep`, hotpaths a third of its range section building a 20M-element list.
+
+**Call/return.**
+- `VM.jit_frame_limit` = min(`frame_cap`, `recursion_limit` when > 0), kept by `vm_frame_limit_update` at the five places that change either. OP_CALL, the method-call and closure-call fast paths compare against it once (was nine instructions).
+- OP_CALL drops the `jit_state == 2` check when the callee was already compiled when the caller was compiled (state never leaves 2), or is the function being compiled (its code only runs if the compile succeeds). A self-call is `call rel32` to offset 0.
+- RETURN: `exc_top > 0` used to send every return inside any active `try` to `vm_jit_return_slow`. It now checks `exc_stack[exc_top-1].frame_count >= frame_count`, the condition the slow path pops handlers on.
+- fib: 227M -> 200M instructions for `cfib` (3 x fib(27)).
+
+**Fusion without branch-target analysis.** Both fusions emit an extra fast path in the first op and still emit every op of the sequence, so a jump into the middle, a non-int operand or a slow path runs the old code.
+- Return fusion: an op whose fast path yields an int (ADD/SUB/MUL, *_LOCAL_I32, *_LOCALS, LOAD_LOCAL of an int), followed by OP_RETURN directly or through OP_CAST_INT, jumps past RETURN's pop with the value in rax (`ret_fuse_idx`/`ret_fuse_patch`; an unpatched fusion fails the compile).
+- Compare-branch: `LOAD_LOCAL; PUSH_I8/PUSH_I32 or LOAD_LOCAL; EQ/NE/LT/LE/GT/GE; JMP_IF_FALSE/TRUE` with a forward target compares two ints and branches from LOAD_LOCAL's code.
+- `LT/LE_LOCAL_I32_JMP_F` with a forward target jumps straight to it (it went through a shared stub).
+
+**Closure calls.** OP_CALL_CLOSURE checks the value is an unbound closure whose chunk is compiled, non-variadic and current (`dt_code_len_src == code_len`), then builds the frame inline (as the method-call path does) with `frame->closure` set, which keeps the closure alive for the GC.
+
+**Hash probe.** `jb_emit_hash_primary_probe` scans `entries[0, used)` of an inline hash (no `index`) for an occupied entry with the key's hash, instead of only slot 0. oop: 12.5M step-helper calls -> 3.
+
+**Calls from C.** `vm_execute_call_cl` is now a small wrapper: for a chunk with `jit_state == 2` it pushes the frame, sets `exec_base`/`jit_stop_base`/`g_active_vm`, and runs the JIT code. If that returns `VM_JIT_OK` at the base it returns the result; otherwise it calls `vm_execute_call_full(..., resume_rc, ...)`, which skips frame setup and continues through `VM_JIT_HANDLE_RC` as if its own JIT entry had returned that code. Sort comparators: ~310 -> ~245 instructions per call; the rest of sort is GC marking and the C sort routines.
+
+**Range foreach.** `foreach my $x (A..B)` where both bounds pass `ctx_expr_is_int` (and are not raw int parameters) keeps the current value in `__fe_i` and the end in `__fe_arr`; the condition is `__fe_i <= end`. Bounds are evaluated once, before the loop, as before. Other ranges (untyped or string bounds) still build the list, so `"aa".."ad"` keeps Perl's string range.
+
+Test: `interpreter/test/test_vm_perf_c20d.strada` (recursion past 256 frames and near the limit, returns through try in the same and an outer frame, `local` in recursion, GC in deep recursion, closure argument counts / captures / recursion / variadic / non-code, inline-hash deletes, sort comparators that throw or sort, every comparison against ints, floats and strings, range edge cases). Output matches compiled, and the VM at round 3, with the JIT on and off.
+
+**Not yet done.**
+- gc is 0.6% more instructions; not investigated.
+- Boxed-int ADD/MOD/MUL (sort's random-number setup) still go through the step helper.
+- The JIT's call frame still writes eight fields per call; fib spends most of its instructions on call/return.
