@@ -1147,6 +1147,16 @@ driver adds `-lz` when it links. Or pass link flags after `--`:
 `strada prog.strada -- -lz -L/opt/lib`. Headers go in a top-level `__C__` block
 (`#include <zlib.h>`).
 
+### Calling Strada from C: `extern func`
+
+`extern func NAME(int $a, str $s) str { ... }` exports NAME with a plain C
+signature: `int` is `int64_t`, `num` is `double`, `str` is `char*` (a returned
+string is a malloc'd copy the C caller frees, NULL for undef), `scalar`/`array`/
+`hash` are `StradaValue*`. The body is ordinary Strada (`our`, hashes, other
+functions). Build with `strada --shared lib.strada`; the C program links the
+runtime: `cc host.c $(strada --embed-ldflags)`. Strada code calls NAME like any
+function (the name is not package-qualified; `import_lib` does not list it).
+
 ---
 
 ## Constants and enums
