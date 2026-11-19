@@ -395,7 +395,7 @@ module.exports = grammar({
     ),
 
     statement_modifier: $ => seq(
-      choice('if', 'unless', 'while', 'until', 'foreach'),
+      choice('if', 'unless', 'while', 'until', 'for', 'foreach'),
       $._expression,
     ),
 
@@ -575,7 +575,11 @@ module.exports = grammar({
       optional(','),
     )),
 
+    // `my $x` inside an if/while condition: `while (defined(my $l = <$fh>))`
+    my_expression: $ => prec(-1, seq('my', optional(field('type', $.type)), field('name', $.scalar_variable))),
+
     _primary_expression: $ => choice(
+      $.my_expression,
       $.number,
       $.string,
       $.q_string,

@@ -2464,7 +2464,54 @@ func parse_primary(scalar $parser) scalar {
         parser_error($parser, "unexpected 'func' in expression context");
     }
 
+    # `my [TYPE] $x` inside an if/unless/while/until condition (see
+    # parse_cond_expr): declare it on the statement, yield the variable.
+    if ($type eq "MY" && ($parser->{"cond_decl_on"} + 0) == 1) {
+        my int $cm_line = parser_current_line($parser);
+        parser_advance($parser);
+        my int $cm_type = TYPE_SCALAR();
+        if (parser_current($parser)->{"type"} ne "DOLLAR") { $cm_type = parse_type($parser); }
+        parser_expect($parser, "DOLLAR");
+        my str $cm_name = parse_var_name($parser);
+        my scalar $cm_decl = ast_new_var_decl($cm_name, $cm_type, "$");
+        ast_set_line($cm_decl, $cm_line);
+        my scalar $cm_list = $parser->{"cond_decls"};
+        push(@{$cm_list}, $cm_decl);
+        my scalar $cm_var = ast_new_variable($cm_name, "$");
+        ast_set_line($cm_var, $cm_line);
+        return $cm_var;
+    }
+
     parser_error($parser, "unexpected " . friendly_token($type, $tok->{"value"}) . " in expression");
+}
+
+# A condition of if/unless/elsif/while/until may declare variables with `my`
+# anywhere inside it (Perl): `while (defined(my $l = <$fh>))`,
+# `if ((my $n = f()) > 0)`. parse_primary appends each declaration to $decls
+# and yields a plain variable; wrap_cond_decls then puts the statement in a
+# block that declares them first, so they are scoped to the statement.
+func parse_cond_expr(scalar $parser, scalar $decls) scalar {
+    my int $cd_saved_on = $parser->{"cond_decl_on"} + 0;
+    my scalar $cd_saved = $parser->{"cond_decls"};
+    $parser->{"cond_decl_on"} = 1;
+    $parser->{"cond_decls"} = $decls;
+    my scalar $cd_expr = parse_expression($parser);
+    $parser->{"cond_decl_on"} = $cd_saved_on;
+    $parser->{"cond_decls"} = $cd_saved;
+    return $cd_expr;
+}
+
+func wrap_cond_decls(scalar $decls, scalar $stmt, int $line) scalar {
+    if (size(@{$decls}) == 0) { return $stmt; }
+    my scalar $cw_outer = ast_new_block();
+    my int $cw_i = 0;
+    while ($cw_i < size(@{$decls})) {
+        ast_add_statement($cw_outer, $decls->[$cw_i]);
+        $cw_i = $cw_i + 1;
+    }
+    ast_add_statement($cw_outer, $stmt);
+    ast_set_line($cw_outer, $line);
+    return $cw_outer;
 }
 
 # Parse postfix operations (-> derefs, function calls, subscripts)
@@ -3744,7 +3791,8 @@ func parse_if_stmt(scalar $parser) scalar {
     my int $if_line = parser_current_line($parser);
     parser_expect($parser, "IF");
     parser_expect($parser, "LPAREN");
-    my scalar $condition = parse_expression($parser);
+    my array @if_decls = ();
+    my scalar $condition = parse_cond_expr($parser, \@if_decls);
     parser_expect($parser, "RPAREN");
 
     my scalar $then_block = parse_block($parser);
@@ -3762,7 +3810,7 @@ func parse_if_stmt(scalar $parser) scalar {
             parser_advance($parser);
         }
         parser_expect($parser, "LPAREN");
-        my scalar $elsif_cond = parse_expression($parser);
+        my scalar $elsif_cond = parse_cond_expr($parser, \@if_decls);
         parser_expect($parser, "RPAREN");
         my scalar $elsif_block = parse_block($parser);
         ast_add_elsif($if_stmt, $elsif_cond, $elsif_block);
@@ -3774,7 +3822,7 @@ func parse_if_stmt(scalar $parser) scalar {
         $if_stmt->{"else_block"} = parse_block($parser);
     }
     
-    return $if_stmt;
+    return wrap_cond_decls(\@if_decls, $if_stmt, $if_line);
 }
 
 func parse_while_stmt(scalar $parser, str $label) scalar {
@@ -3861,7 +3909,8 @@ func parse_while_stmt(scalar $parser, str $label) scalar {
         return $outer_block;
     }
 
-    my scalar $condition = parse_expression($parser);
+    my array @wc_decls = ();
+    my scalar $condition = parse_cond_expr($parser, \@wc_decls);
 
     # If condition is a READLINE node, wrap as: defined($_ = readline)
     if ($condition->{"type"} == NODE_READLINE()) {
@@ -3877,21 +3926,22 @@ func parse_while_stmt(scalar $parser, str $label) scalar {
     my scalar $body = parse_block($parser);
     my scalar $while_stmt = ast_new_while_stmt($condition, $body, $label);
     ast_set_line($while_stmt, $while_line);
-    return $while_stmt;
+    return wrap_cond_decls(\@wc_decls, $while_stmt, $while_line);
 }
 
 func parse_until_stmt(scalar $parser, str $label) scalar {
     my int $until_line = parser_current_line($parser);
     parser_expect($parser, "UNTIL");
     parser_expect($parser, "LPAREN");
-    my scalar $condition = parse_expression($parser);
+    my array @uc_decls = ();
+    my scalar $condition = parse_cond_expr($parser, \@uc_decls);
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
     my scalar $neg_cond = ast_new_unary_op("!", $condition);
     my scalar $until_stmt = ast_new_while_stmt($neg_cond, $body, $label);
     ast_set_line($until_stmt, $until_line);
-    return $until_stmt;
+    return wrap_cond_decls(\@uc_decls, $until_stmt, $until_line);
 }
 
 # Parse do-while loop (`do { body } while (condition);`) or standalone `do { body };` block
@@ -4189,7 +4239,8 @@ func parse_statement(scalar $parser) scalar {
     if ($type eq "UNLESS") {
         parser_advance($parser);
         parser_expect($parser, "LPAREN");
-        my scalar $cond = parse_expression($parser);
+        my array @ul_decls = ();
+        my scalar $cond = parse_cond_expr($parser, \@ul_decls);
         parser_expect($parser, "RPAREN");
         my scalar $then_block = parse_block($parser);
         my scalar $neg_cond = ast_new_unary_op("!", $cond);
@@ -4202,7 +4253,7 @@ func parse_statement(scalar $parser) scalar {
             }
             parser_advance($parser);
             parser_expect($parser, "LPAREN");
-            my scalar $elsif_cond = parse_expression($parser);
+            my scalar $elsif_cond = parse_cond_expr($parser, \@ul_decls);
             parser_expect($parser, "RPAREN");
             my scalar $elsif_block = parse_block($parser);
             ast_add_elsif($if_stmt, $elsif_cond, $elsif_block);
@@ -4211,7 +4262,7 @@ func parse_statement(scalar $parser) scalar {
             parser_advance($parser);
             $if_stmt->{"else_block"} = parse_block($parser);
         }
-        return $if_stmt;
+        return wrap_cond_decls(\@ul_decls, $if_stmt, $stmt_line);
     }
 
     # Check for labeled statement: LABEL: while/for
@@ -4621,6 +4672,34 @@ func parse_statement(scalar $parser) scalar {
         my scalar $mod_while = ast_new_while_stmt($mod_cond, $mod_block, "");
         ast_set_line($mod_while, $stmt_line);
         return $mod_while;
+    }
+
+    # expr for LIST; / expr foreach LIST; -- runs expr once per element with
+    # $_ aliased to it, exactly like `foreach (LIST) { expr; }`.
+    if ($mod_type eq "FOR" || $mod_type eq "FOREACH") {
+        parser_advance($parser);
+        my scalar $fm_list = parse_expression($parser);
+        if (parser_check($parser, "COMMA")) {
+            my scalar $fm_arr = ast_new_anon_array();
+            $fm_arr->{"is_list"} = 1;
+            ast_add_array_elem($fm_arr, $fm_list);
+            while (parser_check($parser, "COMMA")) {
+                parser_advance($parser);
+                if (parser_check($parser, "SEMI")) { last; }
+                ast_add_array_elem($fm_arr, parse_expression($parser));
+            }
+            $fm_list = $fm_arr;
+        }
+        parser_expect($parser, "SEMI");
+        my scalar $fm_stmt = $la_stmt;
+        if (!$fm_stmt) { $fm_stmt = ast_new_expr_stmt($expr); }
+        ast_set_line($fm_stmt, $stmt_line);
+        my scalar $fm_block = ast_new_block();
+        ast_add_statement($fm_block, $fm_stmt);
+        my scalar $fm_decl = ast_new_var_decl("_", TYPE_SCALAR(), "$");
+        my scalar $fm_loop = ast_new_foreach_stmt($fm_decl, "_", $fm_list, $fm_block, "");
+        ast_set_line($fm_loop, $stmt_line);
+        return $fm_loop;
     }
 
     # expr until cond;

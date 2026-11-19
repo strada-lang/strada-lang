@@ -1,7 +1,7 @@
 # Known Issues
 
 Intentional behavioural differences from Perl and unsupported syntax, as of
-2026-11-12.
+2026-11-19.
 
 For bugs that were fixed, read the regression tests in `t/bugfix_tests/` (run
 by `t/t_bugfixes.sh` / `./t/run_tests.sh bugfix`): each file's header comment
@@ -23,10 +23,11 @@ byte escapes (`"\xFF"`) remain byte-oriented until validated in place with
 
 Not bugs, but a common source of parse errors when writing from Perl habit:
 
-- `and`, `or`, `not` (use `&&`, `||`, `!`)
-- `&=`, `|=`
-- `0o77`, `0b1010`, and scientific notation (`1.5e10`); octal is `077`
-- `while (defined(my str $line = <$fh>))` (declare the variable before the loop)
-- a `for`/`foreach` statement modifier (`say($_) for @list;`)
-- `throw EXPR if COND;` (wrap the `throw` in an `if` block)
+- `state` variables (use an `our` variable in the package)
+- `__DATA__` / `__END__` sections and the `DATA` handle
+- postfix dereference (`$r->@*`, `$r->%*`); write `@{$r}`, `%{$r}`
+- `given`/`when`
+- `my` inside an expression other than an if/unless/elsif/while/until
+  condition (`foo(my $x = 1)`)
 - `num(...)` and `str(...)` as conversion functions
+- `"$name"` interpolation: Strada interpolates only `"${name}"`

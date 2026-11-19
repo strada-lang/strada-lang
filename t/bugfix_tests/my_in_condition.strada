@@ -1,0 +1,27 @@
+# EXPECT: L:one L:0 L: L:last |v3 n=3 z=0 found t0 t1 |outer
+# `my` inside an if/unless/elsif/while/until condition was a parse error
+# ("unexpected 'my' in expression"), so Perl's
+# `while (defined(my $l = <$fh>))` did not compile. The variable is scoped to
+# the statement, and a defined-but-false value (0, "") does not end the loop.
+func main() int {
+    my str $path = "/tmp/strada_my_in_cond_" . core::getpid() . ".txt";
+    core::spew($path, "one\n0\n\nlast");
+    my $fh = core::open($path, "r");
+    while (defined(my str $l = <$fh>)) { print("L:" . $l . " "); }
+    core::close($fh);
+    core::unlink($path);
+    print("|");
+    my @q = (3, 0, 7);
+    my $i = 0;
+    while ((my $v = $q[$i++]) > 0) { print("v" . $v . " "); }
+    if ((my $n = scalar(@q)) > 2) { print("n=" . $n . " "); } else { print("no" . $n); }
+    unless ((my $z = 0)) { print("z=" . $z . " "); }
+    if (0) { } elsif (my $e = "found") { print($e . " "); }
+    my $k = 0;
+    until ((my $t = $k++) >= 2) { print("t" . $t . " "); }
+    print("|");
+    my $l = "outer";
+    while (defined(my $l = shift(@q))) { last; }
+    print($l);
+    return 0;
+}

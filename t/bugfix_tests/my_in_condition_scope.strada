@@ -1,0 +1,9 @@
+# COMPILE-ERROR: undefined variable '$n'
+# VM-COMPILE-ERROR: undeclared variable '$n'
+# A `my` declared in a condition is scoped to that statement: using it after
+# the statement is an error, as in Perl.
+func main() int {
+    if ((my $n = 3) > 1) { say($n); }
+    say($n);
+    return 0;
+}

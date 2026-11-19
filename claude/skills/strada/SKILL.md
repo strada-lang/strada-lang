@@ -89,8 +89,10 @@ program on the bytecode VM, and `strada --repl` opens a REPL.
 - **`core::waitpid` returns the raw status** (`$status >> 8` is the exit code);
   `core::system` likewise; `core::system_argv($prog, \@argv)` (no shell, `argv[0]` is
   the program name) returns the exit code itself.
-- Statement modifiers are `if`, `unless`, `while`, `until`; there is no
-  `... for @list` form, write a `foreach` loop.
+- Statement modifiers are `if`, `unless`, `while`, `until`, `for` and
+  `foreach` (`say($_) for @list;`). `my` may appear inside an if/while
+  condition (`while (defined(my $l = <$fh>))`), but not in other
+  expressions.
 - `||` treats `0` and `""` as false; use `//` for "default when undef".
 - Hash keys: quote them (`$h{"name"}`); `k => v` pairs build hashes as in Perl.
 

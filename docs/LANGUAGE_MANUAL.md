@@ -1371,6 +1371,13 @@ next unless $valid;
 | `EXPR unless COND;` | `if (!COND) { EXPR; }` |
 | `EXPR while COND;` | `while (COND) { EXPR; }` |
 | `EXPR until COND;` | `while (!COND) { EXPR; }` |
+| `EXPR for LIST;` / `EXPR foreach LIST;` | `foreach (LIST) { EXPR; }` (`$_` is each element) |
+
+A condition of `if`, `unless`, `elsif`, `while` or `until` may declare
+variables with `my` anywhere inside it, as in Perl:
+`while (defined(my str $line = <$fh>)) { ... }`,
+`if ((my $n = count()) > 0) { ... }`. Such a variable is scoped to that
+statement.
 
 ### 13.5 Goto
 

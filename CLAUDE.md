@@ -605,9 +605,17 @@ keep those two docs accurate: they are what Claude reads. `make claude-skill`
 (claude.ai upload), a tarball (`~/.claude/skills/`), a Claude Code plugin and a
 marketplace listing. `make claude-skill SITE=../strada-lang.github.io` installs
 them into the website (`claude/`, `.claude-plugin/marketplace.json`, version
-stamp in `docs/claude.html`); users then run
+stamp in `docs/ai.html`); users then run
 `/plugin marketplace add strada-lang/strada-lang.github.io`. Rebuild and
 republish after doc or skill changes.
+
+The skill uses the open Agent Skills format, so the same folder works in
+OpenAI Codex (`~/.agents/skills/` or a repo's `.agents/skills/`). The site's
+one page for all assistants is `docs/ai.html` (Claude Code, Codex, the Claude
+apps, and other tools via `claude/strada/reference/language.md`, which is
+served as raw Markdown because it has no front matter); `docs/claude.html` is
+a redirect to it, kept for old links and installed plugins' homepage. Keep
+SKILL.md free of assistant-specific instructions.
 
 Publishing a new version:
 1. Commit the strada-lang changes first. The skill's `VERSION` file records
@@ -616,10 +624,11 @@ Publishing a new version:
    `claude plugin validate ../strada-lang.github.io` and
    `claude plugin validate build/claude-skill/plugins/strada`.
 3. In the website repo, commit `claude/`, `.claude-plugin/` and
-   `docs/claude.html`, and only those. The site often has unrelated uncommitted
+   `docs/ai.html`, and only those. The site often has unrelated uncommitted
    edits. Push only with the user's approval.
 4. Check the live URLs once GitHub Pages has deployed (a minute or two):
-   `docs/claude.html`, `claude/strada-skill.zip`, `claude/strada-skill.tar.gz`.
+   `docs/ai.html`, `claude/strada-skill.zip`, `claude/strada-skill.tar.gz`,
+   `claude/strada/reference/language.md`.
    To test a real install without touching your own setup, run
    `CLAUDE_CONFIG_DIR=$(mktemp -d) claude plugin marketplace add strada-lang/strada-lang.github.io`,
    then `claude plugin install strada@strada-lang` with the same variable.
@@ -1650,7 +1659,13 @@ compiler:
   lexer reads `%` after `keys`/`values`/`each`/`delete`/`exists`/`scalar`/
   `defined` as a sigil unless the word is itself a variable name (`$keys % 4`).
   `while (my ($k, $v) = LIST)` loops while the list is non-empty (desugared to
-  a hidden `@__wlN`); a parenthesized group of pairs in a hash literal joins
+  a hidden `@__wlN`); `EXPR for LIST;` / `EXPR foreach LIST;` is
+  `foreach (LIST) { EXPR; }` (2026-11-19); `my [TYPE] $x` may appear anywhere
+  in an if/unless/elsif/while/until condition (`while (defined(my $l =
+  <$fh>))`): `parse_cond_expr` turns on `cond_decl_on`, parse_primary
+  records the declaration and yields the variable, and `wrap_cond_decls`
+  puts the statement in a block that declares it first (statement scope).
+  Elsewhere `my` in an expression is still a parse error; a parenthesized group of pairs in a hash literal joins
   the hash (`parse_anon_hash_entry`), while `(EXPR) => v` stays a computed key.
 - **Audit 20 final batch (2026-11-18)**: `func { ... }` / `fn { ... }` (no
   parameter list) take their arguments in `@_` and `func ($a, ...@rest)` is
