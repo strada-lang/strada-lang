@@ -247,7 +247,19 @@ endif
 VENDOR_PCRE2_DIR = vendor/pcre2
 VENDOR_PCRE2_LIB = $(VENDOR_PCRE2_DIR)/libpcre2-8.a
 
-$(VENDOR_PCRE2_LIB): $(wildcard $(VENDOR_PCRE2_DIR)/src/*.c)
+# Rebuilt when a source, its Makefile, or the compiler/flags change. A plain
+# dependency on the .c files kept objects from an older build after a pull
+# (built without -fPIC, they broke the stage-1 link). The stamp file is
+# rewritten only when the recorded CC/CFLAGS differ, so an unchanged tree
+# rebuilds nothing; the sub-make keeps its own stamp for its objects.
+VENDOR_PCRE2_STAMP = $(VENDOR_PCRE2_DIR)/.build-cc
+VENDOR_PCRE2_KEY := $(CC) | $(shell printf '%s' "$$CFLAGS")
+$(VENDOR_PCRE2_STAMP): pcre2-force
+	@if [ "$$(cat $@ 2>/dev/null)" != '$(VENDOR_PCRE2_KEY)' ]; then printf '%s\n' '$(VENDOR_PCRE2_KEY)' > $@; fi
+pcre2-force:
+.PHONY: pcre2-force
+
+$(VENDOR_PCRE2_LIB): $(wildcard $(VENDOR_PCRE2_DIR)/src/*.c) $(VENDOR_PCRE2_DIR)/Makefile $(VENDOR_PCRE2_STAMP)
 	@echo "=== Building bundled PCRE2 ==="
 	$(MAKE) -C $(VENDOR_PCRE2_DIR) CC="$(CC)"
 
