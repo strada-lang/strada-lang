@@ -70,6 +70,7 @@ tools/strada-repl.c
 !/LICENSE
 !/Makefile
 !/README.md
+!/claude/
 !/configure
 !/strada
 !/benchmarks/

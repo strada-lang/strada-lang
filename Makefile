@@ -221,7 +221,7 @@ RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 VM_RT_OBJ = $(RUNTIME_DIR)/vm.o
 VM_COMP_RT_OBJ = $(RUNTIME_DIR)/vm_compiler.o
 
-.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp update-bootstrap
+.PHONY: claude-skill all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp update-bootstrap
 
 # Default: build the self-hosting compiler, tools, and libraries. The
 # bytecode VM interpreter binary (`make interpreter`) is still opt-in;
@@ -505,6 +505,11 @@ endif
 tools: $(TOOL_BINS)
 	@echo ""
 	@echo "✓ Tools built in tools/"
+
+# Package the Claude skill (claude/skills/strada) as a folder, zip, tarball and
+# Claude Code plugin in build/claude-skill. SITE=<website checkout> also installs it there.
+claude-skill:
+	tools/build-claude-skill.sh $(if $(SITE),--site $(SITE))
 
 # Every tool is built by its recipe via `./strada` (the shim), which execs
 # the compiled strada-driver — so the tools need it present, not just stradac.
@@ -847,6 +852,7 @@ help:
 	@echo "Primary Targets:"
 	@echo "  all           - Build self-hosting compiler (default)"
 	@echo "  tools         - Build tools (stradadoc, strada-soinfo, etc.)"
+	@echo "  claude-skill  - Package the Strada skill for Claude (SITE=dir installs it)"
 	@echo "  libs          - Build all shared libraries"
 	@echo "  install       - Install to system (default: /usr/local)"
 	@echo "  uninstall     - Remove installed files"
