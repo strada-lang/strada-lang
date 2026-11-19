@@ -577,6 +577,22 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 1. **`CLAUDE.md`** (this file)
 2. **`CLAUDE_DEEP_DIVE.md`** - AST nodes, code gen patterns
 
+## Claude skill (`claude/skills/strada`, 2026-11-19)
+
+A skill that teaches Claude to write Strada: `SKILL.md` (workflow, Perl
+pitfalls, `__C__` rules), `scripts/check-toolchain.sh`, `scripts/strada-run.sh`
+(build to a temp dir, run, clean up; also a `prove --exec` runner). The
+references are copied from `docs/STRADA_FOR_CLAUDE.md` (as
+`reference/language.md`) and `docs/BUILTIN_FUNCTIONS.md` at package time, so
+keep those two docs accurate: they are what Claude reads. `make claude-skill`
+(`tools/build-claude-skill.sh`) builds `build/claude-skill/`: the folder, a zip
+(claude.ai upload), a tarball (`~/.claude/skills/`), a Claude Code plugin and a
+marketplace listing. `make claude-skill SITE=../strada-lang.github.io` installs
+them into the website (`claude/`, `.claude-plugin/marketplace.json`, version
+stamp in `docs/claude.html`); users then run
+`/plugin marketplace add strada-lang/strada-lang.github.io`. Rebuild and
+republish after doc or skill changes.
+
 ## Key Documentation
 
 - **`CLAUDE_DEEP_DIVE.md`** - AST nodes, codegen patterns, runtime internals (read this first!)

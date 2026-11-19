@@ -143,7 +143,7 @@ my array @byname = sort { $a cmp $b; } @strings;
 
 ### Logical
 
-`&&`, `||`, `//` (defined-or), `!`. There are **no** `and` / `or` / `not` word operators (parse error) — use `&&`, `||`, `!`.
+`&&`, `||`, `//` (defined-or), `!`. Perl's low-precedence `and`, `or`, `xor`, `not` also exist; they bind looser than assignment, so `open(...) or die(...)` works, but prefer `&&`/`||`/`!` inside expressions.
 
 `||` returns the actual value, not a boolean (Perl-style):
 
@@ -210,7 +210,7 @@ return 0 unless $ok;
 $i = $i + 1 while $i < 10;
 ```
 
-The modifiers are `if`, `unless`, `while`, `until`. There is no `for`/`foreach` statement modifier (`print($_) for @arr;` is a parse error — write a `foreach` loop). `throw EXPR if COND;` is also a parse error; use `if (COND) { throw EXPR; }` (`die(...) unless COND;` is fine).
+The modifiers are `if`, `unless`, `while`, `until`. There is no `for`/`foreach` statement modifier (`print($_) for @arr;` is a parse error — write a `foreach` loop). `throw EXPR if COND;` and `die(...) unless COND;` both work.
 
 ---
 
@@ -592,7 +592,7 @@ foreach (@lines) {
 }
 ```
 
-Variables interpolate in patterns, including `s///` patterns, as `$name` or `${name}` (the replacement side takes `$1`-style backreferences but not variables).
+Variables interpolate in patterns, including `s///` patterns, as `$name` or `${name}` (the replacement side interpolates variables the same way, plus `$1`-style backreferences).
 
 ### PCRE2 features available
 
@@ -800,7 +800,7 @@ try {
 
 Exceptions are scalar values. Throwing a blessed object lets typed catches match by class. Strada also accepts plain string throws.
 
-Uncaught exceptions print a stack trace and exit (disable trace tracking with the `--no-stack-trace` compile flag). `throw` takes no statement modifier (`throw X if COND;` is a parse error). Introspection:
+Uncaught exceptions print a stack trace and exit (disable trace tracking with the `--no-stack-trace` compile flag). `throw X if COND;` works like any statement modifier. Introspection:
 
 ```strada
 my scalar $info = core::caller();        # immediate caller
@@ -1118,7 +1118,9 @@ func process(str $data) int {
 | `strada_to_str(sv)` | Returns allocated `char*`. **Must `free()`** the result. |
 | `strada_new_int(i)` | Returns tagged-int `StradaValue*` (no heap if in range). |
 | `strada_new_num(n)` | Heap-allocates a STRADA_NUM. |
-| `strada_new_str(s)` | Heap-allocates a STRADA_STR (copies the string). |
+| `strada_new_str(s)` | Heap-allocates a STRADA_STR (copies the string up to its NUL). |
+| `strada_new_str_len(s, n)` | Binary-safe: copies exactly `n` bytes. |
+| `strada_str_len(sv)` | Length in bytes, binary-safe (`strada_to_str` copies every byte, but `strlen` stops at a NUL). |
 | `strada_incref(sv)`, `strada_decref(sv)` | Refcount management. Decref before reassigning. |
 | `STRADA_IS_TAGGED_INT(sv)` | Macro: 1 if `sv` is a tagged int. |
 | `STRADA_TAGGED_INT_VAL(sv)` | Macro: extract the int from a tagged int. |
@@ -1134,6 +1136,13 @@ func process(str $data) int {
   strada_decref(p->some_field);
   p->some_field = strada_new_int(42);
   ```
+
+### Linking C libraries
+
+Name the library in the source with `link_lib "z";` (top level, like `use`), and the
+driver adds `-lz` when it links. Or pass link flags after `--`:
+`strada prog.strada -- -lz -L/opt/lib`. Headers go in a top-level `__C__` block
+(`#include <zlib.h>`).
 
 ---
 
@@ -1443,5 +1452,5 @@ When generating Strada code:
 5. **`func main() int { return 0; }`** is the entry point of a complete program. No statements outside functions.
 6. **`core::` for system calls**, `math::` for math, `async::` for concurrency. No `use` needed for these.
 7. **Don't over-engineer.** Strada is Perl-flavored — small scripts and clean OOP both work without ceremony.
-8. **Interpolate with `"${name}"` only** — bare `"$name"` prints literally; use `.` or `sprintf` for elements and expressions. No `num()`/`str()`, no `and`/`or`/`not`.
+8. **Interpolate with `"${name}"` only** — bare `"$name"` prints literally; use `.` or `sprintf` for elements and expressions. No `num()`/`str()`.
 9. **Test locally:** `./strada --check yourfile.strada` for a fast syntax/semantic check, `./strada -O0 -r yourfile.strada` to compile and run quickly.
