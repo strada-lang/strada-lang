@@ -24,6 +24,14 @@
 
 #include "vm_generic_builtins.inc"
 
+/* The JIT's call fast path compares frame_count against one bound: frame_cap, or
+ * recursion_limit when that is set and smaller. Call after changing either. */
+static inline void vm_frame_limit_update(VM *vm) {
+    size_t lim = vm->frame_cap;
+    if (vm->recursion_limit > 0 && (size_t)vm->recursion_limit < lim) lim = (size_t)vm->recursion_limit;
+    vm->jit_frame_limit = lim;
+}
+
 int vm_generic_builtin_find(const char *name, int argc) {
     for (int i = 0; i < VM_GENERIC_BUILTIN_COUNT; i++) {
         if (vm_generic_builtins[i].argc == argc &&
@@ -1529,6 +1537,7 @@ static VM *vm_new_base(VMProgram *prog) {
     vm->frame_cap = 256;
     vm->frames = calloc(vm->frame_cap, sizeof(VMFrame));
     vm->recursion_limit = 1000;
+    vm_frame_limit_update(vm);
     vm->program = prog;
     vm->exc_cap = 32;
     vm->exc_stack = calloc(vm->exc_cap, sizeof(VMExcHandler));
@@ -1578,6 +1587,7 @@ static VM *vm_new_worker(VM *parent) {
         vm->globals = root->globals;
         vm->default_fh = root->default_fh;
         vm->recursion_limit = root->recursion_limit;
+        vm_frame_limit_update(vm);
         pthread_mutex_lock(&root->gc_wait_mutex);
         while (__atomic_load_n(&root->gc_requested, __ATOMIC_ACQUIRE)) {
             pthread_cond_wait(&root->gc_start_cond, &root->gc_wait_mutex);
@@ -2306,6 +2316,7 @@ static void vm_frames_grow(VM *vm) {
     if (vm->is_worker_vm) pthread_mutex_lock(&vm->gc_mutex);
     vm->frame_cap *= 2;
     vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
+    vm_frame_limit_update(vm);
     if (vm->is_worker_vm) pthread_mutex_unlock(&vm->gc_mutex);
 }
 
@@ -8194,6 +8205,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         }
         case BUILTIN_CORE_SET_RECURSION_LIMIT: {
             vm->recursion_limit = argc >= 1 ? (int)vm_to_int(args[0]) : 1000;
+            vm_frame_limit_update(vm);
             SP_PUSH(VM_UNDEF_VAL);
             break;
         }
@@ -14844,7 +14856,24 @@ static int jb_emit_hash_primary_probe(JitBuf *b, const VMInsn *di, VMChunk *c, i
     fails[nf++] = jb_jcc_placeholder(b, 0x88); /* js: empty index slot */
     uint32_t j_have = jb_jmp_placeholder(b);
     jb_patch_here(b, j_small);
+    /* inline hash: scan dense slots [0, used) for an occupied entry with this hash */
+    jb_mem(b, 1, 0x63, JR_R8, JR_RAX, (int32_t)offsetof(VMHash, used)); /* movsxd r8, [rax+used] */
+    jb_mem(b, 1, 0x8B, JR_RDX, JR_RAX, (int32_t)offsetof(VMHash, entries));
     jb_rr(b, 0, 0x31, JR_RCX, JR_RCX); /* xor ecx, ecx */
+    uint32_t scan_top = (uint32_t)b->len;
+    jb_rr(b, 1, 0x39, JR_R8, JR_RCX); /* cmp rcx, r8 */
+    fails[nf++] = jb_jcc_placeholder(b, 0x8D); /* jge: not found */
+    jb_mov_rr(b, JR_RSI, JR_RCX);
+    jb_shift_ri8(b, 1, 4, JR_RSI, 5); /* shl rsi, 5 */
+    jb_rr(b, 1, 0x01, JR_RDX, JR_RSI); /* add rsi, rdx */
+    jb_mem(b, 0, 0x81, 7, JR_RSI, (int32_t)offsetof(VMHashEntry, hash)); jb_u32(b, khash);
+    uint32_t j_next = jb_jcc_placeholder(b, 0x85);
+    jb_mem(b, 0, 0x80, 7, JR_RSI, (int32_t)offsetof(VMHashEntry, occupied)); jb_u8(b, 1);
+    uint32_t j_found = jb_jcc_placeholder(b, 0x84);
+    jb_patch_here(b, j_next);
+    jb_alu_ri32(b, 0, JR_RCX, 1);
+    jb_u8(b, 0xE9); jb_u32(b, (uint32_t)(int32_t)(scan_top - (b->len + 4)));
+    jb_patch_here(b, j_found);
     jb_patch_here(b, j_have);
     jb_shift_ri8(b, 1, 4, JR_RCX, 5); /* shl rcx, 5 */
     jb_mem(b, 1, 0x8B, JR_RAX, JR_RAX, (int32_t)offsetof(VMHash, entries));
@@ -14880,6 +14909,15 @@ static int jb_emit_hash_primary_probe(JitBuf *b, const VMInsn *di, VMChunk *c, i
     return nf;
 }
 
+/* Index of the OP_RETURN that the value pushed by dt_code[idx] goes straight
+ * to (idx+1, or idx+2 through an OP_CAST_INT when allow_cast), else -1. */
+static long jb_return_after(const VMChunk *c, size_t idx, int allow_cast) {
+    if (idx + 1 < c->dt_len && c->dt_code[idx + 1].op == OP_RETURN) return (long)idx + 1;
+    if (allow_cast && idx + 2 < c->dt_len && c->dt_code[idx + 1].op == OP_CAST_INT &&
+        c->dt_code[idx + 2].op == OP_RETURN) return (long)idx + 2;
+    return -1;
+}
+
 /* Shared bailout stub builder at end of chunk: returns eax (1 or 2) with rbp popped */
 static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
     if (__builtin_expect(c->jit_state != 0, 0)) return;
@@ -14905,6 +14943,13 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
      * tagged int) jumps past the cast's check */
     long skip_cast_idx = -1;
     uint32_t skip_cast_patch = 0;
+    /* Return fusion: an op whose fast path yields an int directly followed by
+     * OP_RETURN (optionally through OP_CAST_INT) jumps past RETURN's pop with
+     * the value in rax and r15 already lowered. RETURN's own code is still
+     * emitted for every other path into it. */
+    long ret_fuse_idx = -1;
+    uint32_t ret_fuse_patch[4];
+    int ret_fuse_n = 0;
 
     for (size_t idx = 0; idx < c->dt_len; idx++) {
         b->offs[idx] = (uint32_t)b->len;
@@ -14986,6 +15031,55 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         case OP_LOAD_LOCAL: {
             uint16_t slot = di->a;
             if (slot > (uint16_t)max_loc) { bail_ok = 0; break; }
+            {
+                /* LOAD_LOCAL; PUSH_I8/I32 or LOAD_LOCAL; EQ..GE; JMP_IF_FALSE/TRUE (forward):
+                 * with integer operands, compare and branch here. The four ops are still
+                 * emitted below for other operand types and for jumps into the middle. */
+                const VMInsn *d1 = idx + 3 < c->dt_len ? di + 1 : NULL;
+                int jcc_true = -1;
+                if (d1) {
+                    uint8_t o2 = d1[1].op, o3 = d1[2].op;
+                    int imm_ok = (d1->op == OP_PUSH_I8 || d1->op == OP_PUSH_I32) &&
+                                 d1->imm.i64 >= INT32_MIN && d1->imm.i64 <= INT32_MAX;
+                    int loc_ok = d1->op == OP_LOAD_LOCAL && d1->a <= (uint16_t)max_loc;
+                    int fwd = (o3 == OP_JMP_IF_FALSE || o3 == OP_JMP_IF_TRUE) &&
+                              d1[2].a < c->dt_len && (size_t)d1[2].a > idx + 3;
+                    if ((imm_ok || loc_ok) && fwd) {
+                        switch (o2) {
+                        case OP_EQ: jcc_true = 0x84; break;
+                        case OP_NE: jcc_true = 0x85; break;
+                        case OP_LT: jcc_true = 0x8C; break;
+                        case OP_LE: jcc_true = 0x8E; break;
+                        case OP_GT: jcc_true = 0x8F; break;
+                        case OP_GE: jcc_true = 0x8D; break;
+                        default: break;
+                        }
+                    }
+                    if (jcc_true >= 0) {
+                        jb_mem(b, 1, 0x8B, JR_RAX, JR_R13, (int32_t)slot * 8);
+                        uint32_t j_gen;
+                        if (loc_ok) {
+                            jb_mem(b, 1, 0x8B, JR_RDX, JR_R13, (int32_t)d1->a * 8);
+                            j_gen = jb_j_not_both_int(b, JR_RAX, JR_RDX);
+                            jb_shift_ri8(b, 1, 4, JR_RAX, 14);
+                            jb_shift_ri8(b, 1, 4, JR_RDX, 14);
+                            jb_rr(b, 1, 0x39, JR_RDX, JR_RAX); /* cmp rax, rdx */
+                        } else {
+                            j_gen = jb_j_not_int(b, JR_RAX);
+                            jb_shift_ri8(b, 1, 4, JR_RAX, 14);
+                            jb_shift_ri8(b, 1, 7, JR_RAX, 14);
+                            jb_alu_ri32(b, 7, JR_RAX, (int32_t)d1->imm.i64); /* cmp rax, imm */
+                        }
+                        /* JMP_IF_FALSE jumps when the comparison is false (jcc ^ 1 inverts it) */
+                        uint8_t jcc_jump = (uint8_t)(o3 == OP_JMP_IF_FALSE ? (jcc_true ^ 1) : jcc_true);
+                        uint32_t p_t = jb_jcc_placeholder(b, jcc_jump);
+                        jb_add_target_patch(b, p_t, d1[2].a);
+                        uint32_t p_n = jb_jmp_placeholder(b);
+                        jb_add_target_patch(b, p_n, (uint16_t)(idx + 4));
+                        jb_patch_here(b, j_gen);
+                    }
+                }
+            }
             jb_mem(b, 1, 0x8B, JR_RAX, JR_R13, (int32_t)slot * 8);
             /* Fast check: rax == 0 || (rax >> 50) != 0 => not ptr */
             jb_rr(b, 1, 0x85, JR_RAX, JR_RAX);
@@ -15001,6 +15095,21 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_alu_ri32(b, 7, JR_RCX, VM_OBJ_WEAKREF);     uint32_t j_slow3 = jb_jcc_placeholder(b, 0x84);
             jb_patch_here(b, j_fast0);
             jb_patch_here(b, j_fast1);
+            {
+                /* return $x: hand the value to RETURN (through CAST_INT only for ints) */
+                long ri = jb_return_after(c, idx, 1);
+                if (ri >= 0 && ret_fuse_idx < 0) {
+                    if (ri == (long)idx + 1) {
+                        ret_fuse_patch[ret_fuse_n++] = jb_jmp_placeholder(b);
+                    } else {
+                        jb_mov_rr(b, JR_RCX, JR_RAX);
+                        jb_shift_ri8(b, 1, 7, JR_RCX, 50); /* sar rcx, 50 */
+                        jb_alu_ri32(b, 7, JR_RCX, -1);     /* cmp rcx, -1 */
+                        ret_fuse_patch[ret_fuse_n++] = jb_jcc_placeholder(b, 0x84); /* je: int */
+                    }
+                    ret_fuse_idx = ri;
+                }
+            }
             jb_sp_push_rax(b);
             uint32_t j_done = jb_jmp_placeholder(b);
 
@@ -15165,13 +15274,20 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
                 }
                 j_ov = jb_tag_rax_int50_or_jump(b);
             }
-            jb_sp_push_rax(b);
-            uint32_t j_done = jb_jmp_placeholder(b);
+            long ri = ret_fuse_idx < 0 ? jb_return_after(c, idx, 1) : -1;
+            if (ri >= 0) {
+                /* return <int expr>: hand the result to RETURN in rax */
+                ret_fuse_patch[ret_fuse_n++] = jb_jmp_placeholder(b);
+                ret_fuse_idx = ri;
+            } else {
+                jb_sp_push_rax(b);
+            }
+            uint32_t j_done = ri >= 0 ? 0 : jb_jmp_placeholder(b);
 
             jb_patch_here(b, j_notint);
             jb_patch_here(b, j_ov);
             jb_emit_step_helper(b, di, next_di, 0);
-            jb_patch_here(b, j_done);
+            if (j_done) jb_patch_here(b, j_done);
             break;
         }
 
@@ -15196,14 +15312,21 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
                 has_mulov = 1;
                 j_ov = jb_tag_rax_int50_or_jump(b);
             }
-            jb_sp_push_rax(b);
-            uint32_t j_done = jb_jmp_placeholder(b);
+            long ri = ret_fuse_idx < 0 ? jb_return_after(c, idx, 1) : -1;
+            if (ri >= 0) {
+                /* return <int expr>: hand the result to RETURN in rax */
+                ret_fuse_patch[ret_fuse_n++] = jb_jmp_placeholder(b);
+                ret_fuse_idx = ri;
+            } else {
+                jb_sp_push_rax(b);
+            }
+            uint32_t j_done = ri >= 0 ? 0 : jb_jmp_placeholder(b);
 
             jb_patch_here(b, j_notint);
             if (has_mulov) jb_patch_here(b, j_mulov);
             jb_patch_here(b, j_ov);
             jb_emit_step_helper(b, di, next_di, 0);
-            jb_patch_here(b, j_done);
+            if (j_done) jb_patch_here(b, j_done);
             break;
         }
 
@@ -15263,15 +15386,27 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
                 has_mulov = 1;
                 j_ov = jb_tag_rax_int50_or_jump(b);
             }
-            jb_alu_ri32(b, 5, JR_R15, 1);
-            jb_sib8(b, 1, 0x89, JR_RAX, JR_R14, JR_R15, -8);
-            uint32_t j_done = jb_jmp_placeholder(b);
+            long ri = ret_fuse_idx < 0 ? jb_return_after(c, idx, 1) : -1;
+            uint32_t j_done;
+            if (ri >= 0) {
+                /* return A op B: the int result goes to RETURN in rax */
+                jb_alu_ri32(b, 5, JR_R15, 2);
+                ret_fuse_patch[ret_fuse_n++] = jb_jmp_placeholder(b);
+                ret_fuse_idx = ri;
+                j_done = 0;
+            } else {
+                jb_alu_ri32(b, 5, JR_R15, 1);
+                jb_sib8(b, 1, 0x89, JR_RAX, JR_R14, JR_R15, -8);
+                j_done = jb_jmp_placeholder(b);
+            }
 
             jb_patch_here(b, j_notint);
             if (has_mulov) jb_patch_here(b, j_mulov);
             jb_patch_here(b, j_ov);
             jb_emit_step_helper(b, di, next_di, 0);
-            if (idx + 1 < c->dt_len && c->dt_code[idx + 1].op == OP_CAST_INT) {
+            if (!j_done) {
+                /* the slow path falls through into CAST/RETURN */
+            } else if (idx + 1 < c->dt_len && c->dt_code[idx + 1].op == OP_CAST_INT) {
                 skip_cast_idx = (long)idx + 1;
                 skip_cast_patch = j_done;
             } else {
@@ -15420,7 +15555,15 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             }
             /* Note if condition is true, fall through; if false, jump to off */
             uint32_t j_true = jb_jcc_placeholder(b, (op == OP_LE_LOCAL_I32_JMP_F) ? 0x8E : 0x8C); /* jle/jl */
-            uint32_t j_take_jmp = jb_jmp_placeholder(b);
+            uint32_t j_take_jmp;
+            if ((size_t)off > idx) {
+                /* forward: no poll, so jump straight to the target */
+                j_take_jmp = jb_jmp_placeholder(b);
+                jb_add_target_patch(b, j_take_jmp, off);
+                j_take_jmp = 0;
+            } else {
+                j_take_jmp = jb_jmp_placeholder(b);
+            }
 
             jb_patch_here(b, j_slow);
             jb_sync_state(b, next_di);
@@ -15436,7 +15579,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_rr(b, 0, 0x85, JR_RAX, JR_RAX);
             uint32_t j_true2 = jb_jcc_placeholder(b, 0x85); /* jnz -> true -> fallthrough */
 
-            jb_patch_here(b, j_take_jmp);
+            if (j_take_jmp) jb_patch_here(b, j_take_jmp);
             if ((size_t)off <= idx) jb_emit_backedge_poll(b, &c->dt_code[off]);
             uint32_t p = jb_jmp_placeholder(b);
             jb_add_target_patch(b, p, off);
@@ -15533,18 +15676,19 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_mov_imm64(b, JR_RAX, (uint64_t)(uintptr_t)callee);
             /* Fast check: jit_state == 2 && frame_count < frame_cap && (!rec_limit || frame_count < rec_limit).
              * has_variadic and local_count are fixed once the program is compiled. */
-            jb_mem(b, 0, 0x80, 7, JR_RAX, (int32_t)offsetof(VMChunk, jit_state)); jb_u8(b, 2); /* cmp byte [rax+jit_state], 2 */
-            uint32_t j_slow0 = jb_jcc_placeholder(b, 0x85);
+            /* jit_state never leaves 2 once set, and a self-call only runs if this
+             * compile succeeds, so the check is needed only for callees not yet compiled. */
+            int callee_ready = (callee == c) ||
+                __atomic_load_n(&callee->jit_state, __ATOMIC_ACQUIRE) == 2;
+            uint32_t j_slow0 = 0;
+            if (!callee_ready) {
+                jb_mem(b, 0, 0x80, 7, JR_RAX, (int32_t)offsetof(VMChunk, jit_state)); jb_u8(b, 2); /* cmp byte [rax+jit_state], 2 */
+                j_slow0 = jb_jcc_placeholder(b, 0x85);
+            }
             uint32_t j_slow1 = callee->has_variadic ? jb_jmp_placeholder(b) : 0;
             jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
-            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_cap));
+            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, jit_frame_limit));
             uint32_t j_slow2 = jb_jcc_placeholder(b, 0x83); /* jae */
-            jb_rex(b, 1, JR_RDX, 0, JR_RBX); jb_u8(b, 0x63); jb_u8(b, 0x93); jb_u32(b, (uint32_t)offsetof(VM, recursion_limit)); /* movsxd rdx, [rbx+rec_limit] */
-            jb_rr(b, 1, 0x85, JR_RDX, JR_RDX);
-            uint32_t j_nolim = jb_jcc_placeholder(b, 0x8E); /* jle */
-            jb_rr(b, 1, 0x39, JR_RDX, JR_RCX); /* cmp rcx, rdx */
-            uint32_t j_slow3 = jb_jcc_placeholder(b, 0x8D); /* jge */
-            jb_patch_here(b, j_nolim);
 
             /* arg_base = r15 - argc in r9, r10 = arg_base + local_count + 1 */
             jb_mov_rr(b, JR_R9, JR_R15);
@@ -15560,8 +15704,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_mem(b, 1, 0xFF, 0, JR_RBX, (int32_t)offsetof(VM, frame_count)); /* inc frame_count */
 
             /* nf = r12 + sizeof(VMFrame) */
-            jb_mov_rr(b, JR_RDI, JR_R12);
-            jb_alu_ri32(b, 0, JR_RDI, (int32_t)sizeof(VMFrame));
+            jb_mem(b, 1, 0x8D, JR_RDI, JR_R12, (int32_t)sizeof(VMFrame)); /* lea rdi, [r12+sizeof] */
             jb_mem(b, 1, 0x89, JR_RAX, JR_RDI, (int32_t)offsetof(VMFrame, chunk));
             jb_mem(b, 1, 0x8B, JR_RDX, JR_RAX, (int32_t)offsetof(VMChunk, dt_code));
             jb_mem(b, 1, 0x89, JR_RDX, JR_RDI, (int32_t)offsetof(VMFrame, ip));
@@ -15589,14 +15732,21 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_mov_rr(b, JR_R12, JR_RDI);
             jb_sib8(b, 1, 0x8D, JR_R13, JR_R14, JR_R9, 0);
             jb_mov_rr(b, JR_R15, JR_R10); /* arg_base + lcnt */
-            /* call qword [rax + jit_code] */
-            jb_mem(b, 1, 0xFF, 2, JR_RAX, (int32_t)offsetof(VMChunk, jit_code));
+            if (callee == c) {
+                /* self-call: call rel32 to this code's entry (offset 0) */
+                jb_reserve(b, 5);
+                jb_u8(b, 0xE8); jb_u32(b, (uint32_t)(-(int32_t)(b->len + 4)));
+            } else {
+                /* call qword [rax + jit_code] */
+                jb_mem(b, 1, 0xFF, 2, JR_RAX, (int32_t)offsetof(VMChunk, jit_code));
+            }
             jb_rr(b, 0, 0x85, JR_RAX, JR_RAX);
             uint32_t j_call_ok = jb_jcc_placeholder(b, 0x84);
             jb_pop(b, JR_RBP); jb_u8(b, 0xC3); /* propagate INTERP/EXC up C stack */
 
-            jb_patch_here(b, j_slow0); if (j_slow1) jb_patch_here(b, j_slow1); jb_patch_here(b, j_slow2);
-            jb_patch_here(b, j_slow3); jb_patch_here(b, j_slow4);
+            if (j_slow0) jb_patch_here(b, j_slow0);
+            if (j_slow1) jb_patch_here(b, j_slow1);
+            jb_patch_here(b, j_slow2); jb_patch_here(b, j_slow4);
             jb_sync_state(b, next_di);
             /* direct call through a frame built in C (variadic callees) */
             jb_mov_rr(b, JR_RDI, JR_RBX);
@@ -15697,11 +15847,24 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         case OP_RETURN: {
             jb_alu_ri32(b, 5, JR_R15, 1);
             jb_sib8(b, 1, 0x8B, JR_RAX, JR_R14, JR_R15, 0); /* result in rax */
+            if (ret_fuse_idx == (long)idx) {
+                for (int fi = 0; fi < ret_fuse_n; fi++) jb_patch_here(b, ret_fuse_patch[fi]);
+                ret_fuse_idx = -1; ret_fuse_n = 0;
+            }
             jb_mem(b, 0, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, global_save_count));
             jb_mem(b, 0, 0x3B, JR_RCX, JR_R12, (int32_t)offsetof(VMFrame, global_save_depth));
             uint32_t j_slow0 = jb_jcc_placeholder(b, 0x8F); /* jg */
+            /* A try handler matters only if it belongs to this frame
+             * (handler.frame_count >= frame_count, as vm_jit_return_slow pops). */
             jb_mem(b, 0, 0x83, 7, JR_RBX, (int32_t)offsetof(VM, exc_top)); jb_u8(b, 0);
-            uint32_t j_slow1 = jb_jcc_placeholder(b, 0x8F); /* jg */
+            uint32_t j_no_exc = jb_jcc_placeholder(b, 0x8E); /* jle */
+            jb_rex(b, 1, JR_RCX, 0, JR_RBX); jb_u8(b, 0x63); jb_u8(b, 0x8B); jb_u32(b, (uint32_t)offsetof(VM, exc_top)); /* movsxd rcx, [rbx+exc_top] */
+            jb_rr(b, 1, 0x69, JR_RCX, JR_RCX); jb_u32(b, (uint32_t)sizeof(VMExcHandler));
+            jb_mem(b, 1, 0x03, JR_RCX, JR_RBX, (int32_t)offsetof(VM, exc_stack)); /* rcx = &exc_stack[exc_top] */
+            jb_mem(b, 1, 0x8B, JR_RCX, JR_RCX, (int32_t)offsetof(VMExcHandler, frame_count) - (int32_t)sizeof(VMExcHandler));
+            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
+            uint32_t j_slow1 = jb_jcc_placeholder(b, 0x83); /* jae */
+            jb_patch_here(b, j_no_exc);
 
             jb_mem(b, 1, 0xFF, 1, JR_RBX, (int32_t)offsetof(VM, frame_count)); /* dec frame_count */
             jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
@@ -15809,14 +15972,8 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_mem(b, 0, 0x83, 7, JR_RAX, (int32_t)offsetof(VMChunk, has_variadic)); jb_u8(b, 0);
             j_mslow[nm++] = jb_jcc_placeholder(b, 0x85);
             jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
-            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_cap));
+            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, jit_frame_limit));
             j_mslow[nm++] = jb_jcc_placeholder(b, 0x83);
-            jb_mem(b, 1, 0x63, JR_RDX, JR_RBX, (int32_t)offsetof(VM, recursion_limit));
-            jb_rr(b, 1, 0x85, JR_RDX, JR_RDX);
-            uint32_t j_mnolim = jb_jcc_placeholder(b, 0x8E);
-            jb_rr(b, 1, 0x39, JR_RDX, JR_RCX);
-            j_mslow[nm++] = jb_jcc_placeholder(b, 0x8D);
-            jb_patch_here(b, j_mnolim);
 
             jb_mem(b, 1, 0x63, JR_R8, JR_RAX, (int32_t)offsetof(VMChunk, local_count));
             jb_alu_ri32(b, 0, JR_R8, 1); /* lcnt */
@@ -16264,6 +16421,96 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
         }
 
         case OP_CALL_CLOSURE: {
+            /* Inline frame push for a compiled, unbound, non-variadic closure
+             * (what vm_jit_closure_prep does in C); everything else goes there. */
+            int argc = di->flags;
+            uint32_t j_cslow[16];
+            int ncs = 0;
+            jb_sib8(b, 1, 0x8B, JR_RAX, JR_R14, JR_R15, -8); /* closure value */
+            jb_rr(b, 1, 0x85, JR_RAX, JR_RAX);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x84);
+            jb_mov_rr(b, JR_RCX, JR_RAX);
+            jb_shift_ri8(b, 1, 5, JR_RCX, 50);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mem(b, 0, 0x80, 7, JR_RAX, (int32_t)offsetof(VMObjHeader, obj_type)); jb_u8(b, VM_OBJ_CLOSURE);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mem(b, 0, 0x83, 7, JR_RAX, (int32_t)offsetof(VMClosure, has_bound_arg)); jb_u8(b, 0);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mov_rr(b, JR_R11, JR_RAX); /* r11 = closure */
+            jb_mem(b, 1, 0x63, JR_RAX, JR_R11, (int32_t)offsetof(VMClosure, func_idx));
+            jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, program));
+            jb_mem(b, 1, 0x3B, JR_RAX, JR_RCX, (int32_t)offsetof(VMProgram, func_count));
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x83); /* jae */
+            jb_rr(b, 1, 0x69, JR_RAX, JR_RAX); jb_u32(b, (uint32_t)sizeof(VMChunk));
+            jb_mem(b, 1, 0x03, JR_RAX, JR_RCX, (int32_t)offsetof(VMProgram, funcs)); /* rax = callee */
+            jb_mem(b, 0, 0x80, 7, JR_RAX, (int32_t)offsetof(VMChunk, jit_state)); jb_u8(b, 2);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mem(b, 0, 0x83, 7, JR_RAX, (int32_t)offsetof(VMChunk, has_variadic)); jb_u8(b, 0);
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mem(b, 1, 0x8B, JR_RCX, JR_RAX, (int32_t)offsetof(VMChunk, code_len));
+            jb_mem(b, 1, 0x3B, JR_RCX, JR_RAX, (int32_t)offsetof(VMChunk, dt_code_len_src));
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x85);
+            jb_mem(b, 1, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, frame_count));
+            jb_mem(b, 1, 0x3B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, jit_frame_limit));
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x83);
+
+            jb_mov_rr(b, JR_R9, JR_R15);
+            jb_alu_ri32(b, 5, JR_R9, argc + 1); /* arg_base */
+            jb_mem(b, 1, 0x63, JR_R8, JR_RAX, (int32_t)offsetof(VMChunk, local_count));
+            jb_alu_ri32(b, 0, JR_R8, 1); /* lcnt */
+            jb_mov_rr(b, JR_R10, JR_R9);
+            jb_rr(b, 1, 0x01, JR_R8, JR_R10); /* arg_base + lcnt */
+            jb_mem(b, 1, 0x3B, JR_R10, JR_RBX, (int32_t)offsetof(VM, stack_cap));
+            j_cslow[ncs++] = jb_jcc_placeholder(b, 0x83); /* jae */
+
+            jb_mov_imm64(b, JR_RDX, (uint64_t)(uintptr_t)next_di);
+            jb_mem(b, 1, 0x89, JR_RDX, JR_R12, (int32_t)offsetof(VMFrame, ip));
+            jb_mem(b, 1, 0xFF, 0, JR_RBX, (int32_t)offsetof(VM, frame_count));
+            jb_mem(b, 1, 0x8D, JR_RDI, JR_R12, (int32_t)sizeof(VMFrame));
+            jb_mem(b, 1, 0x89, JR_RAX, JR_RDI, (int32_t)offsetof(VMFrame, chunk));
+            jb_mem(b, 1, 0x8B, JR_RDX, JR_RAX, (int32_t)offsetof(VMChunk, dt_code));
+            jb_mem(b, 1, 0x89, JR_RDX, JR_RDI, (int32_t)offsetof(VMFrame, ip));
+            jb_mem(b, 1, 0x89, JR_R9,  JR_RDI, (int32_t)offsetof(VMFrame, stack_base));
+            jb_mem(b, 1, 0x89, JR_R9,  JR_RDI, (int32_t)offsetof(VMFrame, local_base));
+            jb_mem(b, 1, 0x89, JR_R11, JR_RDI, (int32_t)offsetof(VMFrame, closure)); /* keeps it alive for the GC */
+            jb_mem(b, 0, 0x8B, JR_RCX, JR_RBX, (int32_t)offsetof(VM, global_save_count));
+            jb_mem(b, 0, 0x89, JR_RCX, JR_RDI, (int32_t)offsetof(VMFrame, global_save_depth));
+            jb_mem(b, 0, 0xC7, 0,      JR_RDI, (int32_t)offsetof(VMFrame, passed_argc)); jb_u32(b, (uint32_t)argc);
+            jb_mem(b, 0, 0x8A, JR_RCX, JR_RBX, (int32_t)offsetof(VM, pending_call_context));
+            jb_mem(b, 0, 0x88, JR_RCX, JR_RDI, (int32_t)offsetof(VMFrame, call_context));
+            jb_mem(b, 0, 0xC6, 0,      JR_RBX, (int32_t)offsetof(VM, pending_call_context)); jb_u8(b, 0);
+
+            /* zero locals [zf, lcnt), zf = min(argc, lcnt, fixed_param_count if >= 0) */
+            jb_mem(b, 1, 0x63, JR_RCX, JR_RAX, (int32_t)offsetof(VMChunk, fixed_param_count));
+            jb_rr(b, 1, 0x85, JR_RCX, JR_RCX);
+            uint32_t j_neg_p = jb_jcc_placeholder(b, 0x88); /* js */
+            jb_rr(b, 1, 0x39, JR_R8, JR_RCX); /* cmp rcx, r8 */
+            uint32_t j_pmax_ok = jb_jcc_placeholder(b, 0x8E); /* jle */
+            jb_patch_here(b, j_neg_p);
+            jb_mov_rr(b, JR_RCX, JR_R8);
+            jb_patch_here(b, j_pmax_ok);
+            jb_alu_ri32(b, 7, JR_RCX, argc);
+            uint32_t j_zf_ok = jb_jcc_placeholder(b, 0x8E); /* jle */
+            jb_mov_imm32(b, JR_RCX, (uint32_t)argc);
+            jb_patch_here(b, j_zf_ok);
+            jb_sib8(b, 1, 0x8D, JR_RDX, JR_R14, JR_R9, 0); /* &stack[arg_base] */
+            uint32_t loop_top = (uint32_t)b->len;
+            jb_rr(b, 1, 0x39, JR_R8, JR_RCX); /* cmp rcx, r8 */
+            uint32_t j_zdone = jb_jcc_placeholder(b, 0x8D); /* jge */
+            jb_sib8(b, 1, 0xC7, 0, JR_RDX, JR_RCX, 0); jb_u32(b, 0);
+            jb_alu_ri32(b, 0, JR_RCX, 1);
+            jb_u8(b, 0xE9); jb_u32(b, (uint32_t)(int32_t)(loop_top - (b->len + 4)));
+            jb_patch_here(b, j_zdone);
+
+            jb_mov_rr(b, JR_R12, JR_RDI);
+            jb_sib8(b, 1, 0x8D, JR_R13, JR_R14, JR_R9, 0);
+            jb_mov_rr(b, JR_R15, JR_R10);
+            jb_mem(b, 1, 0xFF, 2, JR_RAX, (int32_t)offsetof(VMChunk, jit_code));
+            jb_rr(b, 0, 0x85, JR_RAX, JR_RAX);
+            uint32_t j_cfast_done = jb_jcc_placeholder(b, 0x84);
+            jb_pop(b, JR_RBP); jb_u8(b, 0xC3);
+
+            for (int fi = 0; fi < ncs; fi++) jb_patch_here(b, j_cslow[fi]);
             jb_sync_state(b, next_di);
             jb_mov_rr(b, JR_RDI, JR_RBX);
             jb_mov_imm64(b, JR_RSI, (uint64_t)(uintptr_t)di);
@@ -16281,6 +16528,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
             jb_call_c(b, (void *)vm_jit_call_closure_slow);
             jb_emit_reload_and_ret_check(b);
             jb_patch_here(b, j_cl_ok);
+            jb_patch_here(b, j_cfast_done);
             break;
         }
 
@@ -16297,6 +16545,7 @@ static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
 
     if (bail_ok && !b->oom) {
         b->offs[c->dt_len] = (uint32_t)b->len;
+        if (ret_fuse_idx >= 0) bail_ok = 0; /* a fused jump was never patched */
         /* Trailing safety return */
         jb_sync_state(b, &c->dt_code[c->dt_len]);
         jb_mov_imm32(b, JR_RAX, VM_JIT_INTERP);
@@ -16352,12 +16601,82 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     return vm_execute_call_cl(vm, func_idx, NULL, cargs, cargc, cargc);
 }
 
+static VMValue vm_execute_call_full(VM *vm, int func_idx, VMClosure *closure, VMValue *cargs, int cargc, int passed_argc,
+                                    int resume_rc, VM *r_prev, size_t r_exec_base, size_t r_jit_stop);
+
+/* Call a bytecode function from C. When it is already JIT-compiled, push its
+ * frame and run the JIT code directly; vm_execute_call_full (the whole
+ * interpreter) takes over only if that code bails out or throws. */
 static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMValue *cargs, int cargc, int passed_argc) {
-    VM *prev_vm = g_active_vm;
-    g_active_vm = vm;
-    size_t saved_exec_base = vm->exec_base;
-    size_t saved_jit_stop = vm->jit_stop_base;
-    vm->exec_base = vm->frame_count;
+#ifdef VM_JIT_X64
+    VMChunk *chunk = &vm->program->funcs[func_idx];
+    uint8_t *jc;
+    VMJitTrampolineFn tramp;
+    if (__atomic_load_n(&chunk->jit_state, __ATOMIC_ACQUIRE) == 2 &&
+        (jc = __atomic_load_n(&chunk->jit_code, __ATOMIC_ACQUIRE)) != NULL &&
+        chunk->dt_code && chunk->dt_code_len_src == chunk->code_len &&
+        vm->frame_count < vm->frame_cap &&
+        (tramp = vm_jit_get_trampoline()) != NULL) {
+        int cnt = chunk->local_count + 1;
+        size_t base = vm->stack_top;
+        if (__builtin_expect(base + (size_t)cnt >= vm->stack_cap, 0)) vm_stack_grow(vm, base + (size_t)cnt);
+        VM *prev_vm = g_active_vm;
+        g_active_vm = vm;
+        size_t saved_exec_base = vm->exec_base;
+        size_t saved_jit_stop = vm->jit_stop_base;
+        vm->exec_base = vm->frame_count;
+        VMFrame *frame = &vm->frames[vm->frame_count++];
+        frame->chunk = chunk;
+        frame->ip = chunk->dt_code;
+        int pmax = cnt;
+        if (!chunk->has_variadic && chunk->fixed_param_count >= 0 && chunk->fixed_param_count < pmax)
+            pmax = chunk->fixed_param_count;
+        int zf = cargc < pmax ? cargc : pmax;
+        VMValue *loc = vm->stack + base;
+        for (int ci = 0; ci < zf; ci++) loc[ci] = cargs[ci];
+        for (int ci = zf; ci < cnt; ci++) loc[ci] = 0;
+        vm->stack_top = base + (size_t)cnt;
+        frame->local_base = base;
+        frame->stack_base = base;
+        frame->closure = closure;
+        frame->global_save_depth = vm->global_save_count;
+        frame->passed_argc = passed_argc;
+        frame->call_context = vm->pending_call_context;
+        vm->pending_call_context = 0;
+        vm->jit_stop_base = vm->exec_base;
+        int jrc = tramp(vm, jc, 1);
+        if (__builtin_expect(jrc == VM_JIT_OK && vm->frame_count == vm->exec_base, 1)) {
+            vm->exec_base = saved_exec_base;
+            vm->jit_stop_base = saved_jit_stop;
+            g_active_vm = prev_vm;
+            return vm->jit_ret_val;
+        }
+        return vm_execute_call_full(vm, func_idx, closure, cargs, cargc, passed_argc,
+                                    jrc, prev_vm, saved_exec_base, saved_jit_stop);
+    }
+#endif
+    return vm_execute_call_full(vm, func_idx, closure, cargs, cargc, passed_argc, -1, NULL, 0, 0);
+}
+
+/* resume_rc < 0: a normal call. resume_rc >= 0: vm_execute_call_cl already
+ * pushed the frame and ran the JIT code, which returned resume_rc without
+ * finishing (a bail into the interpreter or an exception); continue from there
+ * with the caller's saved state r_prev / r_exec_base / r_jit_stop. */
+static VMValue vm_execute_call_full(VM *vm, int func_idx, VMClosure *closure, VMValue *cargs, int cargc, int passed_argc,
+                                    int resume_rc, VM *r_prev, size_t r_exec_base, size_t r_jit_stop) {
+    VM *prev_vm;
+    size_t saved_exec_base, saved_jit_stop;
+    if (resume_rc >= 0) {
+        prev_vm = r_prev;
+        saved_exec_base = r_exec_base;
+        saved_jit_stop = r_jit_stop;
+    } else {
+        prev_vm = g_active_vm;
+        g_active_vm = vm;
+        saved_exec_base = vm->exec_base;
+        saved_jit_stop = vm->jit_stop_base;
+        vm->exec_base = vm->frame_count;
+    }
     #define VM_EXEC_RETURN(val) do { vm->jit_stop_base = saved_jit_stop; g_active_vm = prev_vm; return (val); } while(0)
 
     VMChunk *chunk = &vm->program->funcs[func_idx];
@@ -16478,6 +16797,11 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 #else
     const void * const *dt_ptr = NULL;
 #endif
+    VMFrame *frame;
+    if (resume_rc >= 0) {
+        frame = &vm->frames[vm->frame_count - 1];
+        goto L_resume_frame_ready;
+    }
     if (__builtin_expect(!__atomic_load_n(&chunk->dt_code, __ATOMIC_ACQUIRE) ||
                          chunk->dt_code_len_src != chunk->code_len, 0)) {
         vm_chunk_ensure_dt(vm->program, chunk, dt_ptr);
@@ -16485,7 +16809,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     if (vm->frame_count >= vm->frame_cap) {
         vm_frames_grow(vm);
     }
-    VMFrame *frame = &vm->frames[vm->frame_count++];
+    frame = &vm->frames[vm->frame_count++];
     frame->chunk = chunk;
     frame->ip = chunk->dt_code;
     size_t base = vm->stack_top;
@@ -16513,6 +16837,7 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
     frame->passed_argc = passed_argc;
     frame->call_context = vm->pending_call_context;
     vm->pending_call_context = 0;
+L_resume_frame_ready:;
 
     VMInsn *ip = frame->ip;
     const VMInsn *di = NULL;
@@ -16660,7 +16985,10 @@ static VMValue vm_execute_call_cl(VM *vm, int func_idx, VMClosure *closure, VMVa
 #ifdef VM_JIT_X64
     /* the frame is complete here (variadic arguments already packed), so
      * any compiled function, closure or variadic, can start in its JIT code */
-    if (__builtin_expect((__atomic_load_n(&chunk->jit_state, __ATOMIC_ACQUIRE) == 2 ||
+    if (resume_rc >= 0) {
+        int jrc = resume_rc;
+        VM_JIT_HANDLE_RC(jrc, 1);
+    } else if (__builtin_expect((__atomic_load_n(&chunk->jit_state, __ATOMIC_ACQUIRE) == 2 ||
                           (chunk->jit_state == 0 && ++chunk->jit_hot >= JIT_HOT_THRESHOLD)), 0)) {
         if (__atomic_load_n(&chunk->jit_state, __ATOMIC_ACQUIRE) == 0) {
             vm_jit_try_compile(vm->program, chunk);

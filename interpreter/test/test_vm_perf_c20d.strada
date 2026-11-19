@@ -1,0 +1,287 @@
+# VM performance, round 4: JIT call/return fast paths, return fusion,
+# inline closure calls, inline-hash field scan, direct JIT entry from C
+# (sort comparators). Output must match the compiled backend.
+package main;
+
+func fib(int $n) int {
+    if ($n < 2) { return $n; }
+    return fib($n - 1) + fib($n - 2);
+}
+
+func depth(int $n) int {
+    my int $a = $n; my int $b = $n * 2; my int $c = $n * 3;
+    if ($n <= 0) { return 0; }
+    return depth($n - 1) + 1 + ($a + $b + $c) * 0;
+}
+
+func ret_sum(scalar $a, scalar $b) scalar { return $a + $b; }
+func ret_int_sum(int $a, int $b) int { return $a + $b; }
+func ret_mul(int $a, int $b) int { return $a * $b; }
+func ret_load(scalar $x) scalar { return $x; }
+func ret_load_int(scalar $x) int { my scalar $y = $x; return $y; }
+func lt2(scalar $n) str { if ($n < 2) { return "lt"; } return "ge"; }
+
+our int $lv = 0;
+func local_rec(int $n) int {
+    local $lv = $lv + 1;
+    if ($n <= 0) { return $lv; }
+    my int $r = local_rec($n - 1);
+    return $r + $lv * 0;
+}
+
+func ret_in_try(int $n) int {
+    try {
+        if ($n > 0) { return $n * 10; }
+        throw "neg";
+    } catch ($e) {
+        return -1;
+    }
+
+    # 8. compare-and-branch on locals
+    my str $cs = "";
+    my array @xs = (2, 3, 4, 3.0, 2.5, "3", "4x", -100000);
+    for (my int $k = 0; $k < 3; $k++) {
+        foreach my $x (@xs) { $cs .= cmps($x, 3) . "|" . cmps($x, 2.5) . " "; }
+    }
+    say("cmp=" . $cs);
+    say("ack=" . ackermann(2, 3) . "," . ackermann(3, 3));
+
+    # 9. foreach over an int range counts without building the list
+    my int $rs = 0;
+    foreach my int $r (0..1000) { $rs += $r; }
+    my int $lo = -5;
+    my int $hi = 5;
+    my str $rl = "";
+    foreach my $r ($lo..$hi) { $rl .= $r; $hi = 100; }
+    my int $empty = 0;
+    foreach my int $r (5..1) { $empty++; }
+    my str $ctl = "";
+    foreach my int $r (1..20) {
+        next if $r % 3 == 0;
+        last if $r > 14;
+        $r = $r * 100;
+        $ctl .= $r . ",";
+    }
+    my array @subs;
+    foreach my int $r (1..3) { push(@subs, fn () { return $r * 10; }); }
+    my str $cv = "";
+    foreach my $f (@subs) { $cv .= $f->() . ","; }
+    my int $nest = 0;
+    foreach my int $a (1..30) { foreach my int $b ($a..30) { $nest += $b - $a; } }
+    my int $ia = 2;
+    my str $ex2 = "";
+    foreach my $r ($ia * 2..$ia * 2 + 3) { $ex2 .= $r; }
+    my scalar $us = 3;
+    my str $ut = "";
+    foreach my $r ($us..6) { $ut .= $r; }
+    my str $st = "";
+    foreach my $r ("aa".."ad") { $st .= $r; }
+    say("range=" . $rs . "|" . $rl . "|" . $empty . "|" . $ctl . "|" . $cv . "|" . $nest . "|" . $ex2 . "|" . $ut . "|" . $st);
+    return 0;
+}
+
+func leaf(int $n) int { return $n + 1; }
+
+func thrower(int $n) int {
+    if ($n <= 0) { throw "bottom"; }
+    return thrower($n - 1) + 1;
+}
+
+func alloc_rec(int $n) int {
+    my array @a = ($n, $n + 1, $n + 2);
+    my hash %h = ("k" => $n);
+    if ($n <= 0) { return 0; }
+    return alloc_rec($n - 1) + $a[2] - $a[0] + $h{"k"} * 0;
+}
+
+our int $cmp_calls = 0;
+func cmp_count(scalar $x, scalar $y) int { $cmp_calls++; return $x <=> $y; }
+func cmp_throw(scalar $x, scalar $y) int { if ($x == 13) { throw "cmp13"; } return $x <=> $y; }
+func cmp_nest(scalar $x, scalar $y) int {
+    my array @in = sort { $b <=> $a; } ($x, $y);
+    return $in[0] == $x ? -1 : 1;
+}
+
+func cmps(scalar $x, scalar $y) str {
+    my str $r = "";
+    if ($x == 3) { $r .= "a"; } else { $r .= "."; }
+    if ($x != 3) { $r .= "b"; } else { $r .= "."; }
+    if ($x < 3) { $r .= "c"; } else { $r .= "."; }
+    if ($x <= 3) { $r .= "d"; } else { $r .= "."; }
+    if ($x > 3) { $r .= "e"; } else { $r .= "."; }
+    if ($x >= 3) { $r .= "f"; } else { $r .= "."; }
+    unless ($x == -100000) { $r .= "g"; } else { $r .= "."; }
+    if ($x == $y) { $r .= "h"; } else { $r .= "."; }
+    if ($x < $y) { $r .= "i"; } else { $r .= "."; }
+    if ($x >= $y) { $r .= "j"; } else { $r .= "."; }
+    unless ($x > $y) { $r .= "k"; } else { $r .= "."; }
+    return $r;
+}
+
+func ackermann(int $m, int $n) int {
+    if ($m == 0) { return $n + 1; }
+    if ($n == 0) { return ackermann($m - 1, 1); }
+    return ackermann($m - 1, ackermann($m, $n - 1));
+}
+
+package Pt;
+func new(int $x, int $y) scalar {
+    my hash %h = ("x" => $x, "y" => $y, "z" => $x + $y, "w" => 7);
+    return bless(\%h, "Pt");
+}
+
+package main;
+
+func main() int {
+    # 1. calls and returns
+    say("fib=" . fib(20));
+    say("depth=" . depth(700));                 # frames grow past 256 twice
+    core::set_recursion_limit(800);
+    say("depth_lim=" . depth(700));
+    core::set_recursion_limit(0);
+    say("depth_unl=" . depth(900));
+    core::set_recursion_limit(1000);
+
+    # 2. return fusion: int, overflow, non-int
+    say("rs=" . ret_sum(2, 3) . "," . ret_sum(1.5, 2) . "," . ret_sum("4", "5"));
+    say("ri=" . ret_int_sum(562949953421311, 1) . "," . ret_int_sum(4611686018427387903, 4611686018427387904));
+    say("rm=" . ret_mul(3, 4) . "," . ret_mul(1073741824, 1073741824) . "," . ret_mul(-7, 6));
+    my scalar $undef_v;
+    say("rl=" . ret_load(5) . "," . ret_load("s") . "," . ret_load(2.5) . "," . (defined(ret_load($undef_v)) ? "d" : "u"));
+    say("rli=" . ret_load_int(5) . "," . ret_load_int("12abc") . "," . ret_load_int(2.75) . "," . ret_load_int($undef_v));
+    say("lt=" . lt2(1) . lt2(2) . lt2(1.5) . lt2("1") . lt2(-3));
+
+    # 3. local in recursion, returns through try (same and outer frame)
+    say("local=" . local_rec(50) . "," . $lv);
+    my int $tsum = 0;
+    for (my int $i = -2; $i < 5; $i++) { $tsum += ret_in_try($i); }
+    say("try=" . $tsum);
+    my int $osum = 0;
+    try {
+        for (my int $i = 0; $i < 300; $i++) { $osum += leaf($i); }
+        thrower(40);
+    } catch ($e) {
+        say("caught=" . $e . "," . $osum);
+    }
+    my int $after = 0;
+    for (my int $i = 0; $i < 300; $i++) { $after += leaf($i); }
+    say("after=" . $after);
+
+    # 4. GC during deep recursion
+    my int $gsum = 0;
+    for (my int $k = 0; $k < 40; $k++) { $gsum += alloc_rec(200); }
+    say("gc=" . $gsum);
+
+    # 5. closures: arg counts, captures, recursion, variadic, non-code
+    my int $base = 100;
+    my scalar $add = fn (int $a, int $b) int { my int $t = $a + $b; return $t + $base; };
+    my scalar $opt = fn ($a, $b, $c) { return defined($c) ? "3" : (defined($b) ? "2" : "1"); };
+    my int $csum = 0;
+    for (my int $i = 0; $i < 300; $i++) { $csum += $add->($i, 1); $base = $base + 1; }
+    say("cl=" . $csum . "," . $base);
+    my str $os = "";
+    for (my int $i = 0; $i < 3; $i++) { $os .= $opt->(1) . $opt->(1, 2) . $opt->(1, 2, 3); }
+    say("opt=" . $os);
+    my scalar $fact;
+    $fact = fn (int $n) int { if ($n <= 1) { return 1; } return $n * $fact->($n - 1); };
+    my int $fs = 0;
+    for (my int $i = 0; $i < 200; $i++) { $fs += $fact->(10) % 1000; }
+    say("fact=" . $fs);
+    my scalar $va = fn ($first, ...@rest) { return $first . ":" . scalar(@rest); };
+    my str $vs = "";
+    for (my int $i = 0; $i < 3; $i++) { $vs .= $va->("a", 1, 2, 3) . " "; }
+    say("va=" . $vs);
+    my int $bad = 0;
+    for (my int $i = 0; $i < 3; $i++) {
+        try { my scalar $nc = 5; $nc->(1); } catch ($e) { $bad++; }
+    }
+    say("nc=" . $bad);
+
+    # 6. small-hash fields (inline scan), deletes, larger hashes
+    my int $hs = 0;
+    for (my int $i = 0; $i < 300; $i++) {
+        my scalar $p = Pt::new($i, 2);
+        $hs += $p->{"x"} + $p->{"y"} + $p->{"z"} + $p->{"w"};
+        $p->{"z"} = 1;
+        $hs += $p->{"z"};
+    }
+    say("hs=" . $hs);
+    my hash %sm = ("a" => 1, "b" => 2, "c" => 3);
+    my str $hk = "";
+    for (my int $i = 0; $i < 200; $i++) {
+        delete $sm{"b"};
+        $hk = (defined($sm{"b"}) ? "B" : "-") . $sm{"a"} . $sm{"c"};
+        $sm{"d"} = $i;
+        $sm{"b"} = $i * 2;
+        $hk .= $sm{"b"} . $sm{"d"};
+        delete $sm{"d"};
+    }
+    say("hk=" . $hk . "," . join(",", keys(%sm)));
+    my hash %big;
+    for (my int $i = 0; $i < 50; $i++) { $big{"k" . $i} = $i; }
+    my int $bs = 0;
+    for (my int $i = 0; $i < 300; $i++) { $bs += $big{"k7"} + $big{"k42"} + (defined($big{"nope"}) ? 1 : 0); }
+    say("big=" . $bs);
+
+    # 7. sort comparators entered directly in JIT code
+    my array @nums;
+    for (my int $i = 0; $i < 400; $i++) { push(@nums, ($i * 7919) % 401); }
+    my array @desc = sort { $b <=> $a; } @nums;
+    say("sd=" . $desc[0] . "," . $desc[399] . "," . $desc[200]);
+    my array @cnt = sort { cmp_count($a, $b); } @nums;
+    say("sc=" . $cnt[0] . "," . $cnt[399] . "," . ($cmp_calls > 0 ? "y" : "n"));
+    my array @words = ("pear", "fig", "apple", "kiwi", "banana", "date");
+    my array @byl = sort { length($a) <=> length($b) || $a cmp $b; } @words;
+    say("sw=" . join(",", @byl));
+    my int $ex = 0;
+    try {
+        my array @boom = sort { cmp_throw($a, $b); } @nums;
+    } catch ($e) {
+        $ex = 1;
+        say("sx=" . $e);
+    }
+    my array @nested = sort { cmp_nest($a, $b); } (3, 1, 2, 5, 4);
+    say("sn=" . join(",", @nested) . "," . $ex);
+
+    # 8. compare-and-branch on locals
+    my str $cs = "";
+    my array @xs = (2, 3, 4, 3.0, 2.5, "3", "4x", -100000);
+    for (my int $k = 0; $k < 3; $k++) {
+        foreach my $x (@xs) { $cs .= cmps($x, 3) . "|" . cmps($x, 2.5) . " "; }
+    }
+    say("cmp=" . $cs);
+    say("ack=" . ackermann(2, 3) . "," . ackermann(3, 3));
+
+    # 9. foreach over an int range counts without building the list
+    my int $rs = 0;
+    foreach my int $r (0..1000) { $rs += $r; }
+    my int $lo = -5;
+    my int $hi = 5;
+    my str $rl = "";
+    foreach my $r ($lo..$hi) { $rl .= $r; $hi = 100; }
+    my int $empty = 0;
+    foreach my int $r (5..1) { $empty++; }
+    my str $ctl = "";
+    foreach my int $r (1..20) {
+        next if $r % 3 == 0;
+        last if $r > 14;
+        $r = $r * 100;
+        $ctl .= $r . ",";
+    }
+    my array @subs;
+    foreach my int $r (1..3) { push(@subs, fn () { return $r * 10; }); }
+    my str $cv = "";
+    foreach my $f (@subs) { $cv .= $f->() . ","; }
+    my int $nest = 0;
+    foreach my int $a (1..30) { foreach my int $b ($a..30) { $nest += $b - $a; } }
+    my int $ia = 2;
+    my str $ex2 = "";
+    foreach my $r ($ia * 2..$ia * 2 + 3) { $ex2 .= $r; }
+    my scalar $us = 3;
+    my str $ut = "";
+    foreach my $r ($us..6) { $ut .= $r; }
+    my str $st = "";
+    foreach my $r ("aa".."ad") { $st .= $r; }
+    say("range=" . $rs . "|" . $rl . "|" . $empty . "|" . $ctl . "|" . $cv . "|" . $nest . "|" . $ex2 . "|" . $ut . "|" . $st);
+    return 0;
+}

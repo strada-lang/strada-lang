@@ -9096,9 +9096,28 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *vname = (var_name && var_name[0]) ? var_name : "_";
         StradaValue *array_expr = ast_get(node, "array");
 
-        /* Compile array */
-        compile_expr_in_ctx(ctx, array_expr, 1);
+        /* foreach my $x (A..B) with int-typed bounds (the compiled backend's
+         * native-loop rule) counts in a hidden local instead of building the
+         * list: stack [A, B] here, stored as __fe_i / __fe_arr below. */
+        int fe_range = 0;
         {
+            StradaValue *rn = ast_deref(array_expr);
+            if (is_lex_var && strcmp(vname, "_") != 0 && rn && !STRADA_IS_TAGGED_INT(rn) && (int)ast_int(rn, "type") == NI_RANGE) {
+                StradaValue *ra = ast_get(rn, "start"), *rb = ast_get(rn, "end");
+                if (ctx_expr_is_int(ctx, ra) && ctx_expr_is_int(ctx, rb) &&
+                    !ctx_is_rawint_param(ctx, ra) && !ctx_is_rawint_param(ctx, rb)) {
+                    fe_range = 1;
+                    compile_expr(ctx, ra);
+                    vm_chunk_emit(ctx->chunk, OP_CAST_INT);
+                    compile_expr(ctx, rb);
+                    vm_chunk_emit(ctx->chunk, OP_CAST_INT);
+                }
+            }
+        }
+
+        /* Compile array */
+        if (!fe_range) compile_expr_in_ctx(ctx, array_expr, 1);
+        if (!fe_range) {
             /* a call returning a plain scalar is a one-element list (Perl) */
             StradaValue *fe_ae = ast_deref(array_expr);
             int fe_aet = (fe_ae && !STRADA_IS_TAGGED_INT(fe_ae)) ? (int)ast_int(fe_ae, "type") : 0;
@@ -9153,12 +9172,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         int saved_fe_lc = ctx->local_count;
         ctx_push_scope(ctx, (void *)ast_deref(node), saved_fe_lc);
 
-        int arr_slot = ctx_add_local(ctx, "__fe_arr", '$');
+        int arr_slot = ctx_add_local(ctx, "__fe_arr", '$'); /* range: the end value */
         emit_reset_store_local(ctx, arr_slot);
 
-        /* Index */
-        vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-        vm_chunk_emit_i64(ctx->chunk, 0);
+        /* Index (range: the current value, from the start bound on the stack) */
+        if (!fe_range) {
+            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+            vm_chunk_emit_i64(ctx->chunk, 0);
+        }
         int idx_slot = ctx_add_local(ctx, "__fe_i", '$');
         emit_reset_store_local(ctx, idx_slot);
 
@@ -9195,13 +9216,17 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         size_t loop_top = ctx->chunk->code_len;
 
-        /* Condition: $i < size(@arr) */
+        /* Condition: $i < size(@arr), or for a range $i <= end */
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)arr_slot);
-        vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE);
-        vm_chunk_emit(ctx->chunk, OP_LT);
+        if (fe_range) {
+            vm_chunk_emit(ctx->chunk, OP_LE);
+        } else {
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE);
+            vm_chunk_emit(ctx->chunk, OP_LT);
+        }
         vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
         size_t exit_patch = emit_patch_u16(ctx);
 
@@ -9211,12 +9236,17 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)var_slot);
         }
 
-        /* $var = $arr[$i] */
-        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-        vm_chunk_emit_u16(ctx->chunk, (uint16_t)arr_slot);
-        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-        vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
-        vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+        /* $var = $arr[$i] (range: $var = $i) */
+        if (fe_range) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
+        } else {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)arr_slot);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)idx_slot);
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+        }
         if (var_slot >= 0) {
             if (var_slot < 256) emit_scalar_type_coerce(ctx, ctx->local_types[var_slot]);
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);

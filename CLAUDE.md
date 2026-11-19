@@ -776,6 +776,16 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
 - Known VM parity gaps around int64 overflow (untyped `+`, `++`) are listed in CLAUDE_DEEP_DIVE.md.
 - Test: `interpreter/test/test_vm_perf_c20c.strada`.
 
+**VM performance, round 4 (2026-11-19)**: closures -21%, oop -20%, functions -14%, hotpaths -13%, compute -12%, binary_trees -5%, sort -4%; details in CLAUDE_DEEP_DIVE.md.
+- JIT calls compare `frame_count` with one bound, `VM.jit_frame_limit` (min of `frame_cap` and `recursion_limit`; call `vm_frame_limit_update` after changing either). Self-calls are a direct `call rel32`, and compiled callees skip the `jit_state` check.
+- RETURN takes the slow path only when the top try handler belongs to the returning frame, not whenever any `try` is active.
+- `return <int expr>` hands the value to RETURN in a register (`ret_fuse_*`, `jb_return_after`), and `LOAD_LOCAL; PUSH_I8/LOAD_LOCAL; EQ..GE; JMP_IF_FALSE/TRUE` compares and branches in one step. Both keep the standalone code for other paths into it.
+- Closure calls push their frame in JIT code; `vm_jit_closure_prep` is the fallback.
+- Constant-key hash get/set in JIT code scan all slots of a small (inline) hash, not only the first.
+- `vm_execute_call_cl` (calls from C: sort comparators, tie, overloads) runs an already-compiled function's JIT code directly; `vm_execute_call_full` is the interpreter, and resumes the frame if that code bails or throws.
+- `foreach my $x (A..B)` with int-typed bounds counts in a hidden local instead of building the list (`fe_range` in vm_compiler.c), the compiled backend's rule.
+- Test: `interpreter/test/test_vm_perf_c20d.strada`.
+
 ## Language Features Reference
 
 ### Namespaces
