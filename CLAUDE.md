@@ -1664,7 +1664,10 @@ compiler:
   every `examples/*.strada` and runs it through the VM; output and exit
   status must match. `t/examples_parity_skip.txt` lists the examples that
   cannot be compared, each with its reason (libraries, servers, network,
-  refcount()/DESTROY timing, compiled-only `int_ptr`). Fixes it drove:
+  refcount()/DESTROY timing, compiled-only `int_ptr`). `--jit-both` compiles
+  each example once and compares it with the VM with the JIT off and on
+  (counts are per run). Examples compile in parallel (`PARITY_JOBS`, default
+  nproc) and run one at a time, since many use fixed `/tmp` paths. Fixes it drove:
   - `my $n = @{$r}` / `$n = @$r` (scalar variable target) is the count; the
     compiled backend aliased the array. Element targets (`$h{k} = @a`,
     `$h{k} = @{$r}`) still store the array in both backends.
