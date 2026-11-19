@@ -14435,17 +14435,6 @@ static void pm_build_prepost(void) {
     pm_state.prepost_gen = pm_state.gen;
 }
 
-/* Set $` and $' from subject and ovector[0..1]. Called after each successful match. */
-static void strada_set_match_pre_post(const char *str, size_t mstart, size_t mend) {
-    if (last_prematch_sv) strada_decref(last_prematch_sv);
-    size_t total = strada_regex_subject_length(str);
-    if (mstart > total) mstart = total;
-    if (mend > total) mend = total;
-    last_prematch_sv = strada_regex_new_capture(str, mstart);
-    if (last_postmatch_sv) strada_decref(last_postmatch_sv);
-    last_postmatch_sv = strada_regex_new_capture(str + mend, total - mend);
-}
-
 StradaValue* strada_prematch(void) {
     pm_build_prepost();
     if (last_prematch_sv) { strada_incref(last_prematch_sv); return last_prematch_sv; }
