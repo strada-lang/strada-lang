@@ -11,8 +11,10 @@
 # Checks: a C program built with `strada --embed-ldflags` loads a --shared
 # library and calls string/int64/num/void/undef-returning externs that use
 # `our`, hashes and split (valgrind-clean when valgrind is installed); the
-# same functions called from Strada in one file, compiled and through the VM;
-# an undeclared variable in an extern body is a located Strada error.
+# same functions called from Strada in one file and through import_lib,
+# compiled and through the VM; an extern and a func of the same name in one
+# package clash; an undeclared variable in an extern body is a located
+# Strada error.
 #
 # Exits non-zero on any failure.
 
@@ -125,6 +127,34 @@ fi
 if [ -x "$INTERP" ]; then
     check "Strada calls the externs (VM)" "$want_s" "$("$INTERP" "$WORK/same.strada" 2>&1)"
 fi
+
+# A Strada program loads the same library with import_lib: in a package the
+# body is the ordinary function Pkg::NAME, listed in the export metadata
+cat > "$WORK/imp.strada" <<'EOF'
+use lib ".";
+import_lib "XLib.so";
+func main() int {
+    my str $a = XLib::shout("m n m");
+    XLib::bump();
+    say($a . "|" . XLib::add(5, 6) . "|" . XLib::big(3) . "|" . XLib::half(3.0) . "|" . XLib::calls());
+    return 0;
+}
+EOF
+want_i="M N M (2 distinct, call 1)|11|3000000000|1.5|101"
+if (cd "$WORK" && "$STRADA" -O0 -o imp imp.strada) > "$WORK/imp.log" 2>&1; then
+    check "import_lib calls the externs (compiled)" "$want_i" "$(cd "$WORK" && ./imp 2>&1)"
+else
+    echo "not ok - compile imp.strada"; cat "$WORK/imp.log"; fail=1
+fi
+if [ -x "$INTERP" ]; then
+    check "import_lib calls the externs (VM)" "$want_i" "$(cd "$WORK" && "$INTERP" imp.strada 2>&1)"
+fi
+
+# An extern and an ordinary function of the same name in one package clash
+printf '%s\n' 'package Clash;' 'extern func add(int $a, int $b) int { return $a + $b; }' \
+    'func add(int $a, int $b) int { return $a - $b; }' > "$WORK/clash.strada"
+clash=$("$STRADA" --check "$WORK/clash.strada" 2>&1 | grep -c "clash.strada:3: error: function 'Clash_add' already defined")
+check "extern and func of the same name in one package is an error" "1" "$clash"
 
 # Semantic checks run on extern bodies
 printf '%s\n' 'package Bad;' 'extern func f(int $a) int {' '    return $a + $nosuch;' '}' > "$WORK/bad.strada"
