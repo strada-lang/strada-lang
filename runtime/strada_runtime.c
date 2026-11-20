@@ -15333,6 +15333,43 @@ char* strada_regex_replace_all(const char *str, const char *pattern, const char 
     return pcre2_do_substitute(str, pattern, replacement, flags, 1);
 }
 
+/* After a group-less s/// match has been pm_record'ed: keep $1..$N from the
+ * previous match and update only index 0 ($&). pm_build_captures() must have
+ * run before pm_record. */
+static void pm_keep_groups_set_amp(const char *str, const PCRE2_SIZE *ovector) {
+    if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY
+        && last_regex_captures->value.av && last_regex_captures->value.av->size > 1) {
+        StradaArray *old_av = last_regex_captures->value.av;
+        StradaValue *new_zero = (ovector[0] != PCRE2_UNSET)
+            ? strada_regex_new_capture(str + ovector[0], (size_t)(ovector[1] - ovector[0]))
+            : strada_new_undef();
+        StradaValue *old_zero = old_av->elements[old_av->head + 0];
+        old_av->elements[old_av->head + 0] = new_zero;
+        strada_decref(old_zero);
+        pm_state.cap_gen = pm_state.gen;
+    }
+}
+
+/* A literal s/// (strada_subst_sv_cnt) that matched at byte OFF: record the
+ * first match like a group-less regex s/// does, so $& (captures()->[0]),
+ * @-/@+ and $`/$' are set and $1..$N are kept. SHARE: SRC is a plain
+ * string's buffer, which pm_state may hold by reference instead of copying. */
+static void strada_subst_record_literal(const char *src, size_t src_len, int utf8,
+                                        size_t off, size_t flen, int share) {
+    pthread_once(&regex_cleanup_once, register_regex_cleanup_atexit);
+    /* last_regex_captures is current when the eager setters own it or it
+     * was built for this gen. Otherwise build it only if the previous match
+     * had groups to keep: building per s/// cost a third of a literal s///. */
+    int cur = pm_state.external || pm_state.cap_gen == pm_state.gen;
+    if (!cur && pm_state.ovec_count > 1) { pm_build_captures(); cur = 1; }
+    PCRE2_SIZE ov[2] = { (PCRE2_SIZE)off, (PCRE2_SIZE)(off + flen) };
+    const char *saved_pv = strada_regex_subject_pv;
+    strada_regex_subject_pv = share ? src : NULL;
+    pm_record(src, src_len, utf8, ov, 1);
+    strada_regex_subject_pv = saved_pv;
+    if (cur) pm_keep_groups_set_amp(src, ov);
+}
+
 /* strada_regex_replace_capture_len2: substitute AND set capture variables, return match count and byte length */
 int strada_regex_replace_capture_len2(const char *str, size_t subject_length, int is_utf8,
                                        const char *pattern, size_t pat_len,
@@ -15416,18 +15453,7 @@ int strada_regex_replace_capture_len2(const char *str, size_t subject_length, in
         pm_state.named_gen = pm_state.gen;
     }
 
-    if (count == 1 && last_regex_captures && last_regex_captures->type == STRADA_ARRAY
-        && last_regex_captures->value.av && last_regex_captures->value.av->size > 1) {
-        /* Preserve $1..$9 from prior match; only update index 0 ($&). */
-        StradaArray *old_av = last_regex_captures->value.av;
-        StradaValue *new_zero = (ovector[0] != PCRE2_UNSET)
-            ? strada_regex_new_capture(str + ovector[0], (size_t)(ovector[1] - ovector[0]))
-            : strada_new_undef();
-        StradaValue *old_zero = old_av->elements[old_av->head + 0];
-        old_av->elements[old_av->head + 0] = new_zero;
-        strada_decref(old_zero);
-        pm_state.cap_gen = pm_state.gen;
-    }
+    if (count == 1) pm_keep_groups_set_amp(str, ovector);
 
     strada_md_release(cap_md);
 
@@ -16898,6 +16924,10 @@ StradaValue* strada_named_captures(void) {
     return strada_new_hash();
 }
 
+static void strada_subst_record_literal(const char *src, size_t src_len, int utf8,
+                                        size_t off, size_t flen, int share) {
+    (void)src; (void)src_len; (void)utf8; (void)off; (void)flen; (void)share;
+}
 #endif /* HAVE_PCRE2 */
 
 /* String split - literal string delimiter (no regex) */
@@ -28942,7 +28972,8 @@ static inline const char *strada_memmem_short(const char *h, size_t hl, const ch
 static char *strada_binary_replace(const char *src, size_t src_len,
                                    const char *find, size_t find_len,
                                    const char *replace, size_t replace_len,
-                                   int global, int64_t *cnt_out, size_t *out_len) {
+                                   int global, int64_t *cnt_out, size_t *out_len,
+                                   size_t *first_out) {
     if (find_len == 0 || find_len > src_len) {
         if (cnt_out) *cnt_out = 0;
         return NULL;
@@ -28953,6 +28984,7 @@ static char *strada_binary_replace(const char *src, size_t src_len,
         return NULL;
     }
     const char *fp = (const char *)first;
+    if (first_out) *first_out = (size_t)(fp - src);
     int64_t cnt = 1;
     if (global) {
         const char *scan = fp + find_len;
@@ -29015,9 +29047,14 @@ int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const ch
         size_t fsrc_len = STRADA_STR_BYTELEN(target);
         if (fsrc_len == 0 && fsrc[0] != '\0') fsrc_len = strlen(fsrc);
         int64_t fcnt = 0;
-        size_t frlen = 0;
-        char *fres = strada_binary_replace(fsrc, fsrc_len, find, find_len, replace, replace_len, global, &fcnt, &frlen);
+        size_t frlen = 0, ffirst = 0;
+        char *fres = strada_binary_replace(fsrc, fsrc_len, find, find_len, replace, replace_len, global, &fcnt, &frlen, &ffirst);
         if (fcnt == 0 || !fres) { free(fres); return 0; }
+        /* Decide in-place reuse before recording: pm_state may take a
+         * reference to the old buffer, which keeps it alive for $`/$'. */
+        int f_inplace = (target->refcount == 1 && SS_FROM_PV(target->value.pv)->refcount == 1);
+        strada_subst_record_literal(fsrc, fsrc_len, STRADA_STR_IS_UTF8(target) ? 1 : 0, ffirst, find_len,
+                                    SS_FROM_PV(fsrc)->len == fsrc_len);
         int f_rep_non_ascii = 0;
         for (size_t fi = 0; fi < replace_len; fi++) {
             if ((unsigned char)replace[fi] >= 0x80) { f_rep_non_ascii = 1; break; }
@@ -29032,7 +29069,7 @@ int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const ch
         }
         int f_keep_utf8 = (f_was_utf8 || (f_rep_non_ascii && f_src_ascii))
                           && (!f_rep_non_ascii || utf8_is_valid(fres, frlen));
-        if (target->refcount == 1 && SS_FROM_PV(target->value.pv)->refcount == 1) {
+        if (f_inplace) {
             uint16_t fasc = (f_was_ascii && !f_rep_non_ascii) ? STRADA_SVf_ASCII : strada_detect_ascii_flag(fres, frlen);
             ss_free_pv(target->value.pv);
             target->value.pv = ss_alloc_pv(fres, frlen);
@@ -29082,14 +29119,15 @@ int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const ch
     }
 
     int64_t cnt = 0;
-    size_t rlen = 0;
+    size_t rlen = 0, first = 0;
     char *result = strada_binary_replace(src, src_len, find, find_len, replace, replace_len,
-                                         global, &cnt, &rlen);
+                                         global, &cnt, &rlen, &first);
     if (cnt == 0 || !result) {
         free(result);
         strada_cleanup_drain_to(cm);
         return 0;
     }
+    strada_subst_record_literal(src, src_len, was_utf8, first, find_len, 0);
     strada_cleanup_push(strada_cstruct_guard(result));
 
     int rep_non_ascii = 0;
@@ -29217,7 +29255,7 @@ StradaValue* strada_replace_sv(StradaValue *str_sv, StradaValue *find_sv, Strada
     int64_t cnt = 0;
     size_t rlen = 0;
     char *out = (find_len > 0)
-        ? strada_binary_replace(src, src_len, find, find_len, repl, repl_len, global, &cnt, &rlen)
+        ? strada_binary_replace(src, src_len, find, find_len, repl, repl_len, global, &cnt, &rlen, NULL)
         : NULL;
     StradaValue *res;
     if (cnt > 0 && out) {
@@ -29508,7 +29546,7 @@ StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char
     int64_t cnt = 0;
     size_t rlen = 0;
     char *r = strada_binary_replace(src, src_len, find, strlen(find), replace, strlen(replace),
-                                    1, &cnt, &rlen);
+                                    1, &cnt, &rlen, NULL);
     StradaValue *rv;
     if (!r) {
         rv = (src_utf8 && utf8_is_valid(src, src_len))

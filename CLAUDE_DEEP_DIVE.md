@@ -2931,6 +2931,11 @@ Measured and rejected:
 - **GC floor at 64K objects**: gc +32%, oop +13%, closures +11%, hotpaths +6% instructions. Fewer collections, but a larger heap per collection, so the pools cycled less.
 - **sprintf without converting arguments**: going through glibc `snprintf` cost more than the runtime's `strada_spf_fast_*` formatters, even for integers.
 
+Compiled literal `s///` and `$&` (follow-up, same day): `strada_subst_sv_cnt` (the compiled fast path for a literal pattern with no flags but `/g` and a plain replacement) never recorded its match, so `captures()->[0]` kept the previous match. It now calls `strada_subst_record_literal`, which records the first match into `pm_state` like the group-less branch of `strada_regex_replace_capture_len2` (both use `pm_keep_groups_set_amp` to keep `$1..$N`). Two cost rules:
+- The plain-string path shares the subject's `StradaString` with `pm_state` instead of copying it. It decides in-place reuse before recording, since the shared reference raises the buffer's refcount; the old buffer is then freed at the next record instead of immediately.
+- The previous match's captures are materialized only when that match had groups (`ovec_count > 1`) and `last_regex_captures` is not current. Materializing on every call made a loop of literal `s///` 44% more instructions; now it is about 9%.
+Test: `t/bugfix_tests/subst_literal_sets_amp.strada`.
+
 ## Lazy `//g` match state (2026-11-19)
 
 Reported from Perla (`strada-bugs/001`): `strada_regex_match_global` built

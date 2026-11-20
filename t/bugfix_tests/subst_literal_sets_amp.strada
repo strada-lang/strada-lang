@@ -1,0 +1,23 @@
+# EXPECT: a-bXc 1=q amp=X|a-b-c amp=X|12x45 amp=3|hello amp=é|kEEp keep amp=e|aBc 1=U amp=b|aBCabc 1=a amp=c|aXbXc amp=q1
+# A literal s/// (no regex metacharacters, no flags but /g) takes a fast path
+# in compiled code (strada_subst_sv_cnt) that never recorded the match, so
+# $& (captures()->[0]) kept the previous match's text. It now records the
+# first match like the regex path: $& is set and $1..$N are kept, as the VM
+# does. A stale group array from an older match is not resurrected.
+func amp() str { my $a = captures()->[0]; return defined($a) ? $a : "U"; }
+func main() int {
+    my @r = ();
+    my $s = "aXbXc"; "q1" =~ /(q)(1)/; $s =~ s/X/-/;
+    push(@r, $s . " 1=" . $1 . " amp=" . amp());
+    $s = "aXbXc"; $s =~ s/X/-/g; push(@r, $s . " amp=" . amp());
+    my $t = 12345; $t =~ s/3/x/; push(@r, $t . " amp=" . amp());
+    my $u = "héllo"; $u =~ s/é/e/; push(@r, $u . " amp=" . amp());
+    my $k = "keep"; my $c = $k; $c =~ s/e/E/g; push(@r, $c . " " . $k . " amp=" . amp());
+    my $x = "abc"; "ab" =~ /(a)(b)/; "zz" =~ /z/; $x =~ s/b/B/;
+    push(@r, $x . " 1=" . ($1 // "U") . " amp=" . amp());
+    $x = "abcabc"; "ab" =~ /(a)(b)/; $x =~ s/b/B/; $x =~ s/c/C/;
+    push(@r, $x . " 1=" . $1 . " amp=" . amp());
+    $x = "aXbXc"; "q1" =~ /(q)(1)/; $x =~ s/Q/-/; push(@r, $x . " amp=" . amp());
+    say(join("|", @r));
+    return 0;
+}
