@@ -1262,6 +1262,20 @@ typedef struct VM {
     uint64_t eval_sync_gen;  /* session store generation last synced with */
     uint32_t eval_epoch;     /* session epoch (reset() starts a new one) */
     int eval_running;        /* executing an eval right now */
+    /* Lazy regex captures: after a PCRE2 match the VM keeps a copy of the
+     * subject and the offsets (rx_lazy = 1) instead of copying every group;
+     * $N, captures() and named_captures() read them directly, and anything
+     * else calls vm_rx_materialize() to fill regex_captures[] first. */
+    char *rx_subj;
+    size_t rx_subj_len;
+    size_t rx_subj_cap;
+    size_t rx_ov[2 * VM_RX_MAX];
+    int rx_count;            /* groups recorded in rx_ov ($0 included) */
+    int rx_lazy;
+    uint8_t rx_subj_utf8;
+    void *rx_name_re;        /* pcre2_code with a name table, or NULL */
+    char *rl_buf;            /* getline() buffer for <$fh> */
+    size_t rl_cap;
 } VM;
 
 /* Program API */

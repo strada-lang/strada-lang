@@ -2899,6 +2899,38 @@ Test: `interpreter/test/test_vm_perf_c20d.strada` (recursion past 256 frames and
 - Boxed-int ADD/MOD/MUL (sort's random-number setup) still go through the step helper.
 - The JIT's call frame still writes eight fields per call; fib spends most of its instructions on call/return.
 
+## VM performance, round 5 (2026-11-20)
+
+Scaled instruction counts (callgrind, `mkscaled.sh` copies), before -> after:
+
+| Benchmark | Before | After | Change |
+|---|---|---|---|
+| strings | 641M | 200M | -69% |
+| data | 901M | 649M | -28% |
+| regex | 1289M | 1032M | -20% |
+| binary | 423M | 391M | -8% |
+| pipeline | 2393M | 2230M | -7% |
+| round5 | 22634M | 21645M | -4% |
+| everything else | | | within 1% |
+
+Where the time was:
+- **strings**: 45% in `s/NAME/World/`. Each substitution went through the runtime's substitute (match, a sizing `pcre2_substitute` and the real one), then `vm_sync_runtime_captures` rebuilt the VM's captures from `strada_captures()` and `strada_named_captures()`, a runtime array and a hash per call.
+- **data / pipeline**: `split(",", ...)` made runtime strings and converted each into a VM string.
+- **regex**: every match copied each group into its own malloc'd string.
+- **binary and every builtin call**: a 95 KB frame for `vm_exec_builtin`, probed page by page.
+
+Lazy captures (`vm_rx_record`):
+- The VM keeps the span of the subject from the leftmost group start to the rightmost end. That is not the whole subject, because a `while ($big =~ /x/g)` over a 100 KB string copies one byte per match.
+- It keeps the offsets relative to that span (`(size_t)-1` = unset), `rx_count`, and the pcre2_code when it has named groups.
+- `\K` can give a group an end before its start. Such a group is clamped to empty, and `vm_subst_native` hands such a match to the runtime.
+- The name-table pointer stays valid because the regex cache materializes the captures before evicting that pattern. A cache-less compile (`need_free`) materializes at once.
+
+`vm_subst_native` empty-match rule (as PCRE2's global substitute and Perl): after an empty match, retry at the same offset with `PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED`; if that fails, copy one character (UTF-8 aware) and search on. `s/b*/-/g` on "abc" is "-a--c-".
+
+Measured and rejected:
+- **GC floor at 64K objects**: gc +32%, oop +13%, closures +11%, hotpaths +6% instructions. Fewer collections, but a larger heap per collection, so the pools cycled less.
+- **sprintf without converting arguments**: going through glibc `snprintf` cost more than the runtime's `strada_spf_fast_*` formatters, even for integers.
+
 ## Lazy `//g` match state (2026-11-19)
 
 Reported from Perla (`strada-bugs/001`): `strada_regex_match_global` built

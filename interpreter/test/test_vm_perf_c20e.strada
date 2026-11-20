@@ -1,0 +1,80 @@
+# VM performance, round 5: lazy regex captures (subject span + offsets,
+# $N / captures() / named_captures() read them directly), s/// with a
+# plain-text replacement done in the VM (literal patterns by byte search),
+# split on a literal separator without runtime values, <$fh> through
+# getline(). Output must match the compiled backend, except that a literal
+# s/// also sets $& here, as in Perl (the compiled fast path does not).
+func show_r(str $l, str $s) void { say($l . " [" . $s . "] 1=" . ($1 // "U") . " 2=" . ($2 // "U") . " amp=" . (defined(captures()->[0]) ? captures()->[0] : "U")); }
+func rx_part() void {
+    my str $s = "abc";
+    "zz9" =~ /(z+)(\d)/;
+    $s = "abc"; $s =~ s/x*/-/g; show_r("empty*", $s);
+    $s = "abc"; $s =~ s/b*/-/g; show_r("b*", $s);
+    $s = "aaa"; $s =~ s/a/b/; show_r("lit1", $s);
+    $s = "aaa"; $s =~ s/a/b/g; show_r("litg", $s);
+    $s = "aaa"; $s =~ s/q/b/g; show_r("lit-nomatch", $s);
+    $s = "a1b22c333"; $s =~ s/\d+/N/g; show_r("digits", $s);
+    $s = "Hello World"; $s =~ s/(o)(r)?/0/g; show_r("groups", $s);
+    $s = "ABCabc"; $s =~ s/b/X/gi; show_r("ci", $s);
+    $s = "l1\nl2\n"; $s =~ s/^l/L/mg; show_r("multi", $s);
+    $s = "héllo wörld"; $s =~ s/ö/o/g; show_r("utf8lit", $s);
+    $s = "héllo"; $s =~ s/./_/g; show_r("utf8dot", $s);
+    $s = "a.b.c"; $s =~ s/\./-/g; show_r("escdot", $s);
+    $s = "xyz"; $s =~ s/(y)/[$1]/; show_r("dollar1", $s);
+    $s = "xyz"; $s =~ s/y/\\/; show_r("bslash", $s);
+    $s = ""; $s =~ s/^/S/; show_r("emptysubj", $s);
+    $s = "aaa"; my $n = ($s =~ s/a/b/g); show_r("count=" . $n, $s);
+    my $t = "k=v; k2=v2";
+    if ($t =~ /(?P<key>\w+)=(?P<val>\w+)/) { my %nc = named_captures(); say("named " . $nc{"key"} . " " . $nc{"val"} . " " . join(",", sort(keys(%nc)))); }
+    if ($t =~ /(\w+)=(\w+); (\w+)=(\w+)/) { say("caps " . join("|", @{captures()}) . " 4=" . $4); }
+    if ("ab" =~ /(a)|(b)/) { say("unset2=" . (defined($2) ? "def" : "undef") . " n=" . scalar(@{captures()})); }
+    my $big = "x" x 100000 . "y";
+    my $c = 0; while ($big =~ /x/g) { $c++; } say("gloop " . $c);
+    "q" =~ /(q)/; "zz" =~ /nomatch(.)/; say("after-fail 1=" . $1);
+
+}
+
+func j(array @a) str { my @q = (); foreach my $x (@a) { push(@q, "<" . $x . ">"); } return scalar(@a) . ":" . join("", @q); }
+func sp_part() void {
+    my str $in = "/tmp/vm_perf_c20e.txt";
+    core::spew($in, "one\ntwo\r\n\nlast-no-newline");
+    say("split1 " . j(split(",", "a,b,,c,,")));
+    say("split2 " . j(split(",", "")));
+    say("split3 " . j(split(",", ",a")));
+    say("split4 " . j(split("::", "x::y::::z::")));
+    say("split5 " . j(split("", "héllo")));
+    say("split6 " . j(split("", "abc")));
+    say("split7 " . j(split(" ", "  a  b c ")));
+    say("split8 " . j(split(/,/, "1,2,3")));
+    say("split9 " . j(split("|", "a|b")));
+    say("split10 " . j(split(".", "a.b")));
+    say("split11 " . j(split(",", ",,,")));
+    my $u = "é,ü"; my @p = split(",", $u); say("split12 " . length($p[0]) . " " . j(@p));
+    say(sprintf("%-20s|%10d|%08d|%6.1f%%", "name", 42, 7, 99.25));
+    say(sprintf("%.6f %e %g", 3.14159265, 12345.678, 0.0001));
+    say(sprintf("%d %x %o %X %u", 255, 255, 8, 255, -1));
+    say(sprintf("%s ... %d ... %.2f", "abc", -5, 2.005));
+    say(sprintf("[%s] user=%s req=%d", "t", "u", 9));
+    say(sprintf("%5s|%-5s|%.2s|%05s", "ab", "ab", "abcdef", "ab"));
+    say(sprintf("%s %s", 12, "x"));
+    say(sprintf("%+d % d %#x %#o", 5, 5, 255, 8));
+    say(sprintf("%s|%5s", "héllo", "é"));
+    say(sprintf("%d", 3.7) . " " . sprintf("%s", 1.5) . " " . sprintf("%d %d", 1) . " " . sprintf("%d", 1, 2));
+    say(sprintf("%c%c", 65, 233) . " " . sprintf("%5.1f|%-8.3e|", -0.05, 1234.5));
+    say(sprintf("%s", "a\x00b") eq "a\x00b" ? "nul ok" : "nul bad");
+    my $fh = core::open($in, "r");
+    my @lines = ();
+    while (defined(my $l = <$fh>)) { push(@lines, "[" . $l . "]"); }
+    core::close($fh);
+    say("lines " . join("", @lines));
+    $fh = core::open($in, "r");
+    my @all = <$fh>;
+    say("all " . scalar(@all) . " " . join("|", @all));
+    core::unlink($in);
+}
+
+func main() int {
+    rx_part();
+    sp_part();
+    return 0;
+}
