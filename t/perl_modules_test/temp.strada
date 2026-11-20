@@ -1,0 +1,33 @@
+use File::Temp qw(tempfile tempdir);
+use File::Basename qw(basename dirname);
+func main(int $argc, array @argv) int {
+    my str $base = $argv[1];
+    my ($fh, $name) = tempfile();
+    say("default dir=" . dirname($name) . " len=" . length(basename($name)) . " exists=" . (core::file_exists($name) ? 1 : 0));
+    say($fh, "hello");
+    core::seek($fh, 0, 0);
+    my str $line = <$fh>;
+    say("readback=" . $line);
+    core::close($fh);
+    my $st = core::stat($name);
+    say(sprintf("mode=%o", $st->{"mode"} & 511));
+    core::unlink($name);
+    my ($fh2, $n2) = tempfile("dataXXXXXX", DIR => $base, SUFFIX => ".json", UNLINK => 1);
+    say("dir2=" . (dirname($n2) eq $base ? "ok" : dirname($n2)) . " name2=" . (basename($n2) =~ /^data[A-Za-z0-9_]{6}\.json$/ ? "ok" : basename($n2)));
+    my str $d = tempdir(CLEANUP => 1, DIR => $base);
+    core::mkdir($d . "/sub", 493);
+    core::spew($d . "/sub/f", "x");
+    say("tempdir=" . (core::is_dir($d) ? "ok" : "missing"));
+    my ($fh3, $n3) = tempfile("keepXXXX", DIR => $base);
+    try { tempfile("badXX"); } catch ($e) { print("err=" . $e); }
+    my ($u, $n4) = tempfile(DIR => $base, OPEN => 0);
+    say("open0=" . (defined($u) ? "fh" : "undef") . " exists=" . core::file_exists($n4));
+    {
+        my $obj = File::Temp::new(DIR => $base, SUFFIX => ".obj");
+        say($obj->fh(), "data");
+        say("obj=" . (core::file_exists($obj->filename()) ? "exists" : "missing"));
+        core::spew($base . "/objname", $obj->filename());
+    }
+    core::spew($base . "/names", $n2 . "\n" . $d . "\n" . $n3 . "\n");
+    return 0;
+}

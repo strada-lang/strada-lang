@@ -1,0 +1,205 @@
+package File::Path;
+version "1.0.0";
+
+# File::Path - create and remove directory trees, compatible with Perl's
+# File::Path.
+#
+#   use File::Path qw(make_path remove_tree);
+#
+#   my @created = make_path("a/b/c", "x/y", { mode => 0750 });
+#   remove_tree("a", "x");
+#   remove_tree("build", { keep_root => 1 });     # empty it, keep "build"
+#
+#   my $err;
+#   make_path("/root/nope", { error => \$err });
+#   foreach my $e (@{$err}) {                     # [{ path => message }, ...]
+#       foreach my $p (keys(%{$e})) { say($p . ": " . $e->{$p}); }
+#   }
+#
+# make_path(PATHS..., [\%opts]) returns the directories it created.
+#   opts: mode (or mask; default 0777, less the umask), verbose, error
+# remove_tree(PATHS..., [\%opts]) returns how many files and directories it
+# removed. Symbolic links are removed, never followed.
+#   opts: verbose, keep_root, result (\$list of removed paths), error
+# Without an error option, failures are reported on STDERR as warnings.
+# The old forms mkpath(PATHS | \@paths, VERBOSE, MODE) and
+# rmtree(PATHS | \@paths, VERBOSE) also work.
+
+private func fp_strerror() str {
+    return "" . core::strerror(core::errno());
+}
+
+# With an error option the entry is { PATH => strerror }; without one,
+# "WHAT PATH: strerror" goes to STDERR (Perl)
+private func report(scalar $opts, scalar $errs, str $path, str $what) void {
+    my str $why = File::Path::fp_strerror();
+    if (defined($opts) && exists($opts->{"error"})) {
+        push(@{$errs}, { $path => $why });
+    } else {
+        print(STDERR, $what . " " . $path . ": " . $why . "\n");
+    }
+}
+
+private func finish_errors(scalar $opts, scalar $errs) void {
+    if (defined($opts) && exists($opts->{"error"})) {
+        my scalar $er = $opts->{"error"};
+        $$er = $errs;
+    }
+}
+
+# Split PATHS... [\%opts] into [paths, opts]
+private func split_args(scalar $args) scalar {
+    my array @paths = ();
+    my scalar $opts = undef;
+    my int $n = scalar(@{$args});
+    if ($n > 0 && ref($args->[$n - 1]) eq "HASH") {
+        $opts = $args->[$n - 1];
+        $n--;
+    }
+    my int $i = 0;
+    while ($i < $n) {
+        push(@paths, "" . $args->[$i]);
+        $i++;
+    }
+    return [\@paths, $opts];
+}
+
+private func mkdir_one(str $path, int $mode, scalar $opts, scalar $created, scalar $errs) int {
+    if (core::is_dir($path) == 1) {
+        return 1;
+    }
+    my str $parent = $path;
+    $parent =~ s/\/+[^\/]*\/*$//;
+    if ($parent ne "" && $parent ne $path && core::is_dir($parent) == 0) {
+        # on failure, still try PATH so its error is reported too (Perl)
+        File::Path::mkdir_one($parent, $mode, $opts, $created, $errs);
+    }
+    if (core::mkdir($path, $mode) == 0) {
+        if (defined($opts) && $opts->{"verbose"}) {
+            say("mkdir " . $path);
+        }
+        push(@{$created}, $path);
+        return 1;
+    }
+    if (core::is_dir($path) == 1) {
+        return 1;
+    }
+    File::Path::report($opts, $errs, $path, "mkdir");
+    return 0;
+}
+
+private func make_paths(scalar $paths, scalar $opts) array {
+    my int $mode = 511;
+    if (defined($opts)) {
+        if (exists($opts->{"mode"})) {
+            $mode = $opts->{"mode"} + 0;
+        } elsif (exists($opts->{"mask"})) {
+            $mode = $opts->{"mask"} + 0;
+        }
+    }
+    my array @created = ();
+    my array @errs = ();
+    foreach my $p (@{$paths}) {
+        my str $path = $p;
+        if ($path ne "/") {
+            $path =~ s/\/+$//;
+        }
+        if ($path eq "") {
+            next;
+        }
+        File::Path::mkdir_one($path, $mode, $opts, \@created, \@errs);
+        # the path itself is listed as given (Perl keeps a trailing "/")
+        my int $nc = scalar(@created);
+        if ($nc > 0 && $created[$nc - 1] eq $path) {
+            $created[$nc - 1] = $p;
+        }
+    }
+    File::Path::finish_errors($opts, \@errs);
+    return @created;
+}
+
+func make_path(scalar ...@args) array {
+    my scalar $sa = File::Path::split_args(\@args);
+    return File::Path::make_paths($sa->[0], $sa->[1]);
+}
+
+func mkpath(scalar ...@args) array {
+    if (scalar(@args) > 0 && ref($args[0]) eq "ARRAY") {
+        my scalar $opts = {};
+        if (scalar(@args) > 1) { $opts->{"verbose"} = $args[1]; }
+        if (scalar(@args) > 2) { $opts->{"mode"} = $args[2]; }
+        my array @paths = ();
+        foreach my $p (@{$args[0]}) { push(@paths, "" . $p); }
+        return File::Path::make_paths(\@paths, $opts);
+    }
+    my scalar $sa = File::Path::split_args(\@args);
+    return File::Path::make_paths($sa->[0], $sa->[1]);
+}
+
+private func rm_one(str $path, int $is_root, scalar $opts, scalar $removed, scalar $errs) int {
+    my int $count = 0;
+    my int $verbose = defined($opts) && $opts->{"verbose"} ? 1 : 0;
+    if (core::is_symlink($path) == 0 && core::is_dir($path) == 1) {
+        foreach my $e (sort(core::readdir($path))) {
+            $count += File::Path::rm_one($path . "/" . $e, 0, $opts, $removed, $errs);
+        }
+        if ($is_root == 1 && defined($opts) && $opts->{"keep_root"}) {
+            return $count;
+        }
+        if (core::rmdir($path) == 0) {
+            if ($verbose == 1) { say("rmdir " . $path); }
+            push(@{$removed}, $path);
+            $count++;
+        } else {
+            File::Path::report($opts, $errs, $path, "cannot remove directory for");
+        }
+        return $count;
+    }
+    if (core::unlink($path) == 0) {
+        if ($verbose == 1) { say("unlink " . $path); }
+        push(@{$removed}, $path);
+        $count++;
+    } else {
+        File::Path::report($opts, $errs, $path, "cannot unlink file for");
+    }
+    return $count;
+}
+
+private func remove_paths(scalar $paths, scalar $opts) int {
+    my int $count = 0;
+    my array @removed = ();
+    my array @errs = ();
+    foreach my $p (@{$paths}) {
+        my str $path = $p;
+        if ($path ne "/") {
+            $path =~ s/\/+$//;
+        }
+        if ($path eq "" || (!core::file_exists($path) && core::is_symlink($path) == 0)) {
+            next;
+        }
+        $count += File::Path::rm_one($path, 1, $opts, \@removed, \@errs);
+    }
+    if (defined($opts) && exists($opts->{"result"})) {
+        my scalar $rr = $opts->{"result"};
+        $$rr = \@removed;
+    }
+    File::Path::finish_errors($opts, \@errs);
+    return $count;
+}
+
+func remove_tree(scalar ...@args) int {
+    my scalar $sa = File::Path::split_args(\@args);
+    return File::Path::remove_paths($sa->[0], $sa->[1]);
+}
+
+func rmtree(scalar ...@args) int {
+    if (scalar(@args) > 0 && ref($args[0]) eq "ARRAY") {
+        my scalar $opts = {};
+        if (scalar(@args) > 1) { $opts->{"verbose"} = $args[1]; }
+        my array @paths = ();
+        foreach my $p (@{$args[0]}) { push(@paths, "" . $p); }
+        return File::Path::remove_paths(\@paths, $opts);
+    }
+    my scalar $sa = File::Path::split_args(\@args);
+    return File::Path::remove_paths($sa->[0], $sa->[1]);
+}

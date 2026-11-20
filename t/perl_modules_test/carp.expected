@@ -1,0 +1,5 @@
+caught: bad x -1 at carp.strada line 9.
+confess: deep at carp.strada line 11. (with trace)
+top: top at carp.strada line 12.
+--- stderr ---
+careful at carp.strada line 10.

@@ -1,0 +1,7 @@
+blessed Foo undef undef
+reftype HASH ARRAY SCALAR CODE
+lln 1111110000101 100
+refaddr same diff undef
+weak 1
+oh open undef
+--- stderr ---

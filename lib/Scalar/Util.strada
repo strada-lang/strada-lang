@@ -1,0 +1,87 @@
+package Scalar::Util;
+version "1.0.0";
+
+# Scalar::Util - reference and number utilities, compatible with Perl's
+# Scalar::Util.
+#
+#   use Scalar::Util qw(blessed reftype looks_like_number refaddr);
+#
+#   blessed($obj)            class name, or undef when not a blessed ref
+#   reftype($ref)            "HASH", "ARRAY", "SCALAR", "CODE", ... ignoring
+#                            bless; undef for a non-reference
+#   looks_like_number($x)    1 if $x is a number or a string Perl would read
+#                            as one ("12", " 1.5e3 ", "-.5", "Inf", "nan")
+#   refaddr($ref)            the referent's address as an integer, or undef
+#   weaken / isweak          use core::weaken / core::isweak; do not
+#                            import them (a library function would get a
+#                            copy of the reference, so this module cannot
+#                            provide them, and listing them in qw() is an
+#                            "undefined function" error)
+#   openhandle($fh)          $fh if it is an open filehandle, else undef
+#   readonly($x)             0 (Strada has no read-only scalars)
+#
+# Note: under strada-interp, an imported name that is also a builtin
+# (blessed, reftype) calls the builtin, whose reftype gives "" rather than
+# undef for a non-reference.
+
+func blessed(scalar $r) scalar {
+    if (ref($r) eq "") {
+        return undef;
+    }
+    my scalar $b = core::blessed($r);
+    if (!defined($b) || "" . $b eq "") {
+        return undef;
+    }
+    return $b;
+}
+
+func reftype(scalar $r) scalar {
+    if (ref($r) eq "") {
+        return undef;
+    }
+    my str $t = reftype($r);
+    return $t eq "" ? undef : $t;
+}
+
+func looks_like_number(scalar $v) int {
+    if (!defined($v)) {
+        return 0;
+    }
+    if (ref($v) ne "") {
+        return 0;
+    }
+    my str $s = "" . $v;
+    if ($s =~ /^\s*[-+]?(?:[0-9]+\.?[0-9]*(?:[eE][-+]?[0-9]+)?|\.[0-9]+(?:[eE][-+]?[0-9]+)?)\s*$/) {
+        return 1;
+    }
+    if ($s =~ /^\s*[-+]?(?:inf(?:inity)?|nan)\s*$/i) {
+        return 1;
+    }
+    return 0;
+}
+
+func refaddr(scalar $r) scalar {
+    if (ref($r) eq "") {
+        return undef;
+    }
+    my str $text = core::sprintf("%s", $r);
+    if ($text =~ /\(0x([0-9a-fA-F]+)\)$/) {
+        return hex($1);
+    }
+    return undef;
+}
+
+func openhandle(scalar $fh) scalar {
+    if (!defined($fh)) {
+        return undef;
+    }
+    my str $t = "" . typeof($fh);
+    if ($t eq "filehandle" || $t eq "FILEHANDLE" || $t eq "socket" || $t eq "SOCKET") {
+        return $fh;
+    }
+    return undef;
+}
+
+func readonly(scalar $v) int {
+    return 0;
+}

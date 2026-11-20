@@ -1,0 +1,14 @@
+use File::Basename qw(basename dirname fileparse);
+func main() int {
+    my array @paths = ("/usr/lib/libc.so", "libc.so", "/usr/lib/", "/usr/lib//", "/", "//", "", ".", "..", "a/", "a/b", "/a", "a//b//", "./x", "../x/y.tar.gz", ".bashrc", "/x/.y", "dir/file.txt");
+    foreach my $p (@paths) {
+        my array @fp = fileparse($p);
+        my array @fs = fileparse($p, "\\.[^.]*");
+        my array @fl = fileparse($p, ".gz", ".tar");
+        say("[" . $p . "] base=[" . basename($p) . "] base_so=[" . basename($p, ".so", ".txt") . "] dir=[" . dirname($p)
+            . "] fp=[" . join("|", @fp) . "] fs=[" . join("|", @fs) . "] fl=[" . join("|", @fl) . "]");
+    }
+    say(basename("a.so", "a.so"));
+    say(basename("x.c*", ".c*"));
+    return 0;
+}

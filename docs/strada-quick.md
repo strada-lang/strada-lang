@@ -623,7 +623,9 @@ High-frequency built-ins:
 Standard modules live under `lib/`. Check there before adding dependencies or
 reimplementing a facility. Notable modules include `JSON`, `YAML`, `DateTime`,
 `List::Util`, `Getopt::Long`, `Test`, `Exception`, `DBI`, `LWP`, `Template`,
-`Text::CSV`, `Digest::MD5`, and `Digest::SHA`. Some require optional native
+`Text::CSV`, `Digest::MD5`, and `Digest::SHA`, plus Perl-compatible
+`File::Basename`, `File::Temp`, `File::Spec`, `File::Path`, `File::Copy`,
+`Cwd`, `Carp` and `Scalar::Util` (`use File::Basename qw(dirname);`). Some require optional native
 libraries selected during `configure`/`make`.
 
 ## Failure patterns to catch during review

@@ -1,0 +1,99 @@
+package File::Basename;
+version "1.0.0";
+
+# File::Basename - split a path into directory, file name and suffix,
+# compatible with Perl's File::Basename (Unix paths).
+#
+#   use File::Basename qw(basename dirname fileparse);
+#
+#   basename("/usr/lib/libc.so")            # "libc.so"
+#   basename("/usr/lib/libc.so", ".so")     # "libc"
+#   basename("/usr/lib/")                   # "lib"
+#   dirname("/usr/lib/libc.so")             # "/usr/lib"
+#   dirname("libc.so")                      # "."
+#   dirname("/usr/lib/")                    # "/usr"
+#   my ($name, $dir, $suffix) = fileparse("/tmp/a.tar.gz", "\\.[^.]*");
+#                                           # ("a.tar", "/tmp/", ".gz")
+#
+# fileparse's suffixes are regular expressions given as strings (Strada has
+# no qr//), matched at the end of the name; basename's are literal strings. Like Perl,
+# fileparse("/usr/lib/") returns ("", "/usr/lib/", "") and dirname of a
+# path with a trailing slash names the parent.
+
+our int $ignore_case = 0;
+
+# Perl's _strip_trailing_sep: "a//" -> "a", "/" stays "/"
+private func strip_trailing_sep(str $p) str {
+    my str $r = $p;
+    $r =~ s/(.)\/*\z/$1/s;
+    return $r;
+}
+
+# fileparse(PATH, SUFFIX_PATTERNS...) - returns (name, dir, suffix)
+func fileparse(str $path, scalar ...@suffixes) array {
+    my str $dirpath = "";
+    my str $basename = $path;
+    my int $slash = rindex($path, "/");
+    if ($slash >= 0) {
+        $dirpath = substr($path, 0, $slash + 1);
+        $basename = substr($path, $slash + 1);
+    }
+    if ($dirpath eq "") {
+        $dirpath = "./";
+    }
+    my str $tail = "";
+    foreach my $sfx (@suffixes) {
+        my str $re = ($ignore_case == 1 ? "(?i)" : "") . "(" . $sfx . ")\\z";
+        if ($basename =~ /$re/s) {
+            my str $matched = $1;
+            $basename = substr($basename, 0, length($basename) - length($matched));
+            $tail = $matched . $tail;
+        }
+    }
+    my array @res = ($basename, $dirpath, $tail);
+    return @res;
+}
+
+# basename(PATH, SUFFIXES...) - the last component, without a literal suffix
+func basename(str $path, str ...@suffixes) str {
+    my str $p = File::Basename::strip_trailing_sep($path);
+    my array @quoted = ();
+    foreach my $s (@suffixes) {
+        push(@quoted, core::quotemeta($s));
+    }
+    my array @parts = File::Basename::fileparse($p, ...@quoted);
+    my str $base = $parts[0];
+    my str $dir = $parts[1];
+    my str $suffix = $parts[2];
+    if (length($suffix) > 0 && length($base) == 0) {
+        $base = $suffix;
+    }
+    if (length($base) == 0) {
+        $base = $dir;
+    }
+    return $base;
+}
+
+# dirname(PATH) - everything but the last component ("." when there is none)
+func dirname(str $path) str {
+    my array @parts = File::Basename::fileparse($path);
+    my str $base = $parts[0];
+    my str $dir = File::Basename::strip_trailing_sep($parts[1]);
+    if (length($base) == 0) {
+        my array @again = File::Basename::fileparse($dir);
+        $dir = File::Basename::strip_trailing_sep($again[1]);
+    }
+    return $dir;
+}
+
+# fileparse_set_fstype(TYPE) - only Unix semantics are implemented; returns
+# the previous type ("Unix"). Any other type dies.
+func fileparse_set_fstype(scalar ...@type) str {
+    if (scalar(@type) > 0) {
+        my str $t = lc("" . $type[0]);
+        if ($t ne "unix" && $t ne "linux" && $t ne "darwin" && $t ne "freebsd") {
+            die("File::Basename: only Unix paths are supported, not " . $type[0] . "\n");
+        }
+    }
+    return "Unix";
+}

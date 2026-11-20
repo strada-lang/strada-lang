@@ -1,0 +1,12 @@
+# EXPECT: c.txt /usr ok
+# `use Mod qw(NAME)` emitted an unused `extern StradaValue* NAME();`, which
+# clashed in C with a libc function of the same name (basename, getcwd):
+# "conflicting types for 'basename'". It is now left out when NAME resolves
+# to a function of the module.
+use lib "lib";
+use File::Basename qw(basename dirname);
+use Cwd qw(getcwd);
+func main() int {
+    say(basename("/usr/c.txt") . " " . dirname("/usr/c.txt") . " " . (getcwd() eq core::getcwd() ? "ok" : "bad"));
+    return 0;
+}

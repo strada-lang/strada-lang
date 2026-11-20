@@ -1,0 +1,121 @@
+package File::Copy;
+version "1.0.0";
+
+# File::Copy - copy and move files, compatible with Perl's File::Copy.
+#
+#   use File::Copy qw(copy move cp mv);
+#
+#   copy("a.txt", "b.txt") or die("copy failed: " . core::strerror(core::errno()) . "\n");
+#   copy("a.txt", "backup/");          # into a directory: backup/a.txt
+#   move("tmp.out", "/data/result");   # rename, or copy + delete across
+#                                      # file systems
+#
+# copy(FROM, TO [, BUFSIZE]) copies bytes (binary-safe); the new file gets
+# the default permissions. cp() also copies the permission bits. move()
+# renames when it can; otherwise it copies (keeping permissions and
+# times) and removes FROM. mv() is move(). All return 1 on success and 0 on
+# failure. FROM and TO are file names (filehandles are not supported).
+
+use File::Basename;
+
+private func target_path(str $from, str $to) str {
+    if (core::is_dir($to) == 1) {
+        my str $t = $to;
+        if ($t !~ /\/$/) {
+            $t = $t . "/";
+        }
+        return $t . File::Basename::basename($from);
+    }
+    return $to;
+}
+
+private func same_file(str $a, str $b) int {
+    my scalar $sa = core::stat($a);
+    my scalar $sb = core::stat($b);
+    if (!defined($sa) || !defined($sb)) {
+        return 0;
+    }
+    return ($sa->{"dev"} == $sb->{"dev"} && $sa->{"ino"} == $sb->{"ino"}) ? 1 : 0;
+}
+
+func copy(str $from, str $to_in, scalar ...@bufsize) int {
+    my str $to = File::Copy::target_path($from, $to_in);
+    if (File::Copy::same_file($from, $to) == 1) {
+        print(STDERR, "'" . $from . "' and '" . $to . "' are identical (not copied)\n");
+        return 0;
+    }
+    my int $bs = 65536;
+    if (scalar(@bufsize) > 0 && defined($bufsize[0]) && $bufsize[0] + 0 > 0) {
+        $bs = $bufsize[0] + 0;
+    }
+    if (core::is_dir($from) == 1) {
+        return 0;
+    }
+    my scalar $in = core::open($from, "rb");
+    if (!defined($in)) {
+        return 0;
+    }
+    my scalar $out = core::open($to, "wb");
+    if (!defined($out)) {
+        core::close($in);
+        return 0;
+    }
+    my int $ok = 1;
+    while (1) {
+        my scalar $chunk = core::fread($in, $bs);
+        if (!defined($chunk)) {
+            last;
+        }
+        my int $n = core::byte_length($chunk);
+        if ($n == 0) {
+            last;
+        }
+        if (core::fwrite($out, $chunk, $n) != $n) {
+            $ok = 0;
+            last;
+        }
+    }
+    core::close($in);
+    core::close($out);
+    return $ok;
+}
+
+func cp(str $from, str $to_in, scalar ...@bufsize) int {
+    my str $to = File::Copy::target_path($from, $to_in);
+    if (File::Copy::copy($from, $to, ...@bufsize) == 0) {
+        return 0;
+    }
+    my scalar $st = core::stat($from);
+    if (defined($st)) {
+        core::chmod($to, $st->{"mode"} & 4095);
+    }
+    return 1;
+}
+
+func move(str $from, str $to_in) int {
+    my str $to = File::Copy::target_path($from, $to_in);
+    if (core::rename($from, $to) == 0) {
+        return 1;
+    }
+    if (core::is_dir($from) == 1 || (!core::file_exists($from) && core::is_symlink($from) == 0)) {
+        return 0;
+    }
+    my scalar $st = core::stat($from);
+    if (File::Copy::copy($from, $to) == 0) {
+        core::unlink($to);
+        return 0;
+    }
+    if (defined($st)) {
+        core::chmod($to, $st->{"mode"} & 4095);
+        core::utime($to, $st->{"atime"}, $st->{"mtime"});
+    }
+    if (core::unlink($from) != 0) {
+        core::unlink($to);
+        return 0;
+    }
+    return 1;
+}
+
+func mv(str $from, str $to) int {
+    return File::Copy::move($from, $to);
+}

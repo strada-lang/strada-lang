@@ -5964,11 +5964,32 @@ func gen_program(scalar $cg, scalar $program) void {
     if ($imp_count > 0) {
         emit($cg, "/* Imported function declarations */\n");
         my scalar $imports = $program->{"imports"};
+        # Names a `use Mod qw(...)` import resolves to a function compiled
+        # here: calls go to that function (qw_imports), so the bare extern is
+        # unused, and it clashes with libc for names like basename/getcwd.
+        my hash %imp_resolved = ();
+        my scalar $imp_qwi = $cg->{"qw_imports"};
+        if (defined($imp_qwi)) {
+            my scalar $imp_funcs = $cg->{"functions"};
+            my array @imp_qkeys = keys(%{$imp_qwi});
+            my int $imp_qi = 0;
+            while ($imp_qi < scalar(@imp_qkeys)) {
+                my str $imp_qk = $imp_qkeys[$imp_qi];
+                my str $imp_tgt = "" . $imp_qwi->{$imp_qk};
+                if (defined($imp_funcs) && defined($imp_funcs->{sanitize_name($imp_tgt)})) {
+                    my int $imp_cp = rindex($imp_qk, "::");
+                    $imp_resolved{substr($imp_qk, $imp_cp + 2)} = 1;
+                }
+                $imp_qi = $imp_qi + 1;
+            }
+        }
         my int $imp = 0;
         while ($imp < $imp_count) {
             my str $imp_name = $imports->[$imp];
             # Generate generic extern declaration (assume StradaValue* return and variadic params)
-            emit($cg, "extern StradaValue* " . $imp_name . "();\n");
+            if (!exists($imp_resolved{$imp_name})) {
+                emit($cg, "extern StradaValue* " . $imp_name . "();\n");
+            }
             $imp = $imp + 1;
         }
         emit($cg, "\n");

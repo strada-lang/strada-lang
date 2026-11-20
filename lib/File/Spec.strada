@@ -1,0 +1,215 @@
+package File::Spec;
+version "1.0.0";
+
+# File::Spec - portable path operations (Unix rules), compatible with
+# Perl's File::Spec. Call the methods on the class name, as in Perl:
+#
+#   use File::Spec;
+#
+#   File::Spec->catfile("a", "b", "c.txt")     # "a/b/c.txt"
+#   File::Spec->catdir("/usr/", "lib")          # "/usr/lib"
+#   File::Spec->rel2abs("lib")                  # "/current/dir/lib"
+#   File::Spec->abs2rel("/a/b/c", "/a")         # "b/c"
+#   my ($vol, $dir, $file) = File::Spec->splitpath("/a/b/c.txt");
+#
+# File::Spec::Functions exports the same operations as plain functions.
+#
+# Methods: canonpath, catdir, catfile, join, curdir, updir, rootdir,
+# devnull, tmpdir, case_tolerant, file_name_is_absolute, path, splitpath,
+# splitdir, catpath, no_upwards, rel2abs, abs2rel.
+
+func canonpath(scalar $self, scalar $p) scalar {
+    if (!defined($p)) {
+        return undef;
+    }
+    my str $path = "" . $p;
+    $path =~ s/\/{2,}/\//g;
+    $path =~ s/(?:\/\.)+(?:\/|\z)/\//g;
+    if ($path ne "./") {
+        $path =~ s/^(?:\.\/)+//s;
+    }
+    $path =~ s/^\/(?:\.\.\/)+/\//;
+    $path =~ s/^\/\.\.$/\//;
+    if ($path ne "/") {
+        $path =~ s/\/\z//;
+    }
+    return $path;
+}
+
+func catdir(scalar $self, scalar ...@parts) str {
+    my array @all = ();
+    foreach my $p (@parts) {
+        push(@all, defined($p) ? "" . $p : "");
+    }
+    push(@all, "");
+    return File::Spec::canonpath($self, join("/", @all));
+}
+
+func catfile(scalar $self, scalar ...@parts) str {
+    if (scalar(@parts) == 0) {
+        return "";
+    }
+    my str $file = File::Spec::canonpath($self, pop(@parts));
+    if (scalar(@parts) == 0) {
+        return $file;
+    }
+    my str $dir = File::Spec::catdir($self, ...@parts);
+    if (substr($dir, -1) ne "/") {
+        $dir = $dir . "/";
+    }
+    return $dir . $file;
+}
+
+func join(scalar $self, scalar ...@parts) str {
+    return File::Spec::catfile($self, ...@parts);
+}
+
+func curdir(scalar $self) str { return "."; }
+func updir(scalar $self) str { return ".."; }
+func rootdir(scalar $self) str { return "/"; }
+func devnull(scalar $self) str { return "/dev/null"; }
+func case_tolerant(scalar $self) int { return 0; }
+
+func tmpdir(scalar $self) str {
+    my scalar $env = core::getenv("TMPDIR");
+    if (defined($env) && length($env) > 0 && core::is_dir($env) == 1 && core::is_writable($env) == 1) {
+        return File::Spec::canonpath($self, $env);
+    }
+    return "/tmp";
+}
+
+func file_name_is_absolute(scalar $self, str $file) int {
+    return substr($file, 0, 1) eq "/" ? 1 : 0;
+}
+
+# path() - the directories in $PATH ("" entries become ".")
+func path(scalar $self) array {
+    my array @res = ();
+    my scalar $p = core::getenv("PATH");
+    if (!defined($p)) {
+        return @res;
+    }
+    foreach my $d (split(/:/, "" . $p, -1)) {
+        push(@res, $d eq "" ? "." : $d);
+    }
+    return @res;
+}
+
+# splitpath(PATH [, NOFILE]) - (volume, directory, file); volume is ""
+func splitpath(scalar $self, str $path, scalar ...@nofile) array {
+    my str $dir = "";
+    my str $file = "";
+    if (scalar(@nofile) > 0 && $nofile[0]) {
+        $dir = $path;
+    } elsif ($path =~ /^((?:.*\/(?:\.\.?\z)?)?)([^\/]*)/s) {
+        $dir = $1;
+        $file = $2;
+    }
+    my array @res = ("", $dir, $file);
+    return @res;
+}
+
+# splitdir(DIRS) - the components, keeping empty ones ("/a/" -> "", "a", "")
+func splitdir(scalar $self, str $dirs) array {
+    my array @res = split(/\//, $dirs, -1);
+    if ($dirs eq "") {
+        @res = ("");
+    }
+    return @res;
+}
+
+func catpath(scalar $self, str $volume, str $directory, str $file) str {
+    my str $d = $directory;
+    if ($d ne "" && $file ne "" && substr($d, -1) ne "/" && substr($file, 0, 1) ne "/") {
+        $d = $d . "/" . $file;
+    } else {
+        $d = $d . $file;
+    }
+    return $d;
+}
+
+func no_upwards(scalar $self, scalar ...@names) array {
+    my array @res = ();
+    foreach my $n (@names) {
+        if ("" . $n ne "." && "" . $n ne "..") {
+            push(@res, $n);
+        }
+    }
+    return @res;
+}
+
+func rel2abs(scalar $self, str $path, scalar ...@base_arg) str {
+    my str $p = $path;
+    if (File::Spec::file_name_is_absolute($self, $p) == 0) {
+        my str $base = "";
+        if (scalar(@base_arg) > 0 && defined($base_arg[0]) && "" . $base_arg[0] ne "") {
+            $base = "" . $base_arg[0];
+            if (File::Spec::file_name_is_absolute($self, $base) == 0) {
+                $base = File::Spec::rel2abs($self, $base);
+            } else {
+                $base = File::Spec::canonpath($self, $base);
+            }
+        } else {
+            $base = "" . core::getcwd();
+        }
+        $p = File::Spec::catdir($self, $base, $p);
+    }
+    return File::Spec::canonpath($self, $p);
+}
+
+func abs2rel(scalar $self, str $path_in, scalar ...@base_arg) str {
+    my str $base = "";
+    if (scalar(@base_arg) > 0 && defined($base_arg[0]) && "" . $base_arg[0] ne "") {
+        $base = "" . $base_arg[0];
+    } else {
+        $base = "" . core::getcwd();
+    }
+    my str $path = File::Spec::canonpath($self, $path_in);
+    $base = File::Spec::canonpath($self, $base);
+    my str $path_dirs = "";
+    my str $base_dirs = "";
+    if (File::Spec::file_name_is_absolute($self, $path) == 1 || File::Spec::file_name_is_absolute($self, $base) == 1) {
+        $path_dirs = File::Spec::rel2abs($self, $path);
+        $base_dirs = File::Spec::rel2abs($self, $base);
+    } else {
+        my str $wd = "" . core::getcwd();
+        $path_dirs = File::Spec::catdir($self, $wd, $path);
+        $base_dirs = File::Spec::catdir($self, $wd, $base);
+    }
+    my array @pathchunks = File::Spec::splitdir($self, $path_dirs);
+    my array @basechunks = File::Spec::splitdir($self, $base_dirs);
+    if ($base_dirs eq "/") {
+        if ($path_dirs eq "/") {
+            return ".";
+        }
+        shift(@pathchunks);
+        return File::Spec::canonpath($self, File::Spec::catdir($self, ...@pathchunks));
+    }
+    my array @common = ();
+    while (scalar(@pathchunks) > 0 && scalar(@basechunks) > 0 && $pathchunks[0] eq $basechunks[0]) {
+        push(@common, shift(@pathchunks));
+        shift(@basechunks);
+    }
+    if (scalar(@pathchunks) == 0 && scalar(@basechunks) == 0) {
+        return ".";
+    }
+    my array @reverse_base = ();
+    while (scalar(@basechunks) > 0) {
+        my str $d = shift(@basechunks);
+        if ($d ne "..") {
+            unshift(@reverse_base, "..");
+            push(@common, $d);
+        } elsif (scalar(@common) > 0) {
+            if (scalar(@reverse_base) > 0 && $reverse_base[0] eq "..") {
+                shift(@reverse_base);
+                pop(@common);
+            } else {
+                unshift(@reverse_base, pop(@common));
+            }
+        }
+    }
+    my array @all = ();
+    foreach my $rb (@reverse_base) { push(@all, $rb); }
+    foreach my $pc (@pathchunks) { push(@all, $pc); }
+    return File::Spec::canonpath($self, File::Spec::catdir($self, ...@all));
+}
