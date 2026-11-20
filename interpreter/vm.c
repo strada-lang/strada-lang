@@ -1528,6 +1528,14 @@ void vm_program_add_attr(VMProgram *prog, const char *cls, const char *name, con
     a->default_val = default_val;
 }
 
+/* Collect when the live object count reaches this (twice the live count
+ * above it). A 64K floor was tried: fewer collections, but more instructions
+ * overall on the gc, oop and closures benchmarks (+13-32%), so it stays. */
+#define VM_GC_MIN_THRESHOLD 8192
+static inline size_t vm_gc_next_threshold(size_t live) {
+    return live < VM_GC_MIN_THRESHOLD / 2 ? VM_GC_MIN_THRESHOLD : live * 2;
+}
+
 /* ===== VM ===== */
 
 static VM *vm_new_base(VMProgram *prog) {
@@ -1549,7 +1557,7 @@ static VM *vm_new_base(VMProgram *prog) {
     vm->has_exception = 0;
     vm->pending_exc = VM_UNDEF_VAL;
     vm->has_pending_exc = 0;
-    vm->gc_threshold = 8192;
+    vm->gc_threshold = VM_GC_MIN_THRESHOLD;
     memset(vm->regex_captures, 0, sizeof(vm->regex_captures));
     memset(vm->regex_capture_len, 0, sizeof(vm->regex_capture_len));
     memset(vm->regex_capture_utf8, 0, sizeof(vm->regex_capture_utf8));
@@ -2156,7 +2164,7 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
         vm_gc_free_one(vm, dead_list);
         dead_list = next;
     }
-    vm->gc_threshold = (vm->gc_count < 4096) ? 8192 : (vm->gc_count * 2);
+    vm->gc_threshold = vm_gc_next_threshold(vm->gc_count);
     if (vm->gc_user_disabled) vm->gc_threshold = SIZE_MAX / 2;
     vm->gc_runs++;
 }
@@ -2295,6 +2303,8 @@ void vm_free(VM *vm) {
         free(vm->regex_captures[i]);
         free(vm->regex_capture_names[i]);
     }
+    free(vm->rx_subj);
+    free(vm->rl_buf);
     free(vm->script_name);
     vm_method_cache_clear(vm);
     vm_destroy_cache_clear(vm);
@@ -2402,6 +2412,8 @@ static void __attribute__((destructor)) vm_static_cleanup(void) {
     }
 }
 
+static void vm_rx_materialize(VM *vm);
+
 #ifdef HAVE_PCRE2
 static uint32_t vm_hash_bytes_opts(const char *s, size_t len, uint32_t opts) {
     uint32_t h = 2166136261u ^ opts;
@@ -2439,7 +2451,8 @@ static inline pcre2_code *regex_cache_get(VM *vm, const char *pattern, size_t pa
         *md_out = e->match_data;
         return e->compiled;
     }
-    /* Evict old entry */
+    /* Evict old entry (lazy captures may still need its name table) */
+    if (e->compiled && vm->rx_name_re == (void *)e->compiled) vm_rx_materialize(vm);
     if (e->pattern) { free(e->pattern); e->pattern = NULL; }
     if (e->compiled) { pcre2_code_free(e->compiled); pcre2_match_data_free(e->match_data); e->compiled = NULL; e->match_data = NULL; }
     int errcode; PCRE2_SIZE erroff;
@@ -2509,6 +2522,9 @@ static inline void vm_write_val(FILE *fp, VMValue v, int with_nl) {
 }
 
 static void vm_clear_regex_captures(VM *vm) {
+    vm->rx_lazy = 0;
+    vm->rx_count = 0;
+    vm->rx_name_re = NULL;
     vm->regex_ngroups = 0;
     int hw = vm->regex_hw;
     if (hw > VM_RX_MAX) hw = VM_RX_MAX;
@@ -2529,6 +2545,7 @@ static void vm_clear_regex_captures(VM *vm) {
 
 static void vm_store_regex_capture(VM *vm, int i, const char *s, size_t len, int is_utf8) {
     if (i < 0 || i >= VM_RX_MAX) return;
+    if (vm->rx_lazy) vm_rx_materialize(vm);
     if (i + 1 > vm->regex_ngroups) vm->regex_ngroups = i + 1;
     if (i + 1 > vm->regex_hw) vm->regex_hw = i + 1;
     if (vm->regex_captures[i]) {
@@ -2545,6 +2562,115 @@ static void vm_store_regex_capture(VM *vm, int i, const char *s, size_t len, int
     vm->regex_capture_utf8[i] = (uint8_t)(is_utf8 ? 1 : 0);
 }
 
+
+/* Capture N of the last match, in either representation. */
+static inline int vm_rx_get(VM *vm, int i, const char **p, size_t *len, int *u8) {
+    if (i < 0 || i >= VM_RX_MAX) return 0;
+    if (vm->rx_lazy) {
+        if (i >= vm->rx_count || vm->rx_ov[2*i] == (size_t)-1) return 0;
+        *p = vm->rx_subj + vm->rx_ov[2*i];
+        *len = vm->rx_ov[2*i+1] - vm->rx_ov[2*i];
+        *u8 = vm->rx_subj_utf8;
+        return 1;
+    }
+    if (!vm->regex_captures[i]) return 0;
+    *p = vm->regex_captures[i];
+    *len = vm->regex_capture_len[i];
+    *u8 = vm->regex_capture_utf8[i];
+    return 1;
+}
+
+/* Highest capture index that is set (-1 if none) */
+static int vm_rx_last_set(VM *vm) {
+    int last = -1;
+    if (vm->rx_lazy) {
+        for (int i = 0; i < vm->rx_count; i++) if (vm->rx_ov[2*i] != (size_t)-1) last = i;
+    } else {
+        for (int i = 0; i < vm->regex_hw && i < VM_RX_MAX; i++) if (vm->regex_captures[i]) last = i;
+    }
+    return last;
+}
+
+#ifdef HAVE_PCRE2
+/* Record a successful pcre2_match lazily: one copy of the matched span of
+ * the subject (reused buffer) plus the group offsets. */
+static void vm_rx_record(VM *vm, pcre2_code *re, const char *str, int is_utf8, PCRE2_SIZE *ov, int rc, int need_free) {
+    vm_clear_regex_captures(vm);
+    int count = rc < VM_RX_MAX ? rc : VM_RX_MAX;
+    uint32_t ncap = 0;
+    pcre2_pattern_info(re, PCRE2_INFO_CAPTURECOUNT, &ncap);
+    vm->regex_ngroups = (int)ncap + 1 < VM_RX_MAX ? (int)ncap + 1 : VM_RX_MAX;
+    size_t lo = (size_t)-1, hi = 0;
+    for (int i = 0; i < count; i++) {
+        if (ov[2*i] == PCRE2_UNSET) continue;
+        size_t a = ov[2*i], b = ov[2*i+1];
+        if (b < a) { size_t t = a; a = b; b = t; }   /* \K can put the start after the end */
+        if (a < lo) lo = a;
+        if (b > hi) hi = b;
+    }
+    if (lo == (size_t)-1) { lo = 0; hi = 0; }
+    size_t span = hi - lo;
+    if (span + 1 > vm->rx_subj_cap) {
+        size_t nc = vm->rx_subj_cap ? vm->rx_subj_cap : 64;
+        while (nc < span + 1) nc *= 2;
+        char *nb = realloc(vm->rx_subj, nc);
+        if (!nb) return;
+        vm->rx_subj = nb;
+        vm->rx_subj_cap = nc;
+    }
+    if (span > 0) memcpy(vm->rx_subj, str + lo, span);
+    vm->rx_subj[span] = '\0';
+    vm->rx_subj_len = span;
+    for (int i = 0; i < count; i++) {
+        if (ov[2*i] == PCRE2_UNSET) {
+            vm->rx_ov[2*i] = vm->rx_ov[2*i+1] = (size_t)-1;
+        } else {
+            vm->rx_ov[2*i] = ov[2*i] - lo;
+            vm->rx_ov[2*i+1] = ov[2*i+1] < ov[2*i] ? ov[2*i] - lo : ov[2*i+1] - lo;
+        }
+    }
+    vm->rx_count = count;
+    vm->rx_subj_utf8 = (uint8_t)(is_utf8 ? 1 : 0);
+    uint32_t nc = 0;
+    pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &nc);
+    vm->rx_name_re = nc > 0 ? (void *)re : NULL;
+    vm->rx_lazy = 1;
+    if (need_free) vm_rx_materialize(vm);   /* re is freed by the caller */
+}
+#endif
+
+/* Turn lazy captures into regex_captures[] / regex_capture_names[] */
+static void vm_rx_materialize(VM *vm) {
+    if (!vm->rx_lazy) return;
+    vm->rx_lazy = 0;
+    int ng = vm->regex_ngroups;
+    for (int i = 0; i < vm->rx_count; i++) {
+        if (vm->rx_ov[2*i] != (size_t)-1)
+            vm_store_regex_capture(vm, i, vm->rx_subj + vm->rx_ov[2*i], vm->rx_ov[2*i+1] - vm->rx_ov[2*i], vm->rx_subj_utf8);
+    }
+    if (ng > vm->regex_ngroups) vm->regex_ngroups = ng;
+#ifdef HAVE_PCRE2
+    pcre2_code *re = (pcre2_code *)vm->rx_name_re;
+    vm->rx_name_re = NULL;
+    if (re) {
+        uint32_t nc = 0, nes = 0;
+        PCRE2_SPTR nt = NULL;
+        pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &nc);
+        if (nc > 0 && pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &nt) == 0 &&
+            pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &nes) == 0) {
+            for (uint32_t n = 0; n < nc; n++) {
+                PCRE2_SPTR e = nt + n * nes;
+                int g = (e[0] << 8) | e[1];
+                if (g >= 0 && g < VM_RX_MAX && !vm->regex_capture_names[g]) {
+                    vm->regex_capture_names[g] = strdup((const char *)(e + 2));
+                    if (g + 1 > vm->regex_hw) vm->regex_hw = g + 1;
+                }
+            }
+        }
+    }
+#endif
+}
+
 static int vm_regex_match_len_u8(VM *vm, const char *str, size_t slen, int is_utf8, const char *pattern, size_t pat_len) {
 #ifdef HAVE_PCRE2
     pcre2_match_data *md;
@@ -2554,39 +2680,7 @@ static int vm_regex_match_len_u8(VM *vm, const char *str, size_t slen, int is_ut
     if (!re) return 0;
     int rc = pcre2_match(re, (PCRE2_SPTR)str, slen, 0, 0, md, NULL);
     if (rc > 0) {
-        vm_clear_regex_captures(vm);
-        PCRE2_SIZE *ov = pcre2_get_ovector_pointer(md);
-        int count = rc < VM_RX_MAX ? rc : VM_RX_MAX;
-        {
-            uint32_t ncap = 0;
-            pcre2_pattern_info(re, PCRE2_INFO_CAPTURECOUNT, &ncap);
-            vm->regex_ngroups = (int)ncap + 1 < VM_RX_MAX ? (int)ncap + 1 : VM_RX_MAX;
-        }
-        for (int i = 0; i < count; i++) {
-            if (ov[2*i] != PCRE2_UNSET) {
-                size_t len = ov[2*i+1] - ov[2*i];
-                vm_store_regex_capture(vm, i, str + ov[2*i], len, is_utf8);
-            }
-        }
-
-        /* Extract named-group names (PCRE2 name table) */
-        {
-            uint32_t __nc = 0, __nes = 0;
-            PCRE2_SPTR __nt = NULL;
-            pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &__nc);
-            if (__nc > 0 &&
-                pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &__nt) == 0 &&
-                pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &__nes) == 0) {
-                for (uint32_t __n = 0; __n < __nc; __n++) {
-                    PCRE2_SPTR __e = __nt + __n * __nes;
-                    int __g = (__e[0] << 8) | __e[1];
-                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g]) {
-                        vm->regex_capture_names[__g] = strdup((const char *)(__e + 2));
-                        if (__g + 1 > vm->regex_hw) vm->regex_hw = __g + 1;
-                    }
-                }
-            }
-        }
+        vm_rx_record(vm, re, str, is_utf8, pcre2_get_ovector_pointer(md), rc, need_free);
     }
     if (need_free) {
         pcre2_match_data_free(md);
@@ -2689,37 +2783,8 @@ static int vm_regex_find_u8(VM *vm, const char *str, size_t slen, int is_utf8, c
     if (!re) return 0;
     int rc = pcre2_match(re, (PCRE2_SPTR)str, slen, start, 0, md, NULL);
     if (rc > 0) {
-        vm_clear_regex_captures(vm);
         PCRE2_SIZE *ov = pcre2_get_ovector_pointer(md);
-        int count = rc < VM_RX_MAX ? rc : VM_RX_MAX;
-        {
-            uint32_t ncap = 0;
-            pcre2_pattern_info(re, PCRE2_INFO_CAPTURECOUNT, &ncap);
-            vm->regex_ngroups = (int)ncap + 1 < VM_RX_MAX ? (int)ncap + 1 : VM_RX_MAX;
-        }
-        for (int i = 0; i < count; i++) {
-            if (ov[2*i] != PCRE2_UNSET)
-                vm_store_regex_capture(vm, i, str + ov[2*i], ov[2*i+1] - ov[2*i], is_utf8);
-        }
-
-        /* Extract named-group names (PCRE2 name table) */
-        {
-            uint32_t __nc = 0, __nes = 0;
-            PCRE2_SPTR __nt = NULL;
-            pcre2_pattern_info(re, PCRE2_INFO_NAMECOUNT, &__nc);
-            if (__nc > 0 &&
-                pcre2_pattern_info(re, PCRE2_INFO_NAMETABLE, &__nt) == 0 &&
-                pcre2_pattern_info(re, PCRE2_INFO_NAMEENTRYSIZE, &__nes) == 0) {
-                for (uint32_t __n = 0; __n < __nc; __n++) {
-                    PCRE2_SPTR __e = __nt + __n * __nes;
-                    int __g = (__e[0] << 8) | __e[1];
-                    if (__g >= 0 && __g < VM_RX_MAX && !vm->regex_capture_names[__g]) {
-                        vm->regex_capture_names[__g] = strdup((const char *)(__e + 2));
-                        if (__g + 1 > vm->regex_hw) vm->regex_hw = __g + 1;
-                    }
-                }
-            }
-        }
+        vm_rx_record(vm, re, str, is_utf8, ov, rc, need_free);
         *mstart = ov[0]; *mend = ov[1];
         if (need_free) {
             pcre2_match_data_free(md);
@@ -2751,6 +2816,134 @@ static int vm_regex_find_u8(VM *vm, const char *str, size_t slen, int is_utf8, c
     }
     regfree(&re);
     return 0;
+#endif
+}
+
+/* s/// done in the VM when the replacement is plain text (no '$' or '\'):
+ * a literal pattern without flags is a byte search, anything else loops
+ * pcre2_match over the VM's cached pattern. Captures follow the runtime
+ * path: the first match is recorded; a pattern without groups keeps the
+ * earlier $1.. and sets only $&. Returns the number of substitutions, or
+ * -1 when the runtime must do it (the caller then uses
+ * strada_regex_replace_capture_len2). *res_out is malloc'd when > 0. */
+static int vm_rx_has_meta(const char *p, size_t plen) {
+    for (size_t i = 0; i < plen; i++) {
+        char c = p[i];
+        if (c == '.' || c == '*' || c == '+' || c == '?' || c == '[' || c == ']' || c == '(' ||
+            c == ')' || c == '{' || c == '}' || c == '|' || c == '^' || c == '$' || c == '\\')
+            return 1;
+    }
+    return 0;
+}
+
+typedef struct { char *buf; size_t len, cap; } VMSubstBuf;
+
+static int vm_sb_put(VMSubstBuf *b, const char *p, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap : 64;
+        while (nc < b->len + n + 1) nc *= 2;
+        char *nb = realloc(b->buf, nc);
+        if (!nb) return 0;
+        b->buf = nb;
+        b->cap = nc;
+    }
+    if (n) memcpy(b->buf + b->len, p, n);
+    b->len += n;
+    b->buf[b->len] = '\0';
+    return 1;
+}
+
+static void vm_subst_set_amp(VM *vm, const char *p, size_t n, int u8) {
+    /* group-less match: $1.. stay, $& is the match */
+    if (vm->rx_lazy) vm_rx_materialize(vm);
+    int ng = vm->regex_ngroups;
+    vm_store_regex_capture(vm, 0, p, n, u8);
+    if (ng > vm->regex_ngroups) vm->regex_ngroups = ng;
+}
+
+static int vm_subst_native(VM *vm, const char *s, size_t slen, int s_u8, const char *pat, size_t plen,
+                           const char *repl, size_t rlen, const char *flags, int global,
+                           char **res_out, size_t *out_len) {
+    *res_out = NULL;
+    *out_len = 0;
+    for (size_t i = 0; i < rlen; i++) if (repl[i] == '$' || repl[i] == '\\') return -1;
+    uint32_t opts = 0;
+    for (const char *f = flags; f && *f; f++) {
+        if (*f == 'i') opts |= PCRE2_CASELESS;
+        else if (*f == 'm') opts |= PCRE2_MULTILINE;
+        else if (*f == 's') opts |= PCRE2_DOTALL;
+        else if (*f == 'x') opts |= PCRE2_EXTENDED;
+        else return -1;
+    }
+    VMSubstBuf out = {0};
+    int count = 0;
+    if (plen > 0 && opts == 0 && !vm_rx_has_meta(pat, plen)) {
+        size_t pos = 0;
+        const char *first = NULL;
+        while (pos <= slen) {
+            const char *hit = (slen - pos >= plen) ? memmem(s + pos, slen - pos, pat, plen) : NULL;
+            if (!hit) break;
+            if (!first) first = hit;
+            if (!vm_sb_put(&out, s + pos, (size_t)(hit - (s + pos))) || !vm_sb_put(&out, repl, rlen)) { free(out.buf); return -1; }
+            pos = (size_t)(hit - s) + plen;
+            count++;
+            if (!global) break;
+        }
+        if (count == 0) return 0;
+        if (!vm_sb_put(&out, s + pos, slen - pos)) { free(out.buf); return -1; }
+        vm_subst_set_amp(vm, first, plen, s_u8);
+        *res_out = out.buf;
+        *out_len = out.len;
+        return count;
+    }
+#ifdef HAVE_PCRE2
+    if (s_u8) opts |= PCRE2_UTF | PCRE2_UCP;
+    pcre2_match_data *md;
+    int need_free = 0;
+    pcre2_code *re = regex_cache_get(vm, pat, plen, opts, &md, &need_free);
+    if (!re || need_free) {
+        if (need_free) { pcre2_match_data_free(md); pcre2_code_free(re); }
+        return -1;
+    }
+    uint32_t ncap = 0;
+    pcre2_pattern_info(re, PCRE2_INFO_CAPTURECOUNT, &ncap);
+    size_t pos = 0;      /* where the next match search starts */
+    size_t copied = 0;   /* subject bytes already copied to out */
+    uint32_t mflags = 0;
+    while (pos <= slen) {
+        int rc = pcre2_match(re, (PCRE2_SPTR)s, slen, pos, mflags, md, NULL);
+        if (rc == PCRE2_ERROR_NOMATCH) {
+            if (mflags == 0) break;
+            /* empty match at pos could not be extended: copy one character, move on */
+            size_t step = 1;
+            if (s_u8) while (pos + step < slen && ((unsigned char)s[pos + step] & 0xC0) == 0x80) step++;
+            pos += step;
+            mflags = 0;
+            continue;
+        }
+        if (rc < 0) { free(out.buf); return count > 0 ? -1 : (rc == PCRE2_ERROR_NOMATCH ? 0 : -1); }
+        PCRE2_SIZE *ov = pcre2_get_ovector_pointer(md);
+        if (ov[1] < ov[0] || ov[0] < copied) { free(out.buf); return -1; }   /* \K oddities: runtime */
+        if (count == 0) {
+            if (ncap == 0) vm_subst_set_amp(vm, s + ov[0], ov[1] - ov[0], s_u8);
+            else vm_rx_record(vm, re, s, s_u8, ov, rc, 0);
+        }
+        if (!vm_sb_put(&out, s + copied, ov[0] - copied) || !vm_sb_put(&out, repl, rlen)) { free(out.buf); return -1; }
+        copied = ov[1];
+        count++;
+        if (!global) break;
+        pos = ov[1];
+        mflags = (ov[0] == ov[1]) ? (PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED) : 0;
+        if (ov[0] == ov[1] && pos >= slen) break;
+    }
+    if (count == 0) { free(out.buf); return 0; }
+    if (!vm_sb_put(&out, s + copied, slen - copied)) { free(out.buf); return -1; }
+    *res_out = out.buf;
+    *out_len = out.len;
+    return count;
+#else
+    free(out.buf);
+    return -1;
 #endif
 }
 
@@ -7478,6 +7671,28 @@ static int vm_builtin_ov_kind(uint16_t bid) {
     }
 }
 
+/* strada_substr_replace under a runtime try frame. Kept out of
+ * vm_exec_builtin: a setjmp in a function stops gcc from sharing stack
+ * slots between its blocks, and vm_exec_builtin's case-local buffers then
+ * added up to a 95 KB frame that was probed page by page on every builtin
+ * call (and was a large share of a green task's stack). */
+static __attribute__((noinline)) StradaValue *vm_substr_replace_guarded(StradaValue *cur, int64_t off, int64_t len,
+                                                                        StradaValue *rep, StradaValue **removed, int *failed) {
+    StradaValue * volatile res = NULL;
+    int cm = strada_cleanup_mark();
+    *failed = 0;
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        res = strada_substr_replace(cur, off, len, rep, removed);
+        STRADA_TRY_POP();
+    } else {
+        STRADA_TRY_POP();
+        strada_cleanup_drain_to(cm);
+        strada_clear_exception();
+        *failed = 1;
+    }
+    return res;
+}
+
 static __attribute__((noinline)) int vm_exec_builtin(VM *vm, uint16_t bid, uint8_t argc, VMValue *out_throw) {
     VMValue *stack = vm->stack;
     size_t sp = vm->stack_top;
@@ -7817,7 +8032,20 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 SP_PUSH(lv);
                 break;
             }
-            if (fp) {
+            if (fp && max_bytes <= 0) {
+                /* default $/: one getline() into a reused per-thread buffer */
+                int _gl_safe = vm_worker_enter_safe(vm);
+                ssize_t got = getline(&vm->rl_buf, &vm->rl_cap, fp);
+                vm_worker_leave_safe(vm, _gl_safe);
+                if (got <= 0) {
+                    SP_PUSH(VM_UNDEF_VAL);
+                } else {
+                    size_t len = (size_t)got;
+                    /* the newline goes, a CR before it stays (compiled readline) */
+                    if (vm->rl_buf[len - 1] == '\n') len--;
+                    SP_PUSH(VM_MAKE_STR_N(vm->rl_buf, len));
+                }
+            } else if (fp) {
                 size_t cap = 256, len = 0;
                 char *buf = malloc(cap);
                 int c = EOF;
@@ -8216,18 +8444,44 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
         case BUILTIN_CAPTURES: {
             /* captures() — [0]=full match, [1..]=groups from the last match */
             VMArray *ca = vm_array_new(10);
-            int last = -1;
-            for (int i = 0; i < vm->regex_hw && i < VM_RX_MAX; i++) if (vm->regex_captures[i]) last = i;
+            int last = vm_rx_last_set(vm);
             if (vm->regex_ngroups - 1 > last) last = vm->regex_ngroups - 1;
-            for (int i = 0; i <= last; i++)
-                vm_array_push(ca, vm->regex_captures[i]
-                    ? vm_make_str_flag(vm->regex_captures[i], vm->regex_capture_len[i], vm->regex_capture_utf8[i])
-                    : VM_UNDEF_VAL);
+            for (int i = 0; i <= last; i++) {
+                const char *cp; size_t cl; int cu;
+                vm_array_push(ca, vm_rx_get(vm, i, &cp, &cl, &cu) ? vm_make_str_flag(cp, cl, cu) : VM_UNDEF_VAL);
+            }
             SP_PUSH(VM_MAKE_PTR(ca));
             break;
         }
         case BUILTIN_NAMED_CAPTURES: {
             VMHash *nh = vm_hash_new(8);
+#ifdef HAVE_PCRE2
+            if (vm->rx_lazy) {
+                /* read the name table of the matched pattern directly */
+                const char *gname[VM_RX_MAX];
+                int ng = vm->rx_count;
+                memset(gname, 0, sizeof(gname[0]) * (size_t)(ng > 0 ? ng : 1));
+                pcre2_code *nre = (pcre2_code *)vm->rx_name_re;
+                uint32_t nc = 0, nes = 0;
+                PCRE2_SPTR nt = NULL;
+                if (nre) pcre2_pattern_info(nre, PCRE2_INFO_NAMECOUNT, &nc);
+                if (nc > 0 && pcre2_pattern_info(nre, PCRE2_INFO_NAMETABLE, &nt) == 0 &&
+                    pcre2_pattern_info(nre, PCRE2_INFO_NAMEENTRYSIZE, &nes) == 0) {
+                    for (uint32_t n = 0; n < nc; n++) {
+                        PCRE2_SPTR e = nt + n * nes;
+                        int g = (e[0] << 8) | e[1];
+                        if (g >= 0 && g < ng && !gname[g]) gname[g] = (const char *)(e + 2);
+                    }
+                }
+                for (int i = 0; i < ng; i++) {
+                    const char *cp; size_t cl; int cu;
+                    if (gname[i] && vm_rx_get(vm, i, &cp, &cl, &cu))
+                        vm_hash_set(nh, gname[i], vm_make_str_flag(cp, cl, cu));
+                }
+                SP_PUSH(VM_MAKE_PTR(nh));
+                break;
+            }
+#endif
             for (int i = 0; i < VM_RX_MAX; i++) {
                 if (vm->regex_capture_names[i] && vm->regex_captures[i])
                     vm_hash_set(nh, vm->regex_capture_names[i],
@@ -8275,7 +8529,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 stack = vm->stack; RELOAD();
             } else if (op == 1) {
                 vm->gc_user_disabled = 0;
-                vm->gc_threshold = (vm->gc_count < 4096) ? 8192 : (vm->gc_count * 2);
+                vm->gc_threshold = vm_gc_next_threshold(vm->gc_count);
                 strada_gc_set_enabled(1);
             } else if (op == 2) {
                 vm->gc_user_disabled = 1;
@@ -9069,9 +9323,12 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 clean_flags[cf] = '\0';
                 char *res_str = NULL;
                 size_t out_len = 0;
-                int count = strada_regex_replace_capture_len2(s, slen, vm_is_utf8(args[0]), pat, plen, repl, rlen, clean_flags, is_global, &res_str, &out_len);
-                if (count > 0) {
-                    vm_sync_runtime_captures(vm);
+                int count = vm_subst_native(vm, s, slen, vm_is_utf8(args[0]), pat, plen, repl, rlen, clean_flags, is_global, &res_str, &out_len);
+                if (count < 0) {
+                    count = strada_regex_replace_capture_len2(s, slen, vm_is_utf8(args[0]), pat, plen, repl, rlen, clean_flags, is_global, &res_str, &out_len);
+                    if (count > 0) {
+                        vm_sync_runtime_captures(vm);
+                    }
                 }
                 int out_u8 = (count > 0) ? (vm_is_utf8(args[0]) || vm_is_utf8(args[2])) : vm_is_utf8(args[0]);
                 VMArray *pair = vm_array_new(2);
@@ -10564,19 +10821,9 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             int64_t sr_len = vm_to_int(args[2]);   /* 2-arg form passes VM_INT_MAX */
             StradaValue *sr_cur = vm_to_sv(args[0]);
             StradaValue *sr_rep = vm_to_sv(args[3]);
-            StradaValue * volatile sr_new = NULL;
             StradaValue *sr_removed = NULL;
-            int sr_cm = strada_cleanup_mark();
-            volatile int sr_failed = 0;
-            if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-                sr_new = strada_substr_replace(sr_cur, sr_off, sr_len, sr_rep, &sr_removed);
-                STRADA_TRY_POP();
-            } else {
-                STRADA_TRY_POP();
-                strada_cleanup_drain_to(sr_cm);
-                strada_clear_exception();
-                sr_failed = 1;
-            }
+            int sr_failed = 0;
+            StradaValue *sr_new = vm_substr_replace_guarded(sr_cur, sr_off, sr_len, sr_rep, &sr_removed, &sr_failed);
             strada_decref(sr_cur);
             strada_decref(sr_rep);
             if (sr_failed) {
@@ -11684,24 +11931,15 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE)
                 lfp = (FILE*)((VMFileHandle*)VM_TO_PTR(args[0]))->fp;
             if (lfp) {
-                size_t cap = 256;
-                char *buf = malloc(cap);
                 int _ls = vm_worker_enter_safe(vm);
                 for (;;) {
-                    size_t len = 0;
-                    int c = EOF;
-                    while ((c = fgetc(lfp)) != EOF) {
-                        if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
-                        buf[len++] = (char)c;
-                        if (c == '\n') break;
-                    }
-                    if (len == 0 && c == EOF) break;
-                    if (len > 0 && buf[len - 1] == '\n') len--;
-                    vm_array_push(la, VM_MAKE_STR_N(buf, len));
-                    if (c == EOF) break;
+                    ssize_t got = getline(&vm->rl_buf, &vm->rl_cap, lfp);
+                    if (got <= 0) break;
+                    size_t len = (size_t)got;
+                    if (vm->rl_buf[len - 1] == '\n') len--;
+                    vm_array_push(la, VM_MAKE_STR_N(vm->rl_buf, len));
                 }
                 vm_worker_leave_safe(vm, _ls);
-                free(buf);
             } else if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_NATIVE_SV) {
                 StradaValue *rsv = vm_to_sv(args[0]);
                 StradaValue *all = strada_read_all_lines(rsv);
@@ -12096,14 +12334,10 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 const char *s = vm_bytes_view(args[0], sbuf, sizeof(sbuf), &slen);
                 const char *pat = vm_bytes_view(args[1], pbuf, sizeof(pbuf), &plen);
                 if (vm_regex_match_len_u8(vm, s, slen, vm_is_utf8(args[0]), pat, plen)) {
-                    int last = -1;
-                    for (int i = 0; i < vm->regex_hw && i < VM_RX_MAX; i++) {
-                        if (vm->regex_captures[i]) last = i;
-                    }
+                    int last = vm_rx_last_set(vm);
                     for (int i = 0; i <= last; i++) {
-                        vm_array_push(ca, vm->regex_captures[i]
-                            ? vm_make_str_flag(vm->regex_captures[i], vm->regex_capture_len[i], vm->regex_capture_utf8[i])
-                            : VM_UNDEF_VAL);
+                        const char *cp; size_t cl; int cu;
+                        vm_array_push(ca, vm_rx_get(vm, i, &cp, &cl, &cu) ? vm_make_str_flag(cp, cl, cu) : VM_UNDEF_VAL);
                     }
                 }
             }
@@ -14495,11 +14729,48 @@ static VMValue vm_op_chr(VMValue v) {
 }
 
 /* split(delim, str) (OP_STR_SPLIT) */
+/* split on a separator without regex metacharacters, as the runtime's
+ * strada_string_split_raw_n + strada_split_strip_trailing do, but building
+ * VM strings directly. "" splits into characters (UTF-8 aware). */
+static VMArray *vm_split_literal(const char *s, size_t slen, int u8, const char *d, size_t dlen) {
+    VMArray *res = vm_array_new(8);
+    if (dlen == 0) {
+        size_t i = 0;
+        while (i < slen) {
+            size_t st = i++;
+            if (u8) while (i < slen && ((unsigned char)s[i] & 0xC0) == 0x80) i++;
+            vm_array_push(res, vm_make_str_flag(s + st, i - st, u8));
+        }
+    } else {
+        const char *p = s, *end = s + slen, *f;
+        while ((f = (dlen == 1) ? memchr(p, d[0], (size_t)(end - p))
+                                : ((size_t)(end - p) >= dlen ? memmem(p, (size_t)(end - p), d, dlen) : NULL)) != NULL) {
+            vm_array_push(res, vm_make_str_flag(p, (size_t)(f - p), u8));
+            p = f + dlen;
+        }
+        vm_array_push(res, vm_make_str_flag(p, (size_t)(end - p), u8));
+    }
+    /* trailing empty fields are dropped (Perl, limit 0) */
+    while (res->size > 0) {
+        VMValue last = res->items[res->size - 1];
+        size_t ll = 1;
+        if (VM_IS_PTR(last) && VM_PTR_TYPE(last) == VM_OBJ_STR) ll = VM_AS_STR(last)->len;
+        if (ll != 0) break;
+        res->size--;
+    }
+    return res;
+}
+
 static VMValue vm_op_split(VMValue str, VMValue delim) {
     char sbuf[256], pbuf[256];
     size_t slen = 0;
     const char *s = vm_bytes_view(str, sbuf, sizeof(sbuf), &slen);
     const char *pat = vm_to_cstr(delim, pbuf, sizeof(pbuf));
+    if (!(pat[0] == ' ' && pat[1] == '\0') && !vm_rx_has_meta(pat, strlen(pat))) {
+        VMArray *lres = vm_split_literal(s, slen, vm_is_utf8(str), pat, strlen(pat));
+        vm_val_free(&str); vm_val_free(&delim);
+        return VM_MAKE_PTR(lres);
+    }
     strada_regex_set_subject_len(slen);
     strada_regex_set_subject_utf8(vm_is_utf8(str));
     StradaArray *parts = strada_regex_split(s, pat);
@@ -21761,8 +22032,9 @@ L_resume_frame_ready:;
         uint8_t num = di->flags;
         /* The byte-sized operand fits in the VM_RX_MAX (256) slots. */
         _Static_assert(VM_RX_MAX >= 256, "OP_LOAD_CAPTURE_VAR indexes regex_captures with a uint8_t");
-        if (vm->regex_captures[num]) {
-            SP_PUSH(vm_make_str_flag(vm->regex_captures[num], vm->regex_capture_len[num], vm->regex_capture_utf8[num]));
+        const char *__cp; size_t __cl; int __cu;
+        if (vm_rx_get(vm, num, &__cp, &__cl, &__cu)) {
+            SP_PUSH(vm_make_str_flag(__cp, __cl, __cu));
         } else {
             SP_PUSH(VM_UNDEF_VAL);   /* unset group: undef (Perl, compiled) */
         }

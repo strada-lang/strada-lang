@@ -201,7 +201,7 @@ All 53 Perla tests pass in VM mode, matching the compiled path. This enables run
 - **DESTROY runs at GC time**, not when the last reference goes away (the VM uses a tracing GC).
 - **Raw pointers into variables** (`core::int_ptr`, `core::num_ptr`) are compiled-only; the VM raises an error.
 - **`extern "C"` functions** cannot be called from the VM; the call raises an error. Use a `__C__` block.
-- **Performance is slower** than compiled execution, though the VM is 4-5x faster than Perl 5.38.
+- **Performance is slower** than compiled execution. Against Perl 5.38 (2026-11-20, wall clock): 2-22x faster on calls, closures, objects and arithmetic (compute, functions, json, closures, oop, binary_trees); even on strings, utf8, sort and pipeline; slower on regex (4x: PCRE2's interpreter, built without its JIT, against Perl's engine), binary (`pack`/`unpack`, 1.8x), data (1.6x) and sprintf (1.2x).
 
 ## Testing
 

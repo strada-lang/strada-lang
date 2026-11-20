@@ -1,0 +1,49 @@
+empty* [-a-b-c-] 1=zz 2=9 amp=
+b* [-a--c-] 1=zz 2=9 amp=
+lit1 [baa] 1=zz 2=9 amp=a
+litg [bbb] 1=zz 2=9 amp=a
+lit-nomatch [aaa] 1=zz 2=9 amp=a
+digits [aNbNcN] 1=zz 2=9 amp=1
+groups [Hell0 W0ld] 1=o 2=U amp=o
+ci [AXCaXc] 1=o 2=U amp=B
+multi [L1
+L2
+] 1=o 2=U amp=l
+utf8lit [héllo world] 1=o 2=U amp=ö
+utf8dot [_____] 1=o 2=U amp=h
+escdot [a-b-c] 1=o 2=U amp=.
+dollar1 [x[y]z] 1=y 2=U amp=y
+bslash [x\z] 1=y 2=U amp=y
+emptysubj [S] 1=y 2=U amp=
+count=3 [bbb] 1=y 2=U amp=a
+named k v key,val
+caps k=v; k2=v2|k|v|k2|v2 4=v2
+unset2=undef n=3
+gloop 100000
+after-fail 1=q
+split1 4:<a><b><><c>
+split2 0:
+split3 2:<><a>
+split4 4:<x><y><><z>
+split5 5:<h><é><l><l><o>
+split6 3:<a><b><c>
+split7 3:<a><b><c>
+split8 3:<1><2><3>
+split9 3:<a><|><b>
+split10 0:
+split11 0:
+split12 1 2:<é><ü>
+name                |        42|00000007|  99.2%
+3.141593 1.234568e+04 0.0001
+255 ff 10 FF 18446744073709551615
+abc ... -5 ... 2.00
+[t] user=u req=9
+   ab|ab   |ab|000ab
+12 x
++5  5 0xff 010
+héllo|    é
+3 1.5 1 0 1
+Aé  -0.1|1.234e+03|
+nul ok
+lines [one][two][][last-no-newline]
+all 4 one|two||last-no-newline

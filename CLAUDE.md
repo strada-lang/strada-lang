@@ -878,6 +878,17 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
 - `foreach my $x (A..B)` with int-typed bounds counts in a hidden local instead of building the list (`fe_range` in vm_compiler.c), the compiled backend's rule.
 - Test: `interpreter/test/test_vm_perf_c20d.strada`.
 
+**VM performance, round 5 (2026-11-20)**: strings -69%, data -28%, regex -20%, binary -8%, pipeline -7% (scaled instruction counts); all other benchmarks unchanged. Only `interpreter/` changed.
+- **Lazy regex captures.** After a PCRE2 match the VM keeps one copy of the matched span and the group offsets (`vm_rx_record`; `VM.rx_subj`/`rx_ov`/`rx_lazy`). `$N`, `captures()`, `named_captures()` and `capture()` read them directly (`vm_rx_get`; named groups come from the pattern's name table, `rx_name_re`). Any other code that touches `regex_captures[]` must call `vm_rx_materialize()` first. `vm_store_regex_capture` does that itself, and so does evicting the pattern from the regex cache.
+- **`s///` with a plain-text replacement** (no `$` or `\`) runs in the VM (`vm_subst_native`): a literal pattern without flags is a `memmem` replace, anything else loops `pcre2_match` over the VM's cached pattern. Other replacements still use `strada_regex_replace_capture_len2` plus `vm_sync_runtime_captures`. Captures follow Perl. The first match is recorded. A pattern without groups keeps `$1..` and sets `$&`; the old path replaced them with the runtime's stale captures. The compiled literal fast path (`strada_replace_sv`) never sets `$&`, which is a compiled-side gap.
+- **`split` on a separator without regex metacharacters** builds VM strings directly (`vm_split_literal`; `" "` awk mode and regexes still go through the runtime).
+- **`vm_exec_builtin` no longer calls `setjmp`** (moved to `vm_substr_replace_guarded`). A `setjmp` anywhere in a function stops gcc from sharing stack slots between its blocks, so the case-local buffers added up to a 95 KB frame. `-fstack-clash-protection` probed it page by page on every builtin call, and it was a large share of a green task's stack. The frame is now 7.4 KB. Keep `setjmp` out of `vm_exec_builtin` and other large dispatch functions.
+- **`<$fh>` and `@a = <$fh>`** read with `getline()` into `VM.rl_buf` (default `$/`; the limit form keeps the `fgetc` loop).
+- **Tried and dropped:**
+  - A 64K-object GC floor collected less often but added 13-32% instructions on gc/oop/closures.
+  - A sprintf fast path through glibc `snprintf` was slower than the runtime's own formatters, even with the argument conversions.
+- Test: `interpreter/test/test_vm_perf_c20e.strada`.
+
 ## Language Features Reference
 
 ### Namespaces
