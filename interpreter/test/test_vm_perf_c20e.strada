@@ -2,8 +2,7 @@
 # $N / captures() / named_captures() read them directly), s/// with a
 # plain-text replacement done in the VM (literal patterns by byte search),
 # split on a literal separator without runtime values, <$fh> through
-# getline(). Output must match the compiled backend, except that a literal
-# s/// also sets $& here, as in Perl (the compiled fast path does not).
+# getline(). Output must match the compiled backend.
 func show_r(str $l, str $s) void { say($l . " [" . $s . "] 1=" . ($1 // "U") . " 2=" . ($2 // "U") . " amp=" . (defined(captures()->[0]) ? captures()->[0] : "U")); }
 func rx_part() void {
     my str $s = "abc";
