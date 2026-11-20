@@ -1,0 +1,348 @@
+package File::Temp;
+version "1.0.0";
+
+# File::Temp - create temporary files and directories safely, compatible
+# with Perl's File::Temp.
+#
+#   use File::Temp qw(tempfile tempdir);
+#
+#   my ($fh, $filename) = tempfile();                  # in $TMPDIR or /tmp
+#   my ($fh2, $name2) = tempfile("dataXXXXXX", DIR => "/var/tmp",
+#                                SUFFIX => ".json", UNLINK => 1);
+#   my ($fh3, $name3) = tempfile("logXXXX", TMPDIR => 1);
+#   my str $dir = tempdir(CLEANUP => 1);
+#
+#   # Object form: the file is removed when the object goes away
+#   my $tmp = File::Temp::new(SUFFIX => ".txt");
+#   say($tmp->fh(), "data");
+#   say($tmp->filename());
+#
+# Files are created with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600 and opened
+# read/write; directories with mode 0700. The trailing X's of a template
+# (at least 4) are replaced with random characters. UNLINK => 1 / CLEANUP
+# => 1 remove the file / directory tree when the program exits (only in the
+# process that created them, not in forked children). Unlike Perl, the
+# handle is a separate return value: there is no scalar-context form.
+
+our array @__unlink_files = ();
+our array @__cleanup_dirs = ();
+our int $__owner_pid = 0;
+
+private func tmp_err(str $msg) void {
+    die($msg . "\n");
+}
+
+# tmpdir() - $TMPDIR when it is a writable directory, else /tmp
+func tmpdir() str {
+    my scalar $env = core::getenv("TMPDIR");
+    if (defined($env) && length($env) > 0 && core::is_dir($env) == 1 && core::is_writable($env) == 1) {
+        return "" . $env;
+    }
+    return "/tmp";
+}
+
+private func random_chars(int $n) str {
+    my str $set = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
+    my str $bytes = core::random_bytes($n);
+    my str $out = "";
+    my int $i = 0;
+    while ($i < $n) {
+        my int $b = 0;
+        if ($i < core::byte_length($bytes)) {
+            $b = core::get_byte($bytes, $i);
+        } else {
+            $b = int(math::rand() * 256);
+        }
+        $out = $out . substr($set, $b % 63, 1);
+        $i++;
+    }
+    return $out;
+}
+
+# Replace the trailing X's of TEMPLATE (before SUFFIX) with random text
+private func fill_template(str $template) str {
+    my int $n = length($template);
+    my int $x = 0;
+    while ($x < $n && substr($template, $n - 1 - $x, 1) eq "X") {
+        $x++;
+    }
+    return substr($template, 0, $n - $x) . File::Temp::random_chars($x);
+}
+
+private func check_template(str $who, str $template) void {
+    if ($template !~ /XXXX$/) {
+        File::Temp::tmp_err("The template must end with at least 4 'X' characters");
+    }
+}
+
+# Split "TEMPLATE, KEY => VALUE ..." arguments
+private func split_args(scalar $args) scalar {
+    my scalar $res = { "template" => undef, "opts" => {} };
+    my int $i = 0;
+    my int $n = scalar(@{$args});
+    if ($n % 2 == 1) {
+        $res->{"template"} = "" . $args->[0];
+        $i = 1;
+    }
+    while ($i + 1 < $n) {
+        $res->{"opts"}->{uc("" . $args->[$i])} = $args->[$i + 1];
+        $i += 2;
+    }
+    return $res;
+}
+
+private func opt_true(scalar $opts, str $k) int {
+    if (!exists($opts->{$k})) {
+        return 0;
+    }
+    my scalar $v = $opts->{$k};
+    return (defined($v) && "" . $v ne "" && "" . $v ne "0") ? 1 : 0;
+}
+
+private func full_template(scalar $opts, scalar $template, str $default_name) str {
+    my str $t = defined($template) ? "" . $template : $default_name;
+    if (exists($opts->{"DIR"}) && defined($opts->{"DIR"})) {
+        my str $d = "" . $opts->{"DIR"};
+        if ($d !~ /\/$/) {
+            $d = $d . "/";
+        }
+        return $d . $t;
+    }
+    if (!defined($template) || File::Temp::opt_true($opts, "TMPDIR") == 1) {
+        return File::Temp::tmpdir() . "/" . $t;
+    }
+    return $t;
+}
+
+private func register_owner() void {
+    if ($__owner_pid == 0) {
+        $__owner_pid = core::getpid();
+    }
+}
+
+# tempfile([TEMPLATE], DIR => d, SUFFIX => s, UNLINK => 0|1, TMPDIR => 0|1,
+#          OPEN => 0|1) - returns (filehandle, filename); the handle is
+#          undef with OPEN => 0
+func tempfile(scalar ...@args) array {
+    my scalar $sa = File::Temp::split_args(\@args);
+    my scalar $opts = $sa->{"opts"};
+    my str $tmpl = File::Temp::full_template($opts, $sa->{"template"}, "XXXXXXXXXX");
+    File::Temp::check_template("tempfile", $tmpl);
+    my str $suffix = exists($opts->{"SUFFIX"}) && defined($opts->{"SUFFIX"}) ? "" . $opts->{"SUFFIX"} : "";
+    my int $want_open = exists($opts->{"OPEN"}) ? File::Temp::opt_true($opts, "OPEN") : 1;
+    my int $tries = 0;
+    my str $path = "";
+    while (1) {
+        $path = File::Temp::fill_template($tmpl) . $suffix;
+        my int $fd = core::open_fd($path, "wx");
+        if ($fd >= 0) {
+            core::close_fd($fd);
+            last;
+        }
+        $tries++;
+        if ($tries >= 1000 || !core::file_exists($path)) {
+            File::Temp::tmp_err("Error in tempfile() using template " . $tmpl . $suffix
+                . ": Could not create temp file " . $path . ": " . core::strerror(core::errno()));
+        }
+    }
+    if (File::Temp::opt_true($opts, "UNLINK") == 1) {
+        File::Temp::register_owner();
+        push(@__unlink_files, $path);
+    }
+    my scalar $fh = undef;
+    if ($want_open == 1) {
+        $fh = core::open($path, "+<");
+        if (!defined($fh)) {
+            File::Temp::tmp_err("Error in tempfile(): could not open " . $path);
+        }
+    }
+    my array @res = ($fh, $path);
+    return @res;
+}
+
+# tempdir([TEMPLATE], DIR => d, CLEANUP => 0|1, TMPDIR => 0|1) - returns
+# the new directory's name
+func tempdir(scalar ...@args) str {
+    my scalar $sa = File::Temp::split_args(\@args);
+    my scalar $opts = $sa->{"opts"};
+    my str $tmpl = File::Temp::full_template($opts, $sa->{"template"}, "XXXXXXXXXX");
+    File::Temp::check_template("tempdir", $tmpl);
+    my int $tries = 0;
+    my str $path = "";
+    while (1) {
+        $path = File::Temp::fill_template($tmpl);
+        if (core::mkdir($path, 448) == 0) {
+            last;
+        }
+        $tries++;
+        if ($tries >= 1000 || !core::file_exists($path)) {
+            File::Temp::tmp_err("Error in tempdir() using " . $tmpl
+                . ": Could not create directory " . $path . ": " . core::strerror(core::errno()));
+        }
+    }
+    if (File::Temp::opt_true($opts, "CLEANUP") == 1) {
+        File::Temp::register_owner();
+        push(@__cleanup_dirs, $path);
+    }
+    return $path;
+}
+
+# mktemp(TEMPLATE) - a name that did not exist when checked (not created;
+# prefer tempfile)
+func mktemp(str $template) str {
+    File::Temp::check_template("mktemp", $template);
+    my int $tries = 0;
+    while ($tries < 1000) {
+        my str $p = File::Temp::fill_template($template);
+        if (!core::file_exists($p) && core::is_symlink($p) == 0) {
+            return $p;
+        }
+        $tries++;
+    }
+    File::Temp::tmp_err("Error in mktemp(): no free name for " . $template);
+    return "";
+}
+
+# Remove a directory tree without following symlinks
+func rmtree_quiet(str $path) void {
+    if (core::is_symlink($path) == 1 || core::is_dir($path) == 0) {
+        core::unlink($path);
+        return;
+    }
+    foreach my $e (core::readdir($path)) {
+        File::Temp::rmtree_quiet($path . "/" . $e);
+    }
+    core::rmdir($path);
+}
+
+# cleanup() - remove now what UNLINK / CLEANUP registered
+func cleanup() void {
+    if ($__owner_pid != 0 && $__owner_pid != core::getpid()) {
+        return;
+    }
+    foreach my $f (@__unlink_files) {
+        if (core::file_exists($f) || core::is_symlink($f) == 1) {
+            core::unlink($f);
+        }
+    }
+    @__unlink_files = ();
+    my int $i = scalar(@__cleanup_dirs) - 1;
+    while ($i >= 0) {
+        my str $d = $__cleanup_dirs[$i];
+        if (core::is_dir($d) == 1) {
+            File::Temp::rmtree_quiet($d);
+        }
+        $i--;
+    }
+    @__cleanup_dirs = ();
+}
+
+END {
+    File::Temp::cleanup();
+}
+
+# ---- object form ----
+
+# File::Temp::new(TEMPLATE => t, DIR => d, SUFFIX => s, UNLINK => 0|1,
+#                 TMPDIR => 0|1) - a temporary file removed when the object
+#                 is destroyed (UNLINK defaults to 1)
+func new(scalar ...@args) scalar {
+    my array @pass = ();
+    my scalar $tmpl = undef;
+    my int $unlink = 1;
+    my int $i = 0;
+    while ($i + 1 < scalar(@args)) {
+        my str $k = uc("" . $args[$i]);
+        if ($k eq "TEMPLATE") {
+            $tmpl = $args[$i + 1];
+        } elsif ($k eq "UNLINK") {
+            $unlink = ($args[$i + 1] ? 1 : 0);
+        } else {
+            push(@pass, $k);
+            push(@pass, $args[$i + 1]);
+        }
+        $i += 2;
+    }
+    my array @call = ();
+    if (defined($tmpl)) {
+        push(@call, $tmpl);
+        my int $has_dir = 0;
+        my int $pi = 0;
+        while ($pi < scalar(@pass)) {
+            if ($pass[$pi] eq "DIR") { $has_dir = 1; }
+            $pi += 2;
+        }
+        if ($has_dir == 0) {
+            push(@call, "TMPDIR");
+            push(@call, 1);
+        }
+    }
+    foreach my $p (@pass) {
+        push(@call, $p);
+    }
+    my array @r = File::Temp::tempfile(...@call);
+    my scalar $self = { "fh" => $r[0], "filename" => $r[1], "unlink" => $unlink, "pid" => core::getpid() };
+    return bless($self, "File::Temp");
+}
+
+# File::Temp::newdir(TEMPLATE?, DIR => d, CLEANUP => 0|1) - a temporary
+# directory object removed when it is destroyed (CLEANUP defaults to 1)
+func newdir(scalar ...@args) scalar {
+    my array @call = ();
+    my int $cleanup = 1;
+    my int $i = 0;
+    if (scalar(@args) % 2 == 1) {
+        push(@call, $args[0]);
+        $i = 1;
+    }
+    while ($i + 1 < scalar(@args)) {
+        if (uc("" . $args[$i]) eq "CLEANUP") {
+            $cleanup = ($args[$i + 1] ? 1 : 0);
+        } else {
+            push(@call, $args[$i]);
+            push(@call, $args[$i + 1]);
+        }
+        $i += 2;
+    }
+    my str $d = File::Temp::tempdir(...@call);
+    my scalar $self = { "dirname" => $d, "cleanup" => $cleanup, "pid" => core::getpid(), "is_dir" => 1 };
+    return bless($self, "File::Temp");
+}
+
+func fh(scalar $self) scalar {
+    return $self->{"fh"};
+}
+
+func filename(scalar $self) str {
+    return $self->{"filename"};
+}
+
+func dirname(scalar $self) str {
+    return $self->{"dirname"};
+}
+
+func unlink_on_destroy(scalar $self, scalar ...@v) int {
+    if (scalar(@v) > 0) {
+        $self->{"unlink"} = $v[0] ? 1 : 0;
+    }
+    return $self->{"unlink"};
+}
+
+func DESTROY(scalar $self) void {
+    if ($self->{"pid"} != core::getpid()) {
+        return;
+    }
+    if (exists($self->{"is_dir"})) {
+        if ($self->{"cleanup"} == 1 && core::is_dir($self->{"dirname"}) == 1) {
+            File::Temp::rmtree_quiet($self->{"dirname"});
+        }
+        return;
+    }
+    if (defined($self->{"fh"})) {
+        core::close($self->{"fh"});
+        $self->{"fh"} = undef;
+    }
+    if ($self->{"unlink"} == 1 && core::file_exists($self->{"filename"})) {
+        core::unlink($self->{"filename"});
+    }
+}

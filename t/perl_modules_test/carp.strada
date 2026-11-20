@@ -1,0 +1,14 @@
+use Carp qw(croak carp confess);
+func inner(int $x) void {
+    croak("bad x " . $x) if $x < 0;
+}
+func helper() void {
+    carp("careful");
+}
+func main() int {
+    try { inner(-1); } catch ($e) { print("caught: " . $e); }
+    helper();
+    try { confess("deep"); } catch ($e) { my @cl = split(/\n/, $e); say("confess: " . $cl[0] . " (" . (scalar(@cl) > 1 ? "with" : "no") . " trace)"); }
+    try { croak("top"); } catch ($e) { print("top: " . $e); }
+    return 0;
+}

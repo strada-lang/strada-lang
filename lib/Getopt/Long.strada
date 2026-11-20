@@ -1,277 +1,733 @@
 package Getopt::Long;
-version "1.0.0";
+version "2.0.0";
 
-# GetOptions - Parse command-line options from core::argv()
+# Getopt::Long - command-line option parsing, compatible with Perl's
+# Getopt::Long.
 #
-# Usage:
-#   use lib "lib";
-#   use Getopt::Long;
+#   use Getopt::Long qw(GetOptions Configure);
 #
 #   my int $verbose = 0;
-#   my str $output = "";
-#   my int $count = 1;
+#   my str $output = "out.txt";
+#   my array @libs = ();
+#   my hash %defs = ();
+#   Configure("bundling");
+#   GetOptions(
+#       "verbose|v+"  => \$verbose,     # -v -v, or -vv with bundling
+#       "output|o=s"  => \$output,      # --output FILE, --output=FILE, -oFILE
+#       "lib|I=s"     => \@libs,        # repeatable
+#       "define|D=s"  => \%defs,        # -D key=value
+#       "color!"      => \$color,       # --color / --nocolor / --no-color
+#       "help|h|?"    => fn ($name, $value) { usage(); },
+#   ) or die("bad options\n");
+#   # @ARGV now holds the arguments that were not options.
 #
-#   my hash %opts = ();
-#   $opts{"verbose"} = "0";
-#   $opts{"output"} = "";
-#   $opts{"count"} = "1";
+# Hash storage: GetOptions(\%opts, "verbose", "output=s", "lib=s@") stores
+# each option under its first name; a spec may still be followed by its own
+# destination reference. The Strada 1.x form GetOptions([SPECS], \%opts) is
+# the same as GetOptions(\%opts, SPECS); 1.x's GetOptions(@specs, %opts)
+# no longer works (the hash arrives as a copy).
 #
-#   my array @specs = ("verbose", "output=s", "count=i");
-#   my int $ok = Getopt::Long::GetOptions(@specs, %opts);
+# Option specification: NAME[|ALIAS...][SPEC]
+#   (none)   flag, set to 1
+#   !        negatable flag: --name sets 1, --noname / --no-name set 0
+#   +        counter: each use adds 1
+#   =s =i =f =o   mandatory string / integer / real / extended integer
+#                 (0x1f, 0b101, 017 are accepted for o)
+#   :s :i :f :o   optional value (empty string or 0 when omitted)
+#   :N  :+        optional integer, N (or the old value + 1) when omitted
+#   suffix @ or %   list or key=value hash value (=s@, =i%)
+#   "<>"          a code ref called with each non-option argument
+# Destinations: \$scalar, \@array, \%hash, or a code ref called as
+# ($name, $value) (hash options: ($name, $key, $value)). A callback may
+# die("!FINISH") to stop option processing.
 #
-#   # After parsing:
-#   # $opts{"verbose"} = "1"  (if --verbose was passed)
-#   # $opts{"output"} = "file.txt"  (if --output file.txt or --output=file.txt)
-#   # $opts{"count"} = "5"  (if --count 5 or --count=5)
-#   # Remaining non-option args are in Getopt::Long::remaining()
+# Configure(...) takes Perl's settings: default, bundling, no_bundling,
+# ignore_case, no_ignore_case, auto_abbrev, no_auto_abbrev, permute,
+# require_order, pass_through, no_pass_through, gnu_compat, gnu_getopt,
+# posix_default, getopt_compat, ignore_case_always, bundling_override,
+# debug. It returns the previous settings as an array ref; passing that
+# ref back restores them.
 #
-# Spec format:
-#   "name"      - Boolean flag (--name sets to 1)
-#   "name!"     - Negatable boolean (--name sets to 1, --no-name sets to 0)
-#   "name=s"    - String argument (--name value or --name=value)
-#   "name=i"    - Integer argument
-#   "name=f"    - Float argument
-#   "name|n"    - Alias (--name or -n)
-#   "name|n=s"  - Alias with argument
+# Errors are printed to STDERR in Perl's words ("Unknown option: x",
+# "Option x requires an argument", ...); GetOptions then returns 0.
+# Without bundling, -name and --name are the same. Unique abbreviations
+# of long names are accepted unless auto_abbrev is off.
+
+our int $cfg_bundling = 0;
+our int $cfg_ignorecase = 1;
+our int $cfg_autoabbrev = 1;
+our int $cfg_passthrough = 0;
+our int $cfg_require_order = 0;
+our int $cfg_gnucompat = 0;
+our int $cfg_inited = 0;
 
 my array @__remaining = ();
 
-# Parse a single spec string into its parts
-# Returns hash with: name, type (bool/str/int/float), negatable, aliases
-private func parse_spec(str $spec) hash {
-    my hash %result = ();
-    my str $name = $spec;
-    my str $type = "bool";
-    my int $negatable = 0;
-
-    # Check for =type suffix
-    my int $eq_pos = index($spec, "=");
-    if ($eq_pos >= 0) {
-        $name = substr($spec, 0, $eq_pos);
-        my str $type_char = substr($spec, $eq_pos + 1, 1);
-        if ($type_char eq "s") {
-            $type = "str";
-        } elsif ($type_char eq "i") {
-            $type = "int";
-        } elsif ($type_char eq "f") {
-            $type = "float";
-        }
+private func config_defaults() void {
+    if (defined(core::getenv("POSIXLY_CORRECT"))) {
+        $cfg_autoabbrev = 0;
+        $cfg_require_order = 1;
+    } else {
+        $cfg_autoabbrev = 1;
+        $cfg_require_order = 0;
     }
-
-    # Check for ! suffix (negatable)
-    if (index($name, "!") >= 0) {
-        $name = replace_all($name, "!", "");
-        $negatable = 1;
-        $type = "bool";
-    }
-
-    # Check for | aliases
-    my str $primary = $name;
-    my str $aliases = "";
-    my int $pipe_pos = index($name, "|");
-    if ($pipe_pos >= 0) {
-        $primary = substr($name, 0, $pipe_pos);
-        $aliases = substr($name, $pipe_pos + 1, length($name) - $pipe_pos - 1);
-    }
-
-    $result{"name"} = $primary;
-    $result{"type"} = $type;
-    $result{"negatable"} = "" . $negatable;
-    $result{"aliases"} = $aliases;
-    return %result;
+    $cfg_bundling = 0;
+    $cfg_ignorecase = 1;
+    $cfg_passthrough = 0;
+    $cfg_gnucompat = 0;
+    $cfg_inited = 1;
 }
 
-# Check if an arg matches a spec (by name or alias)
-# Every name (primary or alias) matches "--name"; a single-character name
-# also matches "-x" (as in Perl's Getopt::Long).
-private func matches_spec(str $arg, str $primary, str $aliases) int {
-    if (Getopt::Long::matches_name($arg, $primary) == 1) {
-        return 1;
+private func config_init() void {
+    if ($cfg_inited == 0) {
+        Getopt::Long::config_defaults();
     }
-    if (length($aliases) > 0) {
-        my array @alias_list = split("\\|", $aliases);
-        my int $i = 0;
-        while ($i < scalar(@alias_list)) {
-            if (Getopt::Long::matches_name($arg, $alias_list[$i]) == 1) {
-                return 1;
-            }
-            $i++;
-        }
-    }
-    return 0;
 }
 
-private func matches_name(str $arg, str $name) int {
-    if (length($name) == 0) {
-        return 0;
-    }
-    if ($arg eq "--" . $name) {
-        return 1;
-    }
-    if (length($name) == 1 && $arg eq "-" . $name) {
-        return 1;
-    }
-    return 0;
-}
-
-# GetOptions - main entry point
-# @specs: array of spec strings like ("verbose", "output=s", "count=i")
-# %opts: hash to fill with parsed values (must be pre-populated with defaults)
-# Returns: 1 on success, 0 on error
-func GetOptions(array @specs, hash %opts) int {
-    my array @args = core::argv();
-    my int $argc = scalar(@args);
-    my int $i = 0;  # @ARGV excludes program name
-    @__remaining = ();
-
-    # Pre-parse all specs
-    my int $num_specs = scalar(@specs);
-    my array @parsed_names = ();
-    my array @parsed_types = ();
-    my array @parsed_neg = ();
-    my array @parsed_aliases = ();
-    my int $si = 0;
-    while ($si < $num_specs) {
-        my hash %p = Getopt::Long::parse_spec($specs[$si]);
-        push(@parsed_names, $p{"name"});
-        push(@parsed_types, $p{"type"});
-        push(@parsed_neg, $p{"negatable"});
-        push(@parsed_aliases, $p{"aliases"});
-        $si++;
-    }
-
-    while ($i < $argc) {
-        my str $arg = $args[$i];
-
-        # -- stops option processing
-        if ($arg eq "--") {
-            $i++;
-            while ($i < $argc) {
-                push(@__remaining, $args[$i]);
-                $i++;
-            }
-            return 1;
-        }
-
-        # Not an option
-        if (substr($arg, 0, 1) ne "-") {
-            push(@__remaining, $arg);
-            $i++;
+# Configure(LIST) - change parsing settings; returns the previous settings
+func Configure(scalar ...@settings) scalar {
+    Getopt::Long::config_init();
+    my scalar $prev = [$cfg_bundling, $cfg_ignorecase, $cfg_autoabbrev,
+                       $cfg_passthrough, $cfg_require_order, $cfg_gnucompat];
+    foreach my $s (@settings) {
+        if (ref($s) eq "ARRAY") {
+            $cfg_bundling = $s->[0] + 0;
+            $cfg_ignorecase = $s->[1] + 0;
+            $cfg_autoabbrev = $s->[2] + 0;
+            $cfg_passthrough = $s->[3] + 0;
+            $cfg_require_order = $s->[4] + 0;
+            $cfg_gnucompat = $s->[5] + 0;
             next;
         }
-
-        # Check for --name=value form
-        my str $arg_name = $arg;
-        my str $arg_value = "";
-        my int $has_eq = 0;
-        my int $eq_pos = index($arg, "=");
-        if ($eq_pos >= 0) {
-            $arg_name = substr($arg, 0, $eq_pos);
-            $arg_value = substr($arg, $eq_pos + 1, length($arg) - $eq_pos - 1);
-            $has_eq = 1;
+        my str $opt = lc("" . $s);
+        my int $on = 1;
+        if ($opt =~ /^no_?(.*)$/) {
+            $opt = $1;
+            $on = 0;
         }
-
-        # Check for --no-name (negation)
-        my int $is_negation = 0;
-        my str $neg_name = "";
-        if (length($arg_name) > 5 && substr($arg_name, 0, 5) eq "--no-") {
-            $is_negation = 1;
-            $neg_name = substr($arg_name, 5, length($arg_name) - 5);
-        }
-
-        my int $matched = 0;
-        my int $j = 0;
-        while ($j < $num_specs) {
-            my str $name = $parsed_names[$j];
-            my str $type = $parsed_types[$j];
-            my str $aliases = $parsed_aliases[$j];
-            my int $negatable = $parsed_neg[$j] + 0;
-
-            # Check negation
-            if ($is_negation == 1 && $negatable == 1 &&
-                ($neg_name eq $name ||
-                 Getopt::Long::matches_spec((length($neg_name) == 1 ? "-" . $neg_name : "--" . $neg_name), $name, $aliases) == 1)) {
-                $opts{$name} = "0";
-                $matched = 1;
-                last;
+        if ($opt eq "default") {
+            Getopt::Long::config_defaults();
+        } elsif ($opt eq "posix_default") {
+            if ($on == 1) {
+                $cfg_autoabbrev = 0;
+                $cfg_bundling = 0;
+                $cfg_require_order = 1;
+            } else {
+                Getopt::Long::config_defaults();
             }
-
-            # Check match
-            if (Getopt::Long::matches_spec($arg_name, $name, $aliases) == 1) {
-                if ($type eq "bool") {
-                    if ($has_eq == 1) {
-                        my str $lval = lc($arg_value);
-                        if ($lval eq "0" || $lval eq "false" || $lval eq "no" || $arg_value eq "") {
-                            $opts{$name} = "0";
-                        } else {
-                            $opts{$name} = "1";
-                        }
-                    } else {
-                        $opts{$name} = "1";
-                    }
-                    $matched = 1;
-                } else {
-                    # Needs a value
-                    my str $val = "";
-                    if ($has_eq == 1) {
-                        $val = $arg_value;
-                    } elsif ($i + 1 < $argc) {
-                        my str $next_arg = $args[$i + 1];
-                        my int $looks_like_opt = 0;
-                        if ($next_arg eq "--" || (length($next_arg) >= 2 && substr($next_arg, 0, 2) eq "--")) {
-                            $looks_like_opt = 1;
-                        } elsif (length($next_arg) >= 2 && substr($next_arg, 0, 1) eq "-") {
-                            my str $next_base = $next_arg;
-                            my int $neq = index($next_arg, "=");
-                            if ($neq >= 0) {
-                                $next_base = substr($next_arg, 0, $neq);
-                            }
-                            my int $mj = 0;
-                            while ($mj < $num_specs) {
-                                if (Getopt::Long::matches_spec($next_base, $parsed_names[$mj], $parsed_aliases[$mj]) == 1) {
-                                    $looks_like_opt = 1;
-                                    last;
-                                }
-                                $mj++;
-                            }
-                        }
-                        if ($looks_like_opt == 1) {
-                            warn("Option --" . $name . " requires an argument");
-                            return 0;
-                        }
-                        $i++;
-                        $val = $next_arg;
-                    } else {
-                        warn("Option --" . $name . " requires an argument");
-                        return 0;
-                    }
-                    if ($type eq "int" && $val !~ /^-?[0-9]+$/) {
-                        warn("Option --" . $name . " requires an integer argument");
-                        return 0;
-                    }
-                    if ($type eq "float" && $val !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/) {
-                        warn("Option --" . $name . " requires a numeric argument");
-                        return 0;
-                    }
-                    $opts{$name} = $val;
-                    $matched = 1;
-                }
-                last;
+        } elsif ($opt eq "bundling" || $opt eq "bundling_override") {
+            $cfg_bundling = $on;
+        } elsif ($opt eq "ignore_case" || $opt eq "ignorecase") {
+            $cfg_ignorecase = $on;
+        } elsif ($opt eq "ignore_case_always" || $opt eq "ignorecase_always") {
+            $cfg_ignorecase = $on == 1 ? 2 : 0;
+        } elsif ($opt eq "auto_abbrev" || $opt eq "autoabbrev") {
+            $cfg_autoabbrev = $on;
+        } elsif ($opt eq "permute") {
+            $cfg_require_order = $on == 1 ? 0 : 1;
+        } elsif ($opt eq "require_order") {
+            $cfg_require_order = $on;
+        } elsif ($opt eq "pass_through" || $opt eq "passthrough") {
+            $cfg_passthrough = $on;
+        } elsif ($opt eq "gnu_compat") {
+            $cfg_gnucompat = $on;
+        } elsif ($opt eq "gnu_getopt") {
+            if ($on == 1) {
+                $cfg_gnucompat = 1;
+                $cfg_bundling = 1;
+                $cfg_require_order = 0;
             }
-            $j++;
+        } elsif ($opt eq "getopt_compat" || $opt eq "debug") {
+            # accepted; "+" as an option prefix is not supported
+        } else {
+            die("Getopt::Long: unknown or erroneous config parameter \"" . $s . "\"\n");
         }
+    }
+    return $prev;
+}
 
-        if ($matched == 0) {
-            # Unknown option - collect as remaining
-            push(@__remaining, $arg);
+private func gol_err(str $msg) void {
+    print(STDERR, $msg . "\n");
+}
+
+# Parse one specification into a hash ref:
+#   names (array ref), primary, type ("" flag, "!" negatable, "+" counter,
+#   "s" "i" "f" "o"), mand, dflt, dflt_incr, list, hashv
+private func parse_spec(str $spec) scalar {
+    my scalar $o = {};
+    my int $p = 0;
+    my int $n = length($spec);
+    while ($p < $n) {
+        my str $c = substr($spec, $p, 1);
+        if ($c eq "!" || $c eq "+" || $c eq "=" || $c eq ":") {
+            last;
         }
+        $p++;
+    }
+    my str $names = substr($spec, 0, $p);
+    my str $mod = substr($spec, $p);
+    my array @nl = split(/\|/, $names);
+    if (scalar(@nl) == 0 || length($nl[0]) == 0) {
+        die("Error in option spec: \"" . $spec . "\"\n");
+    }
+    $o->{"names"} = [@nl];
+    $o->{"primary"} = $nl[0];
+    $o->{"type"} = "";
+    $o->{"mand"} = 0;
+    $o->{"list"} = 0;
+    $o->{"hashv"} = 0;
+    $o->{"dflt_incr"} = 0;
+    if ($mod eq "") {
+        return $o;
+    }
+    if ($mod eq "!" || $mod eq "+") {
+        $o->{"type"} = $mod;
+        return $o;
+    }
+    if ($mod =~ /^([=:])([iofs])([@%]?)$/) {
+        $o->{"type"} = $2;
+        $o->{"mand"} = $1 eq "=" ? 1 : 0;
+        if ($3 eq "@") { $o->{"list"} = 1; }
+        if ($3 eq "%") { $o->{"hashv"} = 1; }
+        return $o;
+    }
+    if ($mod =~ /^:(-?[0-9]+|\+)([@%]?)$/) {
+        $o->{"type"} = "i";
+        if ($1 eq "+") {
+            $o->{"dflt_incr"} = 1;
+        } else {
+            $o->{"dflt"} = $1 + 0;
+        }
+        if ($2 eq "@") { $o->{"list"} = 1; }
+        if ($2 eq "%") { $o->{"hashv"} = 1; }
+        return $o;
+    }
+    if ($mod =~ /\{/) {
+        die("Getopt::Long: repeat specifiers ({n,m}) are not supported: \"" . $spec . "\"\n");
+    }
+    die("Error in option spec: \"" . $spec . "\"\n");
+}
 
-        $i++;
+private func key_of(str $name, int $single_ok) str {
+    if ($cfg_ignorecase == 0) {
+        return $name;
+    }
+    # With bundling, single-character names are case sensitive (Perl)
+    if ($cfg_bundling == 1 && $cfg_ignorecase == 1 && length($name) == 1 && $single_ok == 1) {
+        return $name;
+    }
+    return lc($name);
+}
+
+private func valid_number(str $type, str $v) int {
+    if ($type eq "i") {
+        return ($v =~ /^[-+]?_*[0-9][0-9_]*$/) ? 1 : 0;
+    }
+    if ($type eq "o") {
+        return ($v =~ /^(?:[-+]?_*[1-9][0-9_]*|0[xX]_*[0-9a-fA-F][0-9a-fA-F_]*|0[bB]_*[01][01_]*|0[0-7_]*)$/) ? 1 : 0;
+    }
+    if ($type eq "f") {
+        return ($v =~ /^[-+]?(?=[0-9.])[0-9_]*(\.[0-9_]*)?([eE][-+]?[0-9_]+)?$/) ? 1 : 0;
     }
     return 1;
 }
 
-# remaining - Return non-option arguments left after parsing
+private func convert_value(str $type, scalar $v) scalar {
+    if (!defined($v)) {
+        return $v;
+    }
+    if ($type eq "s") {
+        return "" . $v;
+    }
+    my str $t = "" . $v;
+    $t =~ s/_//g;
+    if ($type eq "i") {
+        return int($t);
+    }
+    if ($type eq "o") {
+        my str $neg = "";
+        if ($t =~ /^([-+])(.*)$/) {
+            $neg = $1;
+            $t = $2;
+        }
+        my int $iv = 0;
+        if ($t =~ /^0/) {
+            $iv = oct($t);
+        } else {
+            $iv = int($t);
+        }
+        return $neg eq "-" ? 0 - $iv : $iv;
+    }
+    # a real number keeps its text, without underscores (Perl)
+    return $t;
+}
+
+private func number_word(str $type) str {
+    if ($type eq "f") { return "real number"; }
+    if ($type eq "o") { return "extended number"; }
+    return "number";
+}
+
+# Store a value in an option's destination. Returns 0, or 1 when a
+# callback asked to stop (die "!FINISH"), or -1 when a callback died.
+private func store_value(scalar $o, scalar $store, scalar $val, scalar $key) int {
+    my str $kind = $o->{"dkind"};
+    my scalar $r = $o->{"dest"};
+    my str $name = $o->{"primary"};
+    if ($kind eq "code") {
+        my int $rc = 0;
+        try {
+            if ($o->{"hashv"} == 1) {
+                $r->($name, $key, $val);
+            } else {
+                $r->($name, $val);
+            }
+        } catch ($e) {
+            my str $msg = "" . $e;
+            if ($msg =~ /^!FINISH/) {
+                $rc = 1;
+            } else {
+                print(STDERR, $msg);
+                if ($msg !~ /\n$/) {
+                    print(STDERR, "\n");
+                }
+                $rc = -1;
+            }
+        }
+        return $rc;
+    }
+    if ($kind eq "array") {
+        push(@{$r}, $val);
+        return 0;
+    }
+    if ($kind eq "hash") {
+        $r->{$key} = $val;
+        return 0;
+    }
+    if ($kind eq "scalar") {
+        if ($o->{"list"} == 1) {
+            if (ref($$r) ne "ARRAY") {
+                $$r = [];
+            }
+            my scalar $lr = $$r;
+            push(@{$lr}, $val);
+        } elsif ($o->{"hashv"} == 1) {
+            if (ref($$r) ne "HASH") {
+                $$r = {};
+            }
+            my scalar $hr = $$r;
+            $hr->{$key} = $val;
+        } else {
+            $$r = $val;
+        }
+        return 0;
+    }
+    # hash storage
+    if ($o->{"list"} == 1) {
+        if (ref($store->{$name}) ne "ARRAY") {
+            $store->{$name} = [];
+        }
+        my scalar $sl = $store->{$name};
+        push(@{$sl}, $val);
+    } elsif ($o->{"hashv"} == 1) {
+        if (ref($store->{$name}) ne "HASH") {
+            $store->{$name} = {};
+        }
+        my scalar $sh = $store->{$name};
+        $sh->{$key} = $val;
+    } else {
+        $store->{$name} = $val;
+    }
+    return 0;
+}
+
+private func current_value(scalar $o, scalar $store) scalar {
+    my str $kind = $o->{"dkind"};
+    if ($kind eq "scalar") {
+        my scalar $r = $o->{"dest"};
+        return $$r;
+    }
+    if ($kind eq "store") {
+        return $store->{$o->{"primary"}};
+    }
+    return undef;
+}
+
+# Find an option by name. Returns [index, negated], or a string (an
+# "ambiguous" message), or undef.
+private func find_option(scalar $table, str $name) scalar {
+    my str $k = Getopt::Long::key_of($name, 0);
+    if (exists($table->{$k})) {
+        return $table->{$k};
+    }
+    if (length($name) == 1 && exists($table->{$name})) {
+        return $table->{$name};
+    }
+    if ($cfg_autoabbrev == 0) {
+        return undef;
+    }
+    my scalar $hit = undef;
+    my array @matches = ();
+    my hash %seen = ();
+    foreach my $tk (sort(keys(%{$table}))) {
+        if (length($tk) > length($k) && substr($tk, 0, length($k)) eq $k) {
+            my scalar $ent = $table->{$tk};
+            my str $id = $ent->[0] . "/" . $ent->[1];
+            if (!exists($seen{$id})) {
+                $seen{$id} = 1;
+                push(@matches, $tk);
+                $hit = $ent;
+            }
+        }
+    }
+    if (scalar(@matches) == 1) {
+        return $hit;
+    }
+    if (scalar(@matches) > 1) {
+        return "Option " . $name . " is ambiguous (" . join(", ", @matches) . ")";
+    }
+    return undef;
+}
+
+# GetOptions(SPEC => DEST, ...) / GetOptions(\%h, SPEC, ...) - parse @ARGV.
+# Removes the options from @ARGV and leaves the other arguments.
+# Returns 1 on success, 0 if any option was in error.
+func GetOptions(scalar ...@spec) int {
+    return Getopt::Long::GetOptionsFromArray(core::argv(), ...@spec);
+}
+
+# GetOptionsFromArray(\@args, SPEC => DEST, ...) - parse the given array
+func GetOptionsFromArray(scalar $argv, scalar ...@spec) int {
+    Getopt::Long::config_init();
+    my scalar $store = undef;
+    my int $si = 0;
+    my int $ns = scalar(@spec);
+    # Strada 1.x form: GetOptions([SPECS], \%opts)
+    if ($ns == 2 && ref($spec[0]) eq "ARRAY" && ref($spec[1]) eq "HASH") {
+        my array @legacy = ($spec[1]);
+        foreach my $ls (@{$spec[0]}) {
+            push(@legacy, $ls);
+        }
+        @spec = @legacy;
+        $ns = scalar(@spec);
+    }
+    if ($ns > 0 && ref($spec[0]) eq "HASH") {
+        $store = $spec[0];
+        $si = 1;
+    }
+
+    my array @opts = ();
+    my scalar $table = {};
+    my scalar $nonopt_cb = undef;
+    while ($si < $ns) {
+        my scalar $sp = $spec[$si];
+        if (ref($sp) ne "") {
+            die("Getopt::Long: expected an option specification, got a " . ref($sp) . " reference\n");
+        }
+        my str $spec_str = "" . $sp;
+        my scalar $dest = undef;
+        if ($si + 1 < $ns && ref($spec[$si + 1]) ne "") {
+            $dest = $spec[$si + 1];
+            $si++;
+        }
+        $si++;
+        if ($spec_str eq "<>") {
+            if (!defined($dest) || ref($dest) ne "CODE") {
+                die("Getopt::Long: \"<>\" needs a code reference\n");
+            }
+            $nonopt_cb = $dest;
+            next;
+        }
+        my scalar $o = Getopt::Long::parse_spec($spec_str);
+        if (defined($dest)) {
+            my str $rk = ref($dest);
+            if ($rk eq "SCALAR" || $rk eq "REF") {
+                $o->{"dkind"} = "scalar";
+            } elsif ($rk eq "ARRAY") {
+                $o->{"dkind"} = "array";
+                $o->{"list"} = 1;
+            } elsif ($rk eq "HASH") {
+                $o->{"dkind"} = "hash";
+                $o->{"hashv"} = 1;
+            } elsif ($rk eq "CODE") {
+                $o->{"dkind"} = "code";
+            } else {
+                die("Getopt::Long: invalid destination for option \"" . $spec_str . "\"\n");
+            }
+            $o->{"dest"} = $dest;
+        } elsif (defined($store)) {
+            $o->{"dkind"} = "store";
+        } else {
+            die("Getopt::Long: option \"" . $spec_str . "\" has no destination\n");
+        }
+        if ($o->{"hashv"} == 1 && $o->{"type"} eq "") {
+            $o->{"type"} = "s";
+            $o->{"mand"} = 1;
+        }
+        if ($o->{"list"} == 1 && $o->{"type"} eq "") {
+            $o->{"type"} = "s";
+            $o->{"mand"} = 1;
+        }
+        my int $idx = scalar(@opts);
+        push(@opts, $o);
+        foreach my $nm (@{$o->{"names"}}) {
+            $table->{Getopt::Long::key_of($nm, 1)} = [$idx, 0];
+            if ($o->{"type"} eq "!") {
+                $table->{Getopt::Long::key_of("no" . $nm, 1)} = [$idx, 1];
+                $table->{Getopt::Long::key_of("no-" . $nm, 1)} = [$idx, 1];
+            }
+        }
+    }
+
+    my array @queue = ();
+    foreach my $a0 (@{$argv}) {
+        push(@queue, $a0);
+    }
+    my array @out = ();
+    my int $errors = 0;
+    my int $finished = 0;
+
+    while (scalar(@queue) > 0 && $finished == 0) {
+        my str $arg = "" . shift(@queue);
+
+        if ($arg eq "--") {
+            foreach my $q (@queue) { push(@out, $q); }
+            @queue = ();
+            last;
+        }
+
+        if (length($arg) < 2 || substr($arg, 0, 1) ne "-") {
+            if ($cfg_require_order == 1) {
+                push(@out, $arg);
+                foreach my $q2 (@queue) { push(@out, $q2); }
+                @queue = ();
+                last;
+            }
+            if (defined($nonopt_cb)) {
+                my int $crc = 0;
+                try {
+                    $nonopt_cb->($arg);
+                } catch ($e) {
+                    my str $cmsg = "" . $e;
+                    if ($cmsg =~ /^!FINISH/) {
+                        $crc = 1;
+                    } else {
+                        print(STDERR, $cmsg);
+                        if ($cmsg !~ /\n$/) { print(STDERR, "\n"); }
+                        $crc = -1;
+                    }
+                }
+                if ($crc == 1) { $finished = 1; }
+                if ($crc == -1) { $errors++; }
+            } else {
+                push(@out, $arg);
+            }
+            next;
+        }
+
+        my str $starter = "-";
+        my str $body = substr($arg, 1);
+        if (substr($arg, 0, 2) eq "--") {
+            $starter = "--";
+            $body = substr($arg, 2);
+        }
+
+        my str $name = "";
+        my int $has_optarg = 0;
+        my str $optarg = "";
+        my int $bundled = 0;
+        my scalar $hit = undef;
+
+        if ($cfg_bundling == 1 && $starter eq "-") {
+            # -abc is -a -b -c; a value option takes the rest (-ofile)
+            $bundled = 1;
+            $name = substr($body, 0, 1);
+            my str $rest = substr($body, 1);
+            my str $bkey = $cfg_ignorecase == 2 ? lc($name) : $name;
+            if (exists($table->{$bkey})) {
+                $hit = $table->{$bkey};
+            }
+            if (!defined($hit)) {
+                if ($cfg_passthrough == 1) {
+                    push(@out, $arg);
+                    next;
+                }
+                Getopt::Long::gol_err("Unknown option: " . $name);
+                $errors++;
+                if (length($rest) > 0) {
+                    unshift(@queue, "-" . $rest);
+                }
+                next;
+            }
+            my scalar $bo = $opts[$hit->[0]];
+            my str $btype = $bo->{"type"};
+            if ($btype eq "" || $btype eq "!" || $btype eq "+") {
+                if (length($rest) > 0) {
+                    unshift(@queue, "-" . $rest);
+                }
+            } elsif (length($rest) > 0) {
+                if (($btype eq "i" || $btype eq "o") && $rest =~ /^([-+]?[0-9]+)(.+)$/) {
+                    $optarg = $1;
+                    unshift(@queue, "-" . $2);
+                } else {
+                    $optarg = $rest;
+                }
+                $has_optarg = 1;
+            }
+        } else {
+            $name = $body;
+            my int $eqp = index($body, "=");
+            if ($eqp >= 0) {
+                $name = substr($body, 0, $eqp);
+                $optarg = substr($body, $eqp + 1);
+                $has_optarg = 1;
+            }
+            my scalar $found = Getopt::Long::find_option($table, $name);
+            if (defined($found) && ref($found) eq "") {
+                Getopt::Long::gol_err("" . $found);
+                $errors++;
+                next;
+            }
+            $hit = $found;
+            if (!defined($hit)) {
+                if ($cfg_passthrough == 1) {
+                    push(@out, $arg);
+                    if ($cfg_require_order == 1) {
+                        foreach my $q3 (@queue) { push(@out, $q3); }
+                        @queue = ();
+                        last;
+                    }
+                    next;
+                }
+                Getopt::Long::gol_err("Unknown option: " . $name);
+                $errors++;
+                next;
+            }
+        }
+
+        my scalar $o = $opts[$hit->[0]];
+        my int $negated = $hit->[1] + 0;
+        my str $type = $o->{"type"};
+        my scalar $val = undef;
+        my scalar $key = undef;
+
+        if ($type eq "" || $type eq "!" || $type eq "+") {
+            if ($has_optarg == 1) {
+                Getopt::Long::gol_err("Option " . $name . " does not take an argument");
+                $errors++;
+                next;
+            }
+            if ($negated == 1) {
+                $val = 0;
+            } elsif ($type eq "+") {
+                my scalar $cur = Getopt::Long::current_value($o, $store);
+                $val = (defined($cur) ? $cur + 0 : 0) + 1;
+            } else {
+                $val = 1;
+            }
+        } else {
+            my int $mand = $o->{"mand"} + 0;
+            my int $use_default = 0;
+            my int $bad = 0;
+            my scalar $raw = undef;
+            if ($has_optarg == 1 && $optarg eq "" && $bundled == 0) {
+                if ($cfg_gnucompat == 1) {
+                    $raw = $type eq "s" ? "" : "0";
+                } elsif ($mand == 1 || $o->{"hashv"} == 1) {
+                    Getopt::Long::gol_err("Option " . $name . " requires an argument");
+                    $errors++;
+                    next;
+                } else {
+                    $use_default = 1;
+                }
+            } elsif ($has_optarg == 1) {
+                $raw = $optarg;
+            } elsif (scalar(@queue) == 0) {
+                if ($mand == 1 || $o->{"hashv"} == 1) {
+                    Getopt::Long::gol_err("Option " . $name . " requires an argument");
+                    $errors++;
+                    next;
+                }
+                $use_default = 1;
+            } else {
+                my str $next = "" . $queue[0];
+                if ($mand == 1 || $o->{"hashv"} == 1) {
+                    if ($type eq "s" || $o->{"hashv"} == 1) {
+                        $raw = shift(@queue);
+                    } else {
+                        # validated below; an invalid value is consumed (Perl)
+                        $raw = shift(@queue);
+                    }
+                } elsif ($type eq "s") {
+                    if ($next eq "--" || ($next ne "-" && substr($next, 0, 1) eq "-")) {
+                        $use_default = 1;
+                    } else {
+                        $raw = shift(@queue);
+                    }
+                } elsif (Getopt::Long::valid_number($type, $next) == 1) {
+                    $raw = shift(@queue);
+                } else {
+                    $use_default = 1;
+                }
+            }
+
+            if ($o->{"hashv"} == 1 && defined($raw)) {
+                my str $kv = "" . $raw;
+                my int $kp = index($kv, "=");
+                if ($kp >= 0) {
+                    $key = substr($kv, 0, $kp);
+                    $raw = substr($kv, $kp + 1);
+                } else {
+                    $key = $kv;
+                    if ($mand == 1) {
+                        Getopt::Long::gol_err("Option " . $name . ", key \"" . $key . "\", requires a value");
+                        $errors++;
+                        next;
+                    }
+                    $raw = $type eq "s" ? "" : "1";
+                }
+            }
+
+            if ($use_default == 1) {
+                if ($o->{"dflt_incr"} == 1) {
+                    my scalar $cur2 = Getopt::Long::current_value($o, $store);
+                    $val = (defined($cur2) ? $cur2 + 0 : 0) + 1;
+                } elsif (exists($o->{"dflt"})) {
+                    $val = $o->{"dflt"};
+                } else {
+                    $val = $type eq "s" ? "" : 0;
+                }
+            } elsif (defined($raw) && $type ne "s" && Getopt::Long::valid_number($type, "" . $raw) == 0) {
+                Getopt::Long::gol_err("Value \"" . $raw . "\" invalid for option " . $name
+                    . " (" . Getopt::Long::number_word($type) . " expected)");
+                $errors++;
+                next;
+            } else {
+                $val = Getopt::Long::convert_value($type, $raw);
+            }
+        }
+
+        my int $src = Getopt::Long::store_value($o, $store, $val, $key);
+        if ($src == 1) {
+            $finished = 1;
+        } elsif ($src == -1) {
+            $errors++;
+        }
+    }
+
+    foreach my $q4 (@queue) {
+        push(@out, $q4);
+    }
+    @__remaining = ();
+    foreach my $r0 (@out) {
+        push(@__remaining, $r0);
+    }
+    splice(@{$argv}, 0);
+    push(@{$argv}, @out);
+    return $errors == 0 ? 1 : 0;
+}
+
+# remaining() - the arguments left in @ARGV by the last GetOptions call
 func remaining() array {
     return @__remaining;
 }

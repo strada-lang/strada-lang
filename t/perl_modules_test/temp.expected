@@ -1,0 +1,14 @@
+default dir=/tmp len=10 exists=1
+readback=hello
+mode=600
+dir2=ok name2=ok
+tempdir=ok
+err=The template must end with at least 4 'X' characters
+open0=undef exists=1
+obj=exists
+--- stderr ---
+--- after exit ---
+file 1 removed
+file 2 removed
+file 3 exists
+object file removed

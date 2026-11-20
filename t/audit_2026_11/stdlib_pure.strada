@@ -78,7 +78,7 @@ func main(int $argc, array @argv) int {
     # 4. Getopt::Long
     my array @specs = ("workdir=s", "flag", "num=i");
     my hash %opts = ("workdir" => "", "flag" => "0", "num" => "0");
-    my int $go_ok = Getopt::Long::GetOptions(@specs, %opts);
+    my int $go_ok = Getopt::Long::GetOptions(\%opts, @specs);
     check($go_ok == 1 && $opts{"flag"} eq "1" && $opts{"num"} eq "25", "Getopt::Long::GetOptions");
 
     # 5. List::Util::last_idx

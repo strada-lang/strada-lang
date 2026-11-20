@@ -272,21 +272,23 @@ func test_numeric_list_datetime() void {
 func main(int $argc, array @argv) int {
     if ($argc > 1 && $argv[1] eq "--getopt-go1") {
         my hash %g1 = ("flag" => 1);
-        my int $ok1 = Getopt::Long::GetOptions(["flag!"], \%g1);
+        my int $ok1 = Getopt::Long::GetOptions(["getopt-go1", "flag!"], \%g1);
         say(($ok1 == 1 && $g1{"flag"} == 0) ? "GO1_OK" : "GO1_FAIL");
         return ($ok1 == 1 && $g1{"flag"} == 0) ? 0 : 1;
     }
     if ($argc > 1 && $argv[1] eq "--getopt-go2") {
         my hash %g2 = ("count" => 0);
-        my int $ok2 = Getopt::Long::GetOptions(["count=i"], \%g2);
+        my int $ok2 = Getopt::Long::GetOptions(["getopt-go2", "count=i"], \%g2);
         say(($ok2 == 0) ? "GO2_OK" : "GO2_FAIL");
         return ($ok2 == 0) ? 0 : 1;
     }
     if ($argc > 1 && $argv[1] eq "--getopt-go3") {
         my hash %g3 = ("name" => "", "other" => 0);
-        my int $ok3 = Getopt::Long::GetOptions(["name=s", "other"], \%g3);
-        say(($ok3 == 0) ? "GO3_OK" : "GO3_FAIL");
-        return ($ok3 == 0) ? 0 : 1;
+        # Perl: a mandatory string value takes the next argument, even "--other"
+        my int $ok3 = Getopt::Long::GetOptions(["getopt-go3", "name=s", "other"], \%g3);
+        my int $good3 = ($ok3 == 1 && $g3{"name"} eq "--other" && $g3{"other"} == 0) ? 1 : 0;
+        say($good3 == 1 ? "GO3_OK" : "GO3_FAIL");
+        return $good3 == 1 ? 0 : 1;
     }
 
     my int $smtp_port = $argc > 1 ? core::atoi($argv[1]) : 19425;

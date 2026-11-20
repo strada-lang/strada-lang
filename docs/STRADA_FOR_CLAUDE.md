@@ -979,6 +979,62 @@ BEGIN { say("runs before main"); }
 END   { say("runs after main, LIFO order"); }
 ```
 
+### Perl-compatible modules
+
+These library modules follow their Perl namesakes. `use Mod qw(f g);`
+makes `f()` and `g()` callable without the package prefix; without a list,
+call them qualified (`File::Basename::dirname($p)`). There are no default
+exports.
+
+```strada
+use Getopt::Long qw(GetOptions Configure);
+use File::Basename qw(basename dirname fileparse);
+use File::Temp qw(tempfile tempdir);
+use File::Spec;                 # File::Spec->catfile(...), class-method style
+use File::Spec::Functions qw(catfile catdir rel2abs abs2rel);
+use File::Path qw(make_path remove_tree);
+use File::Copy qw(copy move cp);
+use Cwd qw(getcwd abs_path);
+use Carp qw(croak carp confess cluck);
+use Scalar::Util qw(blessed reftype looks_like_number refaddr);
+
+func main() int {
+    my int $verbose = 0;
+    my str $out = "a.out";
+    my array @inc = ();
+    Configure("bundling");
+    GetOptions("verbose|v+" => \$verbose, "output|o=s" => \$out, "I=s" => \@inc)
+        or die("usage: prog [-v] [-o FILE] [-I DIR] FILE...\n");
+    # @ARGV now holds only the non-option arguments
+
+    my ($fh, $tmpname) = tempfile("buildXXXXXX", TMPDIR => 1, UNLINK => 1);
+    my str $dir = tempdir(CLEANUP => 1);
+    make_path(catdir($dir, "a", "b"));
+    copy($tmpname, catfile($dir, "a", basename($tmpname))) or croak("copy failed");
+    return 0;
+}
+```
+
+- **Getopt::Long**: specs `name|alias`, `!`, `+`, `=s =i =f =o`, `:s :i
+  :N :+`, `@`/`%` suffixes, `"<>"`; destinations `\$x`, `\@a`, `\%h`, a code
+  ref, or hash storage `GetOptions(\%opts, "spec", ...)`.
+  `GetOptionsFromArray(\@args, ...)`. Errors print Perl's messages to STDERR
+  and GetOptions returns 0. `Configure` takes bundling, no_ignore_case,
+  pass_through, require_order, gnu_getopt and Perl's other settings.
+- **File::Basename**: fileparse's suffixes are regex strings (there is no
+  `qr//`); basename's are literal.
+- **File::Temp**: `tempfile` returns `(fh, name)`, opened read/write, mode
+  0600. Use the list form `my ($fh, $name) = tempfile(...)`: there is no
+  scalar-context form. There are also `tempdir`, `mktemp`, and the objects
+  `File::Temp::new(...)` / `File::Temp::newdir(...)`, removed when the
+  object is destroyed.
+- **File::Spec** methods return lists (`splitpath`, `splitdir`): assign them
+  to an array before using them, since `join("/", File::Spec->splitdir($d))`
+  sees an array ref.
+- **Scalar::Util**: use `core::weaken` / `core::isweak` directly; do not list
+  `weaken` in the import list.
+- **Carp**: `croak` and `carp` report the caller's file and line.
+
 ---
 
 ## Magic namespaces

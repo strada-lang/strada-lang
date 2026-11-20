@@ -1,0 +1,21 @@
+[/usr/lib/libc.so] base=[libc.so] base_so=[libc] dir=[/usr/lib] fp=[libc.so|/usr/lib/|] fs=[libc|/usr/lib/|.so] fl=[libc.so|/usr/lib/|]
+[libc.so] base=[libc.so] base_so=[libc] dir=[.] fp=[libc.so|./|] fs=[libc|./|.so] fl=[libc.so|./|]
+[/usr/lib/] base=[lib] base_so=[lib] dir=[/usr] fp=[|/usr/lib/|] fs=[|/usr/lib/|] fl=[|/usr/lib/|]
+[/usr/lib//] base=[lib] base_so=[lib] dir=[/usr] fp=[|/usr/lib//|] fs=[|/usr/lib//|] fl=[|/usr/lib//|]
+[/] base=[/] base_so=[/] dir=[/] fp=[|/|] fs=[|/|] fl=[|/|]
+[//] base=[/] base_so=[/] dir=[/] fp=[|//|] fs=[|//|] fl=[|//|]
+[] base=[./] base_so=[./] dir=[.] fp=[|./|] fs=[|./|] fl=[|./|]
+[.] base=[.] base_so=[.] dir=[.] fp=[.|./|] fs=[|./|.] fl=[.|./|]
+[..] base=[..] base_so=[..] dir=[.] fp=[..|./|] fs=[.|./|.] fl=[..|./|]
+[a/] base=[a] base_so=[a] dir=[.] fp=[|a/|] fs=[|a/|] fl=[|a/|]
+[a/b] base=[b] base_so=[b] dir=[a] fp=[b|a/|] fs=[b|a/|] fl=[b|a/|]
+[/a] base=[a] base_so=[a] dir=[/] fp=[a|/|] fs=[a|/|] fl=[a|/|]
+[a//b//] base=[b] base_so=[b] dir=[a] fp=[|a//b//|] fs=[|a//b//|] fl=[|a//b//|]
+[./x] base=[x] base_so=[x] dir=[.] fp=[x|./|] fs=[x|./|] fl=[x|./|]
+[../x/y.tar.gz] base=[y.tar.gz] base_so=[y.tar.gz] dir=[../x] fp=[y.tar.gz|../x/|] fs=[y.tar|../x/|.gz] fl=[y|../x/|.tar.gz]
+[.bashrc] base=[.bashrc] base_so=[.bashrc] dir=[.] fp=[.bashrc|./|] fs=[|./|.bashrc] fl=[.bashrc|./|]
+[/x/.y] base=[.y] base_so=[.y] dir=[/x] fp=[.y|/x/|] fs=[|/x/|.y] fl=[.y|/x/|]
+[dir/file.txt] base=[file.txt] base_so=[file] dir=[dir] fp=[file.txt|dir/|] fs=[file|dir/|.txt] fl=[file.txt|dir/|]
+a.so
+x
+--- stderr ---

@@ -1,0 +1,43 @@
+basic: ok=1 color=0 count=5 output=out.txt verbose=1 | rest=file1,--x
+abbrev: ok=1 output=f verbose=1 | rest=
+ambig: ok=0  | rest=
+unknown: ok=0  | rest=a
+needarg: ok=0  | rest=
+badint: ok=0  | rest=y
+optional: ok=1 i=7 j=0 s= t=- | rest=z
+defaults: ok=1 a=5 b=2 | rest=
+lists: ok=0 def={k=v} lib=[a,b] | rest=
+incr: ok=1 v=3 | rest=
+floats: ok=0 f=1.5e3 g=-2 | rest=
+ext: ok=1 x=31 y=15 z=5 | rest=
+case: ok=1 verbose=1 | rest=
+singledash: ok=1 out=q verbose=1 | rest=
+boolarg: ok=0  | rest=
+negno: ok=1 bold=0 color=0 | rest=
+neg5: ok=0  | rest=
+emptyeq: ok=0  | rest=
+bundle: ok=1 V=1 long=1 n=5 o=f2 v=3 x=1 | rest=
+bundle_unk: ok=0 v=1 x=1 | rest=
+pass: ok=1 a=1 | rest=--zz,b,--zz=1
+order: ok=1 a=1 | rest=b,--a
+nocase: ok=0  | rest=
+gnu: ok=1 i=0 s= | rest=
+restored: ok=1 ab=1 | rest=
+refs: ok=1 v=2 o=X l=1,2 d=1 seen=arg:p1,cb:3,arg:p2 rest=
+scalar-list: 1,2
+finish: ok=1 a rest=--a,z
+cbdie: ok=0
+argv: ok=1 m=1 ARGV=a,b
+--- stderr ---
+Option ve is ambiguous (verbose, version)
+Unknown option: nope
+Option out requires an argument
+Value "x" invalid for option n (number expected)
+Option def, key "k2", requires a value
+Value "abc" invalid for option h (real number expected)
+Option flag does not take an argument
+Unknown option: 5
+Option s requires an argument
+Unknown option: q
+Unknown option: A
+cb failed

@@ -1,0 +1,65 @@
+package Cwd;
+version "1.0.0";
+
+# Cwd - the current directory and absolute paths, compatible with Perl's Cwd.
+#
+#   use Cwd qw(getcwd abs_path);
+#
+#   my str $here = getcwd();
+#   my $real = abs_path("../lib");      # undef if the path does not exist
+#
+#   getcwd() / cwd() / fastcwd()     the current directory
+#   abs_path(PATH) / realpath(PATH) / fast_abs_path(PATH)
+#                                    PATH (default ".") with symlinks, "." and
+#                                    ".." resolved; a missing last component
+#                                    is kept, otherwise undef if the path
+#                                    does not exist
+
+func getcwd() scalar {
+    my scalar $d = core::getcwd();
+    if (!defined($d) || "" . $d eq "") {
+        return undef;
+    }
+    return $d;
+}
+
+func cwd() scalar {
+    return Cwd::getcwd();
+}
+
+func fastcwd() scalar {
+    return Cwd::getcwd();
+}
+
+func abs_path(scalar ...@p) scalar {
+    my str $path = scalar(@p) > 0 && defined($p[0]) ? "" . $p[0] : ".";
+    if (!core::file_exists($path) && core::is_symlink($path) == 0) {
+        # Perl: a missing last component is kept when its directory exists
+        my str $trimmed = $path;
+        $trimmed =~ s/\/+$//;
+        my int $sl = rindex($trimmed, "/");
+        my str $parent = $sl > 0 ? substr($trimmed, 0, $sl) : ($sl == 0 ? "/" : ".");
+        my str $last = substr($trimmed, $sl + 1);
+        if ($last eq "" || $last eq "." || $last eq ".." || core::is_dir($parent) == 0) {
+            return undef;
+        }
+        my scalar $pr = core::realpath($parent);
+        if (!defined($pr) || "" . $pr eq "") {
+            return undef;
+        }
+        return ("" . $pr eq "/" ? "" : "" . $pr) . "/" . $last;
+    }
+    my scalar $r = core::realpath($path);
+    if (!defined($r) || "" . $r eq "") {
+        return undef;
+    }
+    return $r;
+}
+
+func realpath(scalar ...@p) scalar {
+    return Cwd::abs_path(...@p);
+}
+
+func fast_abs_path(scalar ...@p) scalar {
+    return Cwd::abs_path(...@p);
+}

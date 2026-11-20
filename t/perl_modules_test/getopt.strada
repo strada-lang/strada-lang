@@ -1,0 +1,73 @@
+use Getopt::Long qw(GetOptions GetOptionsFromArray Configure);
+
+func show(str $label, scalar $args, int $ok, scalar $h) void {
+    my array @parts = ();
+    foreach my $k (sort(keys(%{$h}))) {
+        my scalar $v = $h->{$k};
+        if (ref($v) eq "ARRAY") { $v = "[" . join(",", @{$v}) . "]"; }
+        elsif (ref($v) eq "HASH") { my array @kv = (); foreach my $hk (sort(keys(%{$v}))) { push(@kv, $hk . "=" . ($v->{$hk} // "U")); } $v = "{" . join(",", @kv) . "}"; }
+        elsif (!defined($v)) { $v = "U"; }
+        push(@parts, $k . "=" . $v);
+    }
+    say($label . ": ok=" . $ok . " " . join(" ", @parts) . " | rest=" . join(",", @{$args}));
+}
+
+func run(str $label, scalar $args, scalar ...@spec) void {
+    my scalar $h = {};
+    my int $ok = GetOptionsFromArray($args, $h, ...@spec);
+    show($label, $args, $ok, $h);
+}
+
+func main() int {
+    run("basic", ["--verbose", "-o", "out.txt", "--count=5", "file1", "--no-color", "--", "--x"], "verbose", "output|o=s", "count=i", "color!");
+    run("abbrev", ["--verb", "--out", "f"], "verbose", "output=s");
+    run("ambig", ["--ve"], "verbose", "version");
+    run("unknown", ["--nope", "a"], "verbose");
+    run("needarg", ["--out"], "out=s");
+    run("badint", ["--n", "x", "y"], "n=i");
+    run("optional", ["--s", "--t", "-", "--i", "7", "--j", "z"], "s:s", "t:s", "i:i", "j:i");
+    run("defaults", ["--a", "--b", "--b"], "a:5", "b:+");
+    run("lists", ["--lib", "a", "--lib=b", "--def", "k=v", "--def", "k2"], "lib=s@", "def=s%");
+    run("incr", ["-v", "-v", "--v"], "v+");
+    run("floats", ["--f", "1.5e3", "--g", "-2", "--h", "abc"], "f=f", "g=f", "h=f");
+    run("ext", ["--x", "0x1f", "--y", "017", "--z", "0b101"], "x=o", "y=o", "z=o");
+    run("case", ["--VERBOSE", "-V"], "verbose|V");
+    run("singledash", ["-verbose", "-out=q"], "verbose", "out=s");
+    run("boolarg", ["--flag=1"], "flag");
+    run("negno", ["--nocolor", "--no-bold"], "color!", "bold!");
+    run("neg5", ["-5"], "x");
+    run("emptyeq", ["--s="], "s=s");
+    Configure("bundling");
+    run("bundle", ["-vvx", "-ofile", "-n5v", "-o", "f2", "--long", "-V"], "v+", "x", "o=s", "n=i", "long", "V");
+    run("bundle_unk", ["-vqx"], "v", "x");
+    Configure("no_bundling", "pass_through");
+    run("pass", ["--a", "--zz", "b", "--zz=1"], "a");
+    Configure("default", "require_order");
+    run("order", ["--a", "b", "--a"], "a");
+    Configure("default", "no_ignore_case");
+    run("nocase", ["--A"], "a");
+    Configure("default", "gnu_compat");
+    run("gnu", ["--s=", "--i="], "s=s", "i=i");
+    Configure("default");
+    my scalar $saved = Configure("bundling");
+    Configure($saved);
+    run("restored", ["-ab"], "ab");
+    my int $v = 0; my str $o = "dflt"; my array @l = (); my hash %d = (); my array @seen = ();
+    my scalar $aref = ["--v", "--v", "--o", "X", "--l", "1", "--l", "2", "--d", "a=1", "p1", "--cb", "3", "p2"];
+    my int $ok = GetOptionsFromArray($aref, "v+" => \$v, "o=s" => \$o, "l=i" => \@l, "d=s" => \%d,
+        "cb=i" => fn ($n, $val) { push(@seen, $n . ":" . $val); }, "<>" => fn ($a) { push(@seen, "arg:" . $a); });
+    say("refs: ok=" . $ok . " v=" . $v . " o=" . $o . " l=" . join(",", @l) . " d=" . $d{"a"} . " seen=" . join(",", @seen) . " rest=" . join(",", @{$aref}));
+    my scalar $sr = undef;
+    $ok = GetOptionsFromArray(["--x", "1", "--x", "2"], "x=s@" => \$sr);
+    say("scalar-list: " . join(",", @{$sr}));
+    my array @fin = ();
+    my scalar $fa = ["--a", "--b", "--a", "z"];
+    $ok = GetOptionsFromArray($fa, "a" => fn ($n, $v2) { push(@fin, $n); }, "b" => fn ($n, $v2) { die("!FINISH"); });
+    say("finish: ok=" . $ok . " " . join(",", @fin) . " rest=" . join(",", @{$fa}));
+    $ok = GetOptionsFromArray(["--e"], "e" => fn ($n, $v2) { die("cb failed\n"); });
+    say("cbdie: ok=" . $ok);
+    my int $mv = 0;
+    $ok = GetOptions("m" => \$mv);
+    say("argv: ok=" . $ok . " m=" . $mv . " ARGV=" . join(",", @ARGV));
+    return 0;
+}

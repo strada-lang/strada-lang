@@ -13,7 +13,7 @@ func main(int $argc, array @argv) int {
     my hash %opts = ();
     $opts{"verbose"} = "0"; $opts{"output"} = ""; $opts{"count"} = "1"; $opts{"v"} = "0"; $opts{"color"} = "1";
     my array @specs = ("verbose", "output|o=s", "count=i", "v", "color!");
-    Getopt::Long::GetOptions(@specs, %opts);
+    Getopt::Long::GetOptions(\%opts, @specs);
     say("v=" . $opts{"v"} . " verbose=" . $opts{"verbose"} . " output=" . $opts{"output"} . " color=" . $opts{"color"} . " count=" . $opts{"count"} . " rem=" . join("|", Getopt::Long::remaining()));
     return 0;
 }

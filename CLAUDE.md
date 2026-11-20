@@ -666,6 +666,25 @@ Gotchas:
 - **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
 - **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
 
+**Perl-compatible modules (2026-11-20)**: `Getopt::Long` (rewritten to Perl's
+API: `GetOptions("v+" => \$v, ...)`, hash storage, `Configure`,
+`GetOptionsFromArray`; it changes `@ARGV` in place with splice/push, because
+`@{core::argv()} = LIST` does not change `@ARGV` in compiled code), `File::Basename`,
+`File::Temp`, `File::Spec` (class-method style) + `File::Spec::Functions`,
+`File::Path`, `File::Copy`, `Cwd`, `Carp`, `Scalar::Util`. `make install`
+installs everything under `lib/`. They follow Perl's behaviour, including
+error messages; `t/perl_modules_test/run.sh` runs each program compiled and in
+the VM against expected output that was checked against Perl 5.38. The old
+Getopt::Long `GetOptions([SPECS], \%opts)` form still works; `GetOptions(@specs,
+%opts)` does not (the hash arrives as a copy: use `GetOptions(\%opts, @specs)`).
+Limits: no `qr//` (File::Basename takes regex strings); library functions
+cannot provide `weaken` (arguments are copies), so Scalar::Util leaves it to
+`core::weaken`; a method returning a list gives an array ref inside another
+call's argument list (`join("/", File::Spec->splitdir($d))`).
+`use Mod qw(NAME)` no longer emits an unused `extern StradaValue* NAME();` when
+NAME resolves to the module's function (it clashed with libc's `basename`,
+`getcwd`; test `t/bugfix_tests/qw_import_libc_name.strada`).
+
 Build tools with: `make tools` or `./strada tools/<tool>.strada`
 
 ## Perla (Perl 5 Compiler)

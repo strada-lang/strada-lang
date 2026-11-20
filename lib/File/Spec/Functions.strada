@@ -1,0 +1,27 @@
+package File::Spec::Functions;
+version "1.0.0";
+
+# File::Spec::Functions - File::Spec's methods as plain functions.
+#
+#   use File::Spec::Functions qw(catfile catdir rel2abs);
+#   my str $p = catfile("a", "b", "c.txt");     # "a/b/c.txt"
+
+use File::Spec;
+
+func canonpath(scalar $p) scalar { return File::Spec::canonpath("File::Spec", $p); }
+func catdir(scalar ...@parts) str { return File::Spec::catdir("File::Spec", ...@parts); }
+func catfile(scalar ...@parts) str { return File::Spec::catfile("File::Spec", ...@parts); }
+func curdir() str { return "."; }
+func updir() str { return ".."; }
+func rootdir() str { return "/"; }
+func devnull() str { return "/dev/null"; }
+func tmpdir() str { return File::Spec::tmpdir("File::Spec"); }
+func case_tolerant() int { return 0; }
+func file_name_is_absolute(str $f) int { return File::Spec::file_name_is_absolute("File::Spec", $f); }
+func path() array { return File::Spec::path("File::Spec"); }
+func splitpath(str $p, scalar ...@nofile) array { return File::Spec::splitpath("File::Spec", $p, ...@nofile); }
+func splitdir(str $d) array { return File::Spec::splitdir("File::Spec", $d); }
+func catpath(str $v, str $d, str $f) str { return File::Spec::catpath("File::Spec", $v, $d, $f); }
+func no_upwards(scalar ...@n) array { return File::Spec::no_upwards("File::Spec", ...@n); }
+func rel2abs(str $p, scalar ...@b) str { return File::Spec::rel2abs("File::Spec", $p, ...@b); }
+func abs2rel(str $p, scalar ...@b) str { return File::Spec::abs2rel("File::Spec", $p, ...@b); }

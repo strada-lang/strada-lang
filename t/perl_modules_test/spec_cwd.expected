@@ -1,0 +1,34 @@
+canon [a//b] -> [a/b]
+canon [/a/./b/] -> [/a/b]
+canon [./a] -> [a]
+canon [./] -> [.]
+canon [/../../x] -> [/x]
+canon [/..] -> [/]
+canon [a/../b] -> [a/../b]
+canon [] -> []
+canon [/] -> [/]
+canon [a/b/.] -> [a/b]
+canon [///] -> [/]
+a/b/c.txt c.txt /x a//b
+/usr/lib  /x a/b
+sp=|/a/b/|c.txt
+sp=||c.txt
+sp=|/a/..|
+sp=|/a/b|
+sd=|a|b||c|
+cp=/a/f /a/f
+abs=10
+nu=a,.b
+r2a=/usr/lib /x/../y relbase-ok
+a2r /a/b/c /a -> b/c
+a2r /a/b /a/b -> .
+a2r /a /a/b/c -> ../..
+a2r /x/y /a/b -> ../../x/y
+a2r /a/b / -> a/b
+a2r / / -> .
+a2r a/b a -> b
+a2r /a/../b /a -> ../b
+fn x/y p/q a/b b a|b
+cwd ok undef /usr/lib /tmp/nonexist /nonexistent
+tmp /tmp ...//dev/null
+--- stderr ---

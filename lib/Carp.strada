@@ -1,0 +1,100 @@
+package Carp;
+version "1.0.0";
+
+# Carp - report errors from the caller's point of view, compatible with
+# Perl's Carp.
+#
+#   use Carp qw(croak carp confess cluck);
+#
+#   func open_config(str $path) scalar {
+#       croak("no such file: " . $path) unless core::file_exists($path);
+#       ...
+#   }
+#   # dies with "no such file: x at app.strada line 12." where line 12 is
+#   # the call to open_config, not the croak inside it.
+#
+#   carp(MSG)      warn, located at the caller
+#   croak(MSG)     die, located at the caller
+#   confess(MSG)   die with the location and a stack trace
+#   cluck(MSG)     warn with the location and a stack trace
+#   longmess(MSG) / shortmess(MSG)   the message text, for your own use
+#
+# A croak from a function called directly by main reports the call in
+# main; a croak at the top of main reports its own line.
+
+private func where(int $level) str {
+    my scalar $c = core::caller($level + 1);
+    if (!defined($c)) {
+        $c = core::caller($level);
+    }
+    if (!defined($c)) {
+        return "";
+    }
+    my str $file = defined($c->{"file"}) ? "" . $c->{"file"} : "";
+    my str $line = defined($c->{"line"}) ? "" . $c->{"line"} : "";
+    if (length($file) == 0) {
+        return "";
+    }
+    if (length($line) == 0 || $line eq "0") {
+        return " at " . $file . ".";
+    }
+    return " at " . $file . " line " . $line . ".";
+}
+
+private func join_msg(scalar $args) str {
+    my str $m = "";
+    foreach my $a (@{$args}) {
+        $m = $m . (defined($a) ? "" . $a : "");
+    }
+    if (length($m) == 0) {
+        $m = "Died";
+    }
+    return $m;
+}
+
+# shortmess(MSG) - MSG plus " at FILE line N." of the caller's caller
+func shortmess(scalar ...@msg) str {
+    return Carp::join_msg(\@msg) . Carp::where(2) . "\n";
+}
+
+# longmess(MSG) - shortmess plus a stack trace
+func longmess(scalar ...@msg) str {
+    my str $trace = core::stack_trace();
+    my str $m = Carp::join_msg(\@msg) . Carp::where(2) . "\n";
+    if (length($trace) > 0) {
+        $m = $m . $trace;
+        if ($trace !~ /\n$/) {
+            $m = $m . "\n";
+        }
+    }
+    return $m;
+}
+
+func croak(scalar ...@msg) void {
+    die(Carp::join_msg(\@msg) . Carp::where(1) . "\n");
+}
+
+func confess(scalar ...@msg) void {
+    my str $trace = core::stack_trace();
+    my str $m = Carp::join_msg(\@msg) . Carp::where(1) . "\n";
+    if (length($trace) > 0) {
+        $m = $m . $trace;
+    }
+    die($m);
+}
+
+func carp(scalar ...@msg) void {
+    print(STDERR, Carp::join_msg(\@msg) . Carp::where(1) . "\n");
+}
+
+func cluck(scalar ...@msg) void {
+    my str $trace = core::stack_trace();
+    my str $m = Carp::join_msg(\@msg) . Carp::where(1) . "\n";
+    if (length($trace) > 0) {
+        $m = $m . $trace;
+        if ($trace !~ /\n$/) {
+            $m = $m . "\n";
+        }
+    }
+    print(STDERR, $m);
+}

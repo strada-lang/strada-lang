@@ -1,0 +1,24 @@
+use File::Spec;
+use File::Spec::Functions qw(catfile catdir rel2abs abs2rel canonpath splitdir);
+use Cwd qw(getcwd abs_path);
+func main() int {
+    my array @canon = ("a//b", "/a/./b/", "./a", "./", "/../../x", "/..", "a/../b", "", "/", "a/b/.", "///");
+    foreach my $c (@canon) { say("canon [" . $c . "] -> [" . File::Spec->canonpath($c) . "]"); }
+    say(File::Spec->catfile("a", "b", "c.txt") . " " . File::Spec->catfile("c.txt") . " " . File::Spec->catfile("/", "x") . " " . File::Spec->catfile("a/", "/b"));
+    say(File::Spec->catdir("/usr/", "lib") . " " . File::Spec->catdir() . " " . File::Spec->catdir("", "x") . " " . File::Spec->catdir("a", "", "b"));
+    my @sp = File::Spec->splitpath("/a/b/c.txt"); say("sp=" . join("|", @sp));
+    @sp = File::Spec->splitpath("c.txt"); say("sp=" . join("|", @sp));
+    @sp = File::Spec->splitpath("/a/.."); say("sp=" . join("|", @sp));
+    @sp = File::Spec->splitpath("/a/b", 1); say("sp=" . join("|", @sp));
+    my @sd = File::Spec->splitdir("/a/b//c/"); say("sd=" . join("|", @sd));
+    say("cp=" . File::Spec->catpath("", "/a", "f") . " " . File::Spec->catpath("", "/a/", "f"));
+    say("abs=" . (File::Spec->file_name_is_absolute("/x") ? 1 : 0) . (File::Spec->file_name_is_absolute("x") ? 1 : 0));
+    my @nu = File::Spec->no_upwards(".", "..", "a", ".b"); say("nu=" . join(",", @nu));
+    say("r2a=" . File::Spec->rel2abs("lib", "/usr") . " " . File::Spec->rel2abs("/x/../y") . " " . (File::Spec->rel2abs("b", "a") eq getcwd() . "/a/b" ? "relbase-ok" : File::Spec->rel2abs("b", "a")));
+    my array @rel = (["/a/b/c", "/a"], ["/a/b", "/a/b"], ["/a", "/a/b/c"], ["/x/y", "/a/b"], ["/a/b", "/"], ["/", "/"], ["a/b", "a"], ["/a/../b", "/a"]);
+    foreach my $r (@rel) { say("a2r " . $r->[0] . " " . $r->[1] . " -> " . File::Spec->abs2rel($r->[0], $r->[1])); }
+    say("fn " . catfile("x", "y") . " " . catdir("p", "q") . " " . canonpath("a//b/") . " " . abs2rel("/a/b", "/a") . " " . join("|", splitdir("a/b")));
+    say("cwd " . (getcwd() eq File::Spec->rel2abs(".") ? "ok" : "no") . " " . (defined(abs_path("/tmp/a/b")) ? "def" : "undef") . " " . abs_path("/usr/../usr/lib") . " " . abs_path("/tmp/nonexist") . " " . abs_path("/nonexistent"));
+    say("tmp " . File::Spec->tmpdir() . " " . File::Spec->curdir() . File::Spec->updir() . File::Spec->rootdir() . File::Spec->devnull());
+    return 0;
+}

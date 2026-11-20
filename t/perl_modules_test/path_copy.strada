@@ -1,0 +1,37 @@
+use File::Path qw(make_path remove_tree mkpath rmtree);
+use File::Copy qw(copy move cp);
+func main(int $argc, array @argv) int {
+    my str $b = $argv[1];
+    my @c = make_path($b . "/a/b/c", $b . "/x/", { mode => 0750 });
+    say("created " . scalar(@c) . " " . join(",", map { substr($_, length($b)) } @c));
+    @c = make_path($b . "/a/b/c");
+    say("again " . scalar(@c));
+    my $st = core::stat($b . "/a/b");
+    say(sprintf("mode %o", $st->{"mode"} & 511));
+    my $err;
+    core::spew($b . "/file", "plain");
+    make_path($b . "/file/sub", { error => \$err });
+    my @el = ();
+    foreach my $e (@{$err}) { foreach my $k (keys(%{$e})) { push(@el, substr($k, length($b)) . "=" . $e->{$k}); } }
+    say("errors " . scalar(@{$err}) . " " . join(";", @el));
+    my $bin = "";
+    for my $i (0..255) { $bin = $bin . core::byte($i); }
+    $bin = $bin x 600;
+    core::spew($b . "/bin", $bin);
+    say("copy " . copy($b . "/bin", $b . "/bin2") . " same=" . (core::slurp($b . "/bin2") eq $bin ? 1 : 0) . " len=" . core::file_size($b . "/bin2"));
+    say("copydir " . copy($b . "/bin", $b . "/x") . " " . (core::file_exists($b . "/x/bin") ? 1 : 0));
+    say("missing " . copy($b . "/nope", $b . "/y"));
+    core::chmod($b . "/bin", 0640);
+    say("cp " . cp($b . "/bin", $b . "/bin3") . sprintf(" %o", core::stat($b . "/bin3")->{"mode"} & 511));
+    say("move " . move($b . "/bin2", $b . "/a/moved") . " " . (core::file_exists($b . "/bin2") ? 1 : 0) . (core::file_exists($b . "/a/moved") ? 1 : 0));
+    core::symlink($b . "/x", $b . "/a/link");
+    my $res;
+    my $n = remove_tree($b . "/a", { result => \$res });
+    say("removed " . $n . " " . scalar(@{$res}) . " x-still=" . (core::file_exists($b . "/x/bin") ? 1 : 0) . " a=" . (core::file_exists($b . "/a") ? 1 : 0));
+    make_path($b . "/k/l");
+    remove_tree($b . "/k", { keep_root => 1 });
+    say("keep_root " . (core::is_dir($b . "/k") ? 1 : 0) . (core::is_dir($b . "/k/l") ? 1 : 0));
+    my @old = mkpath([$b . "/o1/o2"], 0, 0755);
+    say("mkpath " . scalar(@old) . " rmtree " . rmtree([$b . "/o1"]));
+    return 0;
+}

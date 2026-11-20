@@ -1,0 +1,13 @@
+created 4 /a,/a/b,/a/b/c,/x/
+again 0
+mode 750
+errors 2 /file=File exists;/file/sub=Not a directory
+copy 1 same=1 len=153600
+copydir 1 1
+missing 0
+cp 1 640
+move 1 01
+removed 5 5 x-still=1 a=0
+keep_root 10
+mkpath 2 rmtree 2
+--- stderr ---

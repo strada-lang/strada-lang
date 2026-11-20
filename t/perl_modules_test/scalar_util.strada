@@ -1,0 +1,18 @@
+use Scalar::Util qw(blessed reftype looks_like_number refaddr openhandle);
+func main() int {
+    my $o = bless({}, "Foo"); my $a = [1]; my $s = \"x"; my $c = fn () { 1; };
+    say("blessed " . blessed($o) . " " . (defined(blessed($a)) ? "def" : "undef") . " " . (defined(blessed("Foo")) ? "def" : "undef"));
+    say("reftype " . reftype($o) . " " . reftype($a) . " " . reftype($s) . " " . reftype($c));
+    my array @nums = ("12", " 1.5e3 ", "-.5", "Inf", "nan", "1.", "0x10", "", "abc", "1 2", "+3", "1e", "\n1\n");
+    my array @r = ();
+    foreach my $n (@nums) { push(@r, looks_like_number($n)); }
+    say("lln " . join("", @r) . " " . looks_like_number(42) . looks_like_number(undef) . looks_like_number($a));
+    my $a2 = $a;
+    say("refaddr " . (refaddr($a) == refaddr($a2) ? "same" : "diff") . " " . (refaddr($a) == refaddr($o) ? "same" : "diff") . " " . (defined(refaddr(5)) ? "def" : "undef"));
+    my $parent = { name => "p" }; my $child = { parent => $parent }; $parent->{child} = $child;
+    core::weaken($child->{parent});
+    say("weak " . (core::isweak($child->{parent}) ? 1 : 0));
+    my $fh = core::open("/dev/null", "r");
+    say("oh " . (defined(openhandle($fh)) ? "open" : "undef") . " " . (defined(openhandle("x")) ? "open" : "undef"));
+    return 0;
+}
