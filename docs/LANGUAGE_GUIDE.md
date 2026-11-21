@@ -2533,8 +2533,9 @@ thread::mutex_destroy($mutex);
 - Data that no thread writes may be read by many threads without a lock.
   Reference counting is atomic once a thread has started, so sharing values
   is safe; changing them is not.
-- `each()` keeps one iterator per hash: don't iterate the same hash with
-  `each()` from two threads at once.
+- `each()` keeps one iterator per hash, and `keys()`/`values()` reset it:
+  don't walk a hash with `each()` while another thread uses `each()`,
+  `keys()` or `values()` on the same hash.
 - For simple counters, `async::atomic` / `async::atomic_add` need no mutex.
 - Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
