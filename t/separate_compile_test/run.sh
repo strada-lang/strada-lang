@@ -657,6 +657,19 @@ fi
 t25_out=""
 "$STRADA" -O0 main.strada -o m >>"$WORK/t25.log" 2>&1 && t25_out="$(./m 2>/dev/null)"
 [ "$t25_out" = "[x]" ] && pass "use-cycle modules link and run from their artifacts" || fail "use-cycle modules link and run from their artifacts" "out='${t25_out}'"
+# --- file-level `my` variables stay inside their module object -------------
+# P and Q each declare `my int $LIMIT`. Their objects exported a C global
+# named LIMIT, so linking both was "duplicate symbol: LIMIT".
+D26="$WORK/filemy"
+mkdir -p "$D26"
+cd "$D26"
+printf 'package P;\nmy int $LIMIT = 60;\nfunc limit() int { return $LIMIT; }\n' > P.strada
+printf 'package Q;\nmy int $LIMIT = 30;\nfunc limit() int { return $LIMIT; }\n' > Q.strada
+printf 'use lib ".";\nuse P;\nuse Q;\nfunc main() int { say(P::limit() . " " . Q::limit()); return 0; }\n' > main.strada
+t26_out=""
+"$STRADA" -O0 -M P.strada >"$WORK/t26.log" 2>&1 && "$STRADA" -O0 -M Q.strada >>"$WORK/t26.log" 2>&1 \
+    && "$STRADA" -O0 main.strada -o m >>"$WORK/t26.log" 2>&1 && t26_out="$(./m 2>/dev/null)"
+[ "$t26_out" = "60 30" ] && pass "same-named file-level my in two module objects" || fail "same-named file-level my in two module objects" "out='${t26_out}' $(grep -m1 -i 'duplicate' "$WORK/t26.log")"
 cd "$WORK/proj"
 
 # --- Summary --------------------------------------------------------------

@@ -3032,3 +3032,20 @@ each offset, so a `//g` loop was O(subject length) per match.
   real file (eval, REPL).
 - Test: the use-cycle cases at the end of `t/separate_compile_test/run.sh`.
 
+## File-level `my` in module-only objects (2026-11-21)
+
+- **The bug.** `gen_program` emitted a file-level `my $LIMIT` as a plain
+  `StradaValue *LIMIT = NULL;` whenever the unit had no `main` or was built
+  `-M`. Two modules with the same variable name then both exported `LIMIT`
+  ("duplicate symbol" at link). It was also order-dependent: when one
+  module's compile read the other from source, `register_globals` saw two
+  declarations and named its own `LIMIT__shadow1`, hiding the clash until a
+  rebuild read the other module from its artifact instead.
+- **The fix.** In `module_only_mode` the declaration is
+  `static __attribute__((used))`, as it already was for a program with
+  `main`. Nothing outside the file can name a lexical, and a consumer never
+  declares another module's globals (`cg_skip_for_module`). `--shared` and
+  `--object-full` units without `-M` are unchanged.
+- Test: the file-level `my` case at the end of
+  `t/separate_compile_test/run.sh`.
+

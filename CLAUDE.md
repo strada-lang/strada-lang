@@ -1258,6 +1258,10 @@ input: A uses B, B uses A, compiling A) is skipped: `parse_program` records
 the input's real path as `root_file` and `resolve_use_module` marks such a
 module loaded instead of loading it again (2026-11-21).
 
+In a module-only object (`-M`) a file-level `my` is a `static` C global: it
+is lexical to the one file the object holds. Exported under its bare name it
+collided with the same variable name in another module's object (2026-11-21).
+
 ### Exception Handling
 
 ```strada

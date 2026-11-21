@@ -5615,6 +5615,14 @@ func gen_program(scalar $cg, scalar $program) void {
                 emit($cg, "static __attribute__((used)) StradaValue *" . $gdecl_cname . " = NULL;\n");
             } elsif ($has_main == 1 && $cg->{"module_only_mode"} == 0) {
                 emit($cg, "static __attribute__((used)) StradaValue *" . $gdecl_cname . " = NULL;\n");
+            } elsif ($cg->{"module_only_mode"} == 1) {
+                # A file-level `my` is lexical to its file, and a module-only
+                # object holds exactly one file: keep the C global out of the
+                # link. As an exported symbol named by the bare variable
+                # name, two modules that each declare `my $LIMIT` were a
+                # duplicate symbol (or not, when one compile happened to see
+                # the other and called its own `LIMIT__shadow1`).
+                emit($cg, "static __attribute__((used)) StradaValue *" . $gdecl_cname . " = NULL;\n");
             } else {
                 emit($cg, "StradaValue *" . $gdecl_cname . " = NULL;\n");
             }
