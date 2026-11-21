@@ -2048,6 +2048,32 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     }
                 }
             }
+            # `::func()` inside a nested package (`package N::B;`) arrives as
+            # `N_B_func`, but a `use`d module registers it as `N::B::func`:
+            # no single underscore split above can rebuild two `::`. Strip
+            # the current package's C prefix and retry with its real name.
+            if ($found_colon == 0 && $ctx->{"functions"}->{$name}->{"is_registered"} != 1) {
+                my str $rel_pkg = "" . $ctx->{"eval_package"};
+                if (length($rel_pkg) == 0 && $ctx->{"current_func"}) {
+                    $rel_pkg = "" . $ctx->{"current_func"}->{"package"};
+                }
+                if (length($rel_pkg) == 0) { $rel_pkg = "" . $ctx->{"cur_pkg"}; }
+                if (index($rel_pkg, "::") > 0) {
+                    my str $rel_c = $rel_pkg;
+                    my int $rel_ci = index($rel_c, "::");
+                    while ($rel_ci >= 0) {
+                        $rel_c = substr($rel_c, 0, $rel_ci) . "_" . substr($rel_c, $rel_ci + 2, length($rel_c) - $rel_ci - 2);
+                        $rel_ci = index($rel_c, "::");
+                    }
+                    my int $rel_plen = length($rel_c) + 1;
+                    if (length($name) > $rel_plen && substr($name, 0, $rel_plen) eq $rel_c . "_") {
+                        my str $rel_name = $rel_pkg . "::" . substr($name, $rel_plen, length($name) - $rel_plen);
+                        if ($ctx->{"functions"}->{$rel_name}->{"is_registered"} == 1) {
+                            $lookup_name = $rel_name;
+                        }
+                    }
+                }
+            }
         }
 
         # Check if user-defined function

@@ -332,16 +332,13 @@ static inline StradaString *ss_new_uninit(uint32_t len) {
 #define HASH_SMALL_BUCKETS 8   /* For objects with <=3 attributes (50% load factor) */
 #define HASH_COMPACT_ENTRIES 4 /* pre-allocated entry slots for small hashes */
 
-/* Positional in-block proofs for compact single-block hashes. A separate
- * malloc can never coincide with these interior addresses (heap chunk
- * headers sit between allocations), so pointer equality is a reliable
- * "still lives in the compact block" test even after the other member
- * has been reallocated out. */
+/* Separate heap allocations can be adjacent. Only a compact allocation owns
+ * the inline storage, and either buffer may subsequently grow out of it. */
 static inline int hv_idx_in_block(StradaHash *hv) {
-    return hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash));
+    return hv->compact_alloc && hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash));
 }
 static inline int hv_ent_in_block(StradaHash *hv) {
-    return hv->entries == (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
+    return hv->compact_alloc && hv->entries == (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
                                              + HASH_SMALL_BUCKETS * sizeof(uint32_t));
 }
 
@@ -404,7 +401,7 @@ static void hash_rebuild_index(StradaHash *hv) {
  * it after updating the entry and before releasing the old value. */
 static void hash_maybe_shrink_index(StradaHash *hv) {
     if (hv->num_buckets <= 64 || hv->num_entries * 8 >= hv->num_buckets) return;
-    if (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash))) return;
+    if (hv_idx_in_block(hv)) return;
     size_t nb = 16;
     while (nb < hv->num_entries * 4) nb *= 2;
     if (nb >= hv->num_buckets) return;
@@ -4955,8 +4952,7 @@ static void strada_hash_resize(StradaHash *hv) {
     }
     size_t new_buckets = hv->num_buckets * 2;
     /* Check if hash_index is part of a compact block (can't realloc) */
-    int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
-    if (is_compact) {
+    if (hv_idx_in_block(hv)) {
         hv->hash_index = malloc(new_buckets * sizeof(uint32_t));
     } else {
         hv->hash_index = sr_xrealloc(hv->hash_index, new_buckets * sizeof(uint32_t));
@@ -4977,6 +4973,7 @@ static void strada_hash_pool_cleanup(void) {
 }
 
 static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
+    hv->compact_alloc = 0;
     hv->num_buckets = nbuckets;
     hv->num_entries = 0;
     hv->num_tombstones = 0;
@@ -5034,7 +5031,7 @@ StradaHash* strada_hash_new(void) {
  * compact blocks when provable. Handles every outgrowth combination:
  * index out / entries in-block (and vice versa) previously freed interior
  * pointers — the crash class exposed when anon hashes joined the presized
- * path. Pooling requires idx_in (positional proof the struct is a block);
+ * path. Pooling requires an index still in the compact block;
  * an outgrown-entries block is restored to compact invariants first. */
 static void hv_release_storage_and_struct(StradaHash *hv) {
     int idx_in = hv_idx_in_block(hv);
@@ -5102,6 +5099,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         size_t ent_size = HASH_COMPACT_ENTRIES * sizeof(StradaHashEntry);
         char *block = malloc(sizeof(StradaHash) + idx_size + ent_size);
         hv = (StradaHash*)block;
+        hv->compact_alloc = 1;
         hv->hash_index = (uint32_t*)(block + sizeof(StradaHash));
         hv->entries = (StradaHashEntry*)(block + sizeof(StradaHash) + idx_size);
         hv->capacity = HASH_COMPACT_ENTRIES;

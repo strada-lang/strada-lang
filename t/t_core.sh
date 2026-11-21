@@ -264,6 +264,9 @@ fi
 # Test: Nested use statements (modules that use other modules)
 test_output_contains "$SCRIPT_DIR/test_nested_use.strada" "test_nested_use" "All nested use tests passed" "Nested use"
 
+# Test: ::func() inside a `use`d module in a nested package (Deep::Leaf)
+test_output_contains "$SCRIPT_DIR/test_use_nested_pkg_relative.strada" "test_use_nested_pkg_relative" "All nested package-relative use tests passed" "Nested-package ::func() via use"
+
 # Test: OOP with nested use statements
 test_output_contains "$SCRIPT_DIR/test_nested_oop.strada" "test_nested_oop" "All nested OOP tests passed" "Nested OOP"
 

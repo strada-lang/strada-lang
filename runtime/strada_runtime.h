@@ -629,6 +629,7 @@ struct StradaHash {
     uint8_t index_dirty;        /* set when cross-boundary dispatch may have desynced
                                  * hash_index from entries[]; when 0, hash_linear_find
                                  * short-circuits (clean hashes never need a full scan). */
+    uint8_t compact_alloc;      /* header allocated with inline index and entry storage */
 };
 
 /* Mark a hash's index as possibly out-of-sync with entries[]. Subsequent
