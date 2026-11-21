@@ -613,6 +613,32 @@ if ar t libL.a 2>/dev/null | grep -q Bar.strada; then
 else
     pass "--static-lib replaces an existing archive"
 fi
+# --- extern func declarations survive a module artifact --------------------
+# `use Decls;` where Decls declares `extern func Provider::make(...) hash;`:
+# read from Decls.o the declaration was dropped, so the consumer compiled the
+# call as undeclared (untyped prototype, and an extra strada_incref on the
+# owned hash result: a leak per call). The artifact now carries it (xdecl:).
+D24="$WORK/xdecl"
+mkdir -p "$D24"
+cd "$D24"
+printf 'package Decls;\nextern func Provider::make(str $s) hash;\n' > Decls.strada
+printf 'package Provider;\nfunc make(str $s) hash {\n    my hash %%h = { "name" => $s, "n" => 1 };\n    return %%h;\n}\n' > Provider.strada
+printf 'package Consumer;\nuse Decls;\nfunc count(str $s) int {\n    my hash %%h = Provider::make($s);\n    return scalar(keys(%%h));\n}\n' > Consumer.strada
+printf 'use lib ".";\nuse Consumer;\nuse Provider;\nfunc main() int { say(Consumer::count("x")); return 0; }\n' > main.strada
+"$STRADA" -O0 -M -c Consumer.strada >"$WORK/t24.log" 2>&1
+t24_src="$(grep 'h = .*Provider_make' Consumer.o.c)"
+rm -f Consumer.o Consumer.o.c
+"$STRADA" -O0 -M Decls.strada >>"$WORK/t24.log" 2>&1
+"$STRADA" -O0 -M -c Consumer.strada >>"$WORK/t24.log" 2>&1
+t24_art="$(grep 'h = .*Provider_make' Consumer.o.c)"
+if [ -n "$t24_src" ] && [ "$t24_src" = "$t24_art" ] && grep -q 'extern StradaValue\* Provider_make(StradaValue\*' Consumer.o.c; then
+    pass "extern func declaration read from a module artifact (same call site as from source)"
+else
+    fail "extern func declaration read from a module artifact (same call site as from source)" "source='${t24_src}' artifact='${t24_art}'"
+fi
+t24_out=""
+"$STRADA" -O0 -M Provider.strada >>"$WORK/t24.log" 2>&1 && "$STRADA" -O0 main.strada -o m >>"$WORK/t24.log" 2>&1 && t24_out="$(./m 2>/dev/null)"
+[ "$t24_out" = "2" ] && pass "extern-declared function links and runs across module artifacts" || fail "extern-declared function links and runs across module artifacts" "out='${t24_out}'"
 cd "$WORK/proj"
 
 # --- Summary --------------------------------------------------------------

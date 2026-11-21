@@ -6662,6 +6662,8 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     my array @enums_local = ();
     my array @constants_local = ();
     my array @structs_local = ();
+    # xdecl: lines — `extern func Pkg::name` declarations the module makes
+    my array @extern_decls_local = ();
 
     # Parse metadata line by line manually (bootstrap doesn't support split well)
     my int $meta_len = length($metadata);
@@ -6702,6 +6704,10 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                         }
                     }
                 }
+            } elsif (length($line) > 6 && substr($line, 0, 6) eq "xdecl:") {
+                # xdecl:... → same fields as a func: line
+                my scalar $xd_info = parse_export_line("func:" . substr($line, 6, length($line) - 6));
+                if ($xd_info != 0) { push(@extern_decls_local, $xd_info); }
             } elsif (length($line) > 5 && substr($line, 0, 5) eq "link:") {
                 # link:NAME → record an extern-C library this module needs.
                 push(@link_libs_local, substr($line, 5, length($line) - 5));
@@ -6844,6 +6850,7 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"enums"} = \@enums_local;
     $lib_info{"constants"} = \@constants_local;
     $lib_info{"structs"} = \@structs_local;
+    $lib_info{"extern_decls"} = \@extern_decls_local;
     $lib_info{"has_mod_info"} = $has_mod_info;
     $lib_info{"modified_methods"} = \@modified_methods;
 
@@ -6991,6 +6998,46 @@ func merge_imported_meta(scalar $parser, scalar $program, scalar $info) void {
             $parser->{"structs"}->{$sname} = $program->{"structs"}->{$sname};
             $si = $si + 1;
         }
+    }
+}
+
+# Declare in $program the `extern func Pkg::name(...) ret;` forward
+# declarations a module object advertises (xdecl: metadata), exactly as if
+# the module had been read from source. Only for objects linked into this
+# program: the declared function is resolved by the linker.
+func merge_imported_extern_decls(scalar $program, scalar $info) void {
+    my scalar $xds = $info->{"extern_decls"};
+    if (!defined($xds)) { return; }
+    my int $xi = 0;
+    while ($xi < size(@{$xds})) {
+        my scalar $xd = $xds->[$xi];
+        $xi = $xi + 1;
+        my str $xd_pkg = "" . $xd->{"orig_pkg"};
+        my str $xd_method = "" . $xd->{"orig_method"};
+        if (length($xd_pkg) == 0 || length($xd_method) == 0) { next; }
+        my str $xd_name = $xd_pkg . "::" . $xd_method;
+        my int $dup = 0;
+        my int $fi = 0;
+        my int $fc = $program->{"function_count"} + 0;
+        while ($fi < $fc) {
+            if (("" . $program->{"functions"}->[$fi]->{"name"}) eq $xd_name) { $dup = 1; last; }
+            $fi = $fi + 1;
+        }
+        if ($dup == 1) { next; }
+        my scalar $xfn = ast_new_extern_func($xd_name);
+        my scalar $xps = $xd->{"params"};
+        my int $xpc = $xd->{"param_count"} + 0;
+        my int $pi = 0;
+        while ($pi < $xpc && $pi < size(@{$xps})) {
+            my scalar $xp = $xps->[$pi];
+            ast_add_param($xfn, ast_new_param("arg" . $pi, $xp->{"param_type"}, "" . $xp->{"sigil"}));
+            $pi = $pi + 1;
+        }
+        $xfn->{"return_type"} = $xd->{"return_type"};
+        $xfn->{"has_body"} = 0;
+        $xfn->{"is_strada_extern_decl"} = 1;
+        $xfn->{"from_use"} = 1;
+        ast_add_function($program, $xfn);
     }
 }
 
@@ -7573,6 +7620,7 @@ func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_
     # Pull in any extern-C link deps and OOP/type metadata the .o advertised.
     merge_link_libs($program, $obj_info->{"link_libs"});
     merge_imported_meta($parser, $program, $obj_info);
+    merge_imported_extern_decls($program, $obj_info);
 
     # Resolve the artifact's Strada module deps (use: metadata lines).
     # A module-only .o contains none of its deps' code, so each dep must

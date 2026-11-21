@@ -1247,6 +1247,12 @@ reaches Semantic as `Deep_Leaf_func`; when no single `_` split matches, the
 lookup strips the current package's C prefix and tries `Deep::Leaf::func`
 (2026-11-21; test `t/test_use_nested_pkg_relative.strada`).
 
+A module artifact's metadata carries the module's own body-less qualified
+`extern func Pkg::name(...) ret;` declarations as `xdecl:` lines (same fields
+as `func:`). A consumer that resolves `use Mod;` from `Mod.o` re-creates them
+(`merge_imported_extern_decls`, objects only), so its calls compile as they
+do when `Mod` is read from source (2026-11-21; `t/separate_compile_test`).
+
 ### Exception Handling
 
 ```strada

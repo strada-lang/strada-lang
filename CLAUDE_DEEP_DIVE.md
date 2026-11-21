@@ -2987,3 +2987,29 @@ each offset, so a `//g` loop was O(subject length) per match.
   is set in the single-block path of `strada_hash_new_presized`, cleared by
   `strada_hash_init`, and kept by pooled blocks. The byte fits in the struct's
   padding (still 80 bytes, no field moved).
+
+## `extern func` declarations in module artifacts (2026-11-21)
+
+- **The bug.** `package Decls; extern func Provider::make(str $s) hash;` and
+  a consumer with `use Decls;` calling `Provider::make`. Read from source,
+  the declaration reaches the consumer and the call is typed. Read from a
+  fresh sibling `Decls.o`, it did not: `gen_export_info` skipped every
+  `NODE_EXTERN_FUNC`, so the consumer (a file without `main`, where an
+  undeclared qualified call is accepted as host-resolved) emitted
+  `extern StradaValue* Provider_make();` and `h = Provider_make(s);
+  strada_incref(h);` — one leaked hash per call. Whether a build leaked
+  depended only on whether `Decls.o` happened to exist.
+- **The fix.** `gen_export_info` (CodeGenStmt.strada) writes one
+  `xdecl:C_name:ret:count:types:-1:Pkg.name` line per body-less qualified
+  extern (`is_strada_extern_decl`) the unit itself declares
+  (`cg_skip_for_module` filters `use`d ones; they come from their own
+  artifact through the `use:` deps). `parse_export_metadata` collects them
+  into `extern_decls`; `merge_imported_extern_decls` (Parser.strada), called
+  from `do_import_object_at`, adds an `ast_new_extern_func` node with
+  `is_strada_extern_decl` and `from_use` set unless the program already has a
+  function of that name. Not done for `import_lib`: there the declared
+  function would be called directly and nothing guarantees the host links it.
+- **Not covered.** Unqualified body-less externs (C-ABI declarations) are not
+  exported. Old compilers ignore `xdecl:` lines.
+- Test: the last two cases of `t/separate_compile_test/run.sh` (the call
+  site generated with and without `Decls.o` must be identical).

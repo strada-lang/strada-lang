@@ -7145,6 +7145,39 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
         $i = $i + 1;
     }
 
+    # xdecl: a body-less qualified `extern func Pkg::name(...) ret;` this
+    # module declares (a Strada function some other object provides). A
+    # consumer reading the module from source sees that declaration; one
+    # reading this artifact must see it too, or its calls compile as
+    # undeclared (untyped, and an owned hash/array result took an extra
+    # reference: a leak). Same fields as func: (old consumers ignore the
+    # line).
+    my int $xd_i = 0;
+    while ($xd_i < $count) {
+        my scalar $xdf = $funcs->[$xd_i];
+        $xd_i = $xd_i + 1;
+        if ($xdf->{"type"} != NODE_EXTERN_FUNC()) { next; }
+        if (($xdf->{"is_strada_extern_decl"} + 0) != 1) { next; }
+        if (cg_skip_for_module($program, $xdf->{"from_use"}) == 1) { next; }
+        my str $xd_name = "" . $xdf->{"name"};
+        my int $xd_pc = $xdf->{"param_count"};
+        my scalar $xd_params = $xdf->{"params"};
+        emit($cg, "xdecl:" . sanitize_name($xd_name) . ":" . type_to_export($xdf->{"return_type"}) . ":" . $xd_pc . ":");
+        my int $xd_j = 0;
+        while ($xd_j < $xd_pc) {
+            if ($xd_j > 0) { emit($cg, ","); }
+            emit($cg, type_to_export($xd_params->[$xd_j]->{"param_type"}));
+            $xd_j = $xd_j + 1;
+        }
+        my str $xd_dotted = $xd_name;
+        my int $xd_di = index($xd_dotted, "::");
+        while ($xd_di >= 0) {
+            $xd_dotted = substr($xd_dotted, 0, $xd_di) . "." . substr($xd_dotted, $xd_di + 2, length($xd_dotted) - $xd_di - 2);
+            $xd_di = index($xd_dotted, "::");
+        }
+        emit($cg, ":-1:" . c_str_escape($xd_dotted) . "\\n");
+    }
+
     # Emit modifier info for cross-.so devirtualization. `modinfo:1` marks
     # the metadata as carrying modifier knowledge — consumers only ever
     # devirtualize methods from libraries with this marker (an old .so
