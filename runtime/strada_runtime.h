@@ -958,6 +958,18 @@ unsigned long strada_gc_objects_freed(void); /* Stats: cyclic objects reclaimed 
 void strada_gc_blocking_enter(void);     /* about to block outside the runtime: count as GC-safe */
 void strada_gc_blocking_leave(void);     /* ...returned (parks if a collection is running) */
 void strada_gc_mutex_lock(pthread_mutex_t *mtx); /* pthread_mutex_lock that is GC-safe while waiting */
+/* Global interpreter lock (STRADA_GIL=1): only its holder runs Strada code.
+ * C code doing long work that touches no Strada values brackets it with
+ * strada_gil_release()/strada_gil_acquire(); no-ops when the lock is off. */
+void strada_gil_release(void);
+void strada_gil_acquire(void);
+int strada_gil_enabled(void);
+void strada_gil_yield_slow(void);
+extern int strada_gil_drop_request;
+static inline void strada_gil_poll(void) {
+    if (__builtin_expect(__atomic_load_n(&strada_gil_drop_request, __ATOMIC_RELAXED), 0))
+        strada_gil_yield_slow();
+}
 void strada_arena_begin(void);           /* Start a request arena (bump region) */
 void strada_arena_end(void);             /* Free the current arena wholesale */
 int  strada_arena_active(void);          /* 1 if an arena is currently active */

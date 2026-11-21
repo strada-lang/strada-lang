@@ -3049,3 +3049,35 @@ each offset, so a `//g` loop was O(subject length) per match.
 - Test: the file-level `my` case at the end of
   `t/separate_compile_test/run.sh`.
 
+## Global interpreter lock, stage 1 (2026-11-21)
+
+Opt-in with `STRADA_GIL=1`; off by default, in which case none of this runs
+beyond one load of `strada_gil_on` per blocking call.
+
+- **State** (strada_runtime.c, after the `cc_*` forward declarations):
+  `gil_mu` protects `gil_locked`, `gil_waiters` and `gil_switches`;
+  `gil_owner` is the holder's `pthread_self()` (read atomically by
+  `gil_i_hold`); `gil_free_cv` wakes a waiter when the lock is dropped and
+  `gil_switch_cv` tells a yielding thread that someone else took it.
+- **Fairness.** A waiter uses `pthread_cond_timedwait` with a 5 ms interval
+  (`GIL_INTERVAL_NS`). If the lock did not change hands in that time it sets
+  `strada_gil_drop_request`; the holder's next `strada_gil_poll()` calls
+  `strada_gil_yield_slow`, which drops the lock and waits on `gil_switch_cv`
+  until another thread has taken it, then queues again. Nothing calls
+  `strada_gil_poll()` yet.
+- **Blocking.** `gil_blocking_enter` drops the lock at depth 0 and remembers
+  whether this thread held it (`gil_block_had`); `gil_blocking_leave` takes it
+  back. The wrappers call the collector's hook first on enter and last on
+  leave, so a thread waiting for the lock is still counted as safe for
+  stop-the-world.
+- **fork.** `gil_atfork_child` re-initializes the mutex and condition
+  variables and makes the forking thread the holder.
+- **What was measured.** Four threads pushing to one array, incrementing hash
+  entries and assigning one scalar: crashed 3 of 3 runs without the lock,
+  compiled and VM; exact results with it. ThreadSanitizer: 43 / 16 / 9
+  reports on three test programs without the lock, 0 with it. A CPU-bound
+  `async::map` on 2 workers: 0.65 s without the lock (1.75x), 1.13 s with it.
+- **VM.** No VM change in this stage: thread bodies run inside
+  `strada_thread_wrapper` and VM blocking calls reach the runtime's hooks.
+  An `async func` call in the VM passes its arguments as copies (the compiled
+  backend shares them), which is a separate parity gap.

@@ -1378,6 +1378,40 @@ Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race
 
 **Event loop + green tasks (2026-06, EXPERIMENTAL — branch `async-eventloop`):** `Async::Loop` (epoll reactor: `watch`/`unwatch`/`timer_after`/`run`/`stop`) + `Async::Task` (green tasks via `$loop->spawn`: `Async::Task::recv/send/accept/sleep` look blocking but park stackful ucontext coroutines; outside a task they fall back to blocking). `async::io_wait($fd, "r"/"w", $ms)` returns a future completed by a dedicated poller thread. Runtime primitives: `core::epoll_*`, `core::eventfd*`, `core::socket_try_recv/try_send/try_accept`, `core::mono_ms`, `core::coro_*` (compiled-only). Linux-only, configure-gated (`--without-epoll`); see **docs/EVENT_LOOP.md**. try/catch works inside tasks including across suspensions (the runtime swaps per-context try/cleanup/trace stacks at every switch); uncaught task exceptions are contained at the task boundary (`on_task_error`, default warn). Multiple watchers per fd (subscription ids, union masks). `Async::Task::connect/readline` + optional timeouts on recv/accept/connect; task sockets get TCP_NODELAY. Backends: epoll (Linux) or poll(2) (any POSIX) behind one internal `evb_*` API — the suite passes on both. `Async::TaskSSL` runs TLS handshake/IO over tasks (parks on WANT_READ/WANT_WRITE; `lib/ssl.strada` gained non-blocking primitives + `link_lib` auto-linking). Hostname resolution runs off-loop (`async::resolve`). Remaining caveats: regex state is per-OS-thread (capture before suspending); one loop = one OS thread. Valgrind-clean including a 100-connection echo stress (the once-suspected per-park leak was a pre-existing `strada_socket_close` bug — it discarded `strada_socket_flush`'s owned return, one SV per connection close — fixed here; `STRADA_RC_TRACE` refcount-trace hook retained in `strada_runtime.h` for future hunts). Coroutine context switches swap the per-thread pending-cleanup and call-trace stacks (`coro_ctx_install/stash` in the runtime).
 
+**Global interpreter lock (2026-11-21, stage 1, opt-in)**: threads share data
+and nothing in the runtime locks arrays, hashes or variables, so two threads
+writing shared data corrupt memory (compiled and VM; see LANGUAGE_GUIDE
+"Thread Safety Notes"). With `STRADA_GIL=1` only the lock holder runs Strada
+code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
+- The decision is made once, when the program first becomes multi-threaded
+  (`strada_gil_activate`, called where `strada_threading_active` is set). The
+  thread making that call takes the lock.
+- `thread::create` bodies, pool workers and `async::map` workers take it
+  before running (`gil_thread_begin`, before `cc_thread_register`, so a
+  thread waiting to start is not counted by the collector's stop-the-world)
+  and drop it when they end.
+- Every `cc_blocking_enter`/`cc_blocking_leave(_mutex)` pair (37 sites: sleep,
+  join, await, channel waits, mutex/cond waits, socket recv/select, idle
+  workers, `strada_gc_mutex_lock`) hands it over. These are now wrappers:
+  the collector's own hooks are `cc_stw_blocking_*`. A new blocking call in
+  the runtime must use the wrappers.
+- Lock order: never wait for the lock while holding a runtime mutex
+  (`gil_blocking_leave_mutex` drops the caller's mutex first).
+- Threads that run no Strada code (I/O poller, resolver) never take it.
+- C code: `strada_gil_release()` / `strada_gil_acquire()` around long work
+  that touches no Strada values; `strada_gil_poll()` (header inline) is the
+  handover check for the later stages.
+- Not done yet: handover checks in compiled loops and function entry and in
+  the VM (a thread that never blocks keeps the lock), releasing it around
+  blocking file/socket I/O and `system`/`qx`, and turning it on by default.
+- Per-object locking was considered and set aside: about 145 runtime
+  functions, inline hash probes compiled into user code, the in-place
+  `refcount == 1` shortcuts and the VM's own containers would all need it.
+- Helgrind does not see these races (0 reports on a program that segfaults).
+  Use ThreadSanitizer: build the runtime and the generated C with
+  `-fsanitize=thread` and run under `setarch -R`.
+- Test: `t/bugfix_tests/gil_shared_writes.strada` (compiled and VM).
+
 ### Variadic Functions and Spread
 
 ```strada

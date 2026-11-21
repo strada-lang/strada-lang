@@ -2537,6 +2537,16 @@ thread::mutex_destroy($mutex);
   don't walk a hash with `each()` while another thread uses `each()`,
   `keys()` or `values()` on the same hash.
 - For simple counters, `async::atomic` / `async::atomic_add` need no mutex.
+- **Global interpreter lock (experimental, opt-in).** Run the program with
+  `STRADA_GIL=1` in the environment (or call `core::setenv("STRADA_GIL", "1")`
+  before the first thread, pool task or `async::map` starts) and only one
+  thread runs Strada code at a time. Unlocked writes to shared data then
+  cannot corrupt memory. The lock is handed over while a thread waits:
+  `sleep`, `thread::join`, `await`, channel `recv`/`send`, mutex and condition
+  waits, socket `recv`/`select`, idle pool workers. In this first stage a
+  thread that never waits keeps the lock until it finishes, and CPU-bound
+  work no longer runs in parallel. Mutexes are still the way to make a
+  read-modify-write sequence across several statements atomic.
 - Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
 ---

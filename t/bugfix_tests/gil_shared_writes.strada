@@ -1,0 +1,49 @@
+# EXPECT: array 80000 hash 80000 counter 80000 scalar ok map 20 pool 6
+# Threads share data and nothing locks it: four threads pushing to one array,
+# incrementing hash entries, bumping a counter and assigning one scalar
+# corrupted memory (segfault, "mremap_chunk(): invalid pointer") in both
+# backends. With the global interpreter lock (STRADA_GIL=1) only the lock
+# holder runs Strada code, so the same program is safe without a mutex.
+# The lock is decided when the first thread starts, so set it before that.
+func main() int {
+    core::setenv("STRADA_GIL", "1");
+    my @a = ();
+    my %h = ();
+    my int $n = 0;
+    my $s = "start";
+    my @t = ();
+    for (my int $w = 0; $w < 4; $w++) {
+        push(@t, thread::create(func () {
+            for (my int $i = 0; $i < 20000; $i++) {
+                push(@a, $i);
+                $h{"k" . ($i % 100)}++;
+                $n++;
+                $s = "w" . $w . "-" . $i;
+            }
+        }));
+    }
+    foreach my $t (@t) { thread::join($t); }
+    my int $sum = 0;
+    foreach my $k (keys(%h)) { $sum += $h{$k}; }
+
+    # async::map workers writing one shared hash
+    my %seen = ();
+    my @items = (1..20);
+    my @r = async::map(func ($x) { $seen{"i" . $x} = $x * 2; return $x; }, \@items, 4);
+
+    # pool tasks updating one shared hash
+    my %pool = ("t" => 0);
+    my @f = ();
+    foreach my $cnt (1, 2, 3) {
+        push(@f, async::spawn(func () {
+            for (my int $i = 0; $i < $cnt; $i++) { $pool{"t"}++; }
+            return $cnt;
+        }));
+    }
+    foreach my $fu (@f) { await $fu; }
+
+    say("array " . scalar(@a) . " hash " . $sum . " counter " . $n
+        . " scalar " . ($s =~ /^w\d-19999$/ ? "ok" : $s)
+        . " map " . scalar(keys(%seen)) . " pool " . $pool{"t"});
+    return 0;
+}

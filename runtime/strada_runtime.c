@@ -1727,18 +1727,176 @@ static inline void cc_safepoint(void) {
 static void cc_thread_register(void);    /* a mutator thread begins Strada execution */
 static void cc_thread_unregister(void);  /* ...and ends for good */
 static int  cc_thread_is_registered(void);
-static void cc_blocking_enter(void);     /* about to block in a syscall -> count as safe */
-static void cc_blocking_leave(void);     /* returned from a block -> re-park if GC active */
-static void cc_blocking_leave_mutex(pthread_mutex_t *mtx);
+static void cc_stw_blocking_enter(void);     /* about to block in a syscall -> count as safe */
+static void cc_stw_blocking_leave(void);     /* returned from a block -> re-park if GC active */
+static void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx);
 #else
 /* No-op stubs so the thread/blocking call sites compile with the collector off. */
 static inline void cc_thread_register(void)   {}
 static inline void cc_thread_unregister(void) {}
 static inline int  cc_thread_is_registered(void) { return 0; }
-static inline void cc_blocking_enter(void)    {}
-static inline void cc_blocking_leave(void)    {}
-static inline void cc_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx; }
+static inline void cc_stw_blocking_enter(void)    {}
+static inline void cc_stw_blocking_leave(void)    {}
+static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx; }
 #endif
+
+/* ===== Global interpreter lock (STRADA_GIL=1, opt-in) =====
+ * Strada containers, variables and runtime caches have no locking of their
+ * own: two threads writing shared data at once corrupt memory. With the lock
+ * on, only the thread holding it runs Strada code. It is created when the
+ * program first becomes multi-threaded (strada_gil_activate) and handed over
+ * wherever a thread blocks: every cc_blocking_enter/leave pair below (sleep,
+ * join, recv, await, mutex/cond waits, socket waits, idle pool workers), and
+ * in strada_gil_release/acquire for C code. A thread that has waited
+ * GIL_INTERVAL_NS without the lock changing hands sets
+ * strada_gil_drop_request; the holder gives the lock up at its next
+ * strada_gil_poll(). Lock order: never wait for the lock while holding a
+ * runtime mutex (the _mutex variant drops it first). Threads that do not run
+ * Strada code (I/O poller, resolver) never take it. */
+int strada_gil_on = 0;
+int strada_gil_drop_request = 0;
+static int gil_decided = 0;
+static pthread_mutex_t gil_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gil_free_cv = PTHREAD_COND_INITIALIZER;    /* lock became free */
+static pthread_cond_t gil_switch_cv = PTHREAD_COND_INITIALIZER;  /* lock changed hands */
+static int gil_locked = 0;
+static int gil_waiters = 0;
+static unsigned long gil_switches = 0;
+static unsigned long gil_owner = 0;     /* pthread_self() of the holder, 0 = none */
+static STRADA_TLS int gil_block_depth = 0;
+static STRADA_TLS int gil_block_had = 0; /* held the lock when the outermost block began */
+#define GIL_INTERVAL_NS 5000000L
+
+static inline int gil_i_hold(void) {
+    return __atomic_load_n(&gil_owner, __ATOMIC_ACQUIRE) == (unsigned long)pthread_self();
+}
+/* Take the lock; gil_mu held. */
+static void gil_take_locked(void) {
+    if (gil_locked) {
+        gil_waiters++;
+        while (gil_locked) {
+            unsigned long sw = gil_switches;
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += GIL_INTERVAL_NS;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            if (pthread_cond_timedwait(&gil_free_cv, &gil_mu, &ts) == ETIMEDOUT
+                && gil_locked && sw == gil_switches)
+                __atomic_store_n(&strada_gil_drop_request, 1, __ATOMIC_RELAXED);
+        }
+        gil_waiters--;
+    }
+    gil_locked = 1;
+    gil_switches++;
+    __atomic_store_n(&gil_owner, (unsigned long)pthread_self(), __ATOMIC_RELEASE);
+    __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
+    pthread_cond_broadcast(&gil_switch_cv);
+}
+static void gil_take(void) {
+    pthread_mutex_lock(&gil_mu);
+    gil_take_locked();
+    pthread_mutex_unlock(&gil_mu);
+}
+/* Give the lock up; gil_mu held. */
+static void gil_drop_locked(void) {
+    __atomic_store_n(&gil_owner, 0UL, __ATOMIC_RELEASE);
+    gil_locked = 0;
+    pthread_cond_signal(&gil_free_cv);
+}
+static void gil_drop(void) {
+    pthread_mutex_lock(&gil_mu);
+    gil_drop_locked();
+    pthread_mutex_unlock(&gil_mu);
+}
+static void gil_atfork_child(void) {
+    /* Only the forking thread survives; it holds the lock if it was on. */
+    pthread_mutex_init(&gil_mu, NULL);
+    pthread_cond_init(&gil_free_cv, NULL);
+    pthread_cond_init(&gil_switch_cv, NULL);
+    gil_waiters = 0;
+    gil_locked = strada_gil_on ? 1 : 0;
+    __atomic_store_n(&gil_owner, strada_gil_on ? (unsigned long)pthread_self() : 0UL, __ATOMIC_RELEASE);
+    __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
+}
+/* Called by a thread running Strada code when the program becomes
+ * multi-threaded (thread::create, the async pool, async::map, ...). The first
+ * call decides from STRADA_GIL; the calling thread then holds the lock. */
+static void strada_gil_activate(void) {
+    pthread_mutex_lock(&gil_mu);
+    if (!gil_decided) {
+        const char *e = getenv("STRADA_GIL");
+        strada_gil_on = (e && e[0] == '1') ? 1 : 0;
+        gil_decided = 1;
+        if (strada_gil_on) pthread_atfork(NULL, NULL, gil_atfork_child);
+    }
+    if (strada_gil_on && !gil_i_hold() && gil_block_depth == 0) gil_take_locked();
+    pthread_mutex_unlock(&gil_mu);
+}
+/* Entry/exit of a thread that runs Strada code. */
+static void gil_thread_begin(void) { if (strada_gil_on) gil_take(); }
+static void gil_thread_end(void)   { if (strada_gil_on && gil_i_hold()) gil_drop(); }
+
+static void gil_blocking_enter(void) {
+    if (!strada_gil_on) return;
+    if (gil_block_depth++ > 0) return;
+    gil_block_had = gil_i_hold();
+    if (gil_block_had) gil_drop();
+}
+static void gil_blocking_leave(void) {
+    if (!strada_gil_on) return;
+    if (gil_block_depth <= 0 || --gil_block_depth > 0) return;
+    if (gil_block_had) gil_take();
+}
+/* As gil_blocking_leave, for a caller holding *mtx: never wait for the lock
+ * while holding a runtime mutex (its other users may hold the lock). */
+static void gil_blocking_leave_mutex(pthread_mutex_t *mtx) {
+    if (!strada_gil_on) return;
+    if (gil_block_depth <= 0 || --gil_block_depth > 0) return;
+    if (!gil_block_had) return;
+    pthread_mutex_lock(&gil_mu);
+    if (!gil_locked) { gil_take_locked(); pthread_mutex_unlock(&gil_mu); return; }
+    pthread_mutex_unlock(&gil_mu);
+    pthread_mutex_unlock(mtx);
+    gil_take();
+    pthread_mutex_lock(mtx);
+}
+
+/* Blocking hooks used by every call site: count as safe for the collector,
+ * and hand the interpreter lock over. */
+static inline void cc_blocking_enter(void) { cc_stw_blocking_enter(); gil_blocking_enter(); }
+static inline void cc_blocking_leave(void) { gil_blocking_leave(); cc_stw_blocking_leave(); }
+static inline void cc_blocking_leave_mutex(pthread_mutex_t *mtx) {
+    gil_blocking_leave_mutex(mtx);
+    cc_stw_blocking_leave_mutex(mtx);
+}
+
+/* Public: C code (a __C__ block, an extension) about to do long work that
+ * touches no Strada values calls strada_gil_release(), then
+ * strada_gil_acquire() before touching them again. No-ops when the lock is
+ * off. */
+void strada_gil_release(void) { cc_blocking_enter(); }
+void strada_gil_acquire(void) { cc_blocking_leave(); }
+/* Slow path of strada_gil_poll(): another thread asked for the lock. */
+void strada_gil_yield_slow(void) {
+    if (!strada_gil_on || !gil_i_hold() || gil_block_depth > 0) {
+        __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
+        return;
+    }
+    pthread_mutex_lock(&gil_mu);
+    if (gil_waiters == 0) {
+        __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
+        pthread_mutex_unlock(&gil_mu);
+        return;
+    }
+    unsigned long sw = gil_switches;
+    pthread_mutex_unlock(&gil_mu);
+    cc_blocking_enter();
+    pthread_mutex_lock(&gil_mu);
+    while (gil_switches == sw && gil_waiters > 0) pthread_cond_wait(&gil_switch_cv, &gil_mu);
+    pthread_mutex_unlock(&gil_mu);
+    cc_blocking_leave();
+}
+int strada_gil_enabled(void) { return strada_gil_on; }
 
 void strada_decref(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
@@ -18343,7 +18501,7 @@ static void cc_safepoint_slow(void) {
 }
 /* Call immediately before a blocking syscall (no heap access in between): we
  * won't touch the graph until we return, so count as safe now. */
-static void cc_blocking_enter(void) {
+static void cc_stw_blocking_enter(void) {
     if (!cc_self_registered) return;
     if (cc_self_blocking_depth++ > 0) return;
     pthread_mutex_lock(&cc_stw_mutex);
@@ -18353,7 +18511,7 @@ static void cc_blocking_enter(void) {
 }
 /* Call immediately after returning from the blocking syscall: stop counting as
  * safe, but if a collect is in progress, park instead of resuming mutation. */
-static void cc_blocking_leave(void) {
+static void cc_stw_blocking_leave(void) {
     if (!cc_self_registered) return;
     if (cc_self_blocking_depth <= 0 || --cc_self_blocking_depth > 0) return;
     pthread_mutex_lock(&cc_stw_mutex);
@@ -18368,7 +18526,7 @@ static void cc_blocking_leave(void) {
 }
 /* Same as cc_blocking_leave(), but drops *mtx before parking on an active STW
  * so no sibling thread stalls acquiring *mtx with in_blocking == 0. */
-static void cc_blocking_leave_mutex(pthread_mutex_t *mtx) {
+static void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) {
     if (!cc_self_registered) return;
     if (cc_self_blocking_depth <= 0 || --cc_self_blocking_depth > 0) return;
     pthread_mutex_lock(&cc_stw_mutex);
@@ -20496,6 +20654,7 @@ static void strada_thread_state_cleanup(void) {
 
 static void* strada_thread_wrapper(void *arg) {
     StradaThread *st = (StradaThread *)arg;
+    gil_thread_begin();     /* wait for the interpreter lock before running Strada code */
     cc_thread_register();   /* count this thread for stop-the-world before it mutates */
     /* Call the closure with 0 arguments */
     st->result = strada_closure_call(st->closure, 0);
@@ -20514,6 +20673,7 @@ static void* strada_thread_wrapper(void *arg) {
      * free_queue or cached in TLS during detached cleanup leaks. */
     strada_thread_state_cleanup();
     cc_thread_unregister();   /* after all heap ops */
+    gil_thread_end();
     return NULL;
 }
 
@@ -20523,6 +20683,7 @@ StradaValue* strada_thread_create(StradaValue *closure) {
     }
 
     if (!strada_threading_active) strada_threading_active = 1;
+    strada_gil_activate();
     cc_thread_register();   /* register the caller (e.g. main) as a mutator thread */
 
     StradaThread *st = malloc(sizeof(StradaThread));
@@ -20753,6 +20914,7 @@ static void strada_future_unref(StradaFuture *f) {
 /* Worker thread function */
 static void* strada_pool_worker(void *arg) {
     StradaThreadPool *pool = (StradaThreadPool *)arg;
+    gil_thread_begin();
     cc_thread_register();   /* count this worker for stop-the-world */
 
     while (1) {
@@ -20774,6 +20936,7 @@ static void* strada_pool_worker(void *arg) {
              * strada_thread_wrapper). */
             strada_thread_state_cleanup();
             cc_thread_unregister();
+            gil_thread_end();
             break;  /* Shutdown */
         }
 
@@ -20974,6 +21137,7 @@ void strada_pool_init(int num_workers) {
 
     /* Enable atomic refcounting now that we're multi-threaded */
     if (!strada_threading_active) strada_threading_active = 1;
+    strada_gil_activate();
     cc_thread_register();   /* register the caller (e.g. main) as a mutator thread */
 
     if (num_workers <= 0) {
@@ -21842,10 +22006,12 @@ static void strada_map_work_loop(StradaMapJob *job) {
 
 static void *strada_map_worker(void *arg) {
     StradaMapJob *job = (StradaMapJob *)arg;
+    gil_thread_begin();
     cc_thread_register();
     strada_map_work_loop(job);
     strada_thread_state_cleanup();
     cc_thread_unregister();
+    gil_thread_end();
     return NULL;
 }
 
@@ -21875,6 +22041,7 @@ StradaValue* strada_async_map(StradaValue *fn, StradaValue *items_ref, StradaVal
 
     /* Same switch as thread::create: atomic refcounts etc. BEFORE spawn. */
     if (!strada_threading_active) strada_threading_active = 1;
+    strada_gil_activate();
     int was_registered = cc_thread_is_registered();
     if (!was_registered) cc_thread_register();   /* count the caller as a mutator */
 
@@ -39024,6 +39191,7 @@ static void *io_poller_main(void *arg) {
 
 static void io_poller_ensure(void) {
     if (!strada_threading_active) strada_threading_active = 1;
+    strada_gil_activate();
     cc_thread_register();
     pthread_mutex_lock(&io_poller_mu);
     if (!io_poller_started) {
@@ -40020,6 +40188,7 @@ static void *resolve_main(void *arg) {
 
 StradaValue* strada_resolve_async(StradaValue *host) {
     if (!strada_threading_active) strada_threading_active = 1;
+    strada_gil_activate();
     cc_thread_register();
 
     StradaFuture *f = malloc(sizeof(StradaFuture));
