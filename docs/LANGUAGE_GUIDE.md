@@ -2521,9 +2521,21 @@ thread::mutex_destroy($mutex);
 
 ### Thread Safety Notes
 
-- Strada's reference counting is atomic, making basic operations thread-safe
-- Always use mutexes when modifying shared data
-- Closures copy captured scalars - share state between threads through a hash/array reference (its contents are visible to every thread)
+- Threads share data; nothing is copied. A variable a thread closure captures
+  is the same variable in every thread (a thread's `$x = 1` is visible to the
+  others), and so are arrays, hashes and everything reachable from them.
+- **Any write to shared data needs a lock**, including a plain scalar
+  assignment (`$shared = "..."`), `push`, `$h{k}++` and `delete`. Containers
+  and variables have no internal locking: an unlocked concurrent write can
+  corrupt memory and crash the process, not just lose an update. Hold the same
+  `thread::mutex_lock` (or `async::lock`) for every read and write of data
+  that some thread may be writing.
+- Data that no thread writes may be read by many threads without a lock.
+  Reference counting is atomic once a thread has started, so sharing values
+  is safe; changing them is not.
+- `each()` keeps one iterator per hash: don't iterate the same hash with
+  `each()` from two threads at once.
+- For simple counters, `async::atomic` / `async::atomic_add` need no mutex.
 - Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
 ---

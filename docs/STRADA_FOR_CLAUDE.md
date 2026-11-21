@@ -935,6 +935,14 @@ async::atomic_cas($counter, $expected, $new);
 
 The default thread pool has 4 workers; call `async::pool_init($n)` before the first async call to choose a different size.
 
+**Shared data and locking.** Threads, pool tasks (`async func`, `async::spawn`,
+`async::map`) and closures share variables and containers; nothing is copied.
+Any write to data another thread can see needs a mutex held by every thread
+that reads or writes it, even `$shared = "x"`, `push(@shared, ...)` or
+`$h{k}++`. An unlocked concurrent write corrupts memory and usually crashes;
+it does not just lose an update. Read-only sharing needs no lock. Prefer
+channels to pass results, and `async::atomic` for counters.
+
 ---
 
 ## Modules
