@@ -1,0 +1,75 @@
+# EXPECT: grep map foreach splice elem values each scalar nested append done
+# With the interpreter lock handed over inside loops, one thread can replace
+# data another thread is in the middle of using: the array under a
+# grep/map/foreach, a hash under values()/each(), a captured scalar passed
+# down a call chain, a nested structure, a string being appended to. Each
+# phase runs a writer thread against a reader; the reader must never see
+# freed memory. STRADA_GIL_INTERVAL_US makes the handover far more frequent
+# than the default 5 ms so the writer lands inside the reader's loops.
+func burn(int $n) int { my int $t = 0; for (my int $i = 0; $i < $n; $i++) { $t = ($t + $i) % 7919; } return $t; }
+func slen(str $s, int $n) int { my int $t = burn($n); return length($s) + $t - $t; }
+func mk(int $i) str { return "value-" . $i . "-" . ("x" x ($i % 40)); }
+func both(str $p, str $q, int $n) int { my int $t = burn($n); return length($p) + length($q) + $t - $t; }
+
+func phase(scalar $writer, scalar $reader, int $rounds) void {
+    my int $stop = 0;
+    my $w = thread::create(func () { my int $i = 0; while ($stop == 0) { $i++; $writer->($i); } });
+    for (my int $r = 0; $r < $rounds; $r++) { $reader->($r); }
+    $stop = 1;
+    thread::join($w);
+}
+
+func main() int {
+    core::setenv("STRADA_GIL", "1");
+    core::setenv("STRADA_GIL_INTERVAL_US", "50");
+    my int $rounds = 400;
+    my int $acc = 0;
+    my @done = ();
+
+    my @a = map { mk($_) } (1..40);
+    phase(func (int $i) { shift(@a); push(@a, mk($i)); },
+          func (int $r) { my @g = grep { slen($_, 200) > 3 } @a; $acc += scalar(@g); }, $rounds);
+    push(@done, "grep");
+    phase(func (int $i) { @a = map { mk($_ + $i) } (1..40); },
+          func (int $r) { my @m = map { slen($_, 200) } @a; $acc += scalar(@m); }, $rounds);
+    push(@done, "map");
+    phase(func (int $i) { if ($i % 2) { @a = (); } else { @a = map { mk($_ + $i) } (1..40); } },
+          func (int $r) { foreach my $e (@a) { $acc += slen($e, 200); } }, $rounds);
+    push(@done, "foreach");
+    phase(func (int $i) { splice(@a, 0, 5); push(@a, mk($i), mk($i + 1), mk($i + 2), mk($i + 3), mk($i + 4)); },
+          func (int $r) { foreach my $e (@a) { $acc += slen($e, 200); } }, $rounds);
+    push(@done, "splice");
+
+    my %h = map { ("k" . $_) => mk($_) } (1..40);
+    phase(func (int $i) { my str $k = "k" . ($i % 40 + 1); delete($h{$k}); $h{$k} = mk($i); },
+          func (int $r) { for (my int $j = 1; $j <= 40; $j++) { $acc += slen($h{"k" . $j} // "none", 100); } }, $rounds);
+    push(@done, "elem");
+    phase(func (int $i) { if ($i % 2) { %h = (); } else { %h = map { ("k" . $_) => mk($_ + $i) } (1..40); } },
+          func (int $r) { foreach my $v (values(%h)) { $acc += slen($v, 100); } }, $rounds);
+    push(@done, "values");
+    phase(func (int $i) { $h{"n" . ($i % 200)} = mk($i); delete($h{"n" . (($i + 100) % 200)}); },
+          func (int $r) { while (my ($k, $v) = each(%h)) { $acc += slen($v, 50) + length($k); } }, $rounds);
+    push(@done, "each");
+
+    my $s = mk(1);
+    my $q = mk(2);
+    phase(func (int $i) { $s = mk($i); $q = mk($i + 1); },
+          func (int $r) { $acc += both($s, $q, 2000); my str $c = $s . burn(1000) . $q . burn(1000) . $s; $acc += length($c); }, $rounds);
+    push(@done, "scalar");
+
+    my $ar = [ map { mk($_) } (1..40) ];
+    my $hr = { "list" => [ map { mk($_) } (1..40) ], "name" => mk(3) };
+    phase(func (int $i) { $ar = [ map { mk($_ + $i) } (1..40) ]; $hr = { "list" => [ map { mk($_ + $i) } (1..10) ], "name" => mk($i) }; },
+          func (int $r) { $acc += slen($ar->[3], 500) + slen($hr->{"name"}, 500);
+                          foreach my $e (@{$hr->{"list"}}) { $acc += slen($e, 50); }
+                          $acc += slen(join(",", @{$ar}), 200); }, $rounds);
+    push(@done, "nested");
+
+    my $str = "";
+    phase(func (int $i) { $str .= "ab"; if (length($str) > 2000) { $str = ""; } },
+          func (int $r) { $acc += slen($str, 1000); my str $u = uc($str); $acc += length($u) + slen(substr($str, 0, 10) // "", 200); }, $rounds);
+    push(@done, "append");
+
+    say(join(" ", @done) . ($acc > 0 ? " done" : " zero"));
+    return 0;
+}

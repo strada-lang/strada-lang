@@ -1401,9 +1401,47 @@ code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
 - C code: `strada_gil_release()` / `strada_gil_acquire()` around long work
   that touches no Strada values; `strada_gil_poll()` (header inline) is the
   handover check for the later stages.
-- Not done yet: handover checks in compiled loops and function entry and in
-  the VM (a thread that never blocks keeps the lock), releasing it around
-  blocking file/socket I/O and `system`/`qx`, and turning it on by default.
+- **Stage 2 (compiled loops).** A waiter that has not got the lock within
+  5 ms (`STRADA_GIL_INTERVAL_US` overrides, for tests) sets
+  `strada_gil_drop_request`; loops check it in their condition
+  (`while ((strada_gil_poll(), COND))`, `gil_poll_prefix` in CodeGen.strada).
+  - Only programs that can start threads get checks: Semantic sets
+    `uses_threads` on a `thread::`/`async::` call, an `await` or an
+    `async func`. A library built on its own gets none unless compiled with
+    `STRADA_GIL_POLLS=1`.
+  - Only loops whose body calls something, contains another loop or is not
+    leaf-safe get one. An innermost arithmetic loop has none: the check stops
+    gcc from vectorizing or deleting such loops, so a thread inside one keeps
+    the lock until it ends. There is no check at function entry either
+    (measured: recursion-heavy code paid for it), so recursion without a loop
+    does not hand over.
+  - Cost, instruction counts against the previous commit: 0.0% on every
+    benchmark that starts no thread; bench_async +7%.
+- **Stage 3 (VM).** `VM_WORKER_SAFEPOINT` (every backward jump in the
+  interpreter, root VM included) and `vm_jit_poll_sig_and_gc` (JIT code calls
+  it at least every 256 loop iterations) call `vm_gil_yield`, which marks a
+  worker GC-safe while it waits. No JIT code changed.
+- **Closures stay alive while they run.** A closure that reassigned the
+  variable it was called through (`$cb = func {...}` inside `$cb`) freed its
+  own captures: a single-threaded segfault that lock handovers also made
+  reachable from another thread. `strada_closure_callN_pin` and
+  `strada_closure_call_argv` hold a reference for the call. Codegen uses the
+  unpinned `strada_closure_callN` only when the callee is a plain local of the
+  calling frame (`closure_callee_is_frame_local`). The pin bumps the refcount
+  directly and uses the cleanup stack only inside a `try` (a full
+  incref/decref pair buffered the closure as a cycle candidate on every call:
+  bench_closures +19%). Test: `t/bugfix_tests/closure_replaces_itself.strada`.
+- Verified with a reader/writer stress under AddressSanitizer at a 20 us
+  handover interval (array under grep/map/foreach, hash under values/each,
+  captured scalars passed down calls, nested structures, in-place append):
+  clean after the closure fix. `t/bugfix_tests/gil_reader_writer.strada` is
+  the short form.
+- VM limit found on the way (not a lock problem): a worker thread's garbage
+  is collected only when the thread ends, and the root marks it on every
+  collection, so a long-lived allocating thread makes each collection slower.
+- Not done yet: releasing the lock around blocking file/socket I/O and
+  `system`/`qx` (a thread blocked there holds it), keeping handles alive
+  across a blocking call, and turning the lock on by default.
 - Per-object locking was considered and set aside: about 145 runtime
   functions, inline hash probes compiled into user code, the in-place
   `refcount == 1` shortcuts and the VM's own containers would all need it.

@@ -2543,10 +2543,14 @@ thread::mutex_destroy($mutex);
   thread runs Strada code at a time. Unlocked writes to shared data then
   cannot corrupt memory. The lock is handed over while a thread waits:
   `sleep`, `thread::join`, `await`, channel `recv`/`send`, mutex and condition
-  waits, socket `recv`/`select`, idle pool workers. In this first stage a
-  thread that never waits keeps the lock until it finishes, and CPU-bound
-  work no longer runs in parallel. Mutexes are still the way to make a
-  read-modify-write sequence across several statements atomic.
+  waits, socket `recv`/`select`, idle pool workers. A busy thread also gives
+  it up inside its loops when another thread has waited about 5 ms, so
+  CPU-bound threads take turns; they no longer run in parallel. Two limits:
+  a tight arithmetic loop that calls nothing, and recursion without a loop,
+  keep the lock until they finish; and a thread blocked in file or socket
+  I/O other than `recv`/`select`, or in `system`/`qx`, still holds it.
+  Mutexes are still the way to make a read-modify-write sequence across
+  several statements atomic.
 - Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
 ---

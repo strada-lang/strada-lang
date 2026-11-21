@@ -566,6 +566,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # Condition-level hash-fetch CSE state (see emit_condition_cse).
     # uses_tie is set from the program node in gen_program.
     $cg{"uses_tie"} = 0;
+    $cg{"uses_threads"} = 0;
     $cg{"func_tracks_depth"} = 0;
     my hash %empty_struct_vars = ();
     $cg{"struct_vars"} = \%empty_struct_vars;
@@ -3979,6 +3980,56 @@ func stmt_has_call(scalar $n) int {
     return 0;
 }
 
+# 1 if AST subtree $n contains a loop (while/until/for/foreach/do-while, or a
+# map/grep block).
+func stmt_has_loop(scalar $n) int {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = size($n);
+        my int $i = 0;
+        while ($i < $len) {
+            if (stmt_has_loop($n->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    my int $type = $n->{"type"} + 0;
+    if ($type == NODE_WHILE_STMT() || $type == NODE_FOR_STMT() || $type == NODE_FOREACH_STMT() ||
+        $type == NODE_DO_WHILE_STMT() || $type == NODE_MAP() || $type == NODE_GREP()) {
+        return 1;
+    }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
+    my array @ks_klist = keys(%{$n});
+    my scalar $ks = \@ks_klist;
+    my int $kn = size($ks);
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $n->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (stmt_has_loop($v) == 1) { return 1; }
+        }
+        $k = $k + 1;
+    }
+    return 0;
+}
+
+# The text that starts a loop condition: "strada_gil_poll(), " when the loop
+# should offer the interpreter lock to a waiting thread once per iteration,
+# else "". Only programs that can start threads get any (uses_threads, set
+# by Semantic). The check is one load and a branch, but it also keeps the C
+# compiler from vectorizing or removing a tight loop, so an innermost loop
+# whose body is plain arithmetic gets none: only loops that call something,
+# contain another loop, or (when $leaf_check is 1) are not leaf-safe.
+func gil_poll_prefix(scalar $cg, scalar $body, int $leaf_check) str {
+    if ($cg->{"uses_threads"} != 1) { return ""; }
+    if (!$body) { return ""; }
+    if (stmt_has_call($body) == 1 || stmt_has_loop($body) == 1) { return "strada_gil_poll(), "; }
+    if ($leaf_check == 1 && node_is_leaf_safe($cg, $body) == 0) { return "strada_gil_poll(), "; }
+    return "";
+}
+
 # Resolve a call's function-info entry using direct name, current_fn_package prefix, and qw_imports fallback.
 func resolve_callee_func_info(scalar $cg, str $raw_name) scalar {
     my scalar $funcs = $cg->{"functions"};
@@ -6016,9 +6067,9 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
     }
     if ($st_t == NODE_WHILE_STMT()) {
         emit_indent($cg);
-        emit($cg, "while (");
+        emit($cg, "while ((" . gil_poll_prefix($cg, $st->{"body"}, 0));
         gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg, 0);
-        emit($cg, ") ");
+        emit($cg, ")) ");
         gen_raw_int_block($cg, $st->{"body"}, $cur_pkg);
         emit($cg, "\n");
         return;
@@ -6038,11 +6089,13 @@ func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
         if ($fi && $has_vd == 0) {
             gen_raw_int_expr($cg, $fi, $cur_pkg);
         }
-        emit($cg, "; ");
+        emit($cg, "; (" . gil_poll_prefix($cg, $st->{"body"}, 0));
         if ($st->{"condition"}) {
             gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg, 0);
+        } else {
+            emit($cg, "1");
         }
-        emit($cg, "; ");
+        emit($cg, "); ");
         if ($st->{"update"}) {
             gen_raw_int_expr($cg, $st->{"update"}, $cur_pkg);
         }

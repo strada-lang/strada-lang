@@ -1943,6 +1943,11 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
             $ctx->{"uses_tie"} = 1;
         }
+        # A program that can start threads (thread::, the async pool) gets
+        # interpreter-lock handover checks in its loops (gil_poll_prefix).
+        if (index($name, "thread::") == 0 || index($name, "async::") == 0) {
+            $ctx->{"uses_threads"} = 1;
+        }
         # bare `&f` passes the caller's @_; where there is none (main, a
         # function with a parameter list) it passes nothing (Perl: empty)
         if (($expr->{"amp_call"} + 0) == 1) {
@@ -2731,6 +2736,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
 
     # await expression
     if ($node_type == NODE_AWAIT()) {
+        $ctx->{"uses_threads"} = 1;
         analyze_expression($ctx, $expr->{"expr"});
         return;
     }
@@ -3606,6 +3612,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     for (my int $i = 0; $i < $count; $i = $i + 1) {
         my scalar $fn = $funcs->[$i];
 
+        if (($fn->{"type"} + 0) == NODE_ASYNC_FUNC()) {
+            $ctx->{"uses_threads"} = 1;
+        }
         # Skip extern functions (no body to analyze)
         if ($fn->{"is_extern"} == 1) {
             next;
@@ -3619,6 +3628,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     # which the parser sets directly). uses_tie gates condition-level CSE.
     if ($ctx->{"uses_tie"} == 1) {
         $ast->{"uses_tie"} = 1;
+    }
+    if ($ctx->{"uses_threads"} == 1) {
+        $ast->{"uses_threads"} = 1;
     }
     # A copy of a weak reference is a strong one (Perl). The weak flag lives
     # on the shared REF value, so in a program that weakens anything, values

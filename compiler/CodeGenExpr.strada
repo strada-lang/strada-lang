@@ -9442,7 +9442,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($use_tmps == 1 && $callee_cleanup == 1) { emit($cg, ")"); }
             emit($cg, "; ");
             emit($cg, "StradaValue *__clres = ");
+            $cg->{"cl_call_pin"} = 1 - closure_callee_is_frame_local($cg, $expr->{"closure"});
             emit_closure_call_n($cg, "__cl_fn", $arg_count, "__cla");
+            $cg->{"cl_call_pin"} = 0;
             emit($cg, "; ");
             if ($use_tmps == 1) {
                 emit($cg, "strada_tmps_free(" . $cl_tm2 . "); ");
@@ -9468,7 +9470,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 $i = $i + 1;
             }
+            $cg->{"cl_call_pin"} = 1 - closure_callee_is_frame_local($cg, $expr->{"closure"});
             emit_closure_call_n($cg, "__cl_fn", $arg_count, "__cla");
+            $cg->{"cl_call_pin"} = 0;
             emit($cg, "; })");
         } else {
             emit($cg, "strada_closure_call(");
@@ -9660,7 +9664,13 @@ func emit_container_replace(scalar $cg, scalar $target, str $k) void {
 # the varargs strada_closure_call otherwise.
 func emit_closure_call_n(scalar $cg, str $fn, int $n, str $prefix) void {
     if ($n <= 4) {
-        emit($cg, "strada_closure_call" . $n . "(" . $fn);
+        # cl_call_pin: the callee can be reassigned while it runs (a captured
+        # variable, an element, a global), so the call holds a reference.
+        if ($cg->{"cl_call_pin"} == 1) {
+            emit($cg, "strada_closure_call" . $n . "_pin(" . $fn);
+        } else {
+            emit($cg, "strada_closure_call" . $n . "(" . $fn);
+        }
     } else {
         emit($cg, "strada_closure_call(" . $fn . ", " . $n);
     }

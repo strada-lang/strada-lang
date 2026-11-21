@@ -1748,7 +1748,7 @@ static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx
  * wherever a thread blocks: every cc_blocking_enter/leave pair below (sleep,
  * join, recv, await, mutex/cond waits, socket waits, idle pool workers), and
  * in strada_gil_release/acquire for C code. A thread that has waited
- * GIL_INTERVAL_NS without the lock changing hands sets
+ * the handover interval (5 ms) without the lock changing hands sets
  * strada_gil_drop_request; the holder gives the lock up at its next
  * strada_gil_poll(). Lock order: never wait for the lock while holding a
  * runtime mutex (the _mutex variant drops it first). Threads that do not run
@@ -1765,7 +1765,7 @@ static unsigned long gil_switches = 0;
 static unsigned long gil_owner = 0;     /* pthread_self() of the holder, 0 = none */
 static STRADA_TLS int gil_block_depth = 0;
 static STRADA_TLS int gil_block_had = 0; /* held the lock when the outermost block began */
-#define GIL_INTERVAL_NS 5000000L
+static long gil_interval_ns = 5000000L;   /* STRADA_GIL_INTERVAL_US overrides (tests) */
 
 static inline int gil_i_hold(void) {
     return __atomic_load_n(&gil_owner, __ATOMIC_ACQUIRE) == (unsigned long)pthread_self();
@@ -1778,8 +1778,8 @@ static void gil_take_locked(void) {
             unsigned long sw = gil_switches;
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += GIL_INTERVAL_NS;
-            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            ts.tv_nsec += gil_interval_ns;
+            while (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
             if (pthread_cond_timedwait(&gil_free_cv, &gil_mu, &ts) == ETIMEDOUT
                 && gil_locked && sw == gil_switches)
                 __atomic_store_n(&strada_gil_drop_request, 1, __ATOMIC_RELAXED);
@@ -1827,6 +1827,13 @@ static void strada_gil_activate(void) {
         const char *e = getenv("STRADA_GIL");
         strada_gil_on = (e && e[0] == '1') ? 1 : 0;
         gil_decided = 1;
+        const char *iv = getenv("STRADA_GIL_INTERVAL_US");
+        if (iv && *iv) {
+            long us = strtol(iv, NULL, 10);
+            if (us < 1) us = 1;
+            if (us > 1000000) us = 1000000;
+            gil_interval_ns = us * 1000L;
+        }
         if (strada_gil_on) pthread_atfork(NULL, NULL, gil_atfork_child);
     }
     if (strada_gil_on && !gil_i_hold() && gil_block_depth == 0) gil_take_locked();
@@ -20385,7 +20392,38 @@ static StradaValue *strada_not_code_call(StradaValue *v) {
     return strada_new_undef();
 }
 
+/* A closure must outlive its own call: the variable it was called through can
+ * be reassigned while it runs -- by its own body (`$cb = func {...}` inside
+ * $cb), or by another thread -- and that used to free the captures array
+ * under the running code. Every call entry point holds a reference for the
+ * duration; the cleanup stack releases it if the call throws.
+ * This is on the closure-call fast path, so it avoids strada_incref /
+ * strada_decref (the surviving decref would buffer the closure as a cycle
+ * candidate on every call) and uses the cleanup stack only while a try
+ * frame is active: without one a throw ends the program. */
+#define STRADA_CL_PIN(c, st) do { \
+    (st) = 0; \
+    if (!STRADA_SV_IS_NONRC(c)) { \
+        if (strada_threading_active) __sync_add_and_fetch(&(c)->refcount, 1); else (c)->refcount++; \
+        (st) = 1; \
+        if (strada_try_depth > 0) { strada_cleanup_push(c); (st) = 3; } \
+    } } while (0)
+#define STRADA_CL_UNPIN(c, st) do { \
+    if (st) { \
+        if ((st) & 2) strada_cleanup_pop(); \
+        if (!strada_threading_active && (c)->refcount > 1) (c)->refcount--; \
+        else strada_decref(c); \
+    } } while (0)
+static StradaValue* strada_closure_call_argv_nopin(StradaValue *closure, int argc, StradaValue **argv);
 static StradaValue* strada_closure_call_argv(StradaValue *closure, int argc, StradaValue **argv) {
+    if (!closure || STRADA_IS_TAGGED_INT(closure) || closure->type != STRADA_CLOSURE)
+        return strada_closure_call_argv_nopin(closure, argc, argv);
+    int __pin; STRADA_CL_PIN(closure, __pin);
+    StradaValue *res = strada_closure_call_argv_nopin(closure, argc, argv);
+    STRADA_CL_UNPIN(closure, __pin);
+    return res;
+}
+static StradaValue* strada_closure_call_argv_nopin(StradaValue *closure, int argc, StradaValue **argv) {
     if (!closure || STRADA_IS_TAGGED_INT(closure)) return strada_not_code_call(closure);
 
     /* Handle plain function pointers (legacy \&func CPOINTER syntax) */
@@ -20580,6 +20618,21 @@ StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaV
     StradaValue *argv[4] = { a0, a1, a2, a3 };
     return strada_closure_call_argv(closure, 4, argv);
 }
+
+/* Pinned forms: the closure is kept alive for the call (see STRADA_CL_PIN).
+ * Codegen uses them unless the callee is a plain local of the calling frame,
+ * which nothing else can reassign. */
+#define STRADA_CL_PINNED(call) \
+    if (!closure || STRADA_IS_TAGGED_INT(closure) || closure->type != STRADA_CLOSURE) return call; \
+    int __pin; STRADA_CL_PIN(closure, __pin); \
+    StradaValue *res = call; \
+    STRADA_CL_UNPIN(closure, __pin); \
+    return res;
+StradaValue* strada_closure_call0_pin(StradaValue *closure) { STRADA_CL_PINNED(strada_closure_call0(closure)) }
+StradaValue* strada_closure_call1_pin(StradaValue *closure, StradaValue *a0) { STRADA_CL_PINNED(strada_closure_call1(closure, a0)) }
+StradaValue* strada_closure_call2_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1) { STRADA_CL_PINNED(strada_closure_call2(closure, a0, a1)) }
+StradaValue* strada_closure_call3_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2) { STRADA_CL_PINNED(strada_closure_call3(closure, a0, a1, a2)) }
+StradaValue* strada_closure_call4_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3) { STRADA_CL_PINNED(strada_closure_call4(closure, a0, a1, a2, a3)) }
 
 /* Call closure with args from a StradaValue array */
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv) {

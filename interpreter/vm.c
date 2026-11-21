@@ -2089,6 +2089,16 @@ static void vm_worker_leave_safe(VM *vm, int prev_safe) {
     vm_worker_enter_active(vm);
 }
 
+/* Hand the interpreter lock (STRADA_GIL) to a waiting thread. A worker
+ * counts as GC-safe while it waits, so the root's stop-the-world does not
+ * wait for a thread that cannot run. The caller has synced frame->ip and
+ * stack_top. */
+static __attribute__((noinline)) void vm_gil_yield(VM *vm) {
+    int prev_safe = vm_worker_enter_safe(vm);
+    strada_gil_yield_slow();
+    vm_worker_leave_safe(vm, prev_safe);
+}
+
 static int vm_gc_stw_begin(VM *vm) {
     pthread_mutex_lock(&vm->gc_wait_mutex);
     if (!vm->workers_head) {
@@ -13238,6 +13248,8 @@ static __attribute__((noinline)) int vm_jit_poll_signals(VM *vm) {
 }
 
 static __attribute__((noinline)) int vm_jit_poll_sig_and_gc(VM *vm) {
+    /* JIT code gets here at least every 256 loop iterations. */
+    if (__builtin_expect(__atomic_load_n(&strada_gil_drop_request, __ATOMIC_RELAXED), 0)) vm_gil_yield(vm);
     if (__builtin_expect(vm->is_worker_vm, 0)) {
         vm_worker_poll_gc(vm);
         return vm_jit_poll_signals(vm);
@@ -17163,6 +17175,11 @@ L_resume_frame_ready:;
                              __atomic_load_n(&vm->root_vm->gc_requested, __ATOMIC_ACQUIRE), 0)) { \
             frame->ip = (sync_ip); vm->stack_top = sp; \
             vm_worker_park(vm); \
+            stack = vm->stack; RELOAD(); \
+        } \
+        if (__builtin_expect(__atomic_load_n(&strada_gil_drop_request, __ATOMIC_RELAXED), 0)) { \
+            frame->ip = (sync_ip); vm->stack_top = sp; \
+            vm_gil_yield(vm); \
             stack = vm->stack; RELOAD(); \
         } \
     } while (0)

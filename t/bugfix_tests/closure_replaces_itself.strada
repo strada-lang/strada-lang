@@ -1,0 +1,31 @@
+# EXPECT: first 1 kept|second 2|a1 b2
+# A closure that reassigns the variable it was called through freed itself
+# while running: the captures array went away under the body, and reading a
+# captured variable afterwards was a use-after-free (segfault). A call through
+# anything but a plain local of the calling frame now holds a reference to the
+# closure for the duration (strada_closure_callN_pin). The same thing happened
+# when another thread reassigned the variable during the call.
+func main() int {
+    my $kept = "kept";
+    my $cb;
+    $cb = func (int $n) str {
+        $cb = func (int $m) str { return "second " . $m; };
+        my @junk = map { "junk-" . $_ } (1..50);     # reuse the freed memory
+        return "first " . $n . " " . $kept;
+    };
+    my str $one = $cb->(1);
+    my str $two = $cb->(2);
+
+    # the same through a hash element
+    my %h = ();
+    my $tag = "a";
+    $h{"f"} = func (int $n) str {
+        $h{"f"} = func (int $m) str { return "b" . $m; };
+        my @junk = map { "junk-" . $_ } (1..50);
+        return $tag . $n;
+    };
+    my str $three = $h{"f"}->(1);
+    my str $four = $h{"f"}->(2);
+    say($one . "|" . $two . "|" . $three . " " . $four);
+    return 0;
+}

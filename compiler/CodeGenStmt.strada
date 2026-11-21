@@ -1745,14 +1745,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         emit_indent($cg);
+        # Offer the interpreter lock once per iteration (see gil_poll_prefix).
+        my str $w_gilp = gil_poll_prefix($cg, $stmt->{"body"}, 1);
         if ($is_regex_g == 1) {
-            emit($cg, "while (");
+            emit($cg, "while ((" . $w_gilp);
             emit_regex_g_condition($cg, $while_cond, $gpos_var);
-            emit($cg, ") {\n");
+            emit($cg, ")) {\n");
         } else {
-            emit($cg, "while (");
+            emit($cg, "while ((" . $w_gilp);
             emit_condition_cse($cg, $while_cond);
-            emit($cg, ") {\n");
+            emit($cg, ")) {\n");
         }
         indent($cg);
         if (length($label) > 0) {
@@ -1970,9 +1972,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         dedent($cg);
         emit_indent($cg);
-        emit($cg, "} while (");
+        emit($cg, "} while ((" . gil_poll_prefix($cg, $stmt->{"body"}, 1));
         emit_condition_cse($cg, $stmt->{"condition"});
-        emit($cg, ");\n");
+        emit($cg, "));\n");
 
         if (length($label) > 0) {
             emit_indent($cg);
@@ -2069,10 +2071,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         emit($cg, "; ");
 
+        emit($cg, "(" . gil_poll_prefix($cg, $stmt->{"body"}, 1));
         if ($stmt->{"condition"}) {
             emit_condition_cse($cg, $stmt->{"condition"});
+        } else {
+            emit($cg, "1");
         }
-        emit($cg, "; ");
+        emit($cg, "); ");
 
         if ($stmt->{"update"}) {
             my scalar $update = $stmt->{"update"};
@@ -2190,6 +2195,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 # Foreach statement
     if ($type == NODE_FOREACH_STMT()) {
         my str $label = $stmt->{"label"};
+        my str $fe_gilp = gil_poll_prefix($cg, $stmt->{"body"}, 1);
         if (length($label) > 0) {
             $cg->{"label_depths"}->{$label} = $cg->{"scope_depth"};
             $cg->{"label_try_depths"}->{$label} = $cg->{"try_depth"};
@@ -2319,7 +2325,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
 
             emit_indent($cg);
-            emit($cg, "for (int64_t __fr_i_" . $foreach_id . " = __fr_start_" . $foreach_id . "; __fr_i_" . $foreach_id . " <= __fr_end_" . $foreach_id . "; __fr_i_" . $foreach_id . "++) {\n");
+            emit($cg, "for (int64_t __fr_i_" . $foreach_id . " = __fr_start_" . $foreach_id . "; (" . $fe_gilp . "__fr_i_" . $foreach_id . " <= __fr_end_" . $foreach_id . "); __fr_i_" . $foreach_id . "++) {\n");
             indent($cg);
             scope_push($cg);
             if ($cg->{"fn_has_tmps_mark"} == 1) {
@@ -2590,11 +2596,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         emit_indent($cg);
         if ($fe_tie == 1) {
-            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < __foreach_len_" . $foreach_id . "; __foreach_i_" . $foreach_id . "++) {\n");
+            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; (" . $fe_gilp . "__foreach_i_" . $foreach_id . " < __foreach_len_" . $foreach_id . "); __foreach_i_" . $foreach_id . "++) {\n");
         } else {
             # The live length: elements removed in the body end the loop early
             # (the cached length gave extra undef iterations).
-            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < (int64_t)strada_array_length(__foreach_av_" . $foreach_id . "); __foreach_i_" . $foreach_id . "++) {\n");
+            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; (" . $fe_gilp . "__foreach_i_" . $foreach_id . " < (int64_t)strada_array_length(__foreach_av_" . $foreach_id . ")); __foreach_i_" . $foreach_id . "++) {\n");
         }
         indent($cg);
         scope_push($cg);
@@ -5266,6 +5272,11 @@ func gen_program(scalar $cg, scalar $program) void {
     # ties a variable (tied FETCH is observable per-mention). Semantic
     # sets uses_tie on the program node.
     $cg->{"uses_tie"} = $program->{"uses_tie"};
+    # STRADA_GIL_POLLS=1 at compile time forces the loop checks, for a library
+    # built on its own that a threaded program will load.
+    if ($program->{"uses_threads"} == 1 || ("" . core::getenv("STRADA_GIL_POLLS")) eq "1") {
+        $cg->{"uses_threads"} = 1;
+    }
     if (defined($program->{"structs"})) {
         $cg->{"structs"} = $program->{"structs"};
         $cg->{"struct_names"} = $program->{"struct_names"};

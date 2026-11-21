@@ -3060,11 +3060,13 @@ beyond one load of `strada_gil_on` per blocking call.
   `gil_i_hold`); `gil_free_cv` wakes a waiter when the lock is dropped and
   `gil_switch_cv` tells a yielding thread that someone else took it.
 - **Fairness.** A waiter uses `pthread_cond_timedwait` with a 5 ms interval
-  (`GIL_INTERVAL_NS`). If the lock did not change hands in that time it sets
+  (`gil_interval_ns`; `STRADA_GIL_INTERVAL_US` overrides). If the lock did not change hands in that time it sets
   `strada_gil_drop_request`; the holder's next `strada_gil_poll()` calls
   `strada_gil_yield_slow`, which drops the lock and waits on `gil_switch_cv`
-  until another thread has taken it, then queues again. Nothing calls
-  `strada_gil_poll()` yet.
+  until another thread has taken it, then queues again. Compiled loops and
+  the VM's safepoints call `strada_gil_poll()` (stages 2 and 3, see CLAUDE.md).
+  Under tcc the header's poll reads the flag without `__atomic_load_n`, which
+  tcc does not have.
 - **Blocking.** `gil_blocking_enter` drops the lock at depth 0 and remembers
   whether this thread held it (`gil_block_had`); `gil_blocking_leave` takes it
   back. The wrappers call the collector's hook first on enter and last on

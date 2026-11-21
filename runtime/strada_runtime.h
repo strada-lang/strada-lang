@@ -967,8 +967,13 @@ int strada_gil_enabled(void);
 void strada_gil_yield_slow(void);
 extern int strada_gil_drop_request;
 static inline void strada_gil_poll(void) {
+#if defined(__TINYC__) || defined(STRADA_TCC_MODE)
+    /* tcc has no __atomic builtins; a plain read of the flag is enough here */
+    if (strada_gil_drop_request) strada_gil_yield_slow();
+#else
     if (__builtin_expect(__atomic_load_n(&strada_gil_drop_request, __ATOMIC_RELAXED), 0))
         strada_gil_yield_slow();
+#endif
 }
 void strada_arena_begin(void);           /* Start a request arena (bump region) */
 void strada_arena_end(void);             /* Free the current arena wholesale */
@@ -1723,6 +1728,12 @@ StradaValue* strada_closure_call1(StradaValue *closure, StradaValue *a0);
 StradaValue* strada_closure_call2(StradaValue *closure, StradaValue *a0, StradaValue *a1);
 StradaValue* strada_closure_call3(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2);
 StradaValue* strada_closure_call4(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3);
+/* The same, holding a reference to the closure for the duration of the call. */
+StradaValue* strada_closure_call0_pin(StradaValue *closure);
+StradaValue* strada_closure_call1_pin(StradaValue *closure, StradaValue *a0);
+StradaValue* strada_closure_call2_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1);
+StradaValue* strada_closure_call3_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2);
+StradaValue* strada_closure_call4_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params);
 StradaValue* strada_foreach_list_take(StradaValue *v);
