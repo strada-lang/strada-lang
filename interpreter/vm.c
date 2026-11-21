@@ -553,7 +553,18 @@ static inline int vm_to_bool(VMValue v) {
 /* Decimal text of an int64 into buf (needs 21 bytes; falls back to snprintf
  * for smaller buffers). snprintf was 12% of bench_hotpaths. */
 static inline const char *vm_i64_to_cstr(int64_t iv, char *buf, size_t bufsz) {
-    if (bufsz < 21) { snprintf(buf, bufsz, "%lld", (long long)iv); return buf; }
+    if (bufsz < 21) {
+        /* Format in full, then truncate into the caller's buffer. */
+        char full[24];
+        snprintf(full, sizeof(full), "%lld", (long long)iv);
+        if (bufsz > 0) {
+            size_t n = strlen(full);
+            if (n >= bufsz) n = bufsz - 1;
+            memcpy(buf, full, n);
+            buf[n] = '\0';
+        }
+        return buf;
+    }
     char tmp[21];
     int n = 0;
     uint64_t u = iv < 0 ? (uint64_t)0 - (uint64_t)iv : (uint64_t)iv;
@@ -3166,6 +3177,23 @@ static int vm_path_has_nul(VMValue v) {
     return np && nl > 0 && memchr(np, 0, nl) != NULL;
 }
 
+/* The runtime's sprintf under a try frame; NULL if it threw. Kept out of
+ * vm_sprintf so that function has no setjmp (see vm_substr_replace_guarded). */
+static __attribute__((noinline)) StradaValue *vm_sprintf_runtime_guarded(StradaValue *fsv, StradaValue *arr) {
+    StradaValue * volatile res = NULL;
+    int cm = strada_cleanup_mark();
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        res = strada_sprintf_sv_arr(fsv, arr);
+        STRADA_TRY_POP();
+    } else {
+        STRADA_TRY_POP();
+        strada_cleanup_drain_to(cm);
+        strada_clear_exception();
+        res = NULL;
+    }
+    return res;
+}
+
 static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
     if (argc < 1) return vm_str("");
     /* Plain scalar arguments (numbers, strings, undef): format with the
@@ -3181,17 +3209,7 @@ static VMValue vm_sprintf(VM *vm, int argc, VMValue *args) {
             StradaValue *fsv = vm_to_sv(args[0]);
             StradaValue *arr = strada_new_array();
             for (int i = 1; i < argc; i++) strada_array_push_take(arr->value.av, vm_to_sv(args[i]));
-            StradaValue * volatile res = NULL;
-            int cm = strada_cleanup_mark();
-            if (setjmp(*STRADA_TRY_PUSH()) == 0) {
-                res = strada_sprintf_sv_arr(fsv, arr);
-                STRADA_TRY_POP();
-            } else {
-                STRADA_TRY_POP();
-                strada_cleanup_drain_to(cm);
-                strada_clear_exception();
-                res = NULL;
-            }
+            StradaValue *res = vm_sprintf_runtime_guarded(fsv, arr);
             strada_decref(fsv);
             strada_decref(arr);
             if (res) {
