@@ -2963,3 +2963,27 @@ each offset, so a `//g` loop was O(subject length) per match.
   PCRE2_UTF/UCP in `//g`, as in single matches.
 - Callers that pass their own `char *` copy (Perla's `strada_to_str`) still
   pay one memcpy per match; passing `value.pv` of the armed SV makes it O(1).
+
+## Nested-package `::func()` and compact-hash ownership (2026-11-21)
+
+- **`::func()` in a nested package.** The parser rewrites `::twice` inside
+  `package Deep::Leaf;` to `Deep_Leaf_twice`. Functions of a `use`d module are
+  registered as `Deep::Leaf::twice`, and the existing fallback in
+  `analyze_expression` (Semantic.strada) only tries one `_` -> `::` split, so
+  it reported "undefined function". When that fails and the name is not
+  registered as is, Semantic converts the current package (`eval_package`,
+  then `current_func->package`, then `cur_pkg`) to its C prefix, strips it and
+  looks up `PKG::rest`. Only `lookup_name` changes; codegen still emits
+  `Deep_Leaf_twice`, which is that function's C name. Test:
+  `t/test_use_nested_pkg_relative.strada` with `t/nested_use_test/Deep/`
+  (a use-cycle between Deep::Leaf and Deep::Peer).
+- **`StradaHash.compact_alloc`.** A small hash is one malloc block: header,
+  `HASH_SMALL_BUCKETS` index slots, `HASH_COMPACT_ENTRIES` entries. The
+  "still in the block" tests compared `hash_index`/`entries` with the inline
+  addresses only, assuming a separate malloc could never land there. An
+  allocator without chunk headers can place a non-compact hash's index right
+  after its 80-byte header; the old test then skipped freeing it (leak) and
+  could pool the header as a compact block, and reuse wrote past it. The flag
+  is set in the single-block path of `strada_hash_new_presized`, cleared by
+  `strada_hash_init`, and kept by pooled blocks. The byte fits in the struct's
+  padding (still 80 bytes, no field moved).

@@ -1,0 +1,16 @@
+# Deep::Leaf - a `use`d module in a nested package that calls its own
+# functions with the package-relative `::name()` form (and uses Deep::Peer,
+# which uses it back).
+package Deep::Leaf;
+
+use Deep::Peer;
+
+func top(int $n) int { return 1 + ::twice($n); }      # forward reference
+func twice(int $n) int { return $n * 2; }
+func label(str $s) str { return "[" . ::pad($s, 4) . "]"; }
+func pad(str $s, int $w) str {
+    my str $out = $s;
+    while (length($out) < $w) { $out = $out . "."; }
+    return $out;
+}
+func via_peer(int $n) int { return Deep::Peer::plus_ten($n) + ::twice($n); }

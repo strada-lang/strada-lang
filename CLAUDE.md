@@ -581,6 +581,12 @@ a container) must NOT be pushed.
 Hash memory: insert/delete churn rehashes in place (no index doubling); a
 mostly-empty hash shrinks its index after deletes and an emptied hash shrinks
 its entries array on the next insert.
+Small hashes live in one block (header, index and entries together). Only
+`compact_alloc` (set by `strada_hash_new_presized`'s single-block path, kept by
+the small-hash pool) says the header owns that inline storage:
+`hv_idx_in_block`/`hv_ent_in_block` check it before comparing addresses,
+because a separately allocated index or entries array may sit right after
+the header with some allocators (2026-11-21).
 
 ### Leak Test Suite
 
@@ -1235,6 +1241,11 @@ extern func Other::make_str(int $n) str;
 ```
 
 These register in the codegen symbol table under the mangled C symbol (`Other_emit`, `Other_make_str`) so `needs_temp_cleanup` recognizes owned returns and call sites use the ordinary Strada calling convention (no raw-C-type conversion). Use this instead of `__C__ extern` for cross-module Strada calls.
+
+`::func()` in a `use`d module whose package is nested (`package Deep::Leaf;`)
+reaches Semantic as `Deep_Leaf_func`; when no single `_` split matches, the
+lookup strips the current package's C prefix and tries `Deep::Leaf::func`
+(2026-11-21; test `t/test_use_nested_pkg_relative.strada`).
 
 ### Exception Handling
 

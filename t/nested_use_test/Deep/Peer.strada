@@ -1,0 +1,8 @@
+# Deep::Peer - the other half of a use-cycle with Deep::Leaf.
+package Deep::Peer;
+
+use Deep::Leaf;
+
+func plus_ten(int $n) int { return ::ten() + $n; }
+func ten() int { return 10; }
+func via_leaf(int $n) int { return Deep::Leaf::twice($n) + ::ten(); }

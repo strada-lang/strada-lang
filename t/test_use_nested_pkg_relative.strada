@@ -1,0 +1,25 @@
+# Test: `::func()` package-relative calls inside a `use`d module whose
+# package name is nested (Deep::Leaf). The parser rewrites `::twice` to
+# `Deep_Leaf_twice`, while the module's functions are registered as
+# `Deep::Leaf::twice`; the lookup reported "undefined function
+# 'Deep_Leaf_twice'" (a one-level package such as `Leaf` worked).
+
+use lib "t/nested_use_test";
+use Deep::Leaf;
+use Deep::Peer;
+
+func main() int {
+    my int $failed = 0;
+
+    if (Deep::Leaf::top(20) != 41) { say("FAIL: top(20) = " . Deep::Leaf::top(20)); $failed++; }
+    if (Deep::Leaf::label("ab") ne "[ab..]") { say("FAIL: label = " . Deep::Leaf::label("ab")); $failed++; }
+    if (Deep::Leaf::via_peer(3) != 19) { say("FAIL: via_peer(3) = " . Deep::Leaf::via_peer(3)); $failed++; }
+    if (Deep::Peer::via_leaf(4) != 18) { say("FAIL: via_leaf(4) = " . Deep::Peer::via_leaf(4)); $failed++; }
+
+    if ($failed == 0) {
+        say("All nested package-relative use tests passed");
+        return 0;
+    }
+    say("FAILED: " . $failed . " tests failed");
+    return 1;
+}
