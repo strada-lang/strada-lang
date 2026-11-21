@@ -5610,6 +5610,7 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $mod_program->{"lib_paths_fallback"} = $program->{"lib_paths_fallback"};
     # Share the resolved-deps list so nested modules land in STRADA_DEPS_OUT
     $mod_program->{"dep_files"} = $program->{"dep_files"};
+    $mod_program->{"root_file"} = $program->{"root_file"};
     # Offset method modifier sequence numbers so modifier C names never collide across nested/sibling modules
     $mod_program->{"mod_seq_offset"} = $program->{"method_modifier_count"} + ($program->{"mod_seq_offset"} + 0);
 
@@ -6301,6 +6302,15 @@ func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
     # actually skip recompilation.
     my str $file_path = find_module_file($program, $mod_name);
     if (length($file_path) > 0) {
+        # A use cycle back to the file being compiled: its declarations are
+        # already in this compile. Loading it again as a module defined its
+        # `has` accessors twice ("function 'A_name' already defined") and
+        # could even link a stale sibling .o of the file being rebuilt.
+        my str $root_file = "" . $program->{"root_file"};
+        if (length($root_file) > 0 && core::realpath($file_path) eq $root_file) {
+            ast_mark_module_loaded($program, $mod_name);
+            return;
+        }
         # Record every resolved module source path (once each — the
         # already-loaded check above guarantees that) for STRADA_DEPS_OUT,
         # which the wrapper's --module-cache warmer consumes.
@@ -8605,6 +8615,15 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
     # written out at the end of the parse when STRADA_DEPS_OUT is set
     # (consumed by the strada wrapper's --module-cache warmer).
     $program->{"dep_files"} = [];
+
+    # The file being compiled, so a `use` that leads back to it (a use
+    # cycle: this file uses B, B uses this file) is not loaded a second
+    # time as a module — see resolve_use_module.
+    my str $root_name = "" . $parser->{"filename"};
+    if (length($root_name) > 0) {
+        my str $root_real = core::realpath($root_name);
+        if (length($root_real) > 0) { $program->{"root_file"} = $root_real; }
+    }
 
     # Add command-line library paths first (high priority - before any use statements)
     my int $path_count = size($lib_paths);

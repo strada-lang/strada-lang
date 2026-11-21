@@ -3013,3 +3013,22 @@ each offset, so a `//g` loop was O(subject length) per match.
   exported. Old compilers ignore `xdecl:` lines.
 - Test: the last two cases of `t/separate_compile_test/run.sh` (the call
   site generated with and without `Decls.o` must be identical).
+
+## A use cycle back to the compile input (2026-11-21)
+
+- **The bug.** `strada -M A.strada` where A has `has ro str $name` and
+  `use B;`, and B has `use A;`: resolving B's `use A;` found `A.strada` on
+  the lib path and loaded it as a module, although it is the file being
+  compiled. Ordinary functions then existed twice under different registry
+  keys (`A_label` from the input, `A::label` from the module copy) and went
+  unnoticed; `has` accessors keep their C name in both, so Semantic reported
+  "function 'A_name' already defined". With a sibling `A.o` present the
+  cycle could instead import that stale object of the file being rebuilt.
+- **The fix.** `parse_program` stores `core::realpath` of the parser's file
+  name in `$program->{"root_file"}` (the driver passes the original path as
+  `--source-name`); `load_module` copies it to each module's program;
+  `resolve_use_module` compares it with the resolved module path and, on a
+  match, marks the module loaded and returns. Unset when the name is not a
+  real file (eval, REPL).
+- Test: the use-cycle cases at the end of `t/separate_compile_test/run.sh`.
+

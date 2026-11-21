@@ -1253,6 +1253,11 @@ as `func:`). A consumer that resolves `use Mod;` from `Mod.o` re-creates them
 (`merge_imported_extern_decls`, objects only), so its calls compile as they
 do when `Mod` is read from source (2026-11-21; `t/separate_compile_test`).
 
+A `use` that resolves to the file being compiled (a use cycle back to the
+input: A uses B, B uses A, compiling A) is skipped: `parse_program` records
+the input's real path as `root_file` and `resolve_use_module` marks such a
+module loaded instead of loading it again (2026-11-21).
+
 ### Exception Handling
 
 ```strada

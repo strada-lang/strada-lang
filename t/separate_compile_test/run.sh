@@ -639,6 +639,24 @@ fi
 t24_out=""
 "$STRADA" -O0 -M Provider.strada >>"$WORK/t24.log" 2>&1 && "$STRADA" -O0 main.strada -o m >>"$WORK/t24.log" 2>&1 && t24_out="$(./m 2>/dev/null)"
 [ "$t24_out" = "2" ] && pass "extern-declared function links and runs across module artifacts" || fail "extern-declared function links and runs across module artifacts" "out='${t24_out}'"
+# --- a use cycle back to the file being compiled ---------------------------
+# A has a `has` attribute and uses B; B uses A. Compiling A resolved B's
+# `use A;` by loading A a second time as a module, which defined A's
+# generated accessor twice ("function 'A_name' already defined").
+D25="$WORK/cycle"
+mkdir -p "$D25"
+cd "$D25"
+printf 'package A;\nuse B;\nhas ro str $name (required);\nfunc label(scalar $self) str { return B::wrap($self->name()); }\n' > A.strada
+printf 'package B;\nuse A;\nfunc wrap(str $s) str { return "[" . $s . "]"; }\nfunc make(str $s) scalar { return A::new("name", $s); }\n' > B.strada
+printf 'use lib ".";\nuse A;\nuse B;\nfunc main() int { say(B::make("x")->label()); return 0; }\n' > main.strada
+if "$STRADA" -O0 -M A.strada >"$WORK/t25.log" 2>&1 && "$STRADA" -O0 -M B.strada >>"$WORK/t25.log" 2>&1; then
+    pass "-M of a module with has attributes inside a use cycle"
+else
+    fail "-M of a module with has attributes inside a use cycle" "$(head -3 "$WORK/t25.log")"
+fi
+t25_out=""
+"$STRADA" -O0 main.strada -o m >>"$WORK/t25.log" 2>&1 && t25_out="$(./m 2>/dev/null)"
+[ "$t25_out" = "[x]" ] && pass "use-cycle modules link and run from their artifacts" || fail "use-cycle modules link and run from their artifacts" "out='${t25_out}'"
 cd "$WORK/proj"
 
 # --- Summary --------------------------------------------------------------
