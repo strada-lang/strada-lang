@@ -4338,6 +4338,16 @@ func c_ref_is_cell(str $cref) int {
     return 0;
 }
 
+# C statements that release a variable's current value and store NEWV (a C
+# local or call-free expression) in it: `strada_decref(REF); REF = NEWV; `
+# for a plain variable, one atomic swap with a deferred release for a cell.
+func c_release_then_store(str $cref, str $newv) str {
+    if (c_ref_is_cell($cref) == 1) {
+        return "strada_slot_release(strada_cell_swap((StradaValue **)&" . $cref . ", " . $newv . ")); ";
+    }
+    return "strada_decref(" . $cref . "); " . $cref . " = " . $newv . "; ";
+}
+
 # The C text gen_expression() emits for NODE, without emitting it.
 func gen_expression_text(scalar $cg, scalar $node) str {
     my scalar $saved_sb = $cg->{"output_sb"};

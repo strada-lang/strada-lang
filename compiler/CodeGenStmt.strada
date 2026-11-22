@@ -387,11 +387,11 @@ func emit_foreach_init_zero(scalar $cg, str $var_name, str $fe_our_key, int $fe_
             emit($cg, "if (!strada_scalar_is_tied(" . $var_name . ")) { strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef(); }\n");
         }
     } elsif ($fe_is_int == 1) {
-        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_int(0);\n");
+        emit($cg, c_release_then_store($var_name, "strada_new_int(0)") . "\n");
     } elsif ($fe_is_num == 1) {
-        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_num(0.0);\n");
+        emit($cg, c_release_then_store($var_name, "strada_new_num(0.0)") . "\n");
     } else {
-        emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = strada_new_undef();\n");
+        emit($cg, c_release_then_store($var_name, "strada_new_undef()") . "\n");
     }
 }
 
@@ -1550,7 +1550,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "strada_global_set_cstr(" . c_str_lit($ds_our_key) . ", __ds_slurp);\n");
                 } else {
                     my str $ds_slurp_ref = scalar_var_c_ref($cg, $var->{"name"}, $name);
-                    emit($cg, "strada_decref(" . $ds_slurp_ref . "); " . $ds_slurp_ref . " = __ds_slurp;\n");
+                    emit($cg, c_release_then_store($ds_slurp_ref, "__ds_slurp") . "\n");
                 }
                 dedent($cg);
                 emit_indent($cg);
@@ -1600,20 +1600,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "} else {\n");
                     indent($cg);
                     emit_indent($cg);
-                    emit($cg, "strada_decref(" . $ds_ref . ");\n");
-                    emit_indent($cg);
-                    emit($cg, $ds_ref . " = " . $ds_el_expr . ";\n");
+                    emit($cg, "{ StradaValue *__ds_nv = " . $ds_el_expr . "; " . c_release_then_store($ds_ref, "__ds_nv") . "}\n");
                     dedent($cg);
                     emit_indent($cg);
                     emit($cg, "}\n");
                 } else {
                     # Decref old value if already assigned
                     emit_indent($cg);
-                    emit($cg, "strada_decref(" . $ds_ref . ");\n");
-
-                    # Get element from array (strada_array_get_safe returns owned reference)
-                    emit_indent($cg);
-                    emit($cg, $ds_ref . " = " . $ds_el_expr . ";\n");
+                    # strada_array_get_safe returns an owned reference
+                    emit($cg, "{ StradaValue *__ds_nv = " . $ds_el_expr . "; " . c_release_then_store($ds_ref, "__ds_nv") . "}\n");
                 }
             }
             $cg->{"known_types"}->{$name} = "";
@@ -2737,7 +2732,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     if ($fe_sp == 1) { emit($cg, "strada_cleanup_push(__fe_v); "); }
                     emit($cg, "strada_tied_scalar_store(" . $var_name . ", __fe_v); ");
                     if ($fe_sp == 1) { emit($cg, "strada_cleanup_pop(); "); }
-                    emit($cg, "strada_decref(__fe_v); } else { strada_decref(" . $var_name . "); " . $var_name . " = __fe_v; } }\n");
+                    emit($cg, "strada_decref(__fe_v); } else { " . c_release_then_store($var_name, "__fe_v") . "} }\n");
                 }
             } else {
                 emit($cg, "{ StradaValue *__fe_v = ");
@@ -2751,7 +2746,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if (length($fe_our_key) > 0) {
                     emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", __fe_v); }\n");
                 } else {
-                    emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = __fe_v; }\n");
+                    emit($cg, c_release_then_store($var_name, "__fe_v") . "}\n");
                 }
             }
         }
@@ -2861,7 +2856,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if (length($fe_our_key) > 0) {
                 emit($cg, "strada_global_set_cstr(" . c_str_lit($fe_our_key) . ", __fe_save_" . $foreach_id . ");\n");
             } else {
-                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = __fe_save_" . $foreach_id . ";\n");
+                emit($cg, c_release_then_store($var_name, "__fe_save_" . $foreach_id) . "\n");
             }
         }
 

@@ -443,7 +443,7 @@ func gen_chomp_chop(scalar $cg, scalar $arg0, str $rt_fn) void {
             else { emit($cg, "strada_decref(__ch_cur); "); }
             emit($cg, "strada_tied_scalar_store(" . $vname . ", __ch_new); ");
             if ($sp == 1) { emit($cg, "strada_cleanup_pop(); "); }
-            emit($cg, "} else { strada_decref(" . $vname . "); " . $vname . " = __ch_new; strada_incref(" . $vname . "); } __ch_new; })");
+            emit($cg, "} else { strada_incref(__ch_new); " . c_release_then_store($vname, "__ch_new") . "} __ch_new; })");
         } else {
             emit($cg, "({ StradaValue *__ch_ssv = strada_to_str_sv(" . $vname . "); ");
             if ($sp == 1) { emit($cg, "strada_cleanup_push(__ch_ssv); "); }
@@ -451,7 +451,7 @@ func gen_chomp_chop(scalar $cg, scalar $arg0, str $rt_fn) void {
             emit($cg, "if (" . $vname . " && !STRADA_IS_TAGGED_INT(" . $vname . ") && " . $vname . "->type == STRADA_STR && !STRADA_STR_IS_UTF8(" . $vname . ")) STRADA_CLEAR_UTF8_FLAG(__ch_new); ");
             if ($sp == 1) { emit($cg, "strada_cleanup_pop_decref(__ch_ssv); "); }
             else { emit($cg, "strada_decref(__ch_ssv); "); }
-            emit($cg, "strada_decref(" . $vname . "); " . $vname . " = __ch_new; strada_incref(" . $vname . "); __ch_new; })");
+            emit($cg, "strada_incref(__ch_new); " . c_release_then_store($vname, "__ch_new") . "__ch_new; })");
         }
         return;
     }

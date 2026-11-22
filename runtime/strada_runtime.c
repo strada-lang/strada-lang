@@ -1808,6 +1808,10 @@ static pthread_mutex_t ol_reg_mu = PTHREAD_MUTEX_INITIALIZER;
 static OlThread *ol_threads = NULL;
 static uint32_t ol_next_id = 1;
 static uint64_t ol_epoch = 1;
+/* Threads now running Strada code (registered and not in a blocking call).
+ * While this is 1 nobody else can hold a borrowed pointer, so releases are
+ * not delayed: destructors run at the usual moment. */
+static int ol_running = 0;
 static OlRetired *ol_orphans = NULL;      /* retired by threads that have ended */
 static size_t ol_orphans_len = 0, ol_orphans_cap = 0;
 
@@ -1827,6 +1831,7 @@ static OlThread *ol_me_slow(void) {
     __atomic_store_n(&t->blocked, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&t->epoch, __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST), __ATOMIC_SEQ_CST);
     __atomic_store_n(&t->active, 1, __ATOMIC_SEQ_CST);
+    __atomic_add_fetch(&ol_running, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&ol_reg_mu);
     ol_self = t;
     return t;
@@ -1890,7 +1895,9 @@ static inline void ol_unlock(uint32_t *w) {
             break;
         }
     }
-    if (me->depth == 0 && __builtin_expect(me->ret_len >= me->ret_next_try, 0)) ol_reclaim(me, 1);
+    if (me->depth == 0 && me->ret_len > 0
+        && (me->ret_len >= me->ret_next_try || __atomic_load_n(&ol_running, __ATOMIC_SEQ_CST) <= 1))
+        ol_reclaim(me, 1);
 }
 static void ol_lock_ext(uint32_t *w) { ol_lock(w); }
 static void ol_unlock_ext(uint32_t *w) { ol_unlock(w); }
@@ -1938,6 +1945,11 @@ static inline void ol_hold(StradaValue *sv) {
 /* Queue a release for after every other thread's next safe point. */
 static void ol_retire(StradaValue *sv) {
     OlThread *me = ol_me();
+    if (me->depth == 0 && !me->reclaiming && me->ret_len == 0
+        && __atomic_load_n(&ol_running, __ATOMIC_SEQ_CST) <= 1) {
+        strada_decref(sv);      /* the only running thread: nothing to wait for */
+        return;
+    }
     if (me->ret_len == me->ret_cap) {
         size_t nc = me->ret_cap ? me->ret_cap * 2 : 256;
         OlRetired *nr = realloc(me->ret, nc * sizeof(OlRetired));
@@ -2017,11 +2029,13 @@ static void ol_blocking_enter(void) {
     if (me->depth > 0) return;      /* blocking with a lock held: not a safe point */
     ol_reclaim(me, 0);
     __atomic_store_n(&me->blocked, 1, __ATOMIC_SEQ_CST);
+    __atomic_sub_fetch(&ol_running, 1, __ATOMIC_SEQ_CST);
 }
 static void ol_blocking_leave(void) {
     OlThread *me = ol_me();
     if (me->block_depth <= 0 || --me->block_depth > 0) return;
     if (!__atomic_load_n(&me->blocked, __ATOMIC_RELAXED)) return;
+    __atomic_add_fetch(&ol_running, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&me->blocked, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&me->epoch, __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST), __ATOMIC_SEQ_CST);
 }
@@ -2050,6 +2064,7 @@ static void ol_thread_end(void) {
         me->ret_len = 0;
     }
     __atomic_store_n(&me->active, 0, __ATOMIC_SEQ_CST);
+    __atomic_sub_fetch(&ol_running, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&ol_reg_mu);
     ol_self = NULL;
 }
@@ -2059,6 +2074,7 @@ void strada_slot_release_slow(StradaValue *old) {
     if (__builtin_expect(strada_objlock_on, 0)) { if (!STRADA_SV_IS_NONRC(old)) ol_retire(old); return; }
     strada_decref(old);
 }
+void strada_slot_hold_slow(StradaValue *sv) { ol_hold(sv); }
 StradaValue *strada_cell_swap_slow(StradaValue **slot, StradaValue *nv) {
     return __atomic_exchange_n(slot, nv, __ATOMIC_SEQ_CST);
 }

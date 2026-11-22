@@ -985,12 +985,20 @@ static inline void strada_slot_release(StradaValue *old) {
     if (__builtin_expect(strada_objlock_on, 0)) strada_slot_release_slow(old);
     else strada_decref(old);
 }
+void strada_slot_hold_slow(StradaValue *sv);
 /* Store into such a place; returns the value that was there. */
 static inline StradaValue *strada_cell_swap(StradaValue **slot, StradaValue *nv) {
     if (__builtin_expect(strada_objlock_on, 0)) return strada_cell_swap_slow(slot, nv);
     StradaValue *cs_old = *slot;
     *slot = nv;
     return cs_old;
+}
+/* Store, and hand the caller the reference the place held (other threads
+ * that read the old pointer keep a valid value until their next safe point). */
+static inline StradaValue *strada_slot_take(StradaValue **slot, StradaValue *nv) {
+    StradaValue *st_old = strada_cell_swap(slot, nv);
+    if (__builtin_expect(strada_objlock_on, 0)) strada_slot_hold_slow(st_old);
+    return st_old;
 }
 void strada_ol_array_append_all(StradaArray *dst, StradaArray *src);
 int strada_array_exists_idx(StradaArray *av, int64_t idx);  /* release a value removed from a shared place */  /* lock on and fp is a pipe/terminal/socket: a read may block */

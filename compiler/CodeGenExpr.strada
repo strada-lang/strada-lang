@@ -340,6 +340,9 @@ func emit_subst_target_begin_mode(scalar $cg, scalar $tgt, int $own_var) void {
             return;
         }
         my str $vref = scalar_var_c_ref($cg, $tgt->{"name"}, $vc);
+        # a variable shared with closures is never modified in place: work
+        # on a reference of our own and swap the result in
+        if (c_ref_is_cell($vref) == 1) { $own_var = 1; }
         if ($cg->{"uses_tie"} == 1) {
             if ($own_var == 1) {
                 emit($cg, "({ int __subst_tied = strada_scalar_is_tied(" . $vref . "); StradaValue *__subst_tv = __subst_tied ? strada_tied_scalar_fetch(" . $vref . ") : ({ StradaValue *__st_in = " . $vref . "; strada_incref(__st_in); __st_in; }); int64_t __subst_cnt = 0; ");
@@ -426,23 +429,26 @@ func emit_subst_target_end_mode(scalar $cg, scalar $tgt, int $own_var) void {
             return;
         }
         my str $vref = scalar_var_c_ref($cg, $tgt->{"name"}, $vc);
+        # a variable shared with closures is never modified in place: work
+        # on a reference of our own and swap the result in
+        if (c_ref_is_cell($vref) == 1) { $own_var = 1; }
         if ($cg->{"uses_tie"} == 1) {
             if ($sp == 1) {
                 if ($own_var == 1) {
-                    emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) { strada_cleanup_push(__subst_tv); strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_cleanup_pop(); } strada_decref(__subst_tv); } else { if (__subst_cnt > 0) { StradaValue *__st_old = " . $vref . "; " . $vref . " = __subst_tv; strada_decref(__st_old); } else { strada_decref(__subst_tv); } } strada_new_int(__subst_cnt); })");
+                    emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) { strada_cleanup_push(__subst_tv); strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_cleanup_pop(); } strada_decref(__subst_tv); } else { if (__subst_cnt > 0) { " . c_release_then_store($vref, "__subst_tv") . "} else { strada_decref(__subst_tv); } } strada_new_int(__subst_cnt); })");
                 } else {
                     emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) { strada_cleanup_push(__subst_tv); strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_cleanup_pop(); } strada_decref(__subst_tv); } else { " . $vref . " = __subst_tv; } strada_new_int(__subst_cnt); })");
                 }
             } else {
                 if ($own_var == 1) {
-                    emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_decref(__subst_tv); } else { if (__subst_cnt > 0) { StradaValue *__st_old = " . $vref . "; " . $vref . " = __subst_tv; strada_decref(__st_old); } else { strada_decref(__subst_tv); } } strada_new_int(__subst_cnt); })");
+                    emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_decref(__subst_tv); } else { if (__subst_cnt > 0) { " . c_release_then_store($vref, "__subst_tv") . "} else { strada_decref(__subst_tv); } } strada_new_int(__subst_cnt); })");
                 } else {
                     emit($cg, "if (__subst_tied) { if (__subst_cnt > 0) strada_tied_scalar_store(" . $vref . ", __subst_tv); strada_decref(__subst_tv); } else { " . $vref . " = __subst_tv; } strada_new_int(__subst_cnt); })");
                 }
             }
         } else {
             if ($own_var == 1) {
-                emit($cg, "if (__subst_cnt > 0) { StradaValue *__st_old = " . $vref . "; " . $vref . " = __subst_tv; strada_decref(__st_old); } else { strada_decref(__subst_tv); } strada_new_int(__subst_cnt); })");
+                emit($cg, "if (__subst_cnt > 0) { " . c_release_then_store($vref, "__subst_tv") . "} else { strada_decref(__subst_tv); } strada_new_int(__subst_cnt); })");
             } else {
                 emit($cg, $vref . " = __subst_tv; strada_new_int(__subst_cnt); })");
             }
@@ -3181,6 +3187,10 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     else { emit($cg, "strada_decref(__ca_res); "); }
                     emit($cg, "__ca_res = __ca_tr; } else { ");
                 }
+                my str $ca_tref = gen_expression_text($cg, $target);
+                if (c_ref_is_cell($ca_tref) == 1) {
+                    emit($cg, c_release_then_store($ca_tref, "__ca_res"));
+                } else {
                 emit($cg, "StradaValue *__ca_cur = ");
                 gen_expression($cg, $target);
                 my int $hpd47 = 0;
@@ -3188,6 +3198,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 gen_expression($cg, $target);
                 emit($cg, " = __ca_res; " . cleanup_pd_str($hpd47, "__ca_cur") . "");
+                }
                 if ($ca_bit_tie == 1) { emit($cg, "} "); }
                 emit($cg, "__ca_res; })");
                 if ($tied_ca_wrap == 1) { emit($cg, "))"); }
@@ -6431,7 +6442,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my str $iv_ref = scalar_var_c_ref($cg, $operand->{"name"}, $iv_name);
                 my str $delta = "1";
                 if ($op eq "--") { $delta = "-1"; }
-                if ($is_prefix == 1) {
+                if (c_ref_is_cell($iv_ref) == 1) {
+                    # shared with closures: one atomic swap; strada_slot_take
+                    # keeps the displaced value alive for other readers
+                    my str $pi_new = "strada_new_int_il((int64_t)((uint64_t)strada_to_int(" . $iv_ref . ") + (uint64_t)(" . $delta . ")))";
+                    if ($is_prefix == 1) {
+                        emit($cg, "({ StradaValue *__pi_new = " . $pi_new . "; strada_incref(__pi_new); strada_slot_release(strada_cell_swap((StradaValue **)&" . $iv_ref . ", __pi_new)); __pi_new; })");
+                    } else {
+                        emit($cg, "strada_slot_take((StradaValue **)&" . $iv_ref . ", " . $pi_new . ")");
+                    }
+                } elsif ($is_prefix == 1) {
                     emit($cg, "({ StradaValue *__pi_old = " . $iv_ref . "; StradaValue *__pi_new = strada_new_int_il((int64_t)((uint64_t)strada_to_int(__pi_old) + (uint64_t)(" . $delta . "))); strada_decref(__pi_old); " . $iv_ref . " = __pi_new; strada_incref(__pi_new); __pi_new; })");
                 } else {
                     emit($cg, "({ StradaValue *__pi_old = " . $iv_ref . "; " . $iv_ref . " = strada_new_int_il((int64_t)((uint64_t)strada_to_int(__pi_old) + (uint64_t)(" . $delta . "))); __pi_old; })");
