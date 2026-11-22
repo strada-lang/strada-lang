@@ -1470,6 +1470,56 @@ runs Strada code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
   Use ThreadSanitizer: build the runtime and the generated C with
   `-fsanitize=thread` and run under `setarch -R`.
 
+**Per-object locking (branch `object-locks`, 2026-11-22, IN PROGRESS; `STRADA_GIL=0` selects it)**:
+goal: with the global lock off, threads run in parallel and memory stays safe.
+The global lock remains the default. `strada-interp` forces the global lock
+(`strada_gil_force_on`): the VM's own containers are not done. Design
+(`ol_*` in strada_runtime.c, section "Per-object locking"):
+- `strada_objlock_on` is set when the program becomes multi-threaded with the
+  global lock off. Every fast path tests it first; single-threaded cost is
+  -0.6%..+0.8% instructions (array_hash +0.78%).
+- Every array and hash has a 32-bit recursive lock word (`ol_lock`, in former
+  struct padding). Runtime functions that touch container internals hold it:
+  `OL_GUARD(av)` at the top of the function (scope guard, released on every
+  return path). Inline hash probes in the header fall through to the locked
+  out-of-line functions when `strada_objlock_on`.
+- Element and variable reads return pointers without a reference, so a value
+  removed from a shared place is released only after every other thread has
+  passed a safe point (loop check, blocking call, thread exit: the points
+  where the global lock changes hands). `strada_decref` under a container lock
+  queues the release automatically (`ol_retire`); this also keeps DESTROY out
+  of locked regions. Values handed out by pop/shift/delete/splice get an
+  extra queued reference (`ol_hold`). With one running thread nothing is
+  delayed.
+- A throw releases the locks the dying runtime function holds
+  (`ol_release_all`). Never call user code or take a second container lock
+  under a lock: snapshot first (`OL_VIEW(v, av)` for iteration,
+  `OL_PRIVATE(sv)` to work on a private copy: sort, reverse, splice source).
+- No pointer into a container's storage outside its lock:
+  `strada_hv_fetch_lvalue_sv_key` returns NULL (callers take their
+  fetch/store path), hash and array compound assignment read/combine/store.
+- Variables shared with closures (cells): generated code reads them as
+  `STRADA_CELLV(...)` and stores with one atomic swap,
+  `strada_slot_release(strada_cell_swap(&cell, new))` (`emit_slot_store`,
+  `c_release_then_store`, `c_ref_is_cell` in CodeGen.strada). Never emit a
+  direct assignment to a cell: compiling generated C with
+  `-DSTRADA_CELL_CHECK` makes one a C error (scan all tests after touching
+  assignment codegen).
+- Strings: an in-place append never moves the buffer under a reader; when it
+  must grow, a new value is built and swapped in.
+- Tools: `t/thread_stress/run.sh [asan|tsan|both]` (sanitizer builds, lock
+  off). Also run the stress programs as plain `-O2` builds in a loop: ASan's
+  timing hid a crash that the native build hit every time.
+- Not done: about 70 runtime functions still unguarded (regex results,
+  channels, clone, dump, tied containers), runtime caches (method cache,
+  pools), `$$r = v` through a reference to an element (rewrites the value in
+  place under readers), tie, the VM. TSan still reports plain-vs-atomic reads
+  (refcounts, cell loads).
+- Measured, 2 cores: arithmetic `async::map` 1.19 s with the global lock,
+  0.65 s with object locks. A hash/array-heavy map does not speed up (0.86 s
+  vs 1.04 s); it did not scale on `main` with no lock at all either (0.82 s
+  with 1 worker, 0.84 s with 2), so something other than locking limits it.
+
 ### Variadic Functions and Spread
 
 ```strada
