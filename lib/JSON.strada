@@ -694,7 +694,10 @@ static StradaValue* jp_value(JsonP *p, int depth) {
                 if (*slot) strada_decref(*slot);
                 *slot = val ? val : strada_new_undef();
             } else {
-                strada_decref(val ? val : strada_new_undef());
+                /* no direct slot (object locks on): ordinary store */
+                StradaValue *jv = val ? val : strada_new_undef();
+                strada_hv_store_sv(hv_sv, ksv, jv);
+                strada_decref(jv);
             }
             strada_decref(ksv);
             free(key);

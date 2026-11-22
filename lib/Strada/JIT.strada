@@ -378,6 +378,20 @@ private func detect_runtime() str {
         return "./runtime";
     }
 
+    # The header must be the one the compiler in use was built with: a
+    # development tree (STRADA_HOME, or runtime/ next to stradac) before any
+    # installed copy.
+    my str $jit_home = core::getenv("STRADA_HOME") // "";
+    if ($jit_home ne "" && core::is_file($jit_home . "/runtime/strada_runtime_tcc.h") == 1) {
+        return $jit_home . "/runtime";
+    }
+    if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
+        my str $dev_runtime = core::dirname($g_stradac_path) . "/runtime";
+        if (core::is_file($dev_runtime . "/strada_runtime_tcc.h") == 1) {
+            return $dev_runtime;
+        }
+    }
+
     if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
         my str $stradac_dir = core::dirname($g_stradac_path);
         my str $relative_runtime = $stradac_dir . "/../lib/strada/runtime";

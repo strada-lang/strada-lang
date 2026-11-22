@@ -2010,16 +2010,15 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "); if (__ta_chk) { strada_tied_array_clear(__ta_chk); } else { StradaValue *__old_a = ");
                         gen_expression($cg, $target);
                         emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = strada_new_array(); strada_decref(__old_a); } ");
+                        emit_slot_store($cg, $target, "strada_new_array()", "__old_a");
+                        emit($cg, "} ");
                         gen_expression($cg, $target);
                         emit($cg, "; })");
                     } else {
                         emit($cg, "({ StradaValue *__old_a = ");
                         gen_expression($cg, $target);
                         emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = strada_new_array(); strada_decref(__old_a); ");
+                        emit_slot_store($cg, $target, "strada_new_array()", "__old_a");
                         gen_expression($cg, $target);
                         emit($cg, "; })");
                     }
@@ -2131,8 +2130,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     emit($cg, "({ StradaValue *__old_h = ");
                     gen_expression($cg, $target);
                     emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = strada_new_hash(); strada_decref(__old_h); ");
+                    emit_slot_store($cg, $target, "strada_new_hash()", "__old_h");
                     gen_expression($cg, $target);
                     emit($cg, "; })");
                     if ($cg->{"uses_tie"} == 1) {
@@ -2282,8 +2280,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "StradaValue *__old = ");
                         gen_expression($cg, $target);
                         emit($cg, "; ");
-                        gen_expression($cg, $target);
-                        emit($cg, " = STRADA_MAKE_TAGGED_INT(__sc_n); strada_decref(__old); ");
+                        emit_slot_store($cg, $target, "STRADA_MAKE_TAGGED_INT(__sc_n)", "__old");
                     } else {
                         gen_expression($cg, $target);
                         emit($cg, " = STRADA_MAKE_TAGGED_INT(__sc_n); ");
@@ -2499,8 +2496,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_num(__ncv_d); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_num(__ncv_d)", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             # Int-declared targets coerce non-int RHS values to canonical
@@ -2516,8 +2512,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = __iw_n; strada_decref(__old); ");
+                emit_slot_store($cg, $target, "__iw_n", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
@@ -2526,8 +2521,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = STRADA_MAKE_TAGGED_INT(" . c_int64_lit("" . $rhs->{"char_code"}) . "); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "STRADA_MAKE_TAGGED_INT(" . c_int64_lit("" . $rhs->{"char_code"}) . ")", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
@@ -2541,8 +2535,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_int(__icv_i); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_int(__icv_i)", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
@@ -2557,8 +2550,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = __rhs_v; strada_decref(__old); __rhs_v; })");
+                emit_slot_store($cg, $target, "__rhs_v", "__old");
+                emit($cg, "__rhs_v; })");
             } else {
                 gen_expression($cg, $target);
                 emit($cg, " = ");
@@ -3238,8 +3231,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_int_il((int64_t)((uint64_t)__ca_l + (uint64_t)__ca_r)); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_int_il((int64_t)((uint64_t)__ca_l + (uint64_t)__ca_r))", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
@@ -3270,8 +3262,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
                     else { emit($cg, "strada_decref(__ca_rv); "); }
                 }
-                gen_expression($cg, $target);
-                emit($cg, " = __ca_nv; strada_decref(__old); ");
+                emit_slot_store($cg, $target, "__ca_nv", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3320,8 +3311,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_int_il((int64_t)((uint64_t)__ca_l - (uint64_t)__ca_r)); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_int_il((int64_t)((uint64_t)__ca_l - (uint64_t)__ca_r))", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
@@ -3352,8 +3342,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
                     else { emit($cg, "strada_decref(__ca_rv); "); }
                 }
-                gen_expression($cg, $target);
-                emit($cg, " = __ca_nv; strada_decref(__old); ");
+                emit_slot_store($cg, $target, "__ca_nv", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3403,8 +3392,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_int_il((int64_t)((uint64_t)__ca_l * (uint64_t)__ca_r)); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_int_il((int64_t)((uint64_t)__ca_l * (uint64_t)__ca_r))", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
@@ -3435,8 +3423,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if (cleanup_push_useful($cg) == 1) { emit($cg, "strada_cleanup_pop_decref(__ca_rv); "); }
                     else { emit($cg, "strada_decref(__ca_rv); "); }
                 }
-                gen_expression($cg, $target);
-                emit($cg, " = __ca_nv; strada_decref(__old); ");
+                emit_slot_store($cg, $target, "__ca_nv", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3482,8 +3469,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; if (__di_b == 0.0) strada_throw(\"Illegal division by zero\"); StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = strada_new_int(strada_num_to_i64_sat(__di_a / __di_b)); strada_decref(__old); ");
+                emit_slot_store($cg, $target, "strada_new_int(strada_num_to_i64_sat(__di_a / __di_b))", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
@@ -3494,8 +3480,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "; StradaValue *__dv_res = strada_safe_div(__dv_a, __dv_b); StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
-                gen_expression($cg, $target);
-                emit($cg, " = __dv_res; strada_decref(__old); ");
+                emit_slot_store($cg, $target, "__dv_res", "__old");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
             } else {
@@ -3571,10 +3556,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     gen_expression($cg, $target);
                     emit($cg, "; ");
                 }
-                gen_expression($cg, $target);
-                emit($cg, " = __lca_rhs; ");
                 if ($cg->{"cleanup_enabled"} == 1) {
-                    emit($cg, "strada_decref(__old); ");
+                    emit_slot_store($cg, $target, "__lca_rhs", "__old");
+                } else {
+                    gen_expression($cg, $target);
+                    emit($cg, " = __lca_rhs; ");
                 }
                 emit($cg, "} ");
                 gen_expression($cg, $target);
@@ -3665,10 +3651,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     gen_expression($cg, $target);
                     emit($cg, "; ");
                 }
-                gen_expression($cg, $target);
-                emit($cg, " = __lb_res; ");
                 if ($cg->{"cleanup_enabled"} == 1) {
-                    emit($cg, "strada_decref(__old); ");
+                    emit_slot_store($cg, $target, "__lb_res", "__old");
+                } else {
+                    gen_expression($cg, $target);
+                    emit($cg, " = __lb_res; ");
                 }
                 gen_expression($cg, $target);
                 emit($cg, "; })");
@@ -9653,8 +9640,7 @@ func emit_container_replace(scalar $cg, scalar $target, str $k) void {
     emit($cg, "StradaValue *__old_" . $k . " = ");
     gen_expression($cg, $target);
     emit($cg, "; ");
-    gen_expression($cg, $target);
-    emit($cg, " = __new_" . $k . "; strada_decref(__old_" . $k . "); ");
+    emit_slot_store($cg, $target, "__new_" . $k, "__old_" . $k);
     if ($cg->{"uses_tie"} == 1) { emit($cg, "} "); }
     emit($cg, "__new_" . $k . "; })");
 }

@@ -1358,6 +1358,8 @@ void strada_set_utf8_flag(StradaValue *sv, int on) {
 /* Stamp SVf_UTF8 on every STRADA_STR element of an array — used by
  * codegen after operations that build new strings from a UTF-8
  * source (split, etc.) so the result pieces stay char-oriented. */
+static void ol_lock_ext(uint32_t *w);     /* object lock, for code above its definition */
+static void ol_unlock_ext(uint32_t *w);
 void strada_array_set_utf8_flag(StradaValue *arr_sv, int on) {
     if (!arr_sv || STRADA_IS_TAGGED_INT(arr_sv)) return;
     StradaArray *av = NULL;
@@ -1368,6 +1370,7 @@ void strada_array_set_utf8_flag(StradaValue *arr_sv, int on) {
         av = arr_sv->value.rv->value.av;
     }
     if (!av) return;
+    if (strada_objlock_on) ol_lock_ext(&av->ol_lock);
     for (size_t i = 0; i < av->size; i++) {
         StradaValue *e = av->elements[av->head + i];
         if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_STR) {
@@ -1375,6 +1378,7 @@ void strada_array_set_utf8_flag(StradaValue *arr_sv, int on) {
             else    STRADA_CLEAR_UTF8_FLAG(e);
         }
     }
+    if (strada_objlock_on) ol_unlock_ext(&av->ol_lock);
 }
 
 static const char* strada_sv_raw_bytes_flags(StradaValue *sv, char *tb, size_t tbsz, size_t *len_out, char **owned_out, int *is_utf8_out);
@@ -1888,6 +1892,8 @@ static inline void ol_unlock(uint32_t *w) {
     }
     if (me->depth == 0 && __builtin_expect(me->ret_len >= me->ret_next_try, 0)) ol_reclaim(me, 1);
 }
+static void ol_lock_ext(uint32_t *w) { ol_lock(w); }
+static void ol_unlock_ext(uint32_t *w) { ol_unlock(w); }
 /* A throw unwinds past the runtime function that holds a lock. */
 static void ol_release_all(void) {
     OlThread *me = ol_self;
@@ -1919,6 +1925,16 @@ static inline void ol_guard_unlock(uint32_t **wp) {
 #define OL_LOCK(obj)   do { if (__builtin_expect(strada_objlock_on, 0) && (obj)) ol_lock(&(obj)->ol_lock); } while (0)
 #define OL_UNLOCK(obj) do { if (__builtin_expect(strada_objlock_on, 0) && (obj)) ol_unlock(&(obj)->ol_lock); } while (0)
 
+static void ol_retire(StradaValue *sv);
+/* A value is leaving a container slot with its reference handed to the
+ * caller (pop, shift, delete): another thread may still hold the pointer it
+ * read from that slot, so keep the value alive until the next safe points. */
+static inline void ol_hold(StradaValue *sv) {
+    if (__builtin_expect(strada_objlock_on, 0) && sv && !STRADA_IS_TAGGED_INT(sv) && !STRADA_SV_IS_NONRC(sv)) {
+        strada_incref(sv);
+        ol_retire(sv);
+    }
+}
 /* Queue a release for after every other thread's next safe point. */
 static void ol_retire(StradaValue *sv) {
     OlThread *me = ol_me();
@@ -2038,10 +2054,13 @@ static void ol_thread_end(void) {
     ol_self = NULL;
 }
 /* Release a value just removed from a place other threads can read. */
-void strada_slot_release(StradaValue *old) {
+void strada_slot_release_slow(StradaValue *old) {
     if (!old || STRADA_IS_TAGGED_INT(old)) return;
     if (__builtin_expect(strada_objlock_on, 0)) { if (!STRADA_SV_IS_NONRC(old)) ol_retire(old); return; }
     strada_decref(old);
+}
+StradaValue *strada_cell_swap_slow(StradaValue **slot, StradaValue *nv) {
+    return __atomic_exchange_n(slot, nv, __ATOMIC_SEQ_CST);
 }
 /* Program exit: release what can be released. */
 static void ol_drain_at_exit(void) { if (strada_objlock_on && ol_self) ol_safepoint(); }
@@ -3057,6 +3076,7 @@ static void strada_weaken_hv_entry_len(StradaHash *hv, const char *key, uint32_t
 void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx) {
     StradaArray *av = strada_deref_array(arr_sv);
     if (!av) return;
+    OL_GUARD(av);
     if (idx < 0) idx += (int64_t)av->size;
     if (idx < 0 || (size_t)idx >= av->size) return;
     strada_weaken(&av->elements[av->head + (size_t)idx]);
@@ -4399,6 +4419,32 @@ static StradaValue **ol_array_snapshot(StradaArray *av, size_t *n) {
     *n = sz;
     return buf;
 }
+/* A stable view of an array's elements for code that hands them to user
+ * code, to I/O or to another container. Without object locks it points
+ * straight at the array; with them it is a snapshot holding references.
+ *     OL_VIEW(v, av);  for (i < v.n) use v.el[i]  (NULL = hole) */
+typedef struct OlView { StradaValue **el; size_t n; StradaValue **owned; } OlView;
+static inline OlView ol_view_open(StradaArray *av) {
+    OlView v = { NULL, 0, NULL };
+    if (!av) return v;
+    if (__builtin_expect(strada_objlock_on, 0)) {
+        v.owned = ol_array_snapshot(av, &v.n);
+        v.el = v.owned;
+        if (!v.owned) v.n = 0;
+    } else {
+        v.el = av->elements + av->head;
+        v.n = av->size;
+    }
+    return v;
+}
+static inline void ol_view_close(OlView *v) {
+    if (__builtin_expect(v->owned != NULL, 0)) {
+        for (size_t i = 0; i < v->n; i++) if (v->owned[i]) strada_decref(v->owned[i]);
+        free(v->owned);
+    }
+}
+#define OL_VIEW(name, av) OlView name __attribute__((cleanup(ol_view_close))) = ol_view_open(av)
+
 void strada_ol_array_append_all(StradaArray *dst, StradaArray *src) {
     size_t n;
     StradaValue **buf = ol_array_snapshot(src, &n);
@@ -4484,6 +4530,7 @@ StradaValue* strada_array_pop(StradaArray *av) {
     av->size--;
     StradaValue *val = av->elements[av->head + av->size];
     av->elements[av->head + av->size] = NULL;
+    ol_hold(val);
     return val ? val : strada_new_undef();
 }
 
@@ -4492,6 +4539,7 @@ StradaValue* strada_array_shift(StradaArray *av) {
     if (!av || av->size == 0) return strada_new_undef();
     StradaValue *result = av->elements[av->head];
     av->elements[av->head] = NULL;
+    ol_hold(result);
     av->head++;
     av->size--;
     return result ? result : strada_new_undef();  /* O(1) — no memmove */
@@ -4591,6 +4639,7 @@ StradaValue* strada_array_delete_idx(StradaArray *av, int64_t idx) {
     if (idx < 0 || (size_t)idx >= av->size) return strada_undef_static();
     StradaValue *old = av->elements[av->head + idx];
     av->elements[av->head + idx] = NULL;
+    ol_hold(old);
     /* If we deleted the last live element, shrink — and trim any
      * tombstones now sitting at the tail so size reflects the real
      * extent of the array. */
@@ -4632,6 +4681,7 @@ static StradaValue* strada_hash_delete_take_len(StradaHash *hv, const char *key,
             StradaHashEntry *e = &hv->entries[idx];
             if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
                 StradaValue *val = e->value;
+                ol_hold(val);
                 hv->hash_index[pos] = HASH_TOMBSTONE;
                 ss_decref(e->key);
                 e->key = NULL; e->value = NULL;
@@ -4679,6 +4729,7 @@ StradaValue* strada_array_get_safe(StradaValue *arr, int64_t idx) {
     }
 
     StradaArray *av = actual->value.av;
+    OL_GUARD(av);
     int64_t real_idx = idx;
     if (real_idx < 0) real_idx += (int64_t)av->size;
     if (real_idx < 0 || real_idx >= (int64_t)av->size) {
@@ -5021,7 +5072,30 @@ static void strada_tied_hash_collect_kv(StradaValue *msv, StradaHash *dst_hv, St
 
 /* Prepare a fresh owned STRADA_ARRAY copy of a sort input (array, arrayref,
  * hash, hashref, or 1-element scalar) for custom-block `sort { ... } EXPR`. */
+/* Object locks: a private shallow copy of the array or hash SV refers to (NULL
+ * without object locks, for tied containers and for anything else). Functions
+ * that read a whole container and may call user code (comparators, "" and
+ * <=> overloads) work on the copy instead of holding the container's lock.
+ *     OL_PRIVATE(arr);   -- rebinds `arr` to the copy for the rest of the function */
+StradaValue* strada_hash_from_ref(StradaValue *ref);
+static StradaValue *ol_private_copy(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return NULL;
+    StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
+    if (!msv || (msv->meta && msv->meta->is_tied)) return NULL;
+    if (msv->type == STRADA_ARRAY) return strada_array_copy(msv);
+    if (msv->type == STRADA_HASH) return strada_hash_from_ref(msv);
+    return NULL;
+}
+static inline void ol_private_done(StradaValue **p) {
+    if (__builtin_expect(*p != NULL, 0)) strada_decref(*p);
+}
+#define OL_PRIVATE(sv) \
+    StradaValue *OL_CAT(ol_p_, __LINE__) __attribute__((cleanup(ol_private_done))) = \
+        (__builtin_expect(strada_objlock_on, 0) ? ol_private_copy(sv) : NULL); \
+    if (__builtin_expect(OL_CAT(ol_p_, __LINE__) != NULL, 0)) (sv) = OL_CAT(ol_p_, __LINE__)
+
 StradaValue* strada_sort_copy_input(StradaValue *arr) {
+    OL_PRIVATE(arr);
     StradaValue *out = strada_new_array();
     if (!arr) return out;
     if (STRADA_IS_TAGGED_INT(arr)) {
@@ -5073,6 +5147,7 @@ StradaValue* strada_sort_copy_input(StradaValue *arr) {
 
 /* Sort array alphabetically (by string comparison) */
 StradaValue* strada_sort(StradaValue *arr) {
+    OL_PRIVATE(arr);
     /* `sort $scalar` in Perl is a list-context call on a 1-element list:
      * returns the scalar wrapped in a 1-elem array. Tagged ints fall here
      * too (a single int is "a 1-element list of one int"). */
@@ -5154,6 +5229,7 @@ StradaValue* strada_sort(StradaValue *arr) {
 
 /* Sort array numerically */
 StradaValue* strada_nsort(StradaValue *arr) {
+    OL_PRIVATE(arr);
     if (!arr || STRADA_IS_TAGGED_INT(arr)) {
         return strada_new_array();
     }
@@ -6148,6 +6224,7 @@ static StradaValue* autoviv_container_cstr(StradaValue *sv, const char *key, int
     }
     StradaHash *hv = strada_deref_hash(msv);
     if (!hv) return strada_undef_static();
+    OL_GUARD(hv);
 
     unsigned int hash = strada_hash_string(key);
     uint32_t key_len = (uint32_t)strlen(key);
@@ -6405,6 +6482,7 @@ static StradaValue* autoviv_container_sv(StradaValue *sv, StradaValue *key_sv, i
     }
     StradaHash *hv = strada_deref_hash(msv);
     if (!hv) return strada_undef_static();
+    OL_GUARD(hv);
     if (__builtin_expect(msv->meta && msv->meta->is_hash_locked, 0)) {
         if (!strada_hv_check_lock_sv(msv, key_sv)) return strada_undef_static();
     }
@@ -6430,6 +6508,9 @@ StradaValue* strada_autoviv_hash_sv(StradaValue *sv, StradaValue *key_sv) { retu
 StradaValue* strada_autoviv_array_sv(StradaValue *sv, StradaValue *key_sv) { return autoviv_container_sv(sv, key_sv, 1); }
 
 StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv, int autoviv) {
+    /* Object locks: a pointer into a hash's storage is not valid outside its
+     * lock. NULL sends the caller to its fetch/store path (as for tie). */
+    if (__builtin_expect(strada_objlock_on, 0)) return NULL;
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (!msv) return NULL;
     if (msv->meta && msv->meta->is_tied) return NULL;   /* tied -> caller uses fetch/store */
@@ -6767,6 +6848,11 @@ static void strada_hv_compound_len(StradaValue *sv, const char *key, size_t key_
         hv_compound_fallback(msv, key, key_sz, rhs, op);
         return;
     }
+    if (__builtin_expect(strada_objlock_on, 0)) {
+        /* read, combine, store: no pointer into the hash outside its lock */
+        hv_compound_fallback(msv, key, key_sz, rhs, op);
+        return;
+    }
     StradaHash *hv = strada_deref_hash(msv);
     if (!hv) return;  /* non-hash: matches the old fetch(undef)/store no-op */
     uint32_t key_len = (uint32_t)key_sz;
@@ -6857,6 +6943,17 @@ void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, i
         strada_cleanup_push(nv);
         strada_array_set(av, idx, nv);  /* increfs nv */
         strada_cleanup_pop_decref(nv);
+        return;
+    }
+    if (__builtin_expect(strada_objlock_on, 0)) {
+        /* no pointer into the element array outside its lock: read, combine, store */
+        StradaValue *cur = strada_array_get_owned(av, idx);
+        strada_cleanup_push(cur);
+        StradaValue *nv = hv_compound_noninplace(cur, rhs, op);
+        strada_cleanup_push(nv);
+        strada_array_set(av, idx, nv);
+        strada_cleanup_pop_decref(nv);
+        strada_cleanup_pop_decref(cur);
         return;
     }
     StradaValue **slot = &av->elements[av->head + (size_t)idx];
@@ -7221,6 +7318,7 @@ static StradaValue* strada_hash_delete_take_with_hash_len(StradaHash *hv, const 
             StradaHashEntry *e = &hv->entries[idx];
             if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
                 StradaValue *old = e->value;
+                ol_hold(old);
                 hv->hash_index[pos] = HASH_TOMBSTONE;
                 ss_decref(e->key);
                 e->key = NULL; e->value = NULL;
@@ -7483,15 +7581,16 @@ void strada_av_push_list_sv(StradaValue *sv, StradaValue *list, int at_front) {
     }
     StradaArray *av = strada_deref_array(sv);
     if (!av || !src) return;
+    OL_VIEW(sv_view, src);
     if (at_front) {
-        for (size_t i = src->size; i > 0; i--) {
-            StradaValue *el = src->elements[src->head + i - 1];
+        for (size_t i = sv_view.n; i > 0; i--) {
+            StradaValue *el = sv_view.el[i - 1];
             strada_array_unshift(av, el ? el : strada_undef_static());
         }
     } else {
-        size_t n = src->size;
+        size_t n = sv_view.n;
         for (size_t i = 0; i < n; i++) {
-            StradaValue *el = src->elements[src->head + i];
+            StradaValue *el = sv_view.el[i];
             strada_array_push(av, el ? el : strada_undef_static());
         }
     }
@@ -8238,13 +8337,39 @@ static StradaValue* strada_str_append_in_place(StradaValue *a, const char *str_b
 #ifdef __linux__
     size_t usable = malloc_usable_size(ss);
     if (usable >= sizeof(StradaString) + new_len + 1) {
-        if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
+        /* Object locks: another thread may be reading this string. The buffer
+         * does not move, so a reader stays in bounds with the old or the new
+         * length; the new terminator is written first so that a C-string
+         * scan always ends inside the buffer. */
+        ss->data[new_len] = '\0';
+        if (len_b > 0) memmove(ss->data + len_a, str_b, len_b);
         ss->data[new_len] = '\0';
         ss->len = (uint32_t)new_len;
         strada_str_set_len_flags(a, new_len, sflags);
         return a;
     }
 #endif
+    if (__builtin_expect(strada_objlock_on, 0)) {
+        /* Growing would move the buffer under a reader. Build a new value
+         * with room to grow instead; the caller puts it in place of `a` and
+         * releases `a` with strada_slot_release(). */
+        size_t cap = len_a < 64 ? 128 : len_a * 2;
+        if (cap < new_len + 1) cap = new_len + 1;
+        StradaString *ns = malloc(sizeof(StradaString) + cap);
+        if (!ns) { fprintf(stderr, "strada: out of memory\n"); abort(); }
+        ns->refcount = 1;
+        ns->hash = 0;
+        ns->len = (uint32_t)new_len;
+        if (len_a > 0) memcpy(ns->data, ss->data, len_a);
+        if (len_b > 0) memcpy(ns->data + len_a, str_b, len_b);
+        ns->data[new_len] = '\0';
+        StradaValue *nv = strada_value_alloc();
+        nv->type = STRADA_STR;
+        nv->refcount = 1;
+        nv->value.pv = ns->data;
+        strada_str_set_len_flags(nv, new_len, sflags);
+        return nv;
+    }
     int aliases_a = is_self_alias ||
                     (str_b >= (const char *)ss->data &&
                      str_b <= (const char *)ss->data + len_a);
@@ -8262,6 +8387,15 @@ static StradaValue* strada_str_append_in_place(StradaValue *a, const char *str_b
     return a;
 }
 
+/* In-place append gave back a new value (object locks, buffer had to grow):
+ * put it in the slot and release the old one for later. */
+static inline StradaValue *ol_slot_put(StradaValue **slot, StradaValue *a, StradaValue *r) {
+    if (r != a) {
+        if (slot) strada_slot_release(__atomic_exchange_n(slot, r, __ATOMIC_SEQ_CST));
+        else strada_slot_release(a);
+    }
+    return r;
+}
 static inline int strada_sv_is_exclusive_str(StradaValue *a) {
     return a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1
         && a->value.pv && !a->meta && SS_FROM_PV(a->value.pv)->refcount == 1;
@@ -8372,9 +8506,10 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
         int b_utf8 = sv_b
                          ? (STRADA_STR_IS_UTF8(sv_b) != 0)
                          : (b && !STRADA_IS_TAGGED_INT(b) && b->type == STRADA_STR && STRADA_STR_IS_UTF8(b));
-        strada_str_append_in_place(a, str_b, len_b, (a == b), b_flags, b_utf8);
+        StradaValue *apr = strada_str_append_in_place(a, str_b, len_b, (a == b), b_flags, b_utf8);
         if (sv_b) strada_decref(sv_b);
-        return a;
+        if (apr != a) strada_slot_release(a);
+        return apr;
     }
 
     /* Slow path: create new string, decref a (reuse sv_b so hooks are not re-invoked) */
@@ -8383,7 +8518,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
     if (sv_b) strada_cleanup_push(sv_b);
     StradaValue *result = strada_concat_sv(a, sv_b ? sv_b : b);
     if (sv_b) strada_cleanup_pop_decref(sv_b);
-    if (a) strada_cleanup_pop_decref(a);
+    if (a) { strada_cleanup_pop(); strada_slot_release(a); }
     else if (!sv_b) strada_cleanup_restore(a_cmark);
     return result;
 }
@@ -8399,7 +8534,7 @@ StradaValue* strada_concat_slot_inplace(StradaValue **slot, StradaValue *b) {
         int b_utf8 = 0;
         const char *str_b = strada_extract_hookfree_bytes(b, buf_b, sizeof(buf_b), &len_b, &b_utf8);
         uint16_t b_flags = STRADA_STR_IS_ASCII(a) ? strada_detect_ascii_flag(str_b, len_b) : 0;
-        return strada_str_append_in_place(a, str_b, len_b, (a == b), b_flags, b_utf8);
+        return ol_slot_put(slot, a, strada_str_append_in_place(a, str_b, len_b, (a == b), b_flags, b_utf8));
     }
     int cmark = strada_cleanup_mark();
     if (a && !STRADA_IS_TAGGED_INT(a)) {
@@ -8409,9 +8544,12 @@ StradaValue* strada_concat_slot_inplace(StradaValue **slot, StradaValue *b) {
     StradaValue *res = strada_concat_sv(a, b);
     strada_cleanup_drain_to(cmark);
     if (slot) {
-        StradaValue *old = *slot;
-        *slot = res;
-        strada_decref(old);
+        if (__builtin_expect(strada_objlock_on, 0)) strada_slot_release(__atomic_exchange_n(slot, res, __ATOMIC_SEQ_CST));
+        else {
+            StradaValue *old = *slot;
+            *slot = res;
+            strada_decref(old);
+        }
     }
     return res;
 }
@@ -8423,14 +8561,16 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
         uint16_t b_flags = strada_detect_ascii_flag(str_b, len_b);
         int b_is_ascii = (b_flags & STRADA_SVf_ASCII) != 0;
         int b_utf8 = (!b_is_ascii && utf8_is_valid(str_b, len_b));
-        return strada_str_append_in_place(a, str_b, len_b, 0, b_flags, b_utf8);
+        StradaValue *apr = strada_str_append_in_place(a, str_b, len_b, 0, b_flags, b_utf8);
+        if (apr != a) strada_slot_release(a);
+        return apr;
     }
     /* Slow path: create new string without temporary literal SV. Push `a`
      * so an exception in a stringify overload does not leak it. */
     int cmark = strada_cleanup_mark();
     if (a) strada_cleanup_push(a);
     StradaValue *result = strada_concat_sv_cstr(a, str_b, len_b);
-    if (a) strada_cleanup_pop_decref(a);
+    if (a) { strada_cleanup_pop(); strada_slot_release(a); }
     else strada_cleanup_restore(cmark);
     return result;
 }
@@ -8442,7 +8582,7 @@ StradaValue* strada_concat_slot_inplace_cstr(StradaValue **slot, const char *str
         uint16_t b_flags = strada_detect_ascii_flag(str_b, len_b);
         int b_is_ascii = (b_flags & STRADA_SVf_ASCII) != 0;
         int b_utf8 = (!b_is_ascii && utf8_is_valid(str_b, len_b));
-        return strada_str_append_in_place(a, str_b, len_b, 0, b_flags, b_utf8);
+        return ol_slot_put(slot, a, strada_str_append_in_place(a, str_b, len_b, 0, b_flags, b_utf8));
     }
     int cmark = strada_cleanup_mark();
     if (a && !STRADA_IS_TAGGED_INT(a)) {
@@ -8452,9 +8592,12 @@ StradaValue* strada_concat_slot_inplace_cstr(StradaValue **slot, const char *str
     StradaValue *res = strada_concat_sv_cstr(a, str_b, len_b);
     strada_cleanup_drain_to(cmark);
     if (slot) {
-        StradaValue *old = *slot;
-        *slot = res;
-        strada_decref(old);
+        if (__builtin_expect(strada_objlock_on, 0)) strada_slot_release(__atomic_exchange_n(slot, res, __ATOMIC_SEQ_CST));
+        else {
+            StradaValue *old = *slot;
+            *slot = res;
+            strada_decref(old);
+        }
     }
     return res;
 }
@@ -9456,9 +9599,10 @@ void strada_print(StradaValue *sv) {
                 if (e) strada_cleanup_pop_decref(e);
             }
         } else if (av) {
-            for (size_t i = 0; i < av->size; i++) {
+            OL_VIEW(pv, av);
+            for (size_t i = 0; i < pv.n; i++) {
                 if (i > 0 && sep_len > 0) { fwrite(sep, 1, sep_len, stdout); }
-                strada_print_elem(av->elements[av->head + i]);
+                strada_print_elem(pv.el[i]);
             }
         }
         if (ofs_guard) strada_cleanup_pop_decref(ofs_guard);
@@ -9632,9 +9776,10 @@ void strada_print_fh(StradaValue *sv, StradaValue *fh) {
                 if (e) strada_cleanup_pop_decref(e);
             }
         } else if (av) {
-            for (size_t i = 0; i < av->size; i++) {
+            OL_VIEW(pv, av);
+            for (size_t i = 0; i < pv.n; i++) {
                 if (i > 0 && ofs_guard) strada_print_fh_scalar(ofs_guard, fh);
-                strada_print_fh_scalar(av->elements[av->head + i], fh);
+                strada_print_fh_scalar(pv.el[i], fh);
             }
         }
         if (ofs_guard) strada_cleanup_pop_decref(ofs_guard);
@@ -23653,6 +23798,7 @@ StradaValue* strada_reverse_scalar(StradaValue *sv) {
 
 StradaValue* strada_reverse_sv(StradaValue *sv) {
     if (!sv) return strada_new_str("");
+    OL_PRIVATE(sv);
     if (STRADA_IS_TAGGED_INT(sv)) {
         /* Reverse string representation of the integer */
         char buf[32];
@@ -28391,10 +28537,11 @@ StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value,
             strada_cleanup_pop_decref(fresh);
             return strada_finish_pinned_target(target);
         }
-        StradaHash *old = target->value.hv;
-        target->value.hv = fresh->value.hv;
+        /* Object locks: another thread may be inside the old hash (its lock
+         * lives in the StradaHash): release it after the next safe points. */
+        StradaHash *old = __atomic_exchange_n(&target->value.hv, fresh->value.hv, __ATOMIC_SEQ_CST);
         fresh->value.hv = old;
-        strada_decref(fresh);          /* frees the old contents */
+        strada_slot_release(fresh);    /* frees the old contents */
         return strada_finish_pinned_target(target);
     }
     if (sigil == '@' && target->type == STRADA_ARRAY) {
@@ -28420,10 +28567,9 @@ StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value,
             strada_cleanup_pop_decref(fresh);
             return strada_finish_pinned_target(target);
         }
-        StradaArray *old = target->value.av;
-        target->value.av = fresh->value.av;
+        StradaArray *old = __atomic_exchange_n(&target->value.av, fresh->value.av, __ATOMIC_SEQ_CST);
         fresh->value.av = old;
-        strada_decref(fresh);
+        strada_slot_release(fresh);
         return strada_finish_pinned_target(target);
     }
     strada_cleanup_pop_decref(target);
@@ -28781,6 +28927,7 @@ StradaValue* strada_hash_from_ref(StradaValue *ref) {
 
     /* Create new hash and copy entries */
     StradaValue *result = strada_new_hash();
+    OL_GUARD(src);   /* result is private: its own lock is never contended */
 
     for (size_t i = 0; i < src->next_slot; i++) {
         if (src->entries[i].key) {
@@ -28902,6 +29049,7 @@ StradaValue* strada_hash_to_flat_array(StradaValue *hash) {
     if (!msv || msv->type != STRADA_HASH) return result;
     StradaHash *hv = msv->value.hv;
     if (!hv) return result;
+    OL_GUARD(hv);
     for (size_t i = 0; i < hv->next_slot; i++) {
         if (hv->entries[i].key) {
             strada_array_push_take(result->value.av, strada_new_str_share_key(&hv->entries[i]));
@@ -37196,11 +37344,18 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
             strada_cleanup_push(repl_tmp);
             StradaArray *src_av = repl_inner->value.av;
             if (src_av) {
+                OL_GUARD(src_av);
                 for (size_t i = 0; i < src_av->size; i++) {
                     StradaValue *el = src_av->elements[src_av->head + i];
                     strada_array_push(repl_tmp->value.av, el ? el : strada_undef_static());
                 }
             }
+            repl_av = repl_tmp->value.av;
+            repl_count = (int64_t)repl_av->size;
+        } else if (__builtin_expect(strada_objlock_on, 0)) {
+            /* never hold two container locks: work from a private copy */
+            repl_tmp = strada_array_copy(repl_inner);
+            strada_cleanup_push(repl_tmp);
             repl_av = repl_tmp->value.av;
             repl_count = (int64_t)repl_av->size;
         } else {
@@ -37218,6 +37373,7 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
         if (need_target_pin) strada_cleanup_pop_decref(target_sv);
         return strada_new_array();
     }
+    OL_GUARD(av);
     int64_t size = (int64_t)av->size;
 
     /* Handle negative offset */

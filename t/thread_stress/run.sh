@@ -38,7 +38,7 @@ run_mode() {
         gcc $san -w $DEFS -Iruntime -c "$D/$n.c" -o "$D/${n}_$m.o" 2>> "$D/$n.cc.log" \
           && gcc $san -rdynamic -o "$D/${n}_$m" "$D/${n}_$m.o" "$rt" vendor/pcre2/libpcre2-8.a -ldl -lm -lpthread 2>> "$D/$n.cc.log" \
           || { echo "FAIL $m $n (cc: $D/$n.cc.log)"; fail=$((fail+1)); continue; }
-        STRADA_GIL=${STRESS_GIL:-0} ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 TSAN_OPTIONS=halt_on_error=0:report_signal_unsafe=0 \
+        STRADA_GIL=${STRESS_GIL:-0} ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 TSAN_OPTIONS=halt_on_error=0:report_signal_unsafe=0:suppressions=$HERE/tsan.supp \
             timeout ${STRESS_TIMEOUT:-600} $pre "$D/${n}_$m" > "$D/${n}_$m.out" 2> "$D/${n}_$m.err"
         local rc=$?
         local reps=$(grep -cE "^(WARNING: ThreadSanitizer|==[0-9]+==ERROR)" "$D/${n}_$m.err")

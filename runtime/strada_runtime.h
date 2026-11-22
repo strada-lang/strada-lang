@@ -970,7 +970,28 @@ void strada_gil_acquire(void);
 int strada_gil_enabled(void);
 int strada_gil_file_blocks(FILE *fp);
 extern int strada_gil_force_on;
-void strada_slot_release(StradaValue *old);
+/* A variable shared with closures, read through its cell. Never assign to it
+ * directly (see strada_cell_swap); -DSTRADA_CELL_CHECK enforces that. */
+#ifdef STRADA_CELL_CHECK
+#define STRADA_CELLV(p) (*(StradaValue *const *)(p))
+#else
+#define STRADA_CELLV(p) (*(p))
+#endif
+void strada_slot_release_slow(StradaValue *old);
+StradaValue *strada_cell_swap_slow(StradaValue **slot, StradaValue *nv);
+/* Release a value just removed from a place other threads can read (a
+ * variable shared with closures, a container slot). */
+static inline void strada_slot_release(StradaValue *old) {
+    if (__builtin_expect(strada_objlock_on, 0)) strada_slot_release_slow(old);
+    else strada_decref(old);
+}
+/* Store into such a place; returns the value that was there. */
+static inline StradaValue *strada_cell_swap(StradaValue **slot, StradaValue *nv) {
+    if (__builtin_expect(strada_objlock_on, 0)) return strada_cell_swap_slow(slot, nv);
+    StradaValue *cs_old = *slot;
+    *slot = nv;
+    return cs_old;
+}
 void strada_ol_array_append_all(StradaArray *dst, StradaArray *src);
 int strada_array_exists_idx(StradaArray *av, int64_t idx);  /* release a value removed from a shared place */  /* lock on and fp is a pipe/terminal/socket: a read may block */
 void strada_gil_yield_slow(void);

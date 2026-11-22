@@ -1,0 +1,4 @@
+# A plain load of an aligned pointer (a captured variable's cell) racing with
+# the atomic swap that stores it: either value is a valid pointer, kept alive
+# by the deferred release.
+race:strada_cell_swap_slow

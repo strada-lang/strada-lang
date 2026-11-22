@@ -4328,25 +4328,61 @@ func is_unboxed_var_node(scalar $cg, scalar $expr) int {
 # the bare name compiles fine in ordinary functions and then fails inside a
 # closure with "'name' undeclared", because the closure never captured it:
 # that was the bug for /$var/ patterns, $var++ on int variables and chomp($var).
+# Is this C variable reference a cell shared with closures (and so with other
+# threads)? scalar_var_c_ref() spells those STRADA_CELLV(...). Generated code
+# must never assign to one directly: use emit_slot_store, or
+# strada_cell_swap + strada_slot_release. Compiling generated C with
+# -DSTRADA_CELL_CHECK makes a direct assignment a C error.
+func c_ref_is_cell(str $cref) int {
+    if (index($cref, "STRADA_CELLV(") == 0) { return 1; }
+    return 0;
+}
+
+# The C text gen_expression() emits for NODE, without emitting it.
+func gen_expression_text(scalar $cg, scalar $node) str {
+    my scalar $saved_sb = $cg->{"output_sb"};
+    $cg->{"output_sb"} = sb_new();
+    gen_expression($cg, $node);
+    my str $text = sb_to_string($cg->{"output_sb"});
+    $cg->{"output_sb"} = $saved_sb;
+    return $text;
+}
+
+# Store NEW_EXPR into the variable TARGET, whose previous value the caller
+# already holds in the C local OLD_NAME, and release that previous value.
+# A variable shared with closures lives in a cell that other threads can read
+# and write: there the store is one atomic swap and the displaced value is
+# released with strada_slot_release() (at once without object locks, after
+# every thread's next safe point with them). Two threads storing at once
+# would otherwise both release the same old value.
+func emit_slot_store(scalar $cg, scalar $target, str $new_expr, str $old_name) void {
+    my str $tref = gen_expression_text($cg, $target);
+    if (c_ref_is_cell($tref) == 1) {
+        emit($cg, "(void)" . $old_name . "; strada_slot_release(strada_cell_swap((StradaValue **)&" . $tref . ", " . $new_expr . ")); ");
+        return;
+    }
+    emit($cg, $tref . " = " . $new_expr . "; strada_decref(" . $old_name . "); ");
+}
+
 func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
     # `_` is the global $_ (STRADA_TOPIC): never a closure capture (a
     # captured copy hid the caller's $_ and writes to it)
     if ($c_var_name eq "_") { return "_"; }
     if (!$cg->{"in_anon_func"}) {
         if (($cg->{"active_boxed_vars"}->{$c_var_name} + 0) == 1) {
-            return "(*__cell_" . $c_var_name . ")";
+            return "STRADA_CELLV(__cell_" . $c_var_name . ")";
         }
         return $c_var_name;
     }
     if (str_contains_name($cg->{"anon_param_str"}, $var_name)) {
         if (($cg->{"active_boxed_vars"}->{$c_var_name} + 0) == 1) {
-            return "(*__cell_" . $c_var_name . ")";
+            return "STRADA_CELLV(__cell_" . $c_var_name . ")";
         }
         return $c_var_name;
     }
     if (str_contains_name($cg->{"anon_local_str"}, $var_name)) {
         if (($cg->{"active_boxed_vars"}->{$c_var_name} + 0) == 1) {
-            return "(*__cell_" . $c_var_name . ")";
+            return "STRADA_CELLV(__cell_" . $c_var_name . ")";
         }
         return $c_var_name;
     }
@@ -4361,7 +4397,7 @@ func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
         $idx = $cg->{"anon_capture_count"};
         $cg->{"anon_capture_count"} = $idx + 1;
     }
-    return "(*__captures[" . $idx . "])";
+    return "STRADA_CELLV(__captures[" . $idx . "])";
 }
 
 # 1 when a regex pattern or s/// replacement mentions a variable: an unescaped

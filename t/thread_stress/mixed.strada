@@ -1,0 +1,74 @@
+# Wider mix: objects and method calls, package globals, sort/join/reverse over
+# a list another thread rewrites, nested containers, hash iteration, string
+# operations on a shared string, pop/shift/delete handing values out.
+package Counter;
+has rw int $n = 0;
+has rw str $label = "c";
+func bump(scalar $self) int { $self->set_n($self->n() + 1); return $self->n(); }
+func describe(scalar $self) str { return $self->label() . "=" . $self->n(); }
+
+package main;
+
+our @glist = ();
+our %gmap = ();
+our $gstr = "g";
+our int $gcount = 0;
+
+func mk(int $i) str { return "item-" . $i . "-" . ("y" x ($i % 30)); }
+func work(int $n) int { my int $t = 0; for (my int $i = 0; $i < $n; $i++) { $t = ($t + $i) % 7919; } return $t; }
+func slen(str $s, int $n) int { my int $t = work($n); return length($s) + $t - $t; }
+
+func phase(str $name, scalar $writer, scalar $reader, int $rounds) void {
+    my int $stop = 0;
+    my @ws = ();
+    for (my int $w = 0; $w < 2; $w++) {
+        push(@ws, thread::create(func () { my int $i = 0; while ($stop == 0) { $i++; $writer->($i); } }));
+    }
+    for (my int $r = 0; $r < $rounds; $r++) { $reader->($r); }
+    $stop = 1;
+    foreach my $t (@ws) { thread::join($t); }
+    say("ok " . $name);
+}
+
+func main() int {
+    my int $rounds = int(core::getenv("ROUNDS") // "200");
+    my int $acc = 0;
+
+    my $obj = Counter::new("label", "shared");
+    phase("object-fields", func (int $i) { $obj->bump(); $obj->set_label("L" . ($i % 7)); $obj->{"extra" . ($i % 20)} = mk($i); delete($obj->{"extra" . (($i + 10) % 20)}); },
+          func (int $r) { $acc += slen($obj->describe(), 300); $acc += scalar(keys(%{$obj})); }, $rounds);
+
+    my @objs = map { Counter::new("label", "o" . $_) } (1..20);
+    phase("object-list", func (int $i) { $objs[$i % 20] = Counter::new("label", "n" . $i); $objs[($i + 7) % 20]->bump(); },
+          func (int $r) { foreach my $o (@objs) { $acc += slen($o->describe(), 100); } }, $rounds);
+
+    push(@glist, map { mk($_) } (1..40));
+    phase("globals", func (int $i) { $glist[$i % 40] = mk($i); $gmap{"k" . ($i % 60)} = mk($i); delete($gmap{"k" . (($i + 30) % 60)}); $gstr = mk($i); $gcount++; if ($i % 50 == 0) { @glist = map { mk($_ + $i) } (1..40); } },
+          func (int $r) { $acc += slen($gstr, 300) + $gcount; foreach my $e (@glist) { $acc += slen($e, 50); } foreach my $k (keys(%gmap)) { $acc += slen($gmap{$k} // "", 50); } }, $rounds);
+
+    my @l = map { mk($_) } (1..60);
+    phase("sort-join-reverse", func (int $i) { $l[$i % 60] = mk($i); if ($i % 3 == 0) { push(@l, mk($i)); } if ($i % 3 == 1) { shift(@l); } },
+          func (int $r) { my @s = sort { work(20) + ($a cmp $b) } @l; $acc += scalar(@s); my @n = sort(@l); $acc += length(join(",", @l)) + scalar(@n);
+                          my @v = reverse(@l); $acc += scalar(@v); my @c = @l; $acc += scalar(@c); my @sl = @l[0, 1, 2]; $acc += slen($sl[0] // "", 100); }, $rounds);
+
+    my %tree = ();
+    foreach my $i (1..20) { $tree{"n" . $i} = { "kids" => [ map { mk($_) } (1..5) ], "meta" => { "name" => mk($i) } }; }
+    phase("nested", func (int $i) { my str $k = "n" . ($i % 20 + 1); if ($i % 4 == 0) { $tree{$k} = { "kids" => [ mk($i) ], "meta" => { "name" => mk($i) } }; } else { push(@{$tree{$k}->{"kids"}}, mk($i)); $tree{$k}->{"meta"}->{"name"} = mk($i); if (scalar(@{$tree{$k}->{"kids"}}) > 30) { $tree{$k}->{"kids"} = []; } } },
+          func (int $r) { foreach my $k (keys(%tree)) { my $n = $tree{$k}; next unless defined($n); $acc += slen($n->{"meta"}->{"name"} // "", 100); foreach my $kid (@{$n->{"kids"}}) { $acc += slen($kid, 20); } }
+                          while (my ($k, $v) = each(%tree)) { $acc += length($k); } my @vs = values(%tree); $acc += scalar(@vs); }, $rounds);
+
+    my $s = "seed";
+    my %sh = ("s" => "seed");
+    my @sa = ("seed");
+    phase("string-ops", func (int $i) { $s .= "ab"; $s = uc($s) if $i % 5 == 0; $s =~ s/AB/ab/ if $i % 7 == 0; chop($s) if $i % 3 == 0; $s = "seed" if length($s) > 3000;
+                                         $sh{"s"} .= "cd"; $sh{"s"} = "seed" if length($sh{"s"}) > 3000; $sa[0] .= "ef"; $sa[0] = "seed" if length($sa[0]) > 3000; },
+          func (int $r) { $acc += slen($s, 500) + slen($sh{"s"}, 500) + slen($sa[0], 500); my str $u = lc($s) . substr($sh{"s"}, 0, 20) . $sa[0]; $acc += length($u); $acc += index($s, "ab"); my @p = split(/b/, $s); $acc += scalar(@p); }, $rounds);
+
+    my @q = map { mk($_) } (1..50);
+    my %qh = map { ("q" . $_) => mk($_) } (1..50);
+    phase("take-out", func (int $i) { my $p = pop(@q); my $f = shift(@q); push(@q, mk($i), mk($i + 1)); my $d = delete($qh{"q" . ($i % 50 + 1)}); $qh{"q" . ($i % 50 + 1)} = mk($i); my @sp = splice(@q, 1, 2); push(@q, @sp); },
+          func (int $r) { foreach my $e (@q) { $acc += slen($e, 100); } foreach my $v (values(%qh)) { $acc += slen($v, 50); } $acc += slen($q[0] // "", 500) + slen($qh{"q7"} // "", 500); }, $rounds);
+
+    say("done");
+    return 0;
+}
