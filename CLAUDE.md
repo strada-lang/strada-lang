@@ -1447,6 +1447,8 @@ runs Strada code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
   only when it is not a regular file (`strada_gil_file_blocks`: pipe,
   terminal, FIFO), and never touches the `FILE*` after the read returns
   (another thread may have closed it; `fclose` waits for the stream lock).
+  The file-kind answer is cached per thread while the stream has buffered
+  input (glibc); one `fstat` per line made threaded file reads 4.5x slower.
   Still holding the lock: writes (a full pipe or socket), `close` of a pipe
   from a destructor, and C library calls in `__C__` blocks (DBI queries, TLS)
   unless they use `strada_gil_release()`/`strada_gil_acquire()`.

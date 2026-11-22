@@ -1928,12 +1928,28 @@ static inline void io_block_leave(StradaValue *h) {
  * costs two mutex operations per read for nothing. */
 int strada_gil_file_blocks(FILE *fp);
 static int fh_may_block(FILE *fp) { return strada_gil_file_blocks(fp); }
+#ifdef __GLIBC__
+/* The last answer, per thread. It is reused only while the stream still has
+ * buffered input: a FILE* that was closed and reopened starts with an empty
+ * buffer, so it is checked again. Without this a line-by-line read of a
+ * regular file paid one fstat() per line (4.5x slower in threaded programs). */
+static __thread FILE *gil_fb_fp = NULL;
+static __thread int gil_fb_val = 0;
+#endif
 int strada_gil_file_blocks(FILE *fp) {
     if (!strada_gil_on || !fp) return 0;
+#ifdef __GLIBC__
+    if (fp == gil_fb_fp && fp->_IO_read_ptr < fp->_IO_read_end) return gil_fb_val;
+#endif
     int fd = fileno(fp);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0) return 0;
-    return !S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode) && !S_ISDIR(st.st_mode);
+    int blk = !S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode) && !S_ISDIR(st.st_mode);
+#ifdef __GLIBC__
+    gil_fb_fp = fp;
+    gil_fb_val = blk;
+#endif
+    return blk;
 }
 
 void strada_decref(StradaValue *sv) {
