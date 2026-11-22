@@ -937,11 +937,16 @@ The default thread pool has 4 workers; call `async::pool_init($n)` before the fi
 
 **Shared data and locking.** Threads, pool tasks (`async func`, `async::spawn`,
 `async::map`) and closures share variables and containers; nothing is copied.
-Any write to data another thread can see needs a mutex held by every thread
-that reads or writes it, even `$shared = "x"`, `push(@shared, ...)` or
-`$h{k}++`. An unlocked concurrent write corrupts memory and usually crashes;
-it does not just lose an update. Read-only sharing needs no lock. Prefer
-channels to pass results, and `async::atomic` for counters.
+Once a program starts a thread, a global interpreter lock lets only one
+thread run Strada code at a time, so unlocked writes to shared data cannot
+corrupt memory. The lock changes hands when a thread waits (sleep, join,
+await, channels, sockets, pipes, `system`/`qx`) and inside loops. Consequences:
+CPU-bound threads take turns rather than run in parallel (use threads for
+waiting, not for computing); a single statement like `$n++` is safe, but a
+read-modify-write over several statements still needs `async::lock` or
+`thread::mutex_lock`. `STRADA_GIL=0` turns the lock off for parallel
+execution; then every access to data another thread may write needs a mutex.
+Prefer channels to pass results, and `async::atomic` for counters.
 
 ---
 

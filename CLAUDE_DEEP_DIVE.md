@@ -3049,10 +3049,11 @@ each offset, so a `//g` loop was O(subject length) per match.
 - Test: the file-level `my` case at the end of
   `t/separate_compile_test/run.sh`.
 
-## Global interpreter lock, stage 1 (2026-11-21)
+## Global interpreter lock (2026-11-21/22)
 
-Opt-in with `STRADA_GIL=1`; off by default, in which case none of this runs
-beyond one load of `strada_gil_on` per blocking call.
+On by default once a program becomes multi-threaded; `STRADA_GIL=0` turns it
+off, in which case none of this runs beyond one load of `strada_gil_on` per
+blocking call. A program that starts no thread never takes it.
 
 - **State** (strada_runtime.c, after the `cc_*` forward declarations):
   `gil_mu` protects `gil_locked`, `gil_waiters` and `gil_switches`;
@@ -3083,3 +3084,13 @@ beyond one load of `strada_gil_on` per blocking call.
   `strada_thread_wrapper` and VM blocking calls reach the runtime's hooks.
   An `async func` call in the VM passes its arguments as copies (the compiled
   backend shares them), which is a separate parity gap.
+- **Measured after stage 5** (2 cores): CPU-bound `async::map` with 2 workers
+  1.25 s with the lock (1.21 s with 1 worker), 0.65 s with `STRADA_GIL=0`;
+  bench_async 0.55 s with the lock, 0.40 s without. Benchmarks that start no
+  thread: instruction counts unchanged.
+- **Why the VM skips a collection.** The root VM collects while holding the
+  lock and waits for every worker to be GC-safe. A worker inside a runtime
+  call that released the lock, at a call site not bracketed with
+  `vm_worker_enter_safe`, is waiting to get the lock back and is not safe:
+  neither side can move. `strada_pclose` from `vm_exec_builtin` was such a
+  site (now bracketed); the skip in `vm_gc_stw_begin` covers any that remain.

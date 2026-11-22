@@ -2115,6 +2115,19 @@ static int vm_gc_stw_begin(VM *vm) {
             }
         }
         if (all_safe) break;
+        if (strada_gil_enabled()) {
+            /* With the interpreter lock on, this thread holds it and a worker
+             * that is not safe is waiting for it (inside a runtime call that
+             * was not bracketed as safe): it cannot become safe until the
+             * lock is handed over, so waiting here would never end. Give the
+             * collection up; it is retried after more allocation. */
+            for (VM *w = vm->workers_head; w; w = w->worker_next)
+                __atomic_store_n(&w->gc_threshold, SIZE_MAX, __ATOMIC_RELEASE);
+            __atomic_store_n(&vm->gc_requested, 0, __ATOMIC_RELEASE);
+            pthread_cond_broadcast(&vm->gc_start_cond);
+            pthread_mutex_unlock(&vm->gc_wait_mutex);
+            return -1;
+        }
         pthread_cond_wait(&vm->gc_parked_cond, &vm->gc_wait_mutex);
     }
     pthread_mutex_unlock(&vm->gc_wait_mutex);
@@ -2122,7 +2135,7 @@ static int vm_gc_stw_begin(VM *vm) {
 }
 
 static void vm_gc_stw_end(VM *vm, int was_stw) {
-    if (!was_stw) return;
+    if (was_stw <= 0) return;
     pthread_mutex_lock(&vm->gc_wait_mutex);
     for (VM *w = vm->workers_head; w; w = w->worker_next) {
         __atomic_store_n(&w->gc_threshold, SIZE_MAX, __ATOMIC_RELEASE);
@@ -2136,6 +2149,12 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
     if (!vm || vm->is_worker_vm || vm->gc_pause > 0 || vm->exec_base > 0) return;
 
     int stw = vm_gc_stw_begin(vm);
+    if (stw < 0) {
+        /* skipped (see vm_gc_stw_begin): try again after 4096 more objects,
+         * and ask for the lock to change hands so the waiting worker runs */
+        if (vm->gc_threshold < vm->gc_count + 4096) vm->gc_threshold = vm->gc_count + 4096;
+        return;
+    }
     pthread_mutex_lock(&vm->gc_mutex);
     pthread_mutex_lock(&vm->globals_mutex);
     vm_gc_mark_all(vm);
@@ -2150,6 +2169,16 @@ static void vm_gc_collect_ex(VM *vm, int propagate_try) {
         vm_run_destroy_batch_ex(vm, fin, fin_count, propagate_try);
         free(fin);
         stw = vm_gc_stw_begin(vm);
+        if (stw < 0) {
+            /* skipped after the finalizers ran: drop the marks and leave the
+             * sweep to the next collection (finalized objects are flagged) */
+            pthread_mutex_lock(&vm->gc_mutex);
+            for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) o->gc_marked = 0;
+            vm_gc_reset_worker_marks(vm);
+            pthread_mutex_unlock(&vm->gc_mutex);
+            if (vm->gc_threshold < vm->gc_count + 4096) vm->gc_threshold = vm->gc_count + 4096;
+            return;
+        }
         pthread_mutex_lock(&vm->gc_mutex);
         pthread_mutex_lock(&vm->globals_mutex);
         for (VMObjHeader *o = vm->gc_objects; o; o = o->gc_next) {
@@ -8063,7 +8092,10 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             if (fp && max_bytes <= 0) {
                 /* default $/: one getline() into a reused per-thread buffer */
                 int _gl_safe = vm_worker_enter_safe(vm);
+                int _gl_blk = strada_gil_file_blocks(fp);   /* pipe/terminal: may wait */
+                if (_gl_blk) strada_gil_release();
                 ssize_t got = getline(&vm->rl_buf, &vm->rl_cap, fp);
+                if (_gl_blk) strada_gil_acquire();
                 vm_worker_leave_safe(vm, _gl_safe);
                 if (got <= 0) {
                     SP_PUSH(VM_UNDEF_VAL);
@@ -8344,6 +8376,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 char cbuf[1024];
                 const char *cmd = vm_to_cstr(args[0], cbuf, 1024);
                 int _prev_safe = vm_worker_enter_safe(vm);
+                strada_gil_release();   /* runs as long as the command does */
                 FILE *fp = popen(cmd, "r");
                 char *out = NULL;
                 size_t total = 0;
@@ -8363,6 +8396,7 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                     out[total] = 0;
                     pclose(fp);
                 }
+                strada_gil_acquire();
                 vm_worker_leave_safe(vm, _prev_safe);
                 if (out) {
                     SP_PUSH(VM_MAKE_STR_N(out, total));
@@ -8378,7 +8412,9 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 char cbuf[1024];
                 const char *cmd = vm_to_cstr(args[0], cbuf, 1024);
                 int _prev_safe = vm_worker_enter_safe(vm);
+                strada_gil_release();
                 int rc = system(cmd);
+                strada_gil_acquire();
                 vm_worker_leave_safe(vm, _prev_safe);
                 SP_PUSH(VM_MAKE_INT(WEXITSTATUS(rc)));
             } else SP_PUSH(VM_MAKE_INT(-1));
@@ -8717,7 +8753,11 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             int tmo = argc >= 2 ? (int)vm_to_int(args[1]) : -1;
             vm->stack_top = sp;
             int prc;
+            int _poll_safe = vm_worker_enter_safe(vm);
+            strada_gil_release();
             do { prc = poll(pfds, (nfds_t)pn, tmo); } while (prc < 0 && errno == EINTR);
+            strada_gil_acquire();
+            vm_worker_leave_safe(vm, _poll_safe);
             for (int i = 0; i < pn; i++) {
                 VMValue ev = pa->items[i];
                 if (VM_IS_PTR(ev) && VM_PTR_TYPE(ev) == VM_OBJ_HASH)
@@ -9808,7 +9848,9 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 useconds_t us = (useconds_t)vm_to_int(args[0]);
                 vm->stack_top = sp;
                 int _ps = vm_worker_enter_safe(vm);
+                strada_gil_release();
                 usleep(us);
+                strada_gil_acquire();
                 vm_worker_leave_safe(vm, _ps);
                 stack = vm->stack; RELOAD();
             }
@@ -9947,14 +9989,25 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                         fh->fp = NULL;
                         SP_PUSH(VM_MAKE_INT(-1));
                     } else {
+                        /* strada_pclose hands the interpreter lock over while
+                         * it waits for the child: count as GC-safe meanwhile */
+                        vm->stack_top = sp;
+                        int _pc_safe = vm_worker_enter_safe(vm);
                         StradaValue *rc = strada_pclose(fh->owner_sv);
+                        vm_worker_leave_safe(vm, _pc_safe);
                         fh->fp = NULL;
                         SP_PUSH(sv_to_vm(rc));
                         if (rc) strada_decref(rc);
                     }
                 } else if (fh->fp) {
-                    int status = pclose((FILE*)fh->fp);
+                    FILE *_pcf = (FILE*)fh->fp;
                     fh->fp = NULL;
+                    vm->stack_top = sp;
+                    int _pc_safe = vm_worker_enter_safe(vm);
+                    strada_gil_release();
+                    int status = pclose(_pcf);
+                    strada_gil_acquire();
+                    vm_worker_leave_safe(vm, _pc_safe);
                     SP_PUSH(VM_MAKE_INT(WEXITSTATUS(status)));
                 } else {
                     SP_PUSH(VM_MAKE_INT(-1));
@@ -10045,7 +10098,9 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 int options = (argc >= 2) ? (int)vm_to_int(args[1]) : 0;
                 vm->stack_top = sp;
                 int _ps = vm_worker_enter_safe(vm);
+                strada_gil_release();
                 pid_t pid = waitpid(target_pid, &status, options);
+                strada_gil_acquire();
                 vm_worker_leave_safe(vm, _ps);
                 stack = vm->stack; RELOAD();
                 if (__builtin_expect(strada_has_pending_signals(), 0)) {
@@ -10377,7 +10432,9 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 ts.tv_nsec = ns % 1000000000;
                 vm->stack_top = sp;
                 int _ps = vm_worker_enter_safe(vm);
+                strada_gil_release();
                 nanosleep(&ts, NULL);
+                strada_gil_acquire();
                 vm_worker_leave_safe(vm, _ps);
                 stack = vm->stack; RELOAD();
             }

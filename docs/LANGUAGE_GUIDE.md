@@ -2521,36 +2521,44 @@ thread::mutex_destroy($mutex);
 
 ### Thread Safety Notes
 
-- Threads share data; nothing is copied. A variable a thread closure captures
-  is the same variable in every thread (a thread's `$x = 1` is visible to the
-  others), and so are arrays, hashes and everything reachable from them.
-- **Any write to shared data needs a lock**, including a plain scalar
-  assignment (`$shared = "..."`), `push`, `$h{k}++` and `delete`. Containers
-  and variables have no internal locking: an unlocked concurrent write can
-  corrupt memory and crash the process, not just lose an update. Hold the same
-  `thread::mutex_lock` (or `async::lock`) for every read and write of data
-  that some thread may be writing.
-- Data that no thread writes may be read by many threads without a lock.
-  Reference counting is atomic once a thread has started, so sharing values
-  is safe; changing them is not.
+- **Threads share data; nothing is copied.** A variable a thread closure
+  captures is the same variable in every thread (a thread's `$x = 1` is
+  visible to the others), and so are arrays, hashes and everything reachable
+  from them.
+- **One thread runs Strada code at a time.** When a program starts its first
+  thread, pool task or `async::map`, the runtime turns on a global interpreter
+  lock. Only the thread holding it runs Strada code, so an unlocked write to
+  shared data (`push`, `$h{k}++`, `$shared = "..."`) cannot corrupt memory.
+  Without the lock such writes crashed the process.
+- **The lock changes hands** whenever a thread waits (`sleep`, `thread::join`,
+  `await`, channel `recv`/`send`, mutex and condition waits, socket `accept`,
+  `connect` and `recv`, reads from pipes and terminals, `system`, `qx`,
+  `waitpid`, `flock`, `poll`/`select`/`epoll_wait`, DNS lookups) and, for a
+  busy thread, inside its loops once another thread has waited about 5 ms.
+- **What it costs.** CPU-bound threads take turns instead of running in
+  parallel: `async::map` over pure computation is no faster than a plain loop.
+  Threads that mostly wait (I/O, sleeps, channels) are unaffected. A program
+  that starts no thread pays nothing.
+- **Mutexes still matter for correctness.** A simple statement such as
+  `$n++` or `push(@a, $v)` completes before the lock can change hands (a
+  statement that calls a function which loops or waits may not), and a
+  sequence of statements never does: `if (!exists($h{$k})) { $h{$k} = make(); }` can
+  interleave with another thread. Hold a `thread::mutex_lock` (or
+  `async::lock`) around read-modify-write sequences, or use `async::atomic`.
+- **Limits.** A tight arithmetic loop that calls nothing, and recursion with
+  no loop, keep the lock until they finish. A thread blocked writing to a
+  full pipe or socket, or inside a C library call (a database query, a TLS
+  read), holds it too; C code can bracket long work with
+  `strada_gil_release()` / `strada_gil_acquire()`. A library compiled on its
+  own gets loop handover checks only when built with `STRADA_GIL_POLLS=1`.
+- **Turning it off.** Run with `STRADA_GIL=0` in the environment (or call
+  `core::setenv("STRADA_GIL", "0")` before the first thread starts) to let
+  threads run in parallel. Then *every* read and write of data another
+  thread may write needs a mutex: an unlocked concurrent write corrupts
+  memory. Read-only sharing needs no lock either way.
 - `each()` keeps one iterator per hash, and `keys()`/`values()` reset it:
   don't walk a hash with `each()` while another thread uses `each()`,
   `keys()` or `values()` on the same hash.
-- For simple counters, `async::atomic` / `async::atomic_add` need no mutex.
-- **Global interpreter lock (experimental, opt-in).** Run the program with
-  `STRADA_GIL=1` in the environment (or call `core::setenv("STRADA_GIL", "1")`
-  before the first thread, pool task or `async::map` starts) and only one
-  thread runs Strada code at a time. Unlocked writes to shared data then
-  cannot corrupt memory. The lock is handed over while a thread waits:
-  `sleep`, `thread::join`, `await`, channel `recv`/`send`, mutex and condition
-  waits, socket `recv`/`select`, idle pool workers. A busy thread also gives
-  it up inside its loops when another thread has waited about 5 ms, so
-  CPU-bound threads take turns; they no longer run in parallel. Two limits:
-  a tight arithmetic loop that calls nothing, and recursion without a loop,
-  keep the lock until they finish; and a thread blocked in file or socket
-  I/O other than `recv`/`select`, or in `system`/`qx`, still holds it.
-  Mutexes are still the way to make a read-modify-write sequence across
-  several statements atomic.
 - Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
 ---

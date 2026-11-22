@@ -1378,11 +1378,11 @@ Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race
 
 **Event loop + green tasks (2026-06, EXPERIMENTAL — branch `async-eventloop`):** `Async::Loop` (epoll reactor: `watch`/`unwatch`/`timer_after`/`run`/`stop`) + `Async::Task` (green tasks via `$loop->spawn`: `Async::Task::recv/send/accept/sleep` look blocking but park stackful ucontext coroutines; outside a task they fall back to blocking). `async::io_wait($fd, "r"/"w", $ms)` returns a future completed by a dedicated poller thread. Runtime primitives: `core::epoll_*`, `core::eventfd*`, `core::socket_try_recv/try_send/try_accept`, `core::mono_ms`, `core::coro_*` (compiled-only). Linux-only, configure-gated (`--without-epoll`); see **docs/EVENT_LOOP.md**. try/catch works inside tasks including across suspensions (the runtime swaps per-context try/cleanup/trace stacks at every switch); uncaught task exceptions are contained at the task boundary (`on_task_error`, default warn). Multiple watchers per fd (subscription ids, union masks). `Async::Task::connect/readline` + optional timeouts on recv/accept/connect; task sockets get TCP_NODELAY. Backends: epoll (Linux) or poll(2) (any POSIX) behind one internal `evb_*` API — the suite passes on both. `Async::TaskSSL` runs TLS handshake/IO over tasks (parks on WANT_READ/WANT_WRITE; `lib/ssl.strada` gained non-blocking primitives + `link_lib` auto-linking). Hostname resolution runs off-loop (`async::resolve`). Remaining caveats: regex state is per-OS-thread (capture before suspending); one loop = one OS thread. Valgrind-clean including a 100-connection echo stress (the once-suspected per-park leak was a pre-existing `strada_socket_close` bug — it discarded `strada_socket_flush`'s owned return, one SV per connection close — fixed here; `STRADA_RC_TRACE` refcount-trace hook retained in `strada_runtime.h` for future hunts). Coroutine context switches swap the per-thread pending-cleanup and call-trace stacks (`coro_ctx_install/stash` in the runtime).
 
-**Global interpreter lock (2026-11-21, stage 1, opt-in)**: threads share data
+**Global interpreter lock (2026-11-21/22; on by default, `STRADA_GIL=0` turns it off)**: threads share data
 and nothing in the runtime locks arrays, hashes or variables, so two threads
 writing shared data corrupt memory (compiled and VM; see LANGUAGE_GUIDE
-"Thread Safety Notes"). With `STRADA_GIL=1` only the lock holder runs Strada
-code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
+"Thread Safety Notes"). Once a program is multi-threaded only the lock holder
+runs Strada code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
 - The decision is made once, when the program first becomes multi-threaded
   (`strada_gil_activate`, called where `strada_threading_active` is set). The
   thread making that call takes the lock.
@@ -1439,16 +1439,34 @@ code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
 - VM limit found on the way (not a lock problem): a worker thread's garbage
   is collected only when the thread ends, and the root marks it on every
   collection, so a long-lived allocating thread makes each collection slower.
-- Not done yet: releasing the lock around blocking file/socket I/O and
-  `system`/`qx` (a thread blocked there holds it), keeping handles alive
-  across a blocking call, and turning the lock on by default.
+- **Stage 4 (blocking I/O).** `io_block_enter`/`io_block_leave` hand the lock
+  over and keep the handle value alive (another thread may drop the last
+  reference to a socket this thread is blocked on): socket accept, connect,
+  recv, UDP recvfrom, socket line reads, `qx`, `pclose`, `flock`, raw fd
+  reads, DNS lookups, `epoll_wait`. A read from a `FILE*` releases the lock
+  only when it is not a regular file (`strada_gil_file_blocks`: pipe,
+  terminal, FIFO), and never touches the `FILE*` after the read returns
+  (another thread may have closed it; `fclose` waits for the stream lock).
+  Still holding the lock: writes (a full pipe or socket), `close` of a pipe
+  from a destructor, and C library calls in `__C__` blocks (DBI queries, TLS)
+  unless they use `strada_gil_release()`/`strada_gil_acquire()`.
+- **VM and blocking calls.** The VM's own blocking builtins (qx, system,
+  poll, usleep, nanosleep, waitpid, pclose, pipe `getline`) release the lock
+  inside their GC-safe brackets. Rule: a worker that can wait for the lock
+  must be GC-safe there, or the root's stop-the-world waits for a thread that
+  cannot run. `vm_gc_stw_begin` therefore gives a collection up (returns -1,
+  retried after 4096 more objects) when the lock is on and a worker is not
+  safe; that was a real deadlock with `pclose`.
+- **Stage 5.** On by default. `strada_ffi_handler` takes the lock when a C
+  callback arrives on a thread that does not hold it.
+- Tests: `t/bugfix_tests/gil_shared_writes.strada`, `gil_reader_writer.strada`,
+  `gil_blocking_io.strada` (hangs without the stage 4 changes).
 - Per-object locking was considered and set aside: about 145 runtime
   functions, inline hash probes compiled into user code, the in-place
   `refcount == 1` shortcuts and the VM's own containers would all need it.
 - Helgrind does not see these races (0 reports on a program that segfaults).
   Use ThreadSanitizer: build the runtime and the generated C with
   `-fsanitize=thread` and run under `setarch -R`.
-- Test: `t/bugfix_tests/gil_shared_writes.strada` (compiled and VM).
 
 ### Variadic Functions and Spread
 

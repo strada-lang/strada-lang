@@ -1740,7 +1740,7 @@ static inline void cc_stw_blocking_leave(void)    {}
 static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx; }
 #endif
 
-/* ===== Global interpreter lock (STRADA_GIL=1, opt-in) =====
+/* ===== Global interpreter lock (on by default; STRADA_GIL=0 turns it off) =====
  * Strada containers, variables and runtime caches have no locking of their
  * own: two threads writing shared data at once corrupt memory. With the lock
  * on, only the thread holding it runs Strada code. It is created when the
@@ -1824,8 +1824,13 @@ static void gil_atfork_child(void) {
 static void strada_gil_activate(void) {
     pthread_mutex_lock(&gil_mu);
     if (!gil_decided) {
+        /* On unless STRADA_GIL is 0/off/no/false (programs that do all their
+         * own locking and want threads to run in parallel). */
         const char *e = getenv("STRADA_GIL");
-        strada_gil_on = (e && e[0] == '1') ? 1 : 0;
+        strada_gil_on = 1;
+        if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'
+                  || ((e[0] == 'o' || e[0] == 'O') && (e[1] == 'f' || e[1] == 'F'))))
+            strada_gil_on = 0;
         gil_decided = 1;
         const char *iv = getenv("STRADA_GIL_INTERVAL_US");
         if (iv && *iv) {
@@ -1904,6 +1909,32 @@ void strada_gil_yield_slow(void) {
     cc_blocking_leave();
 }
 int strada_gil_enabled(void) { return strada_gil_on; }
+
+/* A blocking call on a handle (or with an argument whose bytes it reads):
+ * hand the interpreter lock over and count as GC-safe, as the wrappers above
+ * do, and keep the value alive meanwhile -- another thread may drop the last
+ * reference to a socket or handle this thread is blocked on. Nothing between
+ * enter and leave may touch Strada values. */
+static inline void io_block_enter(StradaValue *h) {
+    if (strada_threading_active && h && !STRADA_IS_TAGGED_INT(h)) strada_incref(h);
+    cc_blocking_enter();
+}
+static inline void io_block_leave(StradaValue *h) {
+    cc_blocking_leave();
+    if (strada_threading_active && h && !STRADA_IS_TAGGED_INT(h)) strada_decref(h);
+}
+/* A read from a FILE* can block for long only when it is not a regular file
+ * (pipe, terminal, socket, FIFO). Regular files keep the lock: releasing it
+ * costs two mutex operations per read for nothing. */
+int strada_gil_file_blocks(FILE *fp);
+static int fh_may_block(FILE *fp) { return strada_gil_file_blocks(fp); }
+int strada_gil_file_blocks(FILE *fp) {
+    if (!strada_gil_on || !fp) return 0;
+    int fd = fileno(fp);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) return 0;
+    return !S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode) && !S_ISDIR(st.st_mode);
+}
 
 void strada_decref(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
@@ -11209,7 +11240,14 @@ StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
              * byte); same result: the line without its '\n', undef at EOF */
             char *gl = NULL;
             size_t glcap = 0;
-            ssize_t gn = getline(&gl, &glcap, fh->value.fh);
+            FILE *glf = fh->value.fh;
+            /* A pipe, terminal or FIFO can block: hand the lock over. glf is
+             * not touched after getline returns (another thread may have
+             * closed the handle; fclose waits for the stream lock). */
+            int gl_blk = fh_may_block(glf);
+            if (gl_blk) io_block_enter(fh);
+            ssize_t gn = getline(&gl, &glcap, glf);
+            if (gl_blk) io_block_leave(fh);
             if (gn < 0) { free(gl); return strada_new_undef(); }
             if (gn > 0 && gl[gn - 1] == '\n') gn--;
             if ((size_t)gn > UINT32_MAX) { free(gl); strada_str_oom_abort((size_t)gn); }
@@ -11223,13 +11261,16 @@ StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
         if (!buf) return strada_new_undef();
         int c = 0;
         FILE *fp = fh->value.fh;
+        /* irs points at this thread's own record separator; fh is pinned */
+        int rl_blk = fh_may_block(fp);
+        if (rl_blk) io_block_enter(fh);
         flockfile(fp);
         while ((max == 0 || len < max) && (c = getc_unlocked(fp)) != EOF) {
             if (!slurp && !custom_irs && c == '\n') break;
             if (len + 1 >= cap) {
                 cap *= 2;
                 char *nb = (char*)realloc(buf, cap);
-                if (!nb) { funlockfile(fp); free(buf); return strada_new_undef(); }
+                if (!nb) { funlockfile(fp); if (rl_blk) io_block_leave(fh); free(buf); return strada_new_undef(); }
                 buf = nb;
             }
             buf[len++] = (char)c;
@@ -11238,6 +11279,7 @@ StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
             }
         }
         funlockfile(fp);
+        if (rl_blk) io_block_leave(fh);
         if (len == 0 && (slurp || custom_irs || c == EOF)) {
             free(buf);
             return strada_new_undef();
@@ -11260,9 +11302,11 @@ StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
         while (max == 0 || (line_pos < max && raw_bytes < max)) {
             if (sb->read_pos >= sb->read_len) {
                 ssize_t n;
+                io_block_enter(fh);   /* sb lives as long as fh */
                 do {
                     n = recv(sb->fd, sb->read_buf, STRADA_SOCKET_BUFSIZE, 0);
                 } while (n < 0 && errno == EINTR);
+                io_block_leave(fh);
                 if (n <= 0) {
                     if (line_pos == 0 && raw_bytes == 0) { free(line); return strada_new_undef(); }
                     break;
@@ -13314,22 +13358,31 @@ int strada_socket_connect(StradaValue *sock, const char *host, int port) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    /* The lookup and the connect can both block for seconds. `host` is the
+     * caller's C string (not a Strada value), so only the socket is pinned. */
+    io_block_enter(sock);
     if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
+        io_block_leave(sock);
         if (res) freeaddrinfo(res);
         return -1;
     }
     int rc = -1;
+    int new_fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
         int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
         strada_fd_set_nosigpipe(fd);
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            close(sock->value.sock->fd);
-            sock->value.sock->fd = fd;
+            new_fd = fd;
             rc = 0;
             break;
         }
         close(fd);
+    }
+    io_block_leave(sock);
+    if (rc == 0) {
+        close(sock->value.sock->fd);
+        sock->value.sock->fd = new_fd;
     }
     freeaddrinfo(res);
     return rc;
@@ -13404,9 +13457,12 @@ StradaValue* strada_socket_accept(StradaValue *sock) {
     socklen_t client_len = sizeof(client_addr);
 
     int client_fd;
+    int listen_fd = sock->value.sock->fd;
+    io_block_enter(sock);
     do {
-        client_fd = accept(sock->value.sock->fd, (struct sockaddr *)&client_addr, &client_len);
+        client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
     } while (client_fd < 0 && errno == EINTR);
+    io_block_leave(sock);
     if (client_fd < 0) {
         return strada_new_undef();
     }
@@ -13500,12 +13556,12 @@ StradaValue* strada_socket_recv(StradaValue *sock, int max_len) {
 
     char *buffer = malloc(cap + 1);
     if (!buffer) return strada_new_undef();
-    cc_blocking_enter();
+    io_block_enter(sock);
     ssize_t received;
     do {
         received = recv(sb->fd, buffer, cap, 0);
     } while (received < 0 && errno == EINTR);
-    cc_blocking_leave();
+    io_block_leave(sock);
 
     if (received < 0) {
         free(buffer);
@@ -13941,8 +13997,11 @@ StradaValue* strada_udp_recvfrom(StradaValue *sock, int max_len) {
     struct sockaddr_storage sender_addr;
     socklen_t sender_len = sizeof(sender_addr);
 
-    ssize_t received = recvfrom(sock->value.sock->fd, buffer, cap, 0,
+    int udp_fd = sock->value.sock->fd;
+    io_block_enter(sock);
+    ssize_t received = recvfrom(udp_fd, buffer, cap, 0,
                                  (struct sockaddr *)&sender_addr, &sender_len);
+    io_block_leave(sock);
 
     if (received < 0) {
         free(buffer);
@@ -30558,9 +30617,11 @@ StradaValue* strada_read_fd(StradaValue *fd_val, StradaValue *size_val) {
     if (!buf) return strada_new_str("");
 
     ssize_t n;
+    cc_blocking_enter();
     do {
         n = read(fd, buf, size);
     } while (n < 0 && errno == EINTR);
+    cc_blocking_leave();
     if (n <= 0) {
         free(buf);
         return strada_new_str("");
@@ -30656,8 +30717,11 @@ StradaValue* strada_read_all_fd(StradaValue *fd_val) {
             }
             buf = newbuf;
         }
+        cc_blocking_enter();
         ssize_t n = read(fd, buf + total, 1024);
-        if (n < 0 && errno == EINTR) continue;
+        int rd_errno = errno;
+        cc_blocking_leave();
+        if (n < 0 && rd_errno == EINTR) continue;
         if (n <= 0) break;
         total += n;
     }
@@ -32815,7 +32879,10 @@ StradaValue* strada_gethostbyname(StradaValue *hostname_val) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(hostname, NULL, &hints, &res) != 0 || !res) {
+    io_block_enter(hostname_val);   /* hostname may point into the value's bytes */
+    int gai_rc = getaddrinfo(hostname, NULL, &hints, &res);
+    io_block_leave(hostname_val);
+    if (gai_rc != 0 || !res) {
         if (res) freeaddrinfo(res);
         return strada_new_undef();
     }
@@ -32843,7 +32910,10 @@ StradaValue* strada_gethostbyname_all(StradaValue *hostname_val) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(hostname, NULL, &hints, &res) != 0 || !res) {
+    io_block_enter(hostname_val);   /* hostname may point into the value's bytes */
+    int gai_rc = getaddrinfo(hostname, NULL, &hints, &res);
+    io_block_leave(hostname_val);
+    if (gai_rc != 0 || !res) {
         if (res) freeaddrinfo(res);
         return strada_new_undef();
     }
@@ -32881,7 +32951,11 @@ StradaValue* strada_getaddrinfo_first(StradaValue *hostname_val, StradaValue *se
     hints.ai_family = AF_UNSPEC;        /* IPv4 or IPv6 */
     hints.ai_socktype = SOCK_STREAM;
 
+    io_block_enter(hostname_val);
+    if (strada_threading_active && service_val && !STRADA_IS_TAGGED_INT(service_val)) strada_incref(service_val);
     int status = getaddrinfo(hostname, service[0] ? service : NULL, &hints, &res);
+    io_block_leave(hostname_val);
+    if (strada_threading_active && service_val && !STRADA_IS_TAGGED_INT(service_val)) strada_decref(service_val);
     if (status != 0) {
         return strada_new_undef();
     }
@@ -33241,7 +33315,11 @@ StradaValue* strada_fgetc(StradaValue *fh) {
     if (!fh || STRADA_IS_TAGGED_INT(fh) || fh->type != STRADA_FILEHANDLE || !fh->value.fh) {
         return strada_new_int(-1);
     }
-    int c = fgetc(fh->value.fh);
+    FILE *gcf = fh->value.fh;
+    int gc_blk = fh_may_block(gcf);
+    if (gc_blk) io_block_enter(fh);
+    int c = fgetc(gcf);
+    if (gc_blk) io_block_leave(fh);
     return strada_new_int(c);
 }
 
@@ -33268,7 +33346,11 @@ StradaValue* strada_fgets(StradaValue *fh, StradaValue *size) {
     char *buf = malloc((size_t)sz);
     if (!buf) return strada_new_undef();
 
-    char *result = fgets(buf, sz, fh->value.fh);
+    FILE *gsf = fh->value.fh;
+    int gs_blk = fh_may_block(gsf);
+    if (gs_blk) io_block_enter(fh);
+    char *result = fgets(buf, sz, gsf);
+    if (gs_blk) io_block_leave(fh);
     if (!result) {
         free(buf);
         return strada_new_undef();
@@ -33381,8 +33463,10 @@ StradaValue* strada_pclose(StradaValue *fh) {
     }
     FILE *fp = fh->value.fh;
     fh_meta_remove(fp);  /* Remove meta before pclose to prevent double-close in free_value */
+    fh->value.fh = NULL;  /* Mark as closed (before the wait: another thread must not reuse fp) */
+    io_block_enter(fh);   /* pclose waits for the child to exit */
     int status = pclose(fp);
-    fh->value.fh = NULL;  /* Mark as closed */
+    io_block_leave(fh);
     return strada_new_int(WEXITSTATUS(status));
 }
 
@@ -33411,8 +33495,11 @@ StradaValue* strada_qx(StradaValue *cmd) {
         return strada_new_str("");
     }
 
+    /* Reading the child's output and waiting for it to exit can take as long
+     * as the command runs; only C buffers are touched meanwhile. */
     char temp[1024];
     size_t chunk_len;
+    cc_blocking_enter();
     while ((chunk_len = fread(temp, 1, sizeof(temp), fp)) > 0) {
         if (len + chunk_len + 1 > capacity) {
             capacity = (len + chunk_len + 1) * 2;
@@ -33420,6 +33507,7 @@ StradaValue* strada_qx(StradaValue *cmd) {
             if (!newbuf) {
                 free(buf);
                 pclose(fp);
+                cc_blocking_leave();
                 strada_last_qx_status = -1;
                 return strada_new_str("");
             }
@@ -33430,7 +33518,9 @@ StradaValue* strada_qx(StradaValue *cmd) {
     }
     buf[len] = '\0';
 
-    strada_last_qx_status = pclose(fp);
+    int qx_status = pclose(fp);
+    cc_blocking_leave();
+    strada_last_qx_status = qx_status;
 
     StradaValue *result = strada_new_str_len(buf, len);
     free(buf);
@@ -34505,7 +34595,9 @@ StradaValue* strada_term_cols(void) {
 StradaValue* strada_read_byte(StradaValue *fd_val) {
     int fd = strada_to_int(fd_val);
     unsigned char c;
+    cc_blocking_enter();
     int n = read(fd, &c, 1);
+    cc_blocking_leave();
     if (n <= 0) return strada_new_int(-1);
     return strada_new_int((int)c);
 }
@@ -34683,9 +34775,11 @@ StradaValue* strada_flock(StradaValue *fd, StradaValue *operation) {
     int f = strada_extract_fd(fd);
     int op = strada_to_int(operation);
     int rc;
+    cc_blocking_enter();   /* waits for the other holder unless LOCK_NB */
     do {
         rc = flock(f, op);
     } while (rc < 0 && errno == EINTR);
+    cc_blocking_leave();
     return strada_new_int(rc);
 }
 
@@ -36214,7 +36308,17 @@ static ffi_type *strada_ffi_type_for(char code) {
 }
 
 /* The generic handler every trampoline bounces through. */
+static void strada_ffi_handler_run(ffi_cif *cif, void *ret, void **args, void *user_data);
+/* C calls back into Strada code. With the interpreter lock on, the calling
+ * thread must hold it: a thread C created itself, or a Strada thread that
+ * gave the lock up around the C call (strada_gil_release), takes it here. */
 static void strada_ffi_handler(ffi_cif *cif, void *ret, void **args, void *user_data) {
+    int took = 0;
+    if (strada_gil_on && !gil_i_hold()) { gil_take(); took = 1; }
+    strada_ffi_handler_run(cif, ret, args, user_data);
+    if (took) gil_drop();
+}
+static void strada_ffi_handler_run(ffi_cif *cif, void *ret, void **args, void *user_data) {
     (void)cif;
     StradaFFICallback *cb = (StradaFFICallback *)user_data;
     int cm = strada_cleanup_mark();
@@ -38977,7 +39081,11 @@ StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd) {
  * Blocks with the cycle collector notified (counts as a safepoint). */
 StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms) {
     EvbEvent evs[64];
-    int n = evb_wait((int)strada_to_int(epfd), evs, 64, (int)strada_to_int(timeout_ms));
+    int ep_set = (int)strada_to_int(epfd);
+    int ep_tmo = (int)strada_to_int(timeout_ms);
+    cc_blocking_enter();   /* the event loop waits here: let other threads run */
+    int n = evb_wait(ep_set, evs, 64, ep_tmo);
+    cc_blocking_leave();
     /* The event loop blocks here: run signal handlers now (a signal also
      * interrupts the wait), or an Async::Loop program never sees them. */
     if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();

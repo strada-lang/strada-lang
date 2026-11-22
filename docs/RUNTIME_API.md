@@ -1345,7 +1345,7 @@ if (index < 0 || index >= arr->length) {
 
 ## Thread Safety
 
-Reference counting uses **atomic operations** once threading is active, so reference-counted values can be shared across threads, and the async runtime (`async::`) provides a thread pool for parallel work. The automatic **cycle collector** also runs under threads (via a stop-the-world pause at safepoints); the request **arena** is single-threaded scope only.
+Reference counting uses **atomic operations** once threading is active, so reference-counted values can be shared across threads, and the async runtime (`async::`) provides a thread pool. A global interpreter lock (on by default once a thread starts; `STRADA_GIL=0` turns it off) lets one thread run Strada code at a time, so pool tasks overlap while they wait but do not compute in parallel; C code can bracket long work with `strada_gil_release()` / `strada_gil_acquire()`. The automatic **cycle collector** also runs under threads (via a stop-the-world pause at safepoints); the request **arena** is single-threaded scope only.
 
 ## Memory Model
 

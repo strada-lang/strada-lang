@@ -1,0 +1,76 @@
+# EXPECT: qx ok pipe ok accept ok recv ok
+# With the interpreter lock on, a thread blocked in qx, a read from a pipe,
+# socket accept or a socket line read held the lock, so every other thread
+# stood still until the command finished or data arrived. Those calls now
+# hand the lock over while they wait. Each phase blocks a thread for about
+# 0.3 s and checks that the main thread kept running meanwhile.
+# Iterations the caller completes between the worker announcing it is about
+# to block ($$started) and the worker finishing ($$done). When the blocked
+# worker keeps the lock, the caller only runs again after it has finished,
+# and the count is 0.
+func spin_while_blocked(scalar $started, scalar $done) int {
+    while ($$started == 0 && $$done == 0) { my str $w = "w"; }
+    my int $n = 0;
+    while ($$done == 0) { $n++; my str $s = "x" . $n; }
+    return $n;
+}
+
+func main() int {
+    core::setenv("STRADA_GIL", "1");
+    my @res = ();
+
+    my int $s1 = 0;
+    my int $d1 = 0;
+    my $t1 = thread::create(func () { $s1 = 1; my str $o = core::qx("sleep 0.3; echo hi"); $d1 = 1; });
+    push(@res, "qx " . (spin_while_blocked(\$s1, \$d1) > 1000 ? "ok" : "stalled"));
+    thread::join($t1);
+
+    my int $s2 = 0;
+    my int $d2 = 0;
+    my $t2 = thread::create(func () {
+        my $p = core::popen("sleep 0.3; echo line", "r");
+        $s2 = 1;
+        my $l = <$p>;
+        core::pclose($p);
+        $d2 = 1;
+    });
+    push(@res, "pipe " . (spin_while_blocked(\$s2, \$d2) > 1000 ? "ok" : "stalled"));
+    thread::join($t2);
+
+    my int $port = 20000 + (core::getpid() % 20000);
+    my $srv = core::socket_server_host("127.0.0.1", $port, 4);
+    my int $s3 = 0;
+    my int $d3 = 0;
+    my int $s4 = 0;
+    my int $d4 = 0;
+    my str $got = "";
+    my $t3 = thread::create(func () {
+        $s3 = 1;
+        my $c = core::socket_accept($srv);      # blocks until the client connects
+        $d3 = 1;
+        $s4 = 1;
+        $got = <$c> // "";                      # blocks until the client sends
+        $d4 = 1;
+        core::socket_close($c);
+    });
+    # the accept can only finish once this thread connects, so reaching the
+    # connect at all means the blocked accept did not keep the lock
+    while ($s3 == 0) { my str $w = "w"; }
+    my int $before = 0;
+    for (my int $i = 0; $i < 200000; $i++) { $before++; my str $s = "y" . $i; }
+    my $cl = core::socket_client("127.0.0.1", $port);
+    while ($d3 == 0) { my str $w = "w"; }
+    push(@res, "accept " . ($before == 200000 ? "ok" : "stalled"));
+    while ($s4 == 0) { my str $w = "w"; }
+    my int $mid = 0;
+    for (my int $i = 0; $i < 200000; $i++) { $mid++; my str $s = "z" . $i; }
+    core::socket_send($cl, "hello\n");
+    while ($d4 == 0) { my str $w = "w"; }
+    push(@res, "recv " . ($got eq "hello" && $mid == 200000 ? "ok" : "bad:" . $got));
+    thread::join($t3);
+    core::socket_close($cl);
+    core::socket_close($srv);
+
+    say(join(" ", @res));
+    return 0;
+}
