@@ -1,0 +1,54 @@
+func burn(int $n) int { my int $t = 0; for (my int $i = 0; $i < $n; $i++) { $t = ($t + $i) % 7919; } return $t; }
+func slen(str $s, int $n) int { my int $t = burn($n); return length($s) + $t - $t; }
+func mk(int $i) str { return "value-" . $i . "-" . ("x" x ($i % 40)); }
+func both(str $p, str $q, int $n) int { my int $t = burn($n); return length($p) + length($q) + $t - $t; }
+
+func phase(str $name, scalar $writer, scalar $reader, int $rounds) void {
+    my int $stop = 0;
+    my $w = thread::create(func () { my int $i = 0; while ($stop == 0) { $i++; $writer->($i); } });
+    for (my int $r = 0; $r < $rounds; $r++) { $reader->($r); }
+    $stop = 1;
+    thread::join($w);
+    say("ok " . $name);
+}
+
+func main() int {
+    my int $rounds = int(core::getenv("ROUNDS") // "200");
+    my int $acc = 0;
+
+    my @a = map { mk($_) } (1..50);
+    phase("grep-vs-shift", func (int $i) { shift(@a); push(@a, mk($i)); },
+          func (int $r) { my @g = grep { slen($_, 300) > 3 } @a; $acc += scalar(@g); }, $rounds);
+    phase("map-vs-assign", func (int $i) { @a = map { mk($_ + $i) } (1..50); },
+          func (int $r) { my @m = map { slen($_, 300) } @a; $acc += scalar(@m); }, $rounds);
+    phase("foreach-vs-assign", func (int $i) { if ($i % 2) { @a = (); } else { @a = map { mk($_ + $i) } (1..50); } },
+          func (int $r) { foreach my $e (@a) { $acc += slen($e, 300); } }, $rounds);
+    phase("foreach-vs-splice", func (int $i) { splice(@a, 0, 5); push(@a, mk($i), mk($i+1), mk($i+2), mk($i+3), mk($i+4)); },
+          func (int $r) { foreach my $e (@a) { $acc += slen($e, 300); } }, $rounds);
+
+    my %h = map { ("k" . $_) => mk($_) } (1..50);
+    phase("hash-elem-vs-delete", func (int $i) { my str $k = "k" . ($i % 50 + 1); delete($h{$k}); $h{$k} = mk($i); },
+          func (int $r) { for (my int $j = 1; $j <= 50; $j++) { $acc += slen($h{"k" . $j} // "none", 200); } }, $rounds);
+    phase("values-vs-clear", func (int $i) { if ($i % 2) { %h = (); } else { %h = map { ("k" . $_) => mk($_ + $i) } (1..50); } },
+          func (int $r) { foreach my $v (values(%h)) { $acc += slen($v, 200); } }, $rounds);
+    phase("each-vs-insert", func (int $i) { $h{"n" . ($i % 500)} = mk($i); delete($h{"n" . (($i + 250) % 500)}); },
+          func (int $r) { while (my ($k, $v) = each(%h)) { $acc += slen($v, 100) + length($k); } }, $rounds);
+
+    my $s = mk(1);
+    my $q = mk(2);
+    phase("scalar-arg-vs-assign", func (int $i) { $s = mk($i); $q = mk($i + 1); },
+          func (int $r) { $acc += both($s, $q, 3000); my str $c = $s . burn(2000) . $q . burn(2000) . $s; $acc += length($c); }, $rounds);
+
+    my $ar = [ map { mk($_) } (1..50) ];
+    my $hr = { "list" => [ map { mk($_) } (1..50) ], "name" => mk(3) };
+    phase("nested-ref-vs-replace", func (int $i) { $ar = [ map { mk($_ + $i) } (1..50) ]; $hr = { "list" => [ map { mk($_ + $i) } (1..10) ], "name" => mk($i) }; },
+          func (int $r) { $acc += slen($ar->[3], 1000) + slen($hr->{"name"}, 1000); foreach my $e (@{$hr->{"list"}}) { $acc += slen($e, 100); }
+                          $acc += slen(join(",", @{$ar}), 500); }, $rounds);
+
+    my $str = "";
+    phase("append-vs-read", func (int $i) { $str .= "ab"; if (length($str) > 4000) { $str = ""; } },
+          func (int $r) { $acc += slen($str, 2000); my str $u = uc($str); $acc += length($u) + slen(substr($str, 0, 10) // "", 500); }, $rounds);
+
+    say("done");
+    return 0;
+}
