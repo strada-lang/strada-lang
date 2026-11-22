@@ -1914,6 +1914,15 @@ StradaValue* strada_unix_server(StradaValue *path, StradaValue *backlog); /* AF_
 StradaValue* strada_unix_client(StradaValue *path);                      /* AF_UNIX connect */
 StradaValue* strada_initgroups(StradaValue *user, StradaValue *gid);
 StradaValue* strada_setgroups(StradaValue *gids);
+StradaValue* strada_environ(void);
+StradaValue* strada_uname(void);
+StradaValue* strada_nproc(void);
+StradaValue* strada_socketpair(void);
+StradaValue* strada_mkfifo(StradaValue *path, StradaValue *mode);
+StradaValue* strada_rewinddir(StradaValue *dh);
+StradaValue* strada_getservbyname(StradaValue *name, StradaValue *proto);
+StradaValue* strada_crc32(StradaValue *sv);
+StradaValue* strada_uuid(void);
 StradaValue* strada_socket_select(StradaValue *sockets, int timeout_ms);
 int strada_socket_fd(StradaValue *sock);
 StradaValue* strada_select_fds(StradaValue *fds, int timeout_ms);

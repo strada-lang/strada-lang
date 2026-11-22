@@ -1071,6 +1071,9 @@ Built-in namespaces that don't need importing:
 core::open(...), core::close(...), core::slurp(...), core::spew(...), core::qx(...)
 core::fork(), core::exec(...), core::wait(), core::pipe()
 core::getenv("HOME"), core::setenv("X", "1")
+core::environ()                  # hash of every variable
+core::uname()->{"sysname"}, core::nproc(), core::uuid(), core::crc32($data)
+core::socketpair()               # [fd0, fd1], two-way; core::mkfifo($path, 0600)
 core::caller(), core::stack_trace()
 core::pack("NnC", $a, $b, $c)
 core::unpack("NnC", $packed)

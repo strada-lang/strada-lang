@@ -722,6 +722,15 @@ func get_builtins() scalar {
     $b{"sys::unix_server"} = 1;
     $b{"sys::unix_client"} = 1;
     $b{"sys::initgroups"} = 1;
+    $b{"sys::environ"} = 1;
+    $b{"sys::uname"} = 1;
+    $b{"sys::nproc"} = 1;
+    $b{"sys::socketpair"} = 1;
+    $b{"sys::uuid"} = 1;
+    $b{"sys::mkfifo"} = 1;
+    $b{"sys::rewinddir"} = 1;
+    $b{"sys::getservbyname"} = 1;
+    $b{"sys::crc32"} = 1;
     $b{"sys::setgroups"} = 1;
     $b{"sys::getsockopt"} = 1;
     $b{"sys::shutdown"} = 1;

@@ -283,6 +283,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::fputs(s, fh)` | `str, scalar → int` | Write string to fh. |
 | `core::dup(fd)` | `int → int` | dup(2). |
 | `core::pipe()` | `→ array` | Returns [read_fd, write_fd]. |
+| `core::socketpair()` | `→ array` | Connected Unix stream sockets as [fd0, fd1]; both ends read and write (`core::read_fd` / `core::write_fd`). undef on error. |
 | `core::popen(cmd, mode)` | `str, str → scalar` | popen(3); returns a filehandle. |
 | `core::pclose(fh)` | `scalar → int` | pclose(3). |
 | `core::tmpfile()` | `→ scalar` | tmpfile(3) — auto-deleted filehandle. |
@@ -325,6 +326,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::rename(old, new)` | `str, str → int` | rename(2). |
 | `core::mkdir(path, mode)` | `str, int → int` | mkdir(2). |
 | `core::rmdir(path)` | `str → int` | rmdir(2). |
+| `core::mkfifo(path, mode)` | `str, int → int` | mkfifo(3): create a named pipe. 0 / -1. |
 | `core::chmod(path, mode)` | `str, int → int` | chmod(2). |
 | `core::fchmod(fd, mode)` | `int, int → int` | fchmod(2). |
 | `core::chown(path, uid, gid)` | `str, int, int → int` | chown(2). |
@@ -346,6 +348,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::readdir_next(dh)` | `scalar → str` | One entry (undef when done). |
 | `core::readdir_full(path)` | `str → array` | Entries of directory `path` as full paths. |
 | `core::closedir(dh)` | `scalar → int` | Close directory. |
+| `core::rewinddir(dh)` | `scalar → int` | Restart reading at the first entry. 0, or -1 for a closed handle. |
 
 ### Time / dates
 
@@ -397,6 +400,9 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::udp_sendto(sock, data, host, port)` | `scalar, str, str, int → int` | sendto. |
 | `core::udp_recvfrom(sock, max)` | `scalar, int → array` | Returns [data, from_addr, from_port]. |
 | `core::gethostname()` | `→ str` | gethostname(3). |
+| `core::uname()` | `→ hash` | uname(2): `sysname`, `nodename`, `release`, `version`, `machine`. |
+| `core::nproc()` | `→ int` | Processors this process may run on (at least 1). |
+| `core::getservbyname(name, proto)` | `str, str → int` | Port number of a service (`"https"`, `"tcp"` → 443); `proto` may be undef. undef when unknown. |
 | `core::gethostbyname(host)` | `str → str` | First IP for hostname. |
 | `core::gethostbyname_all(host)` | `str → array` | All IPs. |
 | `core::getaddrinfo(host, service)` | `str, str → str` | First getaddrinfo(3) result as a numeric address string. |
@@ -448,6 +454,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::getenv(name)` | `str → str` | Get env variable (or undef). |
 | `core::setenv(name, val)` | `str, str → int` | setenv(3). |
 | `core::unsetenv(name)` | `str → int` | unsetenv(3). |
+| `core::environ()` | `→ hash` | The whole environment as name → value. A copy: change variables with `core::setenv`. |
 | `core::argv()` | `→ array` | Command-line args (without program name). |
 | `core::getprocname()` | `→ str` | Current process name (argv[0]). |
 | `core::setprocname(name)` | `str → int` | Set process name. |
@@ -497,6 +504,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::hex(s)` | `str → int` | Parse hex string. |
 | `core::random_bytes(n)` | `int → str` | Cryptographic random bytes. |
 | `core::random_bytes_hex(n)` | `int → str` | Random bytes as hex. |
+| `core::uuid()` | `→ str` | Random (version 4) UUID, lower-case. |
+| `core::crc32(data)` | `str → int` | CRC-32 of the bytes (the zlib/PNG polynomial), 0 to 4294967295. |
 | `core::strerror(errno)` | `int → str` | Errno → message. |
 | `core::strtod(s)` | `str → array` | strtod(3); returns `[value, chars_consumed]`. |
 | `core::strtol(s, base)` | `str, int → array` | strtol(3); returns `[value, chars_consumed]`. |

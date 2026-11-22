@@ -7682,6 +7682,15 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::unix_server"} = 1;
     $owned_set{"sys::unix_client"} = 1;
     $owned_set{"sys::initgroups"} = 1;
+    $owned_set{"sys::environ"} = 1;
+    $owned_set{"sys::uname"} = 1;
+    $owned_set{"sys::nproc"} = 1;
+    $owned_set{"sys::socketpair"} = 1;
+    $owned_set{"sys::uuid"} = 1;
+    $owned_set{"sys::mkfifo"} = 1;
+    $owned_set{"sys::rewinddir"} = 1;
+    $owned_set{"sys::getservbyname"} = 1;
+    $owned_set{"sys::crc32"} = 1;
     $owned_set{"sys::setgroups"} = 1;
     $owned_set{"sys::getsockopt"} = 1;
     $owned_set{"sys::shutdown"} = 1;

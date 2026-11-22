@@ -1140,7 +1140,9 @@ All `sys::` functions can also be called via the `core::` prefix (preferred). Fo
 
 **Time:** `core::time`, `core::localtime`, `core::strftime`, `core::gettimeofday`, `core::hires_time`
 
-**Environment:** `core::getenv`, `core::setenv`, `core::unsetenv`
+**Environment:** `core::getenv`, `core::setenv`, `core::unsetenv`, `core::environ` (hash of all)
+
+**System:** `core::uname` (hash), `core::nproc`, `core::gethostname`, `core::uuid`, `core::crc32`
 
 **Sockets:** `core::socket_server`, `core::socket_client`, `core::socket_accept`, `core::socket_send`, `core::socket_recv`, `core::socket_close`
 

@@ -8392,6 +8392,42 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
             gen_call_with_arg_cleanup($cg, "strada_initgroups", $expr->{"args"}, 2);
             return 1;
         }
+        if ($name eq "sys::environ") {
+            emit($cg, "strada_environ()");
+            return 1;
+        }
+        if ($name eq "sys::uname") {
+            emit($cg, "strada_uname()");
+            return 1;
+        }
+        if ($name eq "sys::nproc") {
+            emit($cg, "strada_nproc()");
+            return 1;
+        }
+        if ($name eq "sys::socketpair") {
+            emit($cg, "strada_socketpair()");
+            return 1;
+        }
+        if ($name eq "sys::uuid") {
+            emit($cg, "strada_uuid()");
+            return 1;
+        }
+        if ($name eq "sys::mkfifo") {
+            gen_call_with_arg_cleanup($cg, "strada_mkfifo", $expr->{"args"}, 2);
+            return 1;
+        }
+        if ($name eq "sys::rewinddir") {
+            gen_call_with_arg_cleanup($cg, "strada_rewinddir", $expr->{"args"}, 1);
+            return 1;
+        }
+        if ($name eq "sys::getservbyname") {
+            gen_call_with_arg_cleanup($cg, "strada_getservbyname", $expr->{"args"}, 2);
+            return 1;
+        }
+        if ($name eq "sys::crc32") {
+            gen_call_with_arg_cleanup($cg, "strada_crc32", $expr->{"args"}, 1);
+            return 1;
+        }
         if ($name eq "sys::setgroups") {
             gen_call_with_arg_cleanup($cg, "strada_setgroups", $expr->{"args"}, 1);
             return 1;

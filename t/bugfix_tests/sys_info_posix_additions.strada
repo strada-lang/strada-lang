@@ -1,0 +1,76 @@
+# EXPECT: env=ok|uname=ok|nproc=ok|sp=ping/pong|fifo=0,1,-1|rewind=ok|serv=443,25,undef|crc=0,3421780262,3625429458,4261876081|uuid=ok
+# core::environ, uname, nproc, socketpair, mkfifo, rewinddir, getservbyname,
+# crc32 and uuid (added 2026-11-22). Only machine-independent facts are printed.
+func main() int {
+    my array @o = ();
+
+    core::setenv("STRADA_T_ENVIRON", "a=b c");
+    my hash %e = %{core::environ()};
+    my int $env_ok = 0;
+    if (exists($e{"STRADA_T_ENVIRON"}) && $e{"STRADA_T_ENVIRON"} eq "a=b c" && exists($e{"PATH"}) && $e{"PATH"} eq core::getenv("PATH")) {
+        $env_ok = 1;
+    }
+    push(@o, "env=" . ($env_ok ? "ok" : "bad"));
+
+    my scalar $u = core::uname();
+    my int $un_ok = 0;
+    if (length($u->{"sysname"}) > 0 && length($u->{"release"}) > 0 && length($u->{"machine"}) > 0 && length($u->{"version"}) > 0 && $u->{"nodename"} eq core::gethostname()) {
+        $un_ok = 1;
+    }
+    push(@o, "uname=" . ($un_ok ? "ok" : "bad"));
+
+    my int $np = core::nproc();
+    push(@o, "nproc=" . (($np >= 1 && $np <= 65536) ? "ok" : "bad " . $np));
+
+    my scalar $sp = core::socketpair();
+    core::write_fd($sp->[0], "ping");
+    my str $got1 = core::read_fd($sp->[1], 16);
+    core::write_fd($sp->[1], "pong");
+    my str $got2 = core::read_fd($sp->[0], 16);
+    core::close_fd($sp->[0]);
+    core::close_fd($sp->[1]);
+    push(@o, "sp=" . $got1 . "/" . $got2);
+
+    my str $fifo = "/tmp/strada_t_fifo_" . core::getpid();
+    core::unlink($fifo);
+    my int $mk = core::mkfifo($fifo, 0600);
+    my scalar $st = core::stat($fifo);
+    my int $is_fifo = (($st->{"mode"} & 0170000) == 0010000) ? 1 : 0;
+    my int $mk2 = core::mkfifo($fifo, 0600);
+    core::unlink($fifo);
+    push(@o, "fifo=" . $mk . "," . $is_fifo . "," . $mk2);
+
+    my str $dir = "/tmp/strada_t_rewind_" . core::getpid();
+    core::mkdir($dir, 0700);
+    core::spew($dir . "/one", "1");
+    core::spew($dir . "/two", "2");
+    my scalar $dh = core::opendir($dir);
+    my int $pass1 = 0;
+    while (defined(core::readdir_next($dh))) { $pass1 += 1; }
+    my int $rw = core::rewinddir($dh);
+    my int $pass2 = 0;
+    while (defined(core::readdir_next($dh))) { $pass2 += 1; }
+    core::closedir($dh);
+    my int $rw_closed = core::rewinddir($dh);
+    core::unlink($dir . "/one");
+    core::unlink($dir . "/two");
+    core::rmdir($dir);
+    push(@o, "rewind=" . (($pass1 == 2 && $pass2 == 2 && $rw == 0 && $rw_closed == -1) ? "ok" : "bad " . $pass1 . " " . $pass2 . " " . $rw . " " . $rw_closed));
+
+    my scalar $none = core::getservbyname("no-such-service-zz", "tcp");
+    push(@o, "serv=" . core::getservbyname("https", "tcp") . "," . core::getservbyname("smtp", undef) . "," . (defined($none) ? "def" : "undef"));
+
+    my str $bin = "a" . core::byte(0) . "b" . core::byte(255);
+    push(@o, "crc=" . core::crc32("") . "," . core::crc32("123456789") . "," . core::crc32($bin) . "," . core::crc32("x" x 100000));
+
+    my str $id1 = core::uuid();
+    my str $id2 = core::uuid();
+    my int $uu_ok = 0;
+    if ($id1 =~ /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/ && $id1 ne $id2 && length($id2) == 36) {
+        $uu_ok = 1;
+    }
+    push(@o, "uuid=" . ($uu_ok ? "ok" : "bad " . $id1));
+
+    say(join("|", @o));
+    return 0;
+}

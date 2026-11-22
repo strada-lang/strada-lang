@@ -140,6 +140,7 @@ TESTS=(
     "test_hash_arg_patterns"
     "test_builtin_hash_args"
     "test_sys_hash_args"
+    "test_sys_info_additions"
     "test_hash_list_init"
     "test_hash_pool"
     "test_small_int_pool"

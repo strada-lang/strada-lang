@@ -1,0 +1,46 @@
+#!/usr/bin/env strada
+# Leak test for core::environ, uname, nproc, socketpair, mkfifo, rewinddir,
+# getservbyname, crc32 and uuid, with hash-access (owned) arguments.
+# Run: valgrind --leak-check=full ./test_sys_info_additions
+
+func main() int {
+    say("Testing system-information additions for leaks...");
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < 30) {
+        my hash %d = ();
+        $d{"svc"} = "https";
+        $d{"proto"} = "tcp";
+        $d{"data"} = "123456789";
+        $d{"fifo"} = "/tmp/strada_leak_fifo_" . core::getpid();
+        $d{"dir"} = "/tmp";
+
+        my scalar $env = core::environ();
+        $sum += scalar(keys(%{$env}));
+        my scalar $u = core::uname();
+        $sum += length($u->{"sysname"});
+        $sum += core::nproc();
+
+        my scalar $sp = core::socketpair();
+        core::write_fd($sp->[0], $d{"data"});
+        $sum += length(core::read_fd($sp->[1], 32));
+        core::close_fd($sp->[0]);
+        core::close_fd($sp->[1]);
+
+        $sum += core::mkfifo($d{"fifo"}, 0600);
+        core::unlink($d{"fifo"});
+
+        my scalar $dh = core::opendir($d{"dir"});
+        my scalar $first = core::readdir_next($dh);
+        $sum += core::rewinddir($dh);
+        core::closedir($dh);
+
+        $sum += core::getservbyname($d{"svc"}, $d{"proto"});
+        my scalar $none = core::getservbyname($d{"data"}, $d{"proto"});
+        $sum += core::crc32($d{"data"}) % 7;
+        $sum += length(core::uuid());
+        $i = $i + 1;
+    }
+    say($sum > 0 ? "PASS" : "FAIL");
+    return 0;
+}

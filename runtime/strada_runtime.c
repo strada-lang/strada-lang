@@ -33730,6 +33730,152 @@ StradaValue* strada_setgroups(StradaValue *gids) {
     return strada_new_int(r);
 }
 
+/* ---- system information and small POSIX additions (2026-11-22) ---- */
+extern char **environ;
+
+/* core::environ(): the whole environment as a hash. */
+StradaValue* strada_environ(void) {
+    StradaValue *out = strada_new_hash();
+    if (!environ) return out;
+    for (char **e = environ; *e; e++) {
+        const char *eq = strchr(*e, '=');
+        if (!eq || eq == *e) continue;
+        size_t klen = (size_t)(eq - *e);
+        char kb[256];
+        char *k = klen < sizeof(kb) ? kb : malloc(klen + 1);
+        if (!k) continue;
+        memcpy(k, *e, klen);
+        k[klen] = '\0';
+        strada_hash_set_take(out->value.hv, k, strada_new_str(eq + 1));
+        if (k != kb) free(k);
+    }
+    return out;
+}
+
+/* core::uname(): hash with sysname, nodename, release, version, machine. */
+StradaValue* strada_uname(void) {
+    struct utsname u;
+    if (uname(&u) != 0) return strada_new_undef();
+    StradaValue *out = strada_new_hash();
+    strada_hash_set_take(out->value.hv, "sysname", strada_new_str(u.sysname));
+    strada_hash_set_take(out->value.hv, "nodename", strada_new_str(u.nodename));
+    strada_hash_set_take(out->value.hv, "release", strada_new_str(u.release));
+    strada_hash_set_take(out->value.hv, "version", strada_new_str(u.version));
+    strada_hash_set_take(out->value.hv, "machine", strada_new_str(u.machine));
+    return out;
+}
+
+/* core::nproc(): processors this process may run on (at least 1). */
+StradaValue* strada_nproc(void) {
+    long n = -1;
+#if defined(__linux__) && defined(CPU_COUNT)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) n = CPU_COUNT(&set);
+#endif
+#ifdef _SC_NPROCESSORS_ONLN
+    if (n < 1) n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (n < 1) n = 1;
+    return strada_new_int((int64_t)n);
+}
+
+/* core::socketpair(): connected AF_UNIX stream sockets as [fd0, fd1]
+ * (the shape of core::pipe(), but both ends read and write). */
+StradaValue* strada_socketpair(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return strada_new_undef();
+    StradaValue *arr = strada_new_array();
+    strada_array_push_take(arr->value.av, strada_new_int(sv[0]));
+    strada_array_push_take(arr->value.av, strada_new_int(sv[1]));
+    return arr;
+}
+
+/* core::mkfifo(path, mode): 0 / -1. */
+StradaValue* strada_mkfifo(StradaValue *path, StradaValue *mode) {
+    char _tb[PATH_MAX];
+    const char *p = strada_path_buf(path, _tb, sizeof(_tb));
+    return strada_new_int(mkfifo(p, (mode_t)strada_to_int(mode)));
+}
+
+/* core::rewinddir(dh): 0, or -1 for a closed / non-directory handle. */
+StradaValue* strada_rewinddir(StradaValue *dh) {
+    if (!dh || STRADA_IS_TAGGED_INT(dh) || dh->type != STRADA_CPOINTER || !dh->value.ptr) {
+        return strada_new_int(-1);
+    }
+    rewinddir((DIR*)dh->value.ptr);
+    return strada_new_int(0);
+}
+
+/* core::getservbyname(name, proto): port number, or undef when unknown.
+ * proto may be undef / "" (any protocol). */
+StradaValue* strada_getservbyname(StradaValue *name, StradaValue *proto) {
+    char nb[128], pb[32];
+    const char *n = strada_to_str_buf(name, nb, sizeof(nb));
+    const char *p = NULL;
+    if (proto && (STRADA_IS_TAGGED_INT(proto) || proto->type != STRADA_UNDEF)) {
+        p = strada_to_str_buf(proto, pb, sizeof(pb));
+        if (p && !*p) p = NULL;
+    }
+    if (!n || !*n) return strada_new_undef();
+#if defined(__GLIBC__)
+    struct servent se, *res = NULL;
+    char buf[2048];
+    if (getservbyname_r(n, p, &se, buf, sizeof(buf), &res) != 0 || !res) return strada_new_undef();
+    return strada_new_int((int64_t)ntohs((uint16_t)res->s_port));
+#else
+    struct servent *res = getservbyname(n, p);
+    if (!res) return strada_new_undef();
+    return strada_new_int((int64_t)ntohs((uint16_t)res->s_port));
+#endif
+}
+
+/* core::crc32(data): CRC-32 (IEEE 802.3, as zlib/PNG) of the bytes, 0..2^32-1. */
+StradaValue* strada_crc32(StradaValue *sv) {
+    static uint32_t table[256];
+    static int ready = 0;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        ready = 1;   /* racing initializers write identical values */
+    }
+    char _tb[256];
+    size_t len = 0;
+    char *owned = NULL;
+    const unsigned char *d = sv ? (const unsigned char *)strada_sv_raw_bytes(sv, _tb, sizeof(_tb), &len, &owned) : NULL;
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; d && i < len; i++) c = table[(c ^ d[i]) & 0xFF] ^ (c >> 8);
+    free(owned);
+    return strada_new_int((int64_t)(c ^ 0xFFFFFFFFu));
+}
+
+/* core::uuid(): random (version 4) UUID, lower-case, or undef when the
+ * system has no random source. */
+StradaValue* strada_uuid(void) {
+    unsigned char b[16];
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return strada_new_undef();
+    size_t got = 0;
+    while (got < sizeof(b)) {
+        ssize_t r = read(fd, b + got, sizeof(b) - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    if (got != sizeof(b)) return strada_new_undef();
+    b[6] = (unsigned char)((b[6] & 0x0F) | 0x40);
+    b[8] = (unsigned char)((b[8] & 0x3F) | 0x80);
+    char out[37];
+    snprintf(out, sizeof(out),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+             b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+    return strada_new_str(out);
+}
+
 /* ---- Unix-domain stream sockets ---- */
 static StradaValue *strada_socket_wrap_fd(int fd) {
     StradaSocketBuffer *buf = malloc(sizeof(StradaSocketBuffer));

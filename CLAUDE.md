@@ -691,6 +691,22 @@ call's argument list (`join("/", File::Spec->splitdir($d))`).
 NAME resolves to the module's function (it clashed with libc's `basename`,
 `getcwd`; test `t/bugfix_tests/qw_import_libc_name.strada`).
 
+**System additions (2026-11-22)**: `core::environ()` (hash of the whole
+environment), `core::uname()` (hash), `core::nproc()` (CPUs this process may
+use: affinity mask on Linux), `core::socketpair()` (`[fd0, fd1]`, the shape of
+`core::pipe()`), `core::mkfifo(path, mode)`, `core::rewinddir($dh)`,
+`core::getservbyname(name, proto)` (port or undef), `core::crc32(data)`,
+`core::uuid()` (version 4). All are plain runtime functions wired like
+`initgroups` (Semantic `$b`, one `gen_call_with_arg_cleanup`/zero-arg `emit`
+handler in CodeGenBuiltins, `owned_set`), so the VM reaches them through the
+generated bridge table. HMAC-SHA256 was already in `Digest::SHA`
+(`hmac_sha256`, `hmac_sha256_hex`; `t/t_hmac.sh`). Not added, on purpose:
+Perl-named aliases `getc`/`read`/`sysread`/`syswrite` (the existing
+`fgetc`/`fread`/`read_fd`/`write_fd` have different signatures and return
+values, so an alias would be a Perl name with non-Perl behaviour) and
+`binmode` (handles have no layers and `"rb"` changes nothing on POSIX, so it
+would be a no-op). Test: `t/bugfix_tests/sys_info_posix_additions.strada`.
+
 Build tools with: `make tools` or `./strada tools/<tool>.strada`
 
 ## Perla (Perl 5 Compiler)
