@@ -521,6 +521,7 @@ struct StradaArray {
     size_t size;
     size_t capacity;
     int refcount;
+    uint32_t ol_lock;   /* per-object lock word (STRADA_GIL=0); fills former padding */
     size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
@@ -552,6 +553,7 @@ void ss_decref_slow(StradaString *ss);  /* handles pool return or free */
  * Gates the atomic branch in refcount ops — single-threaded programs
  * keep the plain increment. */
 extern int strada_threading_active;
+extern int strada_objlock_on;   /* threads run in parallel under per-object locks (STRADA_GIL=0) */
 /* SS refcounts must be atomic under threading, same as StradaValue
  * refcounts: strings cross threads both directly and via zero-copy
  * shares (keys()/each() hand out SVs sharing hash-key StradaStrings,
@@ -630,6 +632,7 @@ struct StradaHash {
                                  * hash_index from entries[]; when 0, hash_linear_find
                                  * short-circuits (clean hashes never need a full scan). */
     uint8_t compact_alloc;      /* header allocated with inline index and entry storage */
+    uint32_t ol_lock;           /* per-object lock word (STRADA_GIL=0); fills former padding */
 };
 
 /* Mark a hash's index as possibly out-of-sync with entries[]. Subsequent
@@ -965,7 +968,11 @@ void strada_gc_mutex_lock(pthread_mutex_t *mtx); /* pthread_mutex_lock that is G
 void strada_gil_release(void);
 void strada_gil_acquire(void);
 int strada_gil_enabled(void);
-int strada_gil_file_blocks(FILE *fp);  /* lock on and fp is a pipe/terminal/socket: a read may block */
+int strada_gil_file_blocks(FILE *fp);
+extern int strada_gil_force_on;
+void strada_slot_release(StradaValue *old);
+void strada_ol_array_append_all(StradaArray *dst, StradaArray *src);
+int strada_array_exists_idx(StradaArray *av, int64_t idx);  /* release a value removed from a shared place */  /* lock on and fp is a pipe/terminal/socket: a read may block */
 void strada_gil_yield_slow(void);
 extern int strada_gil_drop_request;
 static inline void strada_gil_poll(void) {
@@ -2600,6 +2607,7 @@ static inline void strada_av_append_all(StradaArray *dst, StradaValue *src) {
         return;
     }
     StradaArray *av = strada_deref_array(src);
+    if (av && __builtin_expect(strada_objlock_on, 0)) { strada_ol_array_append_all(dst, av); return; }
     if (av) {
         for (size_t i = 0; i < av->size; i++) {
             StradaValue *el = av->elements[av->head + i];
@@ -2618,6 +2626,7 @@ static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
     int64_t len = (int64_t)strada_array_length(av);
     if (idx < 0) idx += len;
     if (idx < 0 || idx >= len) return 0;
+    if (__builtin_expect(strada_objlock_on, 0)) return strada_array_exists_idx(av, idx);
     StradaValue *el = av->elements[av->head + idx];
     return el != NULL;
 }
@@ -2698,7 +2707,7 @@ STRADA_HOT_INLINE StradaValue* strada_hv_fetch_owned_ph_len(StradaValue *sv, con
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) return strada_tied_hash_fetch_len(msv, key, key_len);
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
-    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+    if (__builtin_expect(hv != NULL && key != NULL && !strada_objlock_on, 1)) {
         uint32_t pos = hash & (hv->num_buckets - 1);
         uint32_t idx = hv->hash_index[pos];
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
@@ -2731,7 +2740,7 @@ STRADA_HOT_INLINE int64_t strada_hv_fetch_int_ph_len(StradaValue *sv, const char
         return v;
     }
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
-    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+    if (__builtin_expect(hv != NULL && key != NULL && !strada_objlock_on, 1)) {
         uint32_t pos = hash & (hv->num_buckets - 1);
         uint32_t idx = hv->hash_index[pos];
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
@@ -2791,7 +2800,7 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
         if (!strada_hv_check_lock(msv, key)) return;
     }
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
-    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+    if (__builtin_expect(hv != NULL && key != NULL && !strada_objlock_on, 1)) {
         uint32_t pos = hash & (hv->num_buckets - 1);
         uint32_t idx = hv->hash_index[pos];
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
@@ -2848,7 +2857,7 @@ STRADA_HOT_INLINE void strada_hv_store_take_ph_len(StradaValue *sv, const char *
         if (!ok) { strada_decref(val); return; }
     }
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
-    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+    if (__builtin_expect(hv != NULL && key != NULL && !strada_objlock_on, 1)) {
         uint32_t pos = hash & (hv->num_buckets - 1);
         uint32_t idx = hv->hash_index[pos];
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
@@ -2879,7 +2888,7 @@ STRADA_HOT_INLINE int strada_hv_exists_ph_len(StradaValue *sv, const char *key, 
     StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
     if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) return strada_tied_hash_exists_len(msv, key, key_len);
     StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
-    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+    if (__builtin_expect(hv != NULL && key != NULL && !strada_objlock_on, 1)) {
         uint32_t pos = hash & (hv->num_buckets - 1);
         uint32_t idx = hv->hash_index[pos];
         if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {

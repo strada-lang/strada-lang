@@ -1740,6 +1740,312 @@ static inline void cc_stw_blocking_leave(void)    {}
 static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx; }
 #endif
 
+extern int strada_gil_drop_request;
+/* ===== Per-object locking (STRADA_GIL=0) =====
+ * With the global lock off, threads run Strada code in parallel and memory
+ * safety comes from three rules:
+ *
+ * 1. Container structure. Every array and hash carries a 32-bit recursive
+ *    lock word (ol_lock). Every runtime function that reads or writes a
+ *    container's internals holds it (OL_AV / OL_HV scope guards).
+ * 2. Value lifetime. An element read returns a pointer without a reference.
+ *    So a value removed from a place other threads can read (a container
+ *    slot, a captured variable, a global) is not released at once: the
+ *    release is queued ("retired") and done only after every other thread has
+ *    passed a safe point (a loop check, a blocking call, thread exit), the
+ *    same points where the global lock changes hands. Any strada_decref()
+ *    made while a container lock is held is retired automatically, which
+ *    also keeps DESTROY and other user code from running under a lock.
+ * 3. No user code and no throw under a lock. strada_throw releases whatever
+ *    the dying runtime function still holds (ol_release_all).
+ *
+ * strada_objlock_on is 0 in single-threaded programs and under the global
+ * lock; every fast path tests it first and then behaves exactly as before. */
+int strada_objlock_on = 0;
+typedef char ol_assert_av_size[(sizeof(StradaArray) == 5 * sizeof(size_t)) ? 1 : -1];
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <linux/futex.h>
+static inline void ol_futex_wait(uint32_t *w, uint32_t val) {
+    syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, val, NULL, NULL, 0);
+}
+static inline void ol_futex_wake(uint32_t *w) {
+    syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
+}
+#else
+static inline void ol_futex_wait(uint32_t *w, uint32_t val) { (void)w; (void)val; sched_yield(); }
+static inline void ol_futex_wake(uint32_t *w) { (void)w; }
+#endif
+
+#define OL_OWNER(w)   ((w) & 0xFFFFu)
+#define OL_ONE        0x10000u
+#define OL_COUNT(w)   (((w) >> 16) & 0x7FFFu)
+#define OL_WAIT       0x80000000u
+#define OL_MAX_HELD   32
+
+typedef struct OlRetired { StradaValue *sv; uint64_t epoch; } OlRetired;
+typedef struct OlThread {
+    uint64_t epoch;          /* global epoch seen at this thread's last safe point */
+    int blocked;             /* in a blocking call: holds no borrowed pointers */
+    int block_depth;
+    uint32_t id;             /* 1..65535, lock owner tag */
+    int depth;               /* distinct locks held */
+    int reclaiming;
+    int active;
+    uint32_t *held[OL_MAX_HELD];
+    OlRetired *ret;
+    size_t ret_len, ret_cap, ret_next_try;
+    struct OlThread *next;   /* all records ever created (records are reused) */
+} OlThread;
+
+static STRADA_TLS OlThread *ol_self = NULL;
+static pthread_mutex_t ol_reg_mu = PTHREAD_MUTEX_INITIALIZER;
+static OlThread *ol_threads = NULL;
+static uint32_t ol_next_id = 1;
+static uint64_t ol_epoch = 1;
+static OlRetired *ol_orphans = NULL;      /* retired by threads that have ended */
+static size_t ol_orphans_len = 0, ol_orphans_cap = 0;
+
+static OlThread *ol_me_slow(void) {
+    pthread_mutex_lock(&ol_reg_mu);
+    OlThread *t = ol_threads;
+    while (t && t->active) t = t->next;
+    if (!t) {
+        t = calloc(1, sizeof(OlThread));
+        if (!t || ol_next_id > 0xFFFFu) { fprintf(stderr, "strada: too many threads\n"); abort(); }
+        t->id = ol_next_id++;
+        t->next = ol_threads;
+        __atomic_store_n(&ol_threads, t, __ATOMIC_RELEASE);
+    }
+    t->depth = 0; t->reclaiming = 0; t->block_depth = 0;
+    t->ret_len = 0; t->ret_next_try = 64;
+    __atomic_store_n(&t->blocked, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&t->epoch, __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST), __ATOMIC_SEQ_CST);
+    __atomic_store_n(&t->active, 1, __ATOMIC_SEQ_CST);
+    pthread_mutex_unlock(&ol_reg_mu);
+    ol_self = t;
+    return t;
+}
+static inline OlThread *ol_me(void) {
+    OlThread *t = ol_self;
+    return __builtin_expect(t != NULL, 1) ? t : ol_me_slow();
+}
+
+static void ol_reclaim(OlThread *me, int ask);
+
+static void ol_lock_slow(uint32_t *w, OlThread *me) {
+    int spins = 0;
+    for (;;) {
+        uint32_t cur = __atomic_load_n(w, __ATOMIC_RELAXED);
+        if (cur == 0) {
+            /* Take it marked contended: we may not be the only waiter. */
+            if (__atomic_compare_exchange_n(w, &cur, me->id | OL_ONE | (spins > 64 ? OL_WAIT : 0), 0,
+                                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+            continue;
+        }
+        if (++spins <= 64) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+            continue;
+        }
+        if (!(cur & OL_WAIT)) {
+            if (!__atomic_compare_exchange_n(w, &cur, cur | OL_WAIT, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) continue;
+            cur |= OL_WAIT;
+        }
+        ol_futex_wait(w, cur);
+    }
+}
+static inline void ol_lock(uint32_t *w) {
+    OlThread *me = ol_me();
+    uint32_t exp = 0;
+    if (__builtin_expect(!__atomic_compare_exchange_n(w, &exp, me->id | OL_ONE, 0,
+                                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED), 0)) {
+        if (OL_OWNER(exp) == me->id) {          /* recursive */
+            __atomic_fetch_add(w, OL_ONE, __ATOMIC_RELAXED);
+            return;
+        }
+        ol_lock_slow(w, me);
+    }
+    if (__builtin_expect(me->depth >= OL_MAX_HELD, 0)) { fprintf(stderr, "strada: object lock nesting too deep\n"); abort(); }
+    me->held[me->depth++] = w;
+}
+static inline void ol_unlock(uint32_t *w) {
+    OlThread *me = ol_self;
+    uint32_t cur = __atomic_load_n(w, __ATOMIC_RELAXED);
+    if (OL_COUNT(cur) > 1) { __atomic_fetch_sub(w, OL_ONE, __ATOMIC_RELAXED); return; }
+    uint32_t old = __atomic_exchange_n(w, 0, __ATOMIC_RELEASE);
+    if (__builtin_expect(old & OL_WAIT, 0)) ol_futex_wake(w);
+    int d = me->depth;
+    if (d > 0 && me->held[d - 1] == w) me->depth = d - 1;
+    else {
+        for (int i = d - 1; i >= 0; i--) if (me->held[i] == w) {
+            memmove(&me->held[i], &me->held[i + 1], (size_t)(d - 1 - i) * sizeof(uint32_t*));
+            me->depth = d - 1;
+            break;
+        }
+    }
+    if (me->depth == 0 && __builtin_expect(me->ret_len >= me->ret_next_try, 0)) ol_reclaim(me, 1);
+}
+/* A throw unwinds past the runtime function that holds a lock. */
+static void ol_release_all(void) {
+    OlThread *me = ol_self;
+    if (!me) return;
+    while (me->depth > 0) {
+        uint32_t *w = me->held[--me->depth];
+        uint32_t old = __atomic_exchange_n(w, 0, __ATOMIC_RELEASE);
+        if (old & OL_WAIT) ol_futex_wake(w);
+    }
+}
+
+/* Scope guards: OL_AV(av); / OL_HV(hv); at the top of a function body hold
+ * the container's lock until the enclosing block ends, on every return path. */
+static inline uint32_t *ol_guard_lock(uint32_t *w) {
+    if (__builtin_expect(!strada_objlock_on, 1)) return NULL;
+    ol_lock(w);
+    return w;
+}
+static inline void ol_guard_unlock(uint32_t **wp) {
+    if (__builtin_expect(*wp != NULL, 0)) ol_unlock(*wp);
+}
+#define OL_CAT2(a, b) a##b
+#define OL_CAT(a, b) OL_CAT2(a, b)
+#define OL_GUARD(obj) uint32_t *OL_CAT(ol_g_, __LINE__) __attribute__((cleanup(ol_guard_unlock), unused)) = \
+    ((obj) ? ol_guard_lock(&(obj)->ol_lock) : NULL)
+#define OL_AV(av) OL_GUARD(av)
+#define OL_HV(hv) OL_GUARD(hv)
+/* Explicit forms, for code that must unlock before it finishes. */
+#define OL_LOCK(obj)   do { if (__builtin_expect(strada_objlock_on, 0) && (obj)) ol_lock(&(obj)->ol_lock); } while (0)
+#define OL_UNLOCK(obj) do { if (__builtin_expect(strada_objlock_on, 0) && (obj)) ol_unlock(&(obj)->ol_lock); } while (0)
+
+/* Queue a release for after every other thread's next safe point. */
+static void ol_retire(StradaValue *sv) {
+    OlThread *me = ol_me();
+    if (me->ret_len == me->ret_cap) {
+        size_t nc = me->ret_cap ? me->ret_cap * 2 : 256;
+        OlRetired *nr = realloc(me->ret, nc * sizeof(OlRetired));
+        if (!nr) { fprintf(stderr, "strada: out of memory\n"); abort(); }
+        me->ret = nr; me->ret_cap = nc;
+    }
+    me->ret[me->ret_len].sv = sv;
+    me->ret[me->ret_len].epoch = __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST);
+    me->ret_len++;
+    if (me->depth == 0 && me->ret_len >= me->ret_next_try) ol_reclaim(me, 1);
+}
+/* Lowest epoch any other running thread may still hold pointers from. */
+static uint64_t ol_min_epoch(OlThread *me) {
+    uint64_t min = UINT64_MAX;
+    for (OlThread *t = __atomic_load_n(&ol_threads, __ATOMIC_ACQUIRE); t; t = t->next) {
+        if (t == me || !__atomic_load_n(&t->active, __ATOMIC_SEQ_CST)) continue;
+        if (__atomic_load_n(&t->blocked, __ATOMIC_SEQ_CST)) continue;
+        uint64_t e = __atomic_load_n(&t->epoch, __ATOMIC_SEQ_CST);
+        if (e < min) min = e;
+    }
+    return min;
+}
+static void ol_reclaim(OlThread *me, int ask) {
+    if (me->reclaiming || me->depth > 0) return;
+    if (me->ret_len == 0 && __atomic_load_n(&ol_orphans_len, __ATOMIC_RELAXED) == 0) return;
+    /* Move the epoch on so that threads passing a safe point from now are
+     * known to have dropped everything retired so far. */
+    uint64_t g = __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST);
+    if (me->ret_len == 0 || me->ret[me->ret_len - 1].epoch >= g)
+        __atomic_compare_exchange_n(&ol_epoch, &g, g + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    uint64_t min = ol_min_epoch(me);
+    me->reclaiming = 1;
+    size_t n = 0;
+    while (n < me->ret_len && me->ret[n].epoch < min) n++;
+    if (n > 0) {
+        OlRetired *batch = malloc(n * sizeof(OlRetired));
+        if (batch) {
+            memcpy(batch, me->ret, n * sizeof(OlRetired));
+            memmove(me->ret, me->ret + n, (me->ret_len - n) * sizeof(OlRetired));
+            me->ret_len -= n;
+            for (size_t i = 0; i < n; i++) strada_decref(batch[i].sv);
+            free(batch);
+        }
+    }
+    if (__atomic_load_n(&ol_orphans_len, __ATOMIC_RELAXED) > 0) {
+        OlRetired *batch = NULL; size_t bn = 0;
+        pthread_mutex_lock(&ol_reg_mu);
+        size_t k = 0;
+        while (k < ol_orphans_len && ol_orphans[k].epoch < min) k++;
+        if (k > 0 && (batch = malloc(k * sizeof(OlRetired))) != NULL) {
+            memcpy(batch, ol_orphans, k * sizeof(OlRetired));
+            memmove(ol_orphans, ol_orphans + k, (ol_orphans_len - k) * sizeof(OlRetired));
+            ol_orphans_len -= k;
+            bn = k;
+        }
+        pthread_mutex_unlock(&ol_reg_mu);
+        for (size_t i = 0; i < bn; i++) strada_decref(batch[i].sv);
+        free(batch);
+    }
+    me->reclaiming = 0;
+    if (me->ret_len > 0) {
+        /* Someone has not reached a safe point yet: ask, and try again later. */
+        me->ret_next_try = me->ret_len + 64;
+        if (ask) __atomic_store_n(&strada_gil_drop_request, 1, __ATOMIC_RELAXED);
+    } else me->ret_next_try = 64;
+}
+/* This thread holds no pointers borrowed from shared places. */
+static void ol_safepoint(void) {
+    OlThread *me = ol_me();
+    if (me->depth > 0) return;
+    __atomic_store_n(&me->epoch, __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST), __ATOMIC_SEQ_CST);
+    ol_reclaim(me, 0);
+}
+static void ol_blocking_enter(void) {
+    OlThread *me = ol_me();
+    if (me->block_depth++ > 0) return;
+    if (me->depth > 0) return;      /* blocking with a lock held: not a safe point */
+    ol_reclaim(me, 0);
+    __atomic_store_n(&me->blocked, 1, __ATOMIC_SEQ_CST);
+}
+static void ol_blocking_leave(void) {
+    OlThread *me = ol_me();
+    if (me->block_depth <= 0 || --me->block_depth > 0) return;
+    if (!__atomic_load_n(&me->blocked, __ATOMIC_RELAXED)) return;
+    __atomic_store_n(&me->blocked, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&me->epoch, __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST), __ATOMIC_SEQ_CST);
+}
+static void ol_thread_begin(void) { (void)ol_me(); }
+/* A thread that runs Strada code ends: what it retired is handed on. */
+static void ol_thread_end(void) {
+    OlThread *me = ol_self;
+    if (!me) return;
+    ol_release_all();
+    ol_safepoint();
+    pthread_mutex_lock(&ol_reg_mu);
+    if (me->ret_len > 0) {
+        if (ol_orphans_len + me->ret_len > ol_orphans_cap) {
+            size_t nc = (ol_orphans_len + me->ret_len) * 2;
+            OlRetired *no = realloc(ol_orphans, nc * sizeof(OlRetired));
+            if (!no) { fprintf(stderr, "strada: out of memory\n"); abort(); }
+            ol_orphans = no; ol_orphans_cap = nc;
+        }
+        /* Keep the list ordered by epoch: these are stamped now. */
+        uint64_t g = __atomic_load_n(&ol_epoch, __ATOMIC_SEQ_CST);
+        for (size_t i = 0; i < me->ret_len; i++) {
+            ol_orphans[ol_orphans_len].sv = me->ret[i].sv;
+            ol_orphans[ol_orphans_len].epoch = g;
+            ol_orphans_len++;
+        }
+        me->ret_len = 0;
+    }
+    __atomic_store_n(&me->active, 0, __ATOMIC_SEQ_CST);
+    pthread_mutex_unlock(&ol_reg_mu);
+    ol_self = NULL;
+}
+/* Release a value just removed from a place other threads can read. */
+void strada_slot_release(StradaValue *old) {
+    if (!old || STRADA_IS_TAGGED_INT(old)) return;
+    if (__builtin_expect(strada_objlock_on, 0)) { if (!STRADA_SV_IS_NONRC(old)) ol_retire(old); return; }
+    strada_decref(old);
+}
+/* Program exit: release what can be released. */
+static void ol_drain_at_exit(void) { if (strada_objlock_on && ol_self) ol_safepoint(); }
+
 /* ===== Global interpreter lock (on by default; STRADA_GIL=0 turns it off) =====
  * Strada containers, variables and runtime caches have no locking of their
  * own: two threads writing shared data at once corrupt memory. With the lock
@@ -1755,6 +2061,7 @@ static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx
  * Strada code (I/O poller, resolver) never take it. */
 int strada_gil_on = 0;
 int strada_gil_drop_request = 0;
+int strada_gil_force_on = 0;   /* the VM sets this: its own containers have no object locks yet */
 static int gil_decided = 0;
 static pthread_mutex_t gil_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gil_free_cv = PTHREAD_COND_INITIALIZER;    /* lock became free */
@@ -1831,7 +2138,9 @@ static void strada_gil_activate(void) {
         if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'
                   || ((e[0] == 'o' || e[0] == 'O') && (e[1] == 'f' || e[1] == 'F'))))
             strada_gil_on = 0;
+        if (strada_gil_force_on) strada_gil_on = 1;
         gil_decided = 1;
+        if (!strada_gil_on) { ol_thread_begin(); __atomic_store_n(&strada_objlock_on, 1, __ATOMIC_SEQ_CST); }
         const char *iv = getenv("STRADA_GIL_INTERVAL_US");
         if (iv && *iv) {
             long us = strtol(iv, NULL, 10);
@@ -1845,24 +2154,24 @@ static void strada_gil_activate(void) {
     pthread_mutex_unlock(&gil_mu);
 }
 /* Entry/exit of a thread that runs Strada code. */
-static void gil_thread_begin(void) { if (strada_gil_on) gil_take(); }
-static void gil_thread_end(void)   { if (strada_gil_on && gil_i_hold()) gil_drop(); }
+static void gil_thread_begin(void) { if (strada_gil_on) gil_take(); else if (strada_objlock_on) ol_thread_begin(); }
+static void gil_thread_end(void)   { if (strada_gil_on) { if (gil_i_hold()) gil_drop(); } else if (strada_objlock_on) ol_thread_end(); }
 
 static void gil_blocking_enter(void) {
-    if (!strada_gil_on) return;
+    if (!strada_gil_on) { if (strada_objlock_on) ol_blocking_enter(); return; }
     if (gil_block_depth++ > 0) return;
     gil_block_had = gil_i_hold();
     if (gil_block_had) gil_drop();
 }
 static void gil_blocking_leave(void) {
-    if (!strada_gil_on) return;
+    if (!strada_gil_on) { if (strada_objlock_on) ol_blocking_leave(); return; }
     if (gil_block_depth <= 0 || --gil_block_depth > 0) return;
     if (gil_block_had) gil_take();
 }
 /* As gil_blocking_leave, for a caller holding *mtx: never wait for the lock
  * while holding a runtime mutex (its other users may hold the lock). */
 static void gil_blocking_leave_mutex(pthread_mutex_t *mtx) {
-    if (!strada_gil_on) return;
+    if (!strada_gil_on) { if (strada_objlock_on) ol_blocking_leave(); return; }
     if (gil_block_depth <= 0 || --gil_block_depth > 0) return;
     if (!gil_block_had) return;
     pthread_mutex_lock(&gil_mu);
@@ -1890,6 +2199,11 @@ void strada_gil_release(void) { cc_blocking_enter(); }
 void strada_gil_acquire(void) { cc_blocking_leave(); }
 /* Slow path of strada_gil_poll(): another thread asked for the lock. */
 void strada_gil_yield_slow(void) {
+    if (strada_objlock_on) {
+        __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
+        ol_safepoint();
+        return;
+    }
     if (!strada_gil_on || !gil_i_hold() || gil_block_depth > 0) {
         __atomic_store_n(&strada_gil_drop_request, 0, __ATOMIC_RELAXED);
         return;
@@ -1957,6 +2271,11 @@ void strada_decref(StradaValue *sv) {
     /* Skip immortal/pooled values to prevent freeing non-heap memory */
     if (STRADA_SV_IS_NONRC(sv)) return;
     if (strada_threading_active) {
+        if (__builtin_expect(strada_objlock_on, 0)) {
+            /* Under a container lock: queue the release (rule 2 above). */
+            OlThread *olt = ol_self;
+            if (olt && olt->depth > 0) { ol_retire(sv); return; }
+        }
 #ifdef STRADA_CYCLE_GC
         int do_collect = 0;
         /* Buffer BEFORE releasing our reference so another thread dropping the
@@ -2702,6 +3021,7 @@ void strada_weaken_hv_entry_sv(StradaHash *hv, StradaValue *key_sv) {
 }
 
 static void strada_weaken_hv_entry_len(StradaHash *hv, const char *key, uint32_t key_len) {
+    OL_GUARD(hv);
     if (!hv || !key) return;
     unsigned int hash = strada_hash_bytes(key, key_len);
     uint32_t pos = hash & (hv->num_buckets - 1);
@@ -3972,7 +4292,7 @@ StradaArray* strada_array_new(void) {
         StradaArray *av = strada_array_pool[--strada_array_pool_count];
         av->size = 0;
         av->head = 0;
-        av->refcount = 1;
+        av->refcount = 1; av->ol_lock = 0;
         return av;
     }
     StradaArray *av = sr_xmalloc(sizeof(StradaArray));
@@ -3981,7 +4301,7 @@ StradaArray* strada_array_new(void) {
     av->head = 0;
     av->elements = sr_xmalloc(av->capacity * sizeof(StradaValue*));
     memset(av->elements, 0, av->capacity * sizeof(StradaValue*));
-    av->refcount = 1;
+    av->refcount = 1; av->ol_lock = 0;
     return av;
 }
 
@@ -3998,7 +4318,7 @@ StradaArray* strada_array_new_cap(size_t cap) {
         StradaArray *av = strada_array_pool[--strada_array_pool_count];
         av->size = 0;
         av->head = 0;
-        av->refcount = 1;
+        av->refcount = 1; av->ol_lock = 0;
         if (av->capacity < cap) {
             /* pooled arrays are never compact (pool-push tests it), so this is
              * a plain realloc — but route through the helper for uniformity. */
@@ -4017,7 +4337,7 @@ StradaArray* strada_array_new_cap(size_t cap) {
         av->capacity = cap;
         av->size = 0;
         av->head = 0;
-        av->refcount = 1;
+        av->refcount = 1; av->ol_lock = 0;
         return av;
     }
     StradaArray *av = malloc(sizeof(StradaArray));
@@ -4025,7 +4345,7 @@ StradaArray* strada_array_new_cap(size_t cap) {
     av->size = 0;
     av->head = 0;
     av->elements = calloc(cap, sizeof(StradaValue*));
-    av->refcount = 1;
+    av->refcount = 1; av->ol_lock = 0;
     return av;
 }
 
@@ -4037,6 +4357,7 @@ StradaArray* strada_array_new_cap(size_t cap) {
 #define STRADA_AV_DYING(av) ((av)->refcount <= 0)
 
 void strada_array_push(StradaArray *av, StradaValue *sv) {
+    OL_GUARD(av);
     if (!av || STRADA_AV_DYING(av)) return;
 
     if (av->head + av->size >= av->capacity) {
@@ -4059,6 +4380,34 @@ void strada_array_push(StradaArray *av, StradaValue *sv) {
 
 /* Deep copy an array - creates a new StradaValue wrapping a new StradaArray
    with incref'd copies of each element. Follows references. Caller owns the returned value. */
+/* Snapshot an array's elements, each with a reference, under its lock.
+ * Returns a malloc'd buffer of *n pointers (NULL for holes); the caller owns
+ * the references. Used wherever elements are handed to another container or
+ * to user code: never hold two container locks, never call out under one. */
+static StradaValue **ol_array_snapshot(StradaArray *av, size_t *n) {
+    *n = 0;
+    if (!av) return NULL;
+    OL_GUARD(av);
+    size_t sz = av->size;
+    StradaValue **buf = malloc((sz ? sz : 1) * sizeof(StradaValue*));
+    if (!buf) return NULL;
+    for (size_t i = 0; i < sz; i++) {
+        StradaValue *el = av->elements[av->head + i];
+        if (el) strada_incref(el);
+        buf[i] = el;
+    }
+    *n = sz;
+    return buf;
+}
+void strada_ol_array_append_all(StradaArray *dst, StradaArray *src) {
+    size_t n;
+    StradaValue **buf = ol_array_snapshot(src, &n);
+    if (!buf) return;
+    for (size_t i = 0; i < n; i++)
+        strada_array_push_take(dst, buf[i] ? buf[i] : strada_new_undef());
+    free(buf);
+}
+
 StradaValue* strada_array_copy(StradaValue *src) {
     StradaValue *dst = strada_new_array();
     if (!src || STRADA_IS_TAGGED_INT(src)) return dst;
@@ -4082,6 +4431,7 @@ StradaValue* strada_array_copy(StradaValue *src) {
     }
     StradaArray *sav = strada_deref_array(current);
     if (!sav) return dst;
+    OL_GUARD(sav);
     StradaArray *dav = dst->value.av;
     if (sav->size > 0) {
         if (sav->size > dav->capacity) {
@@ -4101,6 +4451,7 @@ StradaValue* strada_array_copy(StradaValue *src) {
 
 /* Push without incref - caller donates ownership of newly created value */
 void strada_array_push_take(StradaArray *av, StradaValue *sv) {
+    OL_GUARD(av);
     if (!av || STRADA_AV_DYING(av)) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
@@ -4128,6 +4479,7 @@ void strada_array_push_take(StradaArray *av, StradaValue *sv) {
 }
 
 StradaValue* strada_array_pop(StradaArray *av) {
+    OL_GUARD(av);
     if (!av || av->size == 0) return strada_new_undef();
     av->size--;
     StradaValue *val = av->elements[av->head + av->size];
@@ -4136,6 +4488,7 @@ StradaValue* strada_array_pop(StradaArray *av) {
 }
 
 StradaValue* strada_array_shift(StradaArray *av) {
+    OL_GUARD(av);
     if (!av || av->size == 0) return strada_new_undef();
     StradaValue *result = av->elements[av->head];
     av->elements[av->head] = NULL;
@@ -4145,6 +4498,7 @@ StradaValue* strada_array_shift(StradaArray *av) {
 }
 
 void strada_array_unshift(StradaArray *av, StradaValue *sv) {
+    OL_GUARD(av);
     if (!av || STRADA_AV_DYING(av)) return;
     strada_mark_if_self_ref_av(av, sv);
 
@@ -4168,6 +4522,7 @@ void strada_array_unshift(StradaArray *av, StradaValue *sv) {
 }
 
 StradaValue* strada_array_get(StradaArray *av, int64_t idx) {
+    OL_GUARD(av);
     /* Borrowed-reference API. Callers don't decref the result for
      * in-bounds reads, so the NULL-array and out-of-bounds branches
      * must NOT allocate a fresh undef — return the immortal undef
@@ -4202,6 +4557,7 @@ StradaValue* strada_array_get(StradaArray *av, int64_t idx) {
  * (already refcount 1) or the immortal undef static (incref no-op);
  * we just delegate and apply an extra incref. */
 StradaValue* strada_array_get_owned(StradaArray *av, int64_t idx) {
+    OL_GUARD(av);
     if (!av) return strada_new_undef();
     if (idx < 0) {
         idx = (int64_t)av->size + idx;
@@ -4216,6 +4572,7 @@ StradaValue* strada_array_get_owned(StradaArray *av, int64_t idx) {
 /* Returns 1 if the slot at idx is present (in bounds AND not a deletion
  * tombstone), 0 otherwise. Used by `exists $arr[N]`. */
 int strada_array_exists_idx(StradaArray *av, int64_t idx) {
+    OL_GUARD(av);
     if (!av) return 0;
     if (idx < 0) idx = (int64_t)av->size + idx;
     if (idx < 0 || (size_t)idx >= av->size) return 0;
@@ -4228,6 +4585,7 @@ int strada_array_exists_idx(StradaArray *av, int64_t idx) {
  * and trims any tombstones now at the tail. Matches Perl's `delete`
  * semantics for arrays. */
 StradaValue* strada_array_delete_idx(StradaArray *av, int64_t idx) {
+    OL_GUARD(av);
     if (!av) return strada_undef_static();
     if (idx < 0) idx = (int64_t)av->size + idx;
     if (idx < 0 || (size_t)idx >= av->size) return strada_undef_static();
@@ -4254,6 +4612,7 @@ StradaValue* strada_hash_delete_take(StradaHash *hv, const char *key) {
 }
 
 static StradaValue* strada_hash_delete_take_len(StradaHash *hv, const char *key, size_t key_sz) {
+    OL_GUARD(hv);
     if (!hv || !key) return strada_undef_static();
 
     unsigned int hash = strada_hash_bytes(key, key_sz);
@@ -4333,6 +4692,7 @@ StradaValue* strada_array_get_safe(StradaValue *arr, int64_t idx) {
 }
 
 void strada_array_set(StradaArray *av, int64_t idx, StradaValue *sv) {
+    OL_GUARD(av);
     if (!av || STRADA_AV_DYING(av)) return;
 
     /* Handle negative indices */
@@ -4382,11 +4742,13 @@ void strada_array_set(StradaArray *av, int64_t idx, StradaValue *sv) {
 }
 
 size_t strada_array_length(StradaArray *av) {
+    OL_GUARD(av);
     return av ? av->size : 0;
 }
 
 /* Reverse array in-place */
 void strada_array_reverse(StradaArray *av) {
+    OL_GUARD(av);
     if (!av || av->size < 2) return;
 
     size_t left = av->head;
@@ -4433,6 +4795,7 @@ void strada_set_hash_default_capacity(int64_t capacity) {
 
 /* Reserve capacity for an existing array (pre-allocate without changing size) */
 void strada_array_reserve(StradaArray *av, size_t capacity) {
+    OL_GUARD(av);
     if (!av || capacity <= av->capacity) return;
 
     /* Guard the multiplication: for capacity >= SIZE_MAX/sizeof(ptr) the size
@@ -5195,7 +5558,7 @@ static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
     hv->free_head = HASH_EMPTY;
     hv->hash_index = sr_xmalloc(nbuckets * sizeof(uint32_t));
     memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
-    hv->refcount = 1;
+    hv->refcount = 1; hv->ol_lock = 0;
     hv->iter_index = 0;
     hv->index_dirty = 0;
 }
@@ -5297,7 +5660,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         hv->num_tombstones = 0;
         hv->next_slot = 0;
         hv->free_head = HASH_EMPTY;
-        hv->refcount = 1;
+        hv->refcount = 1; hv->ol_lock = 0;
         hv->iter_index = 0;
         hv->index_dirty = 0;
         return hv;
@@ -5322,7 +5685,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         hv->num_tombstones = 0;
         hv->next_slot = 0;
         hv->free_head = HASH_EMPTY;
-        hv->refcount = 1;
+        hv->refcount = 1; hv->ol_lock = 0;
         hv->iter_index = 0;
         hv->index_dirty = 0;
         return hv;
@@ -5343,6 +5706,7 @@ static inline uint8_t strada_key_bytes_for(const char *key) {
 }
 
 void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
+    OL_GUARD(hv);
     if (!hv || !key) return;
     strada_mark_if_self_ref_hv(hv, sv);
 
@@ -5420,6 +5784,7 @@ void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
 /* Pre-hashed variant: caller provides the djb2 hash of the key.
  * Avoids re-hashing for known constant keys (e.g., has-attribute names). */
 void strada_hash_set_take_ph_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv) {
+    OL_GUARD(hv);
     if (!hv || !key) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
@@ -5503,6 +5868,7 @@ StradaValue **strada_hv_fetch_lvalue(StradaHash *hv, const char *key, int autovi
 }
 
 StradaValue **strada_hv_fetch_lvalue_len(StradaHash *hv, const char *key, size_t key_sz, int autoviv) {
+    OL_GUARD(hv);
     if (!hv || !key) return NULL;
     unsigned int hash = strada_hash_bytes(key, key_sz);
     uint32_t key_len = (uint32_t)key_sz;
@@ -5561,6 +5927,7 @@ StradaValue **strada_hv_fetch_lvalue_sv(StradaValue *sv, const char *key, int au
 }
 
 void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
+    OL_GUARD(hv);
     if (!hv || !key) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
@@ -5630,6 +5997,7 @@ void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
 /* Fast hash set with pre-built StradaString key — no allocation, no hashing.
  * Used by inline constructors for known attribute names. Takes ownership of value. */
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv) {
+    OL_GUARD(hv);
     if (!hv || !key_ss) {
         if (sv && !STRADA_IS_TAGGED_INT(sv)) strada_decref(sv);
         return;
@@ -5695,6 +6063,7 @@ void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *
 }
 
 StradaValue* strada_hash_get(StradaHash *hv, const char *key) {
+    OL_GUARD(hv);
     if (!hv || !key) return strada_undef_static();
 
     unsigned int hash = strada_hash_string(key);
@@ -5883,6 +6252,7 @@ StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx) {
 }
 
 int strada_hash_exists_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    OL_GUARD(hv);
     if (!hv || !key) return 0;
 
     uint32_t pos = hash & (hv->num_buckets - 1);
@@ -5916,6 +6286,7 @@ int strada_hash_exists(StradaHash *hv, const char *key) {
 }
 
 void strada_hash_delete(StradaHash *hv, const char *key) {
+    OL_GUARD(hv);
     if (!hv || !key) return;
 
     unsigned int hash = strada_hash_string(key);
@@ -6078,6 +6449,7 @@ StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv
 }
 
 void strada_hash_set_sv(StradaHash *hv, StradaValue *key_sv, StradaValue *sv) {
+    OL_GUARD(hv);
     if (!hv) return;
     strada_mark_if_self_ref_hv(hv, sv);
     char key_buf[SV_KEYBUF_LEN];
@@ -6155,6 +6527,7 @@ void strada_hash_set_sv(StradaHash *hv, StradaValue *key_sv, StradaValue *sv) {
 }
 
 StradaValue* strada_hash_get_sv(StradaHash *hv, StradaValue *key_sv) {
+    OL_GUARD(hv);
     if (!hv) return strada_undef_static();
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
@@ -6510,6 +6883,7 @@ void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, i
 }
 
 int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
+    OL_GUARD(hv);
     if (!hv) return 0;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
@@ -6547,6 +6921,7 @@ int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
 }
 
 void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv) {
+    OL_GUARD(hv);
     if (!hv) return;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
@@ -6684,6 +7059,7 @@ static const char* build_concat_key_buf(
 
 /* Hash get with pre-computed hash (avoids re-hashing) */
 StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
+    OL_GUARD(hv);
     if (!hv || !key) return strada_undef_static();
 
     uint32_t key_len = (uint32_t)strlen(key);
@@ -6715,6 +7091,7 @@ StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned
 
 /* Length-aware get: uses length check + memcmp for faster rejection */
 static inline StradaValue* strada_hash_get_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    OL_GUARD(hv);
     if (!hv || !key) return strada_undef_static();
 
     uint32_t pos = hash & (hv->num_buckets - 1);
@@ -6742,6 +7119,7 @@ static inline StradaValue* strada_hash_get_with_hash_len(StradaHash *hv, const c
 /* Length-aware hash set: avoids strlen, uses memcmp with fast length reject.
  * If heap_key is non-NULL, frees it before any DESTROY decref unwind. */
 static void hash_set_with_hash_len_core(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv, char *heap_key) {
+    OL_GUARD(hv);
     if (!hv || !key) {
         if (heap_key) free(heap_key);
         return;
@@ -6826,6 +7204,7 @@ StradaValue* strada_hash_get_with_hash_len_ext(StradaHash *hv, const char *key, 
 }
 
 static StradaValue* strada_hash_delete_take_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    OL_GUARD(hv);
     if (!hv || !key) return strada_undef_static();
 
     uint32_t pos = hash & (hv->num_buckets - 1);
@@ -6993,6 +7372,7 @@ StradaValue* strada_hv_delete_concat_sv(StradaValue *sv, const char *prefix, siz
 }
 
 StradaArray* strada_hash_keys(StradaHash *hv) {
+    OL_GUARD(hv);
     StradaArray *av = strada_array_new();
     if (!hv) return av;
 
@@ -7238,6 +7618,7 @@ StradaArray* strada_hash_values_sv(StradaValue *sv) {
 }
 
 StradaArray* strada_hash_values(StradaHash *hv) {
+    OL_GUARD(hv);
     StradaArray *av = strada_array_new();
     if (!hv) return av;
 
@@ -7252,6 +7633,7 @@ StradaArray* strada_hash_values(StradaHash *hv) {
 
 /* Reserve capacity for hash entries, keeping the runtime's 50% max load. */
 void strada_hash_reserve(StradaHash *hv, size_t capacity) {
+    OL_GUARD(hv);
     if (!hv || capacity == 0) return;
     if (capacity > STRADA_MAX_HASH_RESERVE) capacity = STRADA_MAX_HASH_RESERVE;
 
@@ -12956,6 +13338,7 @@ void strada_throw(const char *msg) {
                 }
             }
         }
+        if (strada_objlock_on) ol_release_all();
         longjmp(strada_try_slot_at(saved_td - 1)->buf, 1);
     } else {
         /* No try block - fatal error with stack trace */
@@ -13021,6 +13404,7 @@ void strada_throw_value(StradaValue *sv) {
                 }
             }
         }
+        if (strada_objlock_on) ol_release_all();
         longjmp(strada_try_slot_at(saved_td - 1)->buf, 1);
     } else {
         fprintf(stderr, "Uncaught exception: %s\n", strada_exception_msg ? strada_exception_msg : "(unknown)");
@@ -26172,6 +26556,7 @@ static StradaValue* strada_join_stringify_elem(StradaValue *el) {
 }
 
 char* strada_join(const char *sep, StradaArray *arr) {
+    OL_GUARD(arr);
     if (!arr || arr->size == 0) return strdup("");
     if (!sep) sep = "";
 
@@ -26251,6 +26636,7 @@ char* strada_join(const char *sep, StradaArray *arr) {
 /* Binary-safe join: separator passed as StradaValue* so embedded NULs are
  * preserved. Returns a StradaValue* with the byte-accurate length set. */
 StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
+    OL_GUARD(arr);
     if (!arr || arr->size == 0) return strada_new_str_len("", 0);
 
     size_t n = arr->size;
@@ -36917,11 +37303,13 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
  * Hash each() iterator
  * ============================================================ */
 void strada_hash_reset_iter(StradaHash *hv) {
+    OL_GUARD(hv);
     if (!hv) return;
     hv->iter_index = 0;
 }
 
 StradaValue* strada_hash_each(StradaHash *hv) {
+    OL_GUARD(hv);
     if (!hv) return strada_new_array();
 
     /* Find next live entry */
@@ -40406,6 +40794,7 @@ StradaValue* strada_resolve_async(StradaValue *host) {
  * (Previously `split(",", "a,b,,")` gave 4 fields, `split("\n", "a\nb\n")`
  * counted a phantom last line and `split(" ", "  a b")` began with "" "".) */
 static void strada_split_strip_trailing(StradaArray *parts) {
+    OL_GUARD(parts);
     while (parts && parts->size > 0) {
         StradaValue *last = parts->elements[parts->head + parts->size - 1];
         int empty = 0;
@@ -40623,6 +41012,7 @@ void strada_printf_list(StradaValue *all) {
 
 /* keys()/values() reset the hash's each() iterator, as in Perl. */
 StradaHash *strada_hash_iter_reset(StradaHash *hv) {
+    OL_GUARD(hv);
     if (hv) hv->iter_index = 0;
     return hv;
 }
