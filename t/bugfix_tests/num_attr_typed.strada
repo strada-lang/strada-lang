@@ -1,0 +1,84 @@
+# EXPECT: 1.5 9.5|1.5 3|undef 4|7.25|12.5|2.5 tied-store|4 5.5
+# num attributes read and written as doubles (typed accessor arithmetic, and
+# a setter that writes the number into the slot when nothing else refers to
+# it). A copy of the old value, a reference to the element and a weak
+# reference must not see the new number; a tied object keeps its
+# behaviour.
+package Tie;
+func TIEHASH(str $class) scalar { my hash %d = (); my hash %s = ("d" => \%d, "log" => ""); return bless(\%s, $class); }
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; $self->{"log"} = "tied-store"; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}); }
+func DELETE(scalar $self, str $k) void { delete($self->{"d"}->{$k}); }
+func FIRSTKEY(scalar $self) scalar { return undef; }
+func NEXTKEY(scalar $self, str $k) scalar { return undef; }
+
+package P;
+has rw num $x = 0.0;
+has rw num $v = 1.5;
+has rw int $hits = 0;
+
+func step(scalar $self) void {
+    $self->set_x($self->x() + $self->v() * 2);
+    if ($self->x() > 10.0) { $self->set_hits($self->hits() + 1); }
+}
+func bump(scalar $self, num $by) void {
+    $self->set_x($self->x() + $by);
+}
+func half(scalar $self) num {
+    return $self->x() / 2;
+}
+
+package main;
+func main() int {
+    my str $out = "";
+    # a copy taken before the store keeps the old number
+    my scalar $p = P::new("x", 1.5);
+    my scalar $old = $p->{"x"};
+    $p->set_x(9.5);
+    $p->bump(0.0);
+    $out = $old . " " . $p->x();
+
+    # a reference to the element keeps pointing at the old value
+    my scalar $q = P::new("x", 1.5);
+    my scalar $ref = \$q->{"x"};
+    $q->bump(1.5);
+    $out = $out . "|" . $$ref . " " . $q->x();
+
+    # a weak reference to the old value goes undef when it is replaced
+    my scalar $w = P::new();
+    $w->{"x"} = [1];
+    my scalar $weak = $w->{"x"};
+    core::weaken($weak);
+    $w->{"x"} = 1.0;
+    $w->bump(3.0);
+    $out = $out . "|" . (defined($weak) ? "alive" : "undef") . " " . $w->x();
+
+    # receiver that is a hash element
+    my hash %h = ();
+    $h{"o"} = P::new("x", 14.5);
+    $out = $out . "|" . $h{"o"}->half();
+
+    # arithmetic over accessors, int and num mixed
+    my scalar $s = P::new("x", 3.5, "v", 4.5);
+    $s->step();
+    $out = $out . "|" . $s->x();
+
+    # tied object: the setter goes through STORE
+    my hash %th = ();
+    tie(%th, "Tie");
+    my scalar $tobj = bless(\%th, "P");
+    $th{"x"} = 1.0;
+    $tobj->bump(1.5);
+    $out = $out . "|" . $th{"x"} . " " . tied(%th)->{"log"};
+
+    # a non-num value in the slot is converted on read, replaced on write
+    my scalar $m = P::new();
+    $m->{"x"} = "4";
+    $out = $out . "|" . ($m->x() + 0);
+    $m->bump(1.5);
+    $out = $out . " " . $m->x();
+
+    say($out);
+    return 0;
+}

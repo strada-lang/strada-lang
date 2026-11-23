@@ -3931,6 +3931,17 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
             }
         }
 
+        # Arithmetic that is statically num (a num accessor, variable or
+        # literal on at least one side): one double expression, one boxed
+        # result, instead of a boxed value per operand and operator.
+        if (($op eq "+" || $op eq "-" || $op eq "*") && $cg->{"has_overloads"} == 0
+            && expr_is_num_typed($cg, $expr) == 1 && num_expr_has_accessor($cg, $expr) == 1) {
+            emit($cg, "strada_new_num(");
+            emit_num_operand($cg, $expr);
+            emit($cg, ")");
+            return;
+        }
+
         if ($op eq "+") {
             if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
                 if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
@@ -4608,6 +4619,42 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                                 }
                             }
                         }
+                    }
+                }
+
+                # A num attribute set from a statically num expression: the
+                # double goes straight into the slot (in place when the slot's
+                # number has no other owner).
+                if ($setter_receiver_ok == 1 && $cg->{"has_overloads"} == 0 && key_is_hashable_ascii($setter_attr) == 1
+                    && expr_is_num_typed($cg, $expr->{"args"}->[0]) == 1) {
+                    my scalar $nset_attr = resolve_inline_self_attr($cg, $cur_pkg2, $setter_attr);
+                    if ($nset_attr && ($nset_attr->{"attr_type"} + 0) == TYPE_NUM()) {
+                        my int $nset_hold = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $meth_target) == 1;
+                        my int $nset_push = cleanup_push_useful($cg);
+                        emit($cg, "({ ");
+                        if ($nset_hold == 1) {
+                            emit($cg, "StradaValue *__nsv_obj = ");
+                            gen_expression($cg, $meth_target);
+                            emit($cg, "; ");
+                            if ($nset_push == 1) { emit($cg, "strada_cleanup_push(__nsv_obj); "); }
+                        }
+                        emit($cg, "double __nsv_d = ");
+                        emit_num_operand($cg, $expr->{"args"}->[0]);
+                        emit($cg, "; strada_hv_store_num_ph_len(");
+                        if ($nset_hold == 1) {
+                            emit($cg, "__nsv_obj");
+                        } else {
+                            gen_expression($cg, $meth_target);
+                        }
+                        emit($cg, ", ");
+                        emit_hv_store_key($cg, $setter_attr);
+                        emit($cg, ", __nsv_d); ");
+                        if ($nset_hold == 1) {
+                            if ($nset_push == 1) { emit($cg, "strada_cleanup_pop_decref(__nsv_obj); "); }
+                            else { emit($cg, "strada_decref(__nsv_obj); "); }
+                        }
+                        emit($cg, "(StradaValue*)NULL; })");
+                        return;
                     }
                 }
 

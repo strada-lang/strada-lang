@@ -1265,6 +1265,71 @@ func has_user_method_override(scalar $cg, str $pkg, str $method) int {
 }
 
 # Is this expression a zero-arg call to an inline int-typed has accessor on $self?
+# A zero-argument call to an inlinable `has num` accessor (on $self or on a
+# variable whose class is known).
+func is_inline_num_accessor_call(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    if ($expr->{"type"} != NODE_METHOD_CALL()) { return 0; }
+    if ($expr->{"arg_count"} != 0) { return 0; }
+    my scalar $num_attr = resolve_inline_call_attr($cg, $expr);
+    if (!$num_attr) { return 0; }
+    if (($num_attr->{"attr_type"} + 0) != TYPE_NUM()) { return 0; }
+    if (key_is_hashable_ascii("" . $expr->{"method"}) == 0) { return 0; }
+    return 1;
+}
+
+# Statically a double: a num literal or variable, a num accessor, or
+# + - * / over such values and int-typed ones (at least one side num, or `/`).
+# Used to compute num arithmetic in C doubles instead of boxed values.
+func expr_is_num_typed(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    my int $nt = $expr->{"type"};
+    if ($nt == NODE_NUM_LITERAL()) { return 1; }
+    if ($nt == NODE_VARIABLE()) {
+        if (("" . $expr->{"sigil"}) ne "$") { return 0; }
+        my str $nv_name = escape_c_keyword($expr->{"name"});
+        if (length("" . $cg->{"num_vars"}->{$nv_name}) > 0) { return 1; }
+        return 0;
+    }
+    if ($nt == NODE_METHOD_CALL()) {
+        return is_inline_num_accessor_call($cg, $expr);
+    }
+    if ($nt == NODE_UNARY_OP()) {
+        if (("" . $expr->{"op"}) eq "-") { return expr_is_num_typed($cg, $expr->{"operand"}); }
+        return 0;
+    }
+    if ($nt == NODE_BINARY_OP()) {
+        my str $nop = "" . $expr->{"op"};
+        if ($nop ne "+" && $nop ne "-" && $nop ne "*" && $nop ne "/") { return 0; }
+        my int $ln = expr_is_num_typed($cg, $expr->{"left"});
+        my int $rn = expr_is_num_typed($cg, $expr->{"right"});
+        my int $li = 0;
+        my int $ri = 0;
+        if ($ln == 0) { $li = expr_is_int_typed($cg, $expr->{"left"}); }
+        if ($rn == 0) { $ri = expr_is_int_typed($cg, $expr->{"right"}); }
+        if ($ln == 0 && $li == 0) { return 0; }
+        if ($rn == 0 && $ri == 0) { return 0; }
+        if ($nop eq "/") { return 1; }
+        if ($ln == 1 || $rn == 1) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# Does a num-typed expression read a num accessor somewhere? Arithmetic over
+# plain num variables and literals keeps its existing code path.
+func num_expr_has_accessor(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    my int $ht = $expr->{"type"};
+    if ($ht == NODE_METHOD_CALL()) { return is_inline_num_accessor_call($cg, $expr); }
+    if ($ht == NODE_UNARY_OP()) { return num_expr_has_accessor($cg, $expr->{"operand"}); }
+    if ($ht == NODE_BINARY_OP()) {
+        if (num_expr_has_accessor($cg, $expr->{"left"}) == 1) { return 1; }
+        return num_expr_has_accessor($cg, $expr->{"right"});
+    }
+    return 0;
+}
+
 func is_inline_int_accessor_call(scalar $cg, scalar $expr) int {
     if (!$expr) { return 0; }
     if ($expr->{"type"} != NODE_METHOD_CALL()) { return 0; }
@@ -4795,6 +4860,22 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
             emit($cg, $unm);
         } else {
             emit($cg, "((double)" . $unm . ")");
+        }
+    } elsif ($type == NODE_METHOD_CALL() && is_inline_num_accessor_call($cg, $expr) == 1) {
+        # Inline num accessor where a double is wanted: read the slot as a
+        # double, with no boxed copy of the value.
+        my str $nmethod = $expr->{"method"};
+        my int $nhash = djb2_hash_32($nmethod);
+        my scalar $ntarget = $expr->{"base_object"};
+        if (!$ntarget) { $ntarget = $expr->{"object"}; }
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ntarget) == 1) {
+            emit($cg, "({ StradaValue *__nao = ");
+            gen_expression($cg, $ntarget);
+            emit($cg, "; double __nar = strada_hv_fetch_num_ph_len(__nao, " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u); strada_decref(__nao); __nar; })");
+        } else {
+            emit($cg, "strada_hv_fetch_num_ph_len(");
+            gen_expression($cg, $ntarget);
+            emit($cg, ", " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u)");
         }
     } else {
         # Check if expression creates a temp that needs cleanup

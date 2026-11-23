@@ -2770,6 +2770,33 @@ STRADA_HOT_INLINE int64_t strada_hv_fetch_int_ph_len(StradaValue *sv, const char
     StradaValue *v = strada_hash_get_with_hash_len_ext(hv, key, key_len, hash);
     return strada_to_int(v);
 }
+/* The same for a num attribute: the slot's value as a double. */
+STRADA_HOT_INLINE double strada_hv_fetch_num_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0.0;
+    StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
+    if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->meta && msv->meta->is_tied, 0)) {
+        size_t tm = strada_tmps_mark();
+        StradaValue *r = strada_mortal(strada_tied_hash_fetch_len(msv, key, key_len));
+        double v = strada_to_num(r);
+        strada_tmps_free(tm);
+        return v;
+    }
+    StradaHash *hv = (msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH) ? msv->value.hv : NULL;
+    if (__builtin_expect(hv != NULL && key != NULL, 1)) {
+        uint32_t pos = hash & (hv->num_buckets - 1);
+        uint32_t idx = hv->hash_index[pos];
+        if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (__builtin_expect(e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0, 1)) {
+                StradaValue *ev = e->value;
+                if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && !ev->meta, 1)) return ev->value.nv;
+                return strada_to_num(ev);
+            }
+        }
+    }
+    StradaValue *v = strada_hash_get_with_hash_len_ext(hv, key, key_len, hash);
+    return strada_to_num(v);
+}
 STRADA_HOT_INLINE int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
     return strada_hv_fetch_int_ph_len(sv, key, key ? (uint32_t)strlen(key) : 0, hash);
 }
@@ -2836,6 +2863,35 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
         }
     }
     strada_hash_set_ph_len(hv, key, key_len, hash, val);
+}
+/* Store a double under a literal key. When the slot already holds a plain
+ * num that nothing else refers to (refcount 1, no meta: not weak-referenced,
+ * tied or blessed), the number is written into it; any other case is the
+ * ordinary store of a new value, so aliases, references to the element,
+ * tied and key-locked hashes behave as before. */
+STRADA_HOT_INLINE void strada_hv_store_num_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash, double d) {
+    if (__builtin_expect(sv && !STRADA_IS_TAGGED_INT(sv), 1)) {
+        StradaValue *msv = strada_hv_unwrap_meta_sv(sv);
+        if (__builtin_expect(msv && !STRADA_IS_TAGGED_INT(msv) && msv->type == STRADA_HASH && key
+                             && !(msv->meta && (msv->meta->is_tied || msv->meta->is_hash_locked)), 1)) {
+            StradaHash *hv = msv->value.hv;
+            uint32_t pos = hash & (hv->num_buckets - 1);
+            uint32_t idx = hv->hash_index[pos];
+            if (__builtin_expect(idx < HASH_TOMBSTONE, 1)) {
+                StradaHashEntry *e = &hv->entries[idx];
+                if (__builtin_expect(e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0, 1)) {
+                    StradaValue *ev = e->value;
+                    if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta, 1)) {
+                        ev->value.nv = d;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    StradaValue *nv = strada_new_num(d);
+    strada_hv_store_ph_len(sv, key, key_len, hash, nv);
+    strada_decref(nv);
 }
 /* _take variant: caller donates ownership of val (no incref) */
 static inline void strada_hv_store_take(StradaValue *sv, const char *key, StradaValue *val) {
