@@ -2223,6 +2223,19 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
         $i = $i + 1;
     }
 
+    # Declared attributes: bless() interns their keys in the object, which
+    # is what the attribute slot cache (StradaAttrSite) compares against.
+    my scalar $reg_attrs = $cg->{"has_attrs"};
+    my int $reg_attr_n = $cg->{"has_attr_count"} + 0;
+    my int $rai = 0;
+    while ($reg_attrs && $rai < $reg_attr_n) {
+        my scalar $reg_attr = $reg_attrs->[$rai];
+        if (("" . $reg_attr->{"package"}) eq $pkg && key_is_hashable_ascii("" . $reg_attr->{"name"}) == 1) {
+            sb_append($sb, "    strada_class_attr_register(" . c_str_lit($pkg) . ", " . c_str_lit("" . $reg_attr->{"name"}) . ");\n");
+        }
+        $rai = $rai + 1;
+    }
+
     # Generate overload registrations for this package
     if ($has_overloads == 1) {
         my str $pkg_ol_check = "" . $overloads->{$pkg};
@@ -4871,11 +4884,11 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ntarget) == 1) {
             emit($cg, "({ StradaValue *__nao = ");
             gen_expression($cg, $ntarget);
-            emit($cg, "; double __nar = strada_hv_fetch_num_ph_len(__nao, " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u); strada_decref(__nao); __nar; })");
+            emit($cg, "; static StradaAttrSite __nas; double __nar = strada_attr_fetch_num(__nao, &__nas, " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u); strada_decref(__nao); __nar; })");
         } else {
-            emit($cg, "strada_hv_fetch_num_ph_len(");
+            emit($cg, "({ static StradaAttrSite __nas; strada_attr_fetch_num(");
             gen_expression($cg, $ntarget);
-            emit($cg, ", " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u)");
+            emit($cg, ", &__nas, " . c_str_lit($nmethod) . ", " . bytes($nmethod) . "u, " . $nhash . "u); })");
         }
     } else {
         # Check if expression creates a temp that needs cleanup
@@ -5168,15 +5181,15 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
             emit($cg, "({ StradaValue *__iao = ");
             gen_expression($cg, $itarget);
             if ($iascii == 1) {
-                emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph_len(__iao, " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u); strada_decref(__iao); __iar; })");
+                emit($cg, "; static StradaAttrSite __ias; int64_t __iar = strada_attr_fetch_int(__iao, &__ias, " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u); strada_decref(__iao); __iar; })");
             } else {
                 emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, " . c_str_lit($imethod) . ", " . $ihash . "u); strada_decref(__iao); __iar; })");
             }
         } else {
             if ($iascii == 1) {
-                emit($cg, "strada_hv_fetch_int_ph_len(");
+                emit($cg, "({ static StradaAttrSite __ias; strada_attr_fetch_int(");
                 gen_expression($cg, $itarget);
-                emit($cg, ", " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u)");
+                emit($cg, ", &__ias, " . c_str_lit($imethod) . ", " . bytes($imethod) . "u, " . $ihash . "u); })");
             } else {
                 emit($cg, "strada_hv_fetch_int_ph(");
                 gen_expression($cg, $itarget);

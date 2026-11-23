@@ -2711,6 +2711,15 @@ StradaValue* strada_tied_global_scalar(const char *global_name);
 
 /* Inline wrapper implementations */
 static inline StradaValue* strada_hv_unwrap_meta_sv(StradaValue *sv) {
+    /* The usual shapes need no loop: the hash itself, or one plain
+     * reference to it. */
+    if (__builtin_expect(sv && !STRADA_IS_TAGGED_INT(sv), 1)) {
+        if (__builtin_expect(sv->type != STRADA_REF, 1)) return sv;
+        if (!strada_is_slot_ref(sv)) {
+            StradaValue *one = sv->value.rv;
+            if (__builtin_expect(one && !STRADA_IS_TAGGED_INT(one) && one->type != STRADA_REF, 1)) return one;
+        }
+    }
     StradaValue *cur = sv;
     int depth = 0;
     while (cur && !STRADA_IS_TAGGED_INT(cur) && cur->type == STRADA_REF) {
@@ -2885,6 +2894,112 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
     }
     strada_hash_set_ph_len(hv, key, key_len, hash, val);
 }
+/* ===== Attribute slot cache =====
+ * One StradaAttrSite per attribute access site in generated code. It
+ * remembers the entry index where the attribute was found last time. A later
+ * access is a hit when that entry's key is the same interned key string
+ * (pointer compare): the position then provably holds this attribute, in
+ * whatever hash it is, so no probe and no key compare are needed. Anything
+ * else (another layout, a deleted or re-added key, a key that is not the
+ * interned string, a tied hash, a non-hash) is a miss and takes the ordinary
+ * path, which may update the index. A read never changes the object. */
+typedef struct StradaAttrSite {
+    StradaString *ss;      /* interned key (strada_intern_attr_ss), NULL until first miss */
+    uint32_t idx;          /* entry index of the last hit */
+    uint32_t skip;         /* misses to let pass before trying to learn again */
+} StradaAttrSite;
+void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash);
+/* A class's declared attribute (has): bless() gives the object's entry for
+ * it the interned key string, so objects built by any constructor can hit
+ * the slot cache. */
+void strada_class_attr_register(const char *package, const char *attr);
+STRADA_HOT_INLINE StradaHashEntry* strada_attr_entry(StradaValue *sv, StradaAttrSite *site) {
+    if (__builtin_expect(!sv || STRADA_IS_TAGGED_INT(sv), 0)) return NULL;
+    StradaValue *m = sv;
+    if (m->type == STRADA_REF) {
+        if (__builtin_expect(strada_is_slot_ref(m), 0)) return NULL;
+        m = m->value.rv;
+        if (__builtin_expect(!m || STRADA_IS_TAGGED_INT(m), 0)) return NULL;
+    }
+    if (__builtin_expect(m->type != STRADA_HASH, 0)) return NULL;
+    if (__builtin_expect(m->meta && (m->meta->is_tied || m->meta->is_hash_locked), 0)) return NULL;
+    StradaHash *hv = m->value.hv;
+    uint32_t i = site->idx;
+    if (__builtin_expect(hv && (size_t)i < hv->next_slot, 1)) {
+        StradaHashEntry *e = &hv->entries[i];
+        if (__builtin_expect(e->key != NULL && e->key == site->ss, 1)) return e;
+    }
+    return NULL;
+}
+STRADA_HOT_INLINE void strada_attr_site_miss(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash) {
+    if (site->skip) { site->skip--; return; }
+    strada_attr_site_learn(sv, site, key, key_len, hash);
+}
+STRADA_HOT_INLINE double strada_attr_fetch_num(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash) {
+    StradaHashEntry *e = strada_attr_entry(sv, site);
+    if (__builtin_expect(e != NULL, 1)) {
+        StradaValue *ev = e->value;
+        if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && !ev->meta, 1)) return ev->value.nv;
+        return strada_to_num(ev);
+    }
+    strada_attr_site_miss(sv, site, key, key_len, hash);
+    return strada_hv_fetch_num_ph_len(sv, key, key_len, hash);
+}
+STRADA_HOT_INLINE int64_t strada_attr_fetch_int(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash) {
+    StradaHashEntry *e = strada_attr_entry(sv, site);
+    if (__builtin_expect(e != NULL, 1)) {
+        StradaValue *ev = e->value;
+        if (__builtin_expect(STRADA_IS_TAGGED_INT(ev), 1)) return STRADA_TAGGED_INT_VAL(ev);
+        return strada_to_int(ev);
+    }
+    strada_attr_site_miss(sv, site, key, key_len, hash);
+    return strada_hv_fetch_int_ph_len(sv, key, key_len, hash);
+}
+STRADA_HOT_INLINE StradaValue* strada_attr_fetch_owned(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash) {
+    StradaHashEntry *e = strada_attr_entry(sv, site);
+    if (__builtin_expect(e != NULL && e->value != NULL, 1)) {
+        StradaValue *ev = e->value;
+        strada_incref(ev);
+        return ev;
+    }
+    if (!e) strada_attr_site_miss(sv, site, key, key_len, hash);
+    return strada_hv_fetch_owned_ph_len(sv, key, key_len, hash);
+}
+STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *val);
+/* Store of any value: a hit swaps the slot's value. A reference (it may
+ * create a cycle the hash must be told about) and every other special case
+ * take the ordinary store. */
+STRADA_HOT_INLINE void strada_attr_store(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash, StradaValue *val) {
+    StradaHashEntry *e = strada_attr_entry(sv, site);
+    if (__builtin_expect(e != NULL, 1)) {
+        if (__builtin_expect(val != NULL && (STRADA_IS_TAGGED_INT(val)
+                || (val->type != STRADA_REF && val->type != STRADA_HASH && val->type != STRADA_ARRAY)), 1)) {
+            StradaValue *old = e->value;
+            strada_incref(val);
+            e->value = val;
+            if (old) strada_decref(old);
+            return;
+        }
+    } else {
+        strada_attr_site_miss(sv, site, key, key_len, hash);
+    }
+    strada_hv_store_ph_len(sv, key, key_len, hash, val);
+}
+STRADA_HOT_INLINE void strada_hv_store_num_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash, double d);
+STRADA_HOT_INLINE void strada_attr_store_num(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash, double d) {
+    StradaHashEntry *e = strada_attr_entry(sv, site);
+    if (__builtin_expect(e != NULL, 1)) {
+        StradaValue *ev = e->value;
+        if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta, 1)) {
+            ev->value.nv = d;
+            return;
+        }
+    } else {
+        strada_attr_site_miss(sv, site, key, key_len, hash);
+    }
+    strada_hv_store_num_ph_len(sv, key, key_len, hash, d);
+}
+
 /* Store a double under a literal key. When the slot already holds a plain
  * num that nothing else refers to (refcount 1, no meta: not weak-referenced,
  * tied or blessed), the number is written into it; any other case is the

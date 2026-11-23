@@ -3190,10 +3190,35 @@ runtime array function about it. Typed values reach untyped code through
 `\@a`, plain `array` parameters, `__C__` blocks and the VM bridge, so any
 unboxed storage has to stay readable from there.
 
-Candidates, not started (performance changes are proposed first):
-- `num / num` as a plain division with a zero check.
-- `num`/`int` accessor calls typed in arithmetic, and an in-place update of
-  the attribute slot.
-- Inline tagged-int element reads for `array<int>`.
-- Fixed-layout classes, which need the receiver's class known statically
-  (`my Particle $p`, `array<Particle>`).
+What was built (same day; each has a test in `t/bugfix_tests/`):
+
+| Change | Benchmark | Before | After |
+|---|---|---|---|
+| `num` division and `**` in doubles | Mandelbrot 2000x2000 | 0.14 s | 0.03 s (= C) |
+| `num` attributes read/written as doubles | object benchmark | 3.05 s | 1.02 s |
+| `int` foreach variable as `int64_t` | array sum | 0.25 s | 0.18 s |
+| attribute slot cache + no-loop unwrap | object benchmark | 0.51 s | 0.41 s |
+
+Times are best-of-N on a loaded machine, so compare within a row. Object
+benchmark in instructions (callgrind, 500 steps x 1000 objects): 592M at the
+start, 214M after typed num attributes, 202M with the no-loop unwrap, 170M
+with the slot cache.
+
+Decisions and things measured that did not help:
+- Inline array element reads alone changed nothing: LTO already inlined
+  `strada_array_get` and `strada_array_length`. The cost was re-boxing the
+  loop variable per element.
+- Fixed positions inside the hash checked by a "shape" word would need every
+  function that moves or deletes entries to invalidate it (179 `entries[]`
+  uses in the runtime). Checking the interned key pointer at the remembered
+  index needs no invalidation: a hit proves that position holds the key.
+- A struct layout for objects was not built. The slot cache leaves about 20
+  instructions per access; a struct would leave about 6, at the cost of every
+  runtime function that handles blessed hashes (dumper, clone, the cycle
+  collector, the VM bridge, `import_lib`) learning the new type, and of
+  fallback rules for code that uses an object as a hash.
+- Skipping `strada_incref(self)`/`strada_decref(self)` in methods that store
+  (about 16% of the object benchmark) is unsound: releasing the old slot
+  value can run `DESTROY`, which can drop the caller's last reference.
+- Strada::JIT paired the compiler on PATH with the headers of an older
+  installation; it now takes the runtime that belongs to that compiler.

@@ -1,0 +1,130 @@
+# EXPECT: 3 4|4 3|7 x|9 x9|0 gone|5 back|c1 5|k2 1 2|27|undef 8|11 22|hand 6 7|sub 12 3 9|30
+# Attribute slot cache: an access site remembers the hash slot where the
+# attribute was last found and checks it by the interned key. Different
+# construction orders, deleted and re-added keys, a cleared object, clones,
+# subclass instances in a parent method, a hand-written constructor, absent
+# attributes and non-number values must all read and write the right slot.
+package Pt;
+has rw int $a = 0;
+has rw int $b = 0;
+has rw str $tag = "x";
+has rw num $w = 1.5;
+
+func sum(scalar $self) int { return $self->a() + $self->b(); }
+func pair(scalar $self) str { return $self->a() . " " . $self->b(); }
+func bump(scalar $self) void { $self->set_a($self->a() + 1); }
+func retag(scalar $self, str $t) void { $self->set_tag($t . $self->a()); }
+func tagv(scalar $self) str { return $self->tag(); }
+func grow(scalar $self) void { $self->set_w($self->w() * 2); }
+func wv(scalar $self) num { return $self->w(); }
+func hold(scalar $self, scalar $v) void { $self->set_tag($v); }
+
+package Hand;
+has rw int $p = 0;
+has rw int $q = 0;
+func new(int $p, int $q) scalar {
+    my hash %self = ();
+    $self{"q"} = $q;
+    $self{"extra"} = "hand";
+    $self{"p"} = $p;
+    return bless(\%self, "Hand");
+}
+func show(scalar $self) str { return $self->{"extra"} . " " . $self->p() . " " . $self->q(); }
+
+package Kid;
+extends Pt;
+has rw int $c = 0;
+func all(scalar $self) str { return "sub " . ($self->sum() + $self->c()) . " " . $self->a() . " " . $self->c(); }
+
+package main;
+func main() int {
+    my str $out = "";
+    # two construction orders through the same access sites, alternating
+    my scalar $o1 = Pt::new("a", 3, "b", 4);
+    my scalar $o2 = Pt::new("b", 3, "a", 4);
+    my str $alt = "";
+    my int $i = 0;
+    my int $ok = 1;
+    while ($i < 6) {
+        if ($o1->pair() ne "3 4") { $ok = 0; }
+        if ($o2->pair() ne "4 3") { $ok = 0; }
+        $i++;
+    }
+    $out = ($ok == 1) ? $o1->pair() . "|" . $o2->pair() : "alternating layouts broke";
+
+    # setter through the cache, int and string
+    $o1->bump(); $o1->bump(); $o1->bump(); $o1->bump();
+    $out = $out . "|" . $o1->a() . " " . $o1->tagv();
+    $o2->set_a(9);
+    $o2->retag("x");
+    $out = $out . "|" . $o2->a() . " " . $o2->tagv();
+
+    # delete an attribute: the slot is empty, reads see no value
+    my scalar $d = Pt::new("a", 5, "b", 6);
+    $d->sum();
+    delete($d->{"a"});
+    $out = $out . "|" . ($d->a() + 0) . " " . (exists($d->{"a"}) ? "there" : "gone");
+    # re-add it: it lands in a slot again
+    $d->set_a(5);
+    $d->sum();
+    $out = $out . "|" . $d->a() . " " . (exists($d->{"a"}) ? "back" : "gone");
+
+    # cleared object, then a different key order
+    my scalar $c = Pt::new("a", 1, "b", 2);
+    $c->sum();
+    %{$c} = ();
+    $c->{"tag"} = "c1";
+    $c->{"b"} = 2;
+    $c->{"a"} = 3;
+    $out = $out . "|" . $c->tagv() . " " . $c->sum();
+
+    # clone keeps values and stays independent
+    my scalar $k1 = Pt::new("a", 1, "b", 2, "tag", "k1");
+    my scalar $k2 = clone($k1);
+    $k2->set_tag("k2");
+    $k2->bump();
+    $k2->set_a(1);
+    $out = $out . "|" . $k2->tagv() . " " . $k1->pair();
+    if ($k1->tagv() ne "k1") { $out = $out . " CLONE-SHARED"; }
+
+    # many objects, one site
+    my int $tot = 0;
+    foreach my $n (1, 2, 3) {
+        my scalar $t = Pt::new("b", $n, "a", $n * 2);
+        $tot += $t->sum() + $t->a() - $n;
+    }
+    $out = $out . "|" . ($tot + 3);
+
+    # absent attribute (no default given to the hash) and a non-number in a num slot
+    my hash %raw = ();
+    my scalar $r = bless(\%raw, "Pt");
+    $out = $out . "|" . (defined($r->tag()) ? "def" : "undef");
+    $r->{"w"} = "4";
+    $r->grow();
+    $out = $out . " " . $r->wv();
+
+    # a reference stored through the setter, then replaced
+    my scalar $h = Pt::new("a", 11);
+    my array @held = (22);
+    $h->hold(\@held);
+    my scalar $got = $h->tag();
+    $out = $out . "|" . $h->a() . " " . $got->[0];
+    $h->hold("plain");
+
+    # hand-written constructor on a class with has: extra keys in between
+    my scalar $hw = Hand::new(6, 7);
+    $hw->show();
+    $out = $out . "|" . $hw->show();
+
+    # subclass instance in parent methods
+    my scalar $kid = Kid::new("c", 9, "a", 3, "b", 0);
+    $kid->all();
+    $out = $out . "|" . $kid->all();
+
+    # same site, parent then subclass then parent
+    my scalar $pp = Pt::new("a", 10, "b", 20);
+    $out = $out . "|" . ($pp->sum() + $kid->sum() - $kid->sum());
+
+    say($out);
+    return 0;
+}

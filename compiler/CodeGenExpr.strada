@@ -4573,9 +4573,9 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                     }
                 } else {
                     if ($self_acc_ascii == 1) {
-                        emit($cg, "strada_hv_fetch_owned_ph_len(");
+                        emit($cg, "({ static StradaAttrSite __oas; strada_attr_fetch_owned(");
                         gen_expression($cg, $meth_target);
-                        emit($cg, ", " . c_str_lit($method) . ", " . bytes($method) . "u, " . $self_acc_hash . "u)");
+                        emit($cg, ", &__oas, " . c_str_lit($method) . ", " . bytes($method) . "u, " . $self_acc_hash . "u); })");
                     } else {
                         emit($cg, "strada_hv_fetch_owned_ph(");
                         gen_expression($cg, $meth_target);
@@ -4640,13 +4640,13 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         }
                         emit($cg, "double __nsv_d = ");
                         emit_num_operand($cg, $expr->{"args"}->[0]);
-                        emit($cg, "; strada_hv_store_num_ph_len(");
+                        emit($cg, "; static StradaAttrSite __nss; strada_attr_store_num(");
                         if ($nset_hold == 1) {
                             emit($cg, "__nsv_obj");
                         } else {
                             gen_expression($cg, $meth_target);
                         }
-                        emit($cg, ", ");
+                        emit($cg, ", &__nss, ");
                         emit_hv_store_key($cg, $setter_attr);
                         emit($cg, ", __nsv_d); ");
                         if ($nset_hold == 1) {
@@ -4678,13 +4678,19 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         emit($cg, "; ");
                         if ($isv_push == 1) { emit($cg, "strada_cleanup_push(__isv_val); "); }
                     }
-                    emit_hv_store_open($cg, $setter_attr);
+                    my int $isv_site = key_is_hashable_ascii($setter_attr);
+                    if ($isv_site == 1) {
+                        emit($cg, "static StradaAttrSite __iss; strada_attr_store(");
+                    } else {
+                        emit_hv_store_open($cg, $setter_attr);
+                    }
                     if ($obj_cleanup2 == 1) {
                         emit($cg, "__isv_obj");
                     } else {
                         gen_expression($cg, $meth_target);
                     }
                     emit($cg, ", ");
+                    if ($isv_site == 1) { emit($cg, "&__iss, "); }
                     emit_hv_store_key($cg, $setter_attr);
                     emit($cg, ", ");
                     if ($arg_cleanup2 == 1) {

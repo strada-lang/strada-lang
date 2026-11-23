@@ -240,6 +240,40 @@ StradaString *strada_intern_attr_ss(const char *key, unsigned int hash) {
     return ss;
 }
 
+/* Slot cache miss: record where this object keeps the attribute, when its
+ * key is the interned string. The object is not changed. A site that keeps
+ * missing (objects whose keys are not interned, or layouts that alternate)
+ * backs off so its misses cost the ordinary lookup and little more. */
+void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash) {
+    if (!site->ss) site->ss = strada_intern_attr_ss(key, hash);
+    StradaValue *m = strada_hv_unwrap_meta_sv(sv);
+    if (m && !STRADA_IS_TAGGED_INT(m) && m->type == STRADA_HASH && m->value.hv
+        && !(m->meta && (m->meta->is_tied || m->meta->is_hash_locked))) {
+        StradaHash *hv = m->value.hv;
+        if (hv->num_buckets) {
+            uint32_t mask = (uint32_t)hv->num_buckets - 1;
+            uint32_t pos = hash & mask;
+            for (size_t n = 0; n < hv->num_buckets; n++) {
+                uint32_t idx = hv->hash_index[pos];
+                if (idx == HASH_EMPTY) break;
+                if (idx != HASH_TOMBSTONE) {
+                    StradaHashEntry *e = &hv->entries[idx];
+                    if (e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                        if (e->key == site->ss) {
+                            site->idx = idx;
+                            site->skip = 0;
+                            return;
+                        }
+                        break;
+                    }
+                }
+                pos = (pos + 1) & mask;
+            }
+        }
+    }
+    site->skip = site->skip ? (site->skip < 128 ? site->skip * 2 : 255) : 1;
+}
+
 /* ===== StradaString implementation ===== */
 
 /* Immortal static singletons for 0- and 1-byte StradaStrings so frequent empty
@@ -31012,7 +31046,16 @@ typedef struct OopPackage {
     struct OopPackage **mro_cache;
     int mro_cache_n;
     uint32_t mro_cache_gen;
+    /* Interned key strings of the attributes this package declares with
+     * `has` (strada_class_attr_register). */
+    StradaString **attr_ss;
+    int attr_n;
+    int attr_cap;
 } OopPackage;
+
+/* Number of packages with registered attributes: bless() skips the key
+ * interning walk entirely while this is 0. */
+static int oop_attr_class_count = 0;
 
 static OopPackage **oop_packages = NULL;  /* dynamic array of pointers */
 static int oop_package_count = 0;
@@ -31181,6 +31224,7 @@ static void strada_oop_cleanup(void) {
         if (pkg->modifiers) free(pkg->modifiers);
         if (pkg->method_index) free(pkg->method_index);
         if (pkg->mro_cache) free(pkg->mro_cache);
+        if (pkg->attr_ss) free(pkg->attr_ss);
         free(pkg);
     }
     if (oop_packages) {
@@ -31189,6 +31233,7 @@ static void strada_oop_cleanup(void) {
     }
     oop_package_count = 0;
     oop_package_cap = 0;
+    oop_attr_class_count = 0;
     __atomic_store_n(&oop_initialized, 0, __ATOMIC_RELEASE);
 }
 
@@ -31280,6 +31325,49 @@ StradaValue* strada_bless_cached(StradaValue *ref, char *interned_pkg_name) {
     return ref;
 }
 
+static int oop_mro(const char *package, OopPackage ***out);
+/* bless(): give the object's entries for its class's declared attributes
+ * (own and inherited) the interned key strings. Same key bytes, so the
+ * hash index is unaffected; only the key pointer changes. Plain untied
+ * hashes only. */
+static void oop_intern_obj_attr_keys(StradaValue *ref, const char *package) {
+    StradaValue *m = strada_hv_unwrap_meta_sv(ref);
+    if (!m || STRADA_IS_TAGGED_INT(m) || m->type != STRADA_HASH || !m->value.hv) return;
+    if (m->meta && (m->meta->is_tied || m->meta->is_hash_locked)) return;
+    StradaHash *hv = m->value.hv;
+    if (!hv->num_buckets || hv->num_entries == 0) return;
+    oop_lock();
+    OopPackage **mro = NULL;
+    int mn = oop_mro(package, &mro);
+    uint32_t mask = (uint32_t)hv->num_buckets - 1;
+    for (int pi = 0; pi < mn; pi++) {
+        OopPackage *p = mro[pi];
+        if (!p) continue;
+        for (int ai = 0; ai < p->attr_n; ai++) {
+            StradaString *ss = p->attr_ss[ai];
+            uint32_t pos = ss->hash & mask;
+            for (size_t n = 0; n < hv->num_buckets; n++) {
+                uint32_t idx = hv->hash_index[pos];
+                if (idx == HASH_EMPTY) break;
+                if (idx != HASH_TOMBSTONE) {
+                    StradaHashEntry *e = &hv->entries[idx];
+                    if (e->key == ss) break;
+                    if (e->key && e->key->hash == ss->hash && e->key->len == ss->len
+                        && memcmp(e->key->data, ss->data, ss->len) == 0) {
+                        StradaString *old = e->key;
+                        ss_incref(ss);
+                        e->key = ss;
+                        ss_decref(old);
+                        break;
+                    }
+                }
+                pos = (pos + 1) & mask;
+            }
+        }
+    }
+    oop_unlock();
+}
+
 StradaValue* strada_bless(StradaValue *ref, const char *package) {
     /* Bless a reference into a package (like Perl's bless) */
     if (!ref || STRADA_IS_TAGGED_INT(ref) || !package) return ref;
@@ -31309,7 +31397,33 @@ StradaValue* strada_bless(StradaValue *ref, const char *package) {
     meta->blessed_package = strada_intern_str_sticky(package);
     meta->blessed_immortal = 1;
 
+    if (oop_attr_class_count > 0) oop_intern_obj_attr_keys(ref, package);
+
     return ref;
+}
+
+void strada_class_attr_register(const char *package, const char *attr) {
+    if (!package || !attr) return;
+    StradaString *ss = strada_intern_attr_ss(attr, strada_hash_string(attr));
+    oop_lock();
+    if (!__atomic_load_n(&oop_initialized, __ATOMIC_ACQUIRE)) strada_oop_init();
+    OopPackage *p = oop_get_or_create_package(package);
+    if (p) {
+        int have = 0;
+        for (int i = 0; i < p->attr_n; i++) if (p->attr_ss[i] == ss) { have = 1; break; }
+        if (!have) {
+            if (p->attr_n == p->attr_cap) {
+                int ncap = p->attr_cap ? p->attr_cap * 2 : 8;
+                StradaString **na = (StradaString **)realloc(p->attr_ss, (size_t)ncap * sizeof(*na));
+                if (!na) { oop_unlock(); return; }
+                p->attr_ss = na;
+                p->attr_cap = ncap;
+            }
+            if (p->attr_n == 0) oop_attr_class_count++;
+            p->attr_ss[p->attr_n++] = ss;
+        }
+    }
+    oop_unlock();
 }
 
 StradaValue* strada_blessed(StradaValue *ref) {
