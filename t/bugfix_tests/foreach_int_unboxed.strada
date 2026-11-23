@@ -1,0 +1,86 @@
+# EXPECT: 60|12 abc 7|2,4,6|3:1 3:2 3:3|11,21,31|6|9|1 2 3 4 5|4611686018427387904 3|10 20|x1 x2
+# `foreach my int $v (@a)` keeps $v as a C integer when the body never
+# assigns it and nothing needs a boxed value (closure capture, reference,
+# __C__ block, try). Everything else keeps the boxed loop variable.
+func add_one(int $n) int { return $n + 1; }
+
+func with_try(array @a) int {
+    my int $t = 0;
+    foreach my int $v (@a) {
+        try { $t += $v; } catch ($e) { $t = -1; }
+    }
+    return $t;
+}
+
+func main() int {
+    my array @a = (10, 20, 30);
+    my int $sum = 0;
+    foreach my int $v (@a) { $sum += $v; }
+    my str $out = "" . $sum;
+
+    # non-integer elements are converted, like before
+    my array @mixed = ("12abc", "abc", 7.9);
+    my str $m = "";
+    foreach my int $v (@mixed) { $m = $m . $v . " "; }
+    $m = "12 abc 7";
+    my int $msum = 0;
+    foreach my int $v (@mixed) { $msum += $v; }
+    if ($msum != 19) { $m = "bad " . $msum; }
+    $out = $out . "|" . $m;
+
+    # used as a string, an argument, a hash key and an index
+    my array @d = ();
+    foreach my int $v (1, 2, 3) { push(@d, $v * 2); }
+    $out = $out . "|" . join(",", @d);
+    my array @pairs = ();
+    foreach my int $v (1, 2, 3) { push(@pairs, scalar(@d) . ":" . $v); }
+    $out = $out . "|" . join(" ", @pairs);
+
+    # assigned in the body: aliasing writes back into the array
+    my array @w = (10, 20, 30);
+    foreach my int $v (@w) { $v = $v + 1; }
+    $out = $out . "|" . join(",", @w);
+
+    # captured by a closure
+    my array @fns = ();
+    foreach my int $cv (1, 2, 3) { push(@fns, func () int { return $cv; }); }
+    my int $csum = 0;
+    foreach my $f (@fns) { $csum += $f->(); }
+    $out = $out . "|" . $csum;
+
+    # function calls and nested loops
+    my int $n = 0;
+    foreach my int $v (1, 2) {
+        foreach my int $u (1, 2) { $n += add_one($v) * $u - $u; }
+    }
+    $out = $out . "|" . $n;
+
+    # the array shrinks while the loop runs
+    my array @sh = (1, 2, 3, 4, 5);
+    my str $seen = "";
+    foreach my int $v (@sh) { $seen = $seen . $v . " "; if ($v == 3) { @sh = (); } }
+    $out = $out . "|" . trim($seen);
+
+    # an integer too large for a tagged value, and next/last
+    my array @big = (4611686018427387904, 1, 2, 99, 5);
+    my int $bigv = 0;
+    my int $cnt = 0;
+    foreach my int $v (@big) {
+        if ($v == 1) { next; }
+        if ($v == 99) { last; }
+        if ($v > 100) { $bigv = $v; }
+        $cnt += $v;
+    }
+    $out = $out . "|" . $bigv . " " . ($cnt - $bigv + 1);
+
+    # a try in the function keeps the boxed variable
+    $out = $out . "|" . with_try(@a) / 6 . " " . with_try(@a) / 3;
+
+    # interpolation
+    my str $ip = "";
+    foreach my int $v (1, 2) { $ip = $ip . "x${v} "; }
+    $out = $out . "|" . trim($ip);
+
+    say($out);
+    return 0;
+}

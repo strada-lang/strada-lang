@@ -1030,6 +1030,27 @@ StradaValue* strada_hash_delete_take(StradaHash *hv, const char *key);
 StradaValue* strada_hash_delete_take_sv(StradaHash *hv, StradaValue *key_sv);
 size_t strada_array_length(StradaArray *av);
 void strada_array_reverse(StradaArray *av);
+/* Inline element read for loops: the in-bounds, non-hole case without a
+ * call; everything else (negative index, out of range, deleted slot) goes
+ * through strada_array_get. The elements pointer and length are re-read on
+ * every call, so the body may change the array. */
+static inline StradaValue* strada_array_elem_il(StradaArray *av, int64_t idx) {
+    if (__builtin_expect(av && idx >= 0 && (size_t)idx < av->size, 1)) {
+        StradaValue *e = av->elements[av->head + (size_t)idx];
+        if (__builtin_expect(e != NULL, 1)) return e;
+    }
+    return strada_array_get(av, idx);
+}
+static inline size_t strada_array_length_il(StradaArray *av) {
+    return av ? av->size : 0;
+}
+/* Element as an int64: a tagged int is read directly, anything else is
+ * converted like strada_to_int. */
+static inline int64_t strada_array_int_at(StradaArray *av, int64_t idx) {
+    StradaValue *e = strada_array_elem_il(av, idx);
+    if (__builtin_expect(((uintptr_t)e & 1) != 0, 1)) return (int64_t)((intptr_t)e >> 1);
+    return strada_to_int(e);
+}
 int64_t strada_get_array_default_capacity(void);
 void strada_set_array_default_capacity(int64_t capacity);
 void strada_array_reserve(StradaArray *av, size_t capacity);

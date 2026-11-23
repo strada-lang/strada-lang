@@ -6616,6 +6616,37 @@ func pf_walk_node(scalar $cg, scalar $node, scalar $state) void {
     }
 }
 
+# Can `foreach my int $v (@a)` keep $v as a C int64_t? Same rules as an
+# unboxed `my int` local (pf_walk_node over the body), plus: the body never
+# assigns $v (no write-back into the array is needed), and the function has
+# no try or goto.
+func foreach_int_var_unboxable(scalar $cg, str $c_name, str $raw_name, scalar $body) int {
+    if ($cg->{"cleanup_enabled"} != 1 || $cg->{"uses_tie"} == 1) { return 0; }
+    if (($cg->{"func_has_try"} + 0) == 1 || ($cg->{"func_has_goto"} + 0) == 1) { return 0; }
+    if ($cg->{"in_anon_func"}) { return 0; }
+    if (length("" . $cg->{"our_vars"}->{$c_name}) > 0) { return 0; }
+    if ($cg->{"prog_global_names"} && ($cg->{"prog_global_names"}->{$c_name} + 0) == 1) { return 0; }
+    if (node_writes_var($body, $raw_name) == 1) { return 0; }
+    my hash %fb_bad = ();
+    my hash %fb_str_bad = ();
+    my hash %fb_kind = ();
+    my hash %fb_seen = ();
+    my hash %fb_active = ();
+    $fb_kind{$c_name} = "int";
+    $fb_active{$c_name} = 1;
+    my hash %fb_state = ();
+    $fb_state{"bad"} = \%fb_bad;
+    $fb_state{"str_bad"} = \%fb_str_bad;
+    $fb_state{"kind"} = \%fb_kind;
+    $fb_state{"str_seen"} = \%fb_seen;
+    $fb_state{"active"} = \%fb_active;
+    $fb_state{"disable_unbox"} = 0;
+    pf_walk_node($cg, $body, \%fb_state);
+    if ($fb_state{"disable_unbox"} != 0) { return 0; }
+    if (($fb_bad{$c_name} + 0) != 0) { return 0; }
+    return 1;
+}
+
 func prescan_func_locals(scalar $cg, scalar $fn, scalar $cand_boxed_ref) void {
     $cg->{"unboxed_int_vars"} = {};
     $cg->{"unboxed_num_vars"} = {};

@@ -2600,7 +2600,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         } else {
             # The live length: elements removed in the body end the loop early
             # (the cached length gave extra undef iterations).
-            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; (" . $fe_gilp . "__foreach_i_" . $foreach_id . " < (int64_t)strada_array_length(__foreach_av_" . $foreach_id . ")); __foreach_i_" . $foreach_id . "++) {\n");
+            emit($cg, "for (int64_t __foreach_i_" . $foreach_id . " = 0; (" . $fe_gilp . "__foreach_i_" . $foreach_id . " < (int64_t)strada_array_length_il(__foreach_av_" . $foreach_id . ")); __foreach_i_" . $foreach_id . "++) {\n");
         }
         indent($cg);
         scope_push($cg);
@@ -2645,7 +2645,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit($cg, "*__cell_" . $var_name . " = strada_av_fetch_sv(__foreach_arr_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
                     }
                 } elsif ($fe_vtype == TYPE_INT()) {
-                    emit($cg, "*__cell_" . $var_name . " = strada_new_int(strada_to_int(strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ")));\n");
+                    emit($cg, "*__cell_" . $var_name . " = strada_new_int(strada_array_int_at(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . "));\n");
                 } elsif ($fe_vtype == TYPE_NUM()) {
                     emit($cg, "*__cell_" . $var_name . " = strada_new_num(strada_to_num(strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ")));\n");
                 } else {
@@ -2684,9 +2684,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         emit($cg, " = strada_av_fetch_sv(__foreach_arr_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
                         $fe_needs_track = 1;
                     }
+                } elsif ($fe_vtype == TYPE_INT() && foreach_int_var_unboxable($cg, $var_name, "" . $stmt->{"var_name"}, $body) == 1) {
+                    # The loop variable is a C integer for the whole body: no
+                    # boxed copy per element, nothing to release.
+                    emit($cg, "int64_t " . $var_name . " = strada_array_int_at(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
+                    $cg->{"unboxed_int_vars"}->{$var_name} = 1;
                 } elsif ($fe_vtype == TYPE_INT()) {
                     emit_sv_ptr_decl($cg, $var_name);
-                    emit($cg, " = strada_new_int(strada_to_int(strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ")));\n");
+                    emit($cg, " = strada_new_int(strada_array_int_at(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . "));\n");
                     $fe_needs_track = 1;
                 } elsif ($fe_vtype == TYPE_NUM()) {
                     emit_sv_ptr_decl($cg, $var_name);
@@ -2742,7 +2747,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             } else {
                 emit($cg, "{ StradaValue *__fe_v = ");
                 if ($fe_is_int == 1) {
-                    emit($cg, "strada_new_int(strada_to_int(strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . "))); ");
+                    emit($cg, "strada_new_int(strada_array_int_at(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ")); ");
                 } elsif ($fe_is_num == 1) {
                     emit($cg, "strada_new_num(strada_to_num(strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . "))); ");
                 } else {
