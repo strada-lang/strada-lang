@@ -660,6 +660,13 @@ StradaValue* strada_inc_value(StradaValue *old, int64_t delta);
 StradaValue* strada_new_uint(uint64_t u);  /* UV: >INT64_MAX stored UV-flagged, else as signed int */
 StradaValue* strada_new_num(double n);
 StradaValue* strada_safe_div(double a, double b);      /* Throws on b==0 */
+/* Division in a context that wants a double: same zero check as
+ * strada_safe_div, no boxed result. */
+void strada_div_zero_throw(void) __attribute__((noreturn, cold));
+static inline double strada_num_div(double a, double b) {
+    if (__builtin_expect(b == 0.0, 0)) strada_div_zero_throw();
+    return a / b;
+}
 StradaValue* strada_safe_mod(int64_t a, int64_t b);    /* Throws on b==0 */
 StradaValue* strada_new_str(const char *s);
 StradaValue* strada_new_dualvar(int64_t iv, const char *s);  /* String + numeric override (e.g. $!) */

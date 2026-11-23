@@ -1190,6 +1190,11 @@ StradaValue* strada_safe_div(double a, double b) {
     return strada_new_num(a / b);
 }
 
+void strada_div_zero_throw(void) {
+    strada_throw("Illegal division by zero");
+    abort();
+}
+
 /* Safe modulo - throws catchable exception if divisor is zero */
 StradaValue* strada_safe_mod(int64_t a, int64_t b) {
     if (b == 0) {

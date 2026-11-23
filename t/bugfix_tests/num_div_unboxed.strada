@@ -1,0 +1,22 @@
+# EXPECT: 6|1049|0.25|caught: Illegal division by zero|-2.5
+# `/` and `**` where a double is wanted (a num variable's initializer, an
+# operand of num arithmetic) are computed directly: no boxed intermediate, and
+# division by zero still throws.
+func main() int {
+    my num $a = 5.0;
+    my num $z = 0.0;
+    my int $i = 7;
+    my num $q = $a / 2 + $i / 2;
+    my num $p = 2 ** 10 + $a ** 2;
+    my num $r = 1 / 2 / 2;
+    my str $out = $q . "|" . $p . "|" . $r;
+    try {
+        my num $bad = 1.0 + $a / $z;
+        $out = $out . "|no";
+    } catch ($e) {
+        $out = $out . "|caught: " . $e;
+    }
+    my num $neg = 0 - $a / 2;
+    say($out . "|" . $neg);
+    return 0;
+}

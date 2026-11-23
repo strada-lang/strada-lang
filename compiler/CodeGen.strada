@@ -4763,6 +4763,20 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
             emit($cg, " " . $op . " ");
             emit_num_operand($cg, $expr->{"right"});
             emit($cg, ")");
+        } elsif ($op eq "/") {
+            # A double is wanted: divide directly (same zero check as
+            # strada_safe_div, no boxed intermediate).
+            emit($cg, "strada_num_div(");
+            emit_num_operand($cg, $expr->{"left"});
+            emit($cg, ", ");
+            emit_num_operand($cg, $expr->{"right"});
+            emit($cg, ")");
+        } elsif ($op eq "**") {
+            emit($cg, "pow(");
+            emit_num_operand($cg, $expr->{"left"});
+            emit($cg, ", ");
+            emit_num_operand($cg, $expr->{"right"});
+            emit($cg, ")");
         } else {
             # Non-inlineable op: fall through to generic handler
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
