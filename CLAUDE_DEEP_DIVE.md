@@ -3094,3 +3094,29 @@ blocking call. A program that starts no thread never takes it.
   `vm_worker_enter_safe`, is waiting to get the lock back and is not safe:
   neither side can move. `strada_pclose` from `vm_exec_builtin` was such a
   site (now bracketed); the skip in `vm_gc_stw_begin` covers any that remain.
+
+## System additions (2026-11-22)
+
+`core::environ`, `uname`, `nproc`, `socketpair`, `mkfifo`, `rewinddir`,
+`getservbyname`, `crc32` and `uuid` are plain runtime functions
+(`strada_environ` ... `strada_uuid`, after `strada_setgroups` in
+strada_runtime.c). Each is wired the way `initgroups` is:
+
+- `$b{"sys::NAME"} = 1;` in Semantic.strada.
+- One handler in CodeGenBuiltins.strada: `emit($cg, "strada_NAME()")` for the
+  zero-argument ones, `gen_call_with_arg_cleanup($cg, "strada_NAME", $args, N)`
+  for the rest. The VM bridge generator harvests exactly these two shapes.
+- `$owned_set{"sys::NAME"} = 1;` in CodeGen.strada (every one returns an owned
+  value).
+- `python3 tools/gen_vm_generic_builtins.py`, then rebuild the interpreter.
+  No VM code is written by hand.
+
+Notes on the implementations: `nproc` counts the affinity mask on Linux
+(`sched_getaffinity`), so it honours `taskset` and container CPU sets, and
+falls back to `sysconf`. `getservbyname` uses `getservbyname_r` on glibc.
+`crc32` reads the argument with `strada_sv_raw_bytes` (binary-safe). `uuid`
+reads `/dev/urandom` and returns undef if it cannot. Paths go through
+`strada_path_buf` (NUL bytes rejected).
+
+Tests: `t/bugfix_tests/sys_info_posix_additions.strada` (compiled and VM),
+`t/leak_tests/test_sys_info_additions.strada` (valgrind).
