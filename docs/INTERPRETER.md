@@ -56,6 +56,9 @@ make interpreter
 
 # With library search paths
 ./interpreter/strada-interp -L lib program.strada
+
+# Run without the JIT (bytecode interpreter loop only; for debugging the VM)
+./interpreter/strada-interp --no-jit program.strada
 ```
 
 ### Interactive REPL

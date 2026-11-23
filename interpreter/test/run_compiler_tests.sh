@@ -2,7 +2,8 @@
 # Run the compiler test suite source files through the interpreter
 # to find language gaps between compiled and interpreted execution.
 #
-# Usage: bash run_compiler_tests.sh [-v]
+# Usage: bash run_compiler_tests.sh [-v] [--no-jit]
+#   --no-jit   run every test with strada-interp --no-jit
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERP="$SCRIPT_DIR/../strada-interp"
@@ -11,9 +12,13 @@ EXAMPLES_DIR="$PROJECT_DIR/examples"
 T_DIR="$PROJECT_DIR/t"
 
 VERBOSE=0
-if [ "$1" = "-v" ]; then
-    VERBOSE=1
-fi
+INTERP_FLAGS=""
+for a in "$@"; do
+    case "$a" in
+        -v) VERBOSE=1 ;;
+        --no-jit) INTERP_FLAGS="--no-jit" ;;
+    esac
+done
 
 PASS=0
 FAIL=0
@@ -41,7 +46,7 @@ run_test() {
     local output
     # Run from the project root: several tests use repo-relative `use lib`
     # paths (t/nested_use_test, ...), matching how the compiled suite runs.
-    output=$(cd "$PROJECT_DIR" && timeout "$timeout_secs" "$INTERP" "$src" 2>&1)
+    output=$(cd "$PROJECT_DIR" && timeout "$timeout_secs" "$INTERP" $INTERP_FLAGS "$src" 2>&1)
     local exit_code=$?
 
     case "$mode" in

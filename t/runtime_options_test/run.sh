@@ -166,6 +166,7 @@ fi
 if [ -x "$INTERP" ]; then
     check "VM default runs"      "10000 2" "$("$INTERP" pool.strada)"
     check "VM takes the options" "10000 2" "$("$INTERP" --no-gc --no-pool --exit-task-wait-ms 0 pool.strada)"
+    check "VM --no-jit runs the same" "10000 2" "$("$INTERP" --no-jit pool.strada)"
     t_vm0=$(ms_of "$INTERP" --exit-task-wait-ms 0 exitwait.strada)
     t_vmenv=$(STRADA_EXIT_TASK_WAIT_MS=0 ms_of "$INTERP" exitwait.strada)
     r="no"; [ "$t_vm0" -lt 800 ] && r="yes";    check "VM --exit-task-wait-ms 0 exits at once (${t_vm0} ms)" "yes" "$r"

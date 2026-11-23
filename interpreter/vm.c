@@ -26,6 +26,11 @@
 
 /* The JIT's call fast path compares frame_count against one bound: frame_cap, or
  * recursion_limit when that is set and smaller. Call after changing either. */
+/* JIT off for the whole process (strada-interp --no-jit). Set before any
+ * program runs; never read from the environment. */
+static int g_vm_no_jit = 0;
+void vm_set_no_jit(int on) { g_vm_no_jit = on ? 1 : 0; }
+
 static inline void vm_frame_limit_update(VM *vm) {
     size_t lim = vm->frame_cap;
     if (vm->recursion_limit > 0 && (size_t)vm->recursion_limit < lim) lim = (size_t)vm->recursion_limit;
@@ -15280,8 +15285,7 @@ static long jb_return_after(const VMChunk *c, size_t idx, int allow_cast) {
 /* Shared bailout stub builder at end of chunk: returns eax (1 or 2) with rbp popped */
 static void vm_jit_compile_chunk_locked(VMProgram *prog, VMChunk *c) {
     if (__builtin_expect(c->jit_state != 0, 0)) return;
-    const char *no_jit = getenv("STRADA_NO_JIT");
-    if (no_jit && no_jit[0] == '1') { c->jit_state = 3; return; }
+    if (__builtin_expect(g_vm_no_jit, 0)) { c->jit_state = 3; return; }
     if (!c->dt_code || c->dt_len == 0 || c->dt_len > 16384 || !vm_jit_get_trampoline()) {
         c->jit_state = 3;
         return;

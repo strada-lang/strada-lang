@@ -1,6 +1,7 @@
 #!/bin/bash
 # Test runner for the Strada interpreter
-# Usage: ./run_tests.sh [-v] [--default] [pattern]
+# Usage: ./run_tests.sh [-v] [--no-jit] [--default] [pattern]
+#   --no-jit                  Run every test with strada-interp --no-jit
 #   -v                        Verbose output
 #   --default, --default-opt  Build helper .so libs with compiler default params (instead of -O0)
 #   pattern                   Only run tests matching pattern
@@ -18,6 +19,7 @@ PATTERN=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -v) VERBOSE=1; shift ;;
+        --no-jit) INTERP="$INTERP --no-jit"; shift ;;
         --default|--default-opt) DEFAULT_OPT=1; shift ;;
         *)  PATTERN="$1"; shift ;;
     esac

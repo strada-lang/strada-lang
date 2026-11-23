@@ -5,22 +5,25 @@
 # output that legitimately differs run to run, compiled-only features) are
 # listed in t/examples_parity_skip.txt with a reason.
 #
-# Usage: t/examples_parity.sh [-v] [--jit-both] [NAME-FILTER]
+# Usage: t/examples_parity.sh [-v] [--no-jit] [--jit-both] [NAME-FILTER]
 #   -v          show the first lines of each difference
 #   --jit-both  compile each example once and compare it with the VM run
-#               twice, with the JIT off (STRADA_NO_JIT=1) and on (=0); counts
-#               are per run. Without it the VM uses the inherited STRADA_NO_JIT.
+#               twice, with the JIT off (strada-interp --no-jit) and on; counts
+#               are per run.
+#   --no-jit    one VM run per example, with the JIT off
 # Exit status: number of mismatching examples (0 = all match).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERBOSE=0
 FILTER=""
-JIT_MODES="inherit"
+JIT_MODES="0"
+JIT_TAGS=0
 for a in "$@"; do
     case "$a" in
         -v) VERBOSE=1 ;;
-        --jit-both) JIT_MODES="1 0" ;;
+        --jit-both) JIT_MODES="1 0"; JIT_TAGS=1 ;;
+        --no-jit) JIT_MODES="1" ;;
         *) FILTER="$a" ;;
     esac
 done
@@ -78,13 +81,12 @@ for f in examples/*.strada; do
     fi
     for m in $JIT_MODES; do
         total=$((total + 1))
-        if [ "$m" = inherit ]; then
-            tag=""
-            (cd "$WORK/$b" && timeout 20 "$INTERP" "$PROJECT_DIR/$f" < /dev/null > v.out 2>&1); vrc=$?
-        else
+        tag=""; jflag=""
+        if [ "$m" = 1 ]; then jflag="--no-jit"; fi
+        if [ "$JIT_TAGS" = 1 ]; then
             if [ "$m" = 1 ]; then tag=", JIT off"; else tag=", JIT on"; fi
-            (cd "$WORK/$b" && STRADA_NO_JIT=$m timeout 20 "$INTERP" "$PROJECT_DIR/$f" < /dev/null > v.out 2>&1); vrc=$?
         fi
+        (cd "$WORK/$b" && timeout 20 "$INTERP" $jflag "$PROJECT_DIR/$f" < /dev/null > v.out 2>&1); vrc=$?
         if [ "$crc" = "$vrc" ] && cmp -s "$WORK/$b/c.out" "$WORK/$b/v.out"; then
             same=$((same + 1))
         else

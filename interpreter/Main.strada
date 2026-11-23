@@ -699,6 +699,7 @@ func print_usage() void {
     say("  -L PATH       Add library search path");
     say("  --no-gil      Threads run in parallel with no interpreter lock");
     say("  --gil-interval-us N  Lock handover interval for a busy thread (default 5000)");
+    say("  --no-jit      Run bytecode in the interpreter loop only (no native code)");
     say("  --no-gc       Start with the runtime's cycle collector off");
     say("  --exit-task-wait-ms N  How long exit waits for running pool tasks (default 1000)");
     say("  --no-pool     Debug: no free-list pools in the runtime");
@@ -821,6 +822,7 @@ func main() int {
     my int $gil_enabled = 1;
     my int $gil_us = 0;
     my int $rt_no_gc = 0;
+    my int $vm_no_jit = 0;
     my int $rt_no_pool = 0;
     my int $rt_debug_bless = 0;
     my int $rt_exit_ms = -1;
@@ -847,6 +849,8 @@ func main() int {
             }
         } elsif ($parsing_opts == 1 && $arg eq "--no-gil") {
             $gil_enabled = 0;
+        } elsif ($parsing_opts == 1 && $arg eq "--no-jit") {
+            $vm_no_jit = 1;
         } elsif ($parsing_opts == 1 && $arg eq "--no-gc") {
             $rt_no_gc = 1;
         } elsif ($parsing_opts == 1 && $arg eq "--no-pool") {
@@ -907,6 +911,7 @@ func main() int {
 
     # Other runtime settings given on the command line (never the environment).
     __C__ {
+        if (strada_to_int(vm_no_jit)) vm_set_no_jit(1);
         if (strada_to_int(rt_no_pool)) strada_set_no_pool(1);
         if (strada_to_int(rt_no_gc)) strada_gc_set_enabled(0);
         if (strada_to_int(rt_debug_bless)) strada_set_debug_bless(1);

@@ -1280,6 +1280,7 @@ typedef struct VM {
 
 /* Program API */
 void vm_chunk_free_jit(VMChunk *chunk);
+void vm_set_no_jit(int on);  /* strada-interp --no-jit: whole process, set before any program runs */
 VMProgram *vm_program_new(void);
 void vm_program_retain(VMProgram *prog);
 void vm_program_free(VMProgram *prog);
