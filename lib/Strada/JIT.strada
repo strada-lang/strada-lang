@@ -378,6 +378,25 @@ private func detect_runtime() str {
         return "./runtime";
     }
 
+    # The compiler found on PATH: use the runtime that belongs to it (a
+    # source tree keeps it next to stradac, an installation under
+    # ../lib/strada). Pairing it with another installation's headers breaks
+    # as soon as the compiler emits a call the older header lacks.
+    if ($g_stradac_path eq "stradac") {
+        my array @path_dirs = split(":", "" . core::getenv("PATH"));
+        foreach my str $path_dir (@path_dirs) {
+            if (length($path_dir) == 0) { next; }
+            if (core::is_file($path_dir . "/stradac") != 1) { next; }
+            if (core::is_file($path_dir . "/runtime/strada_runtime_tcc.h") == 1) {
+                return $path_dir . "/runtime";
+            }
+            if (core::is_file($path_dir . "/../lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+                return $path_dir . "/../lib/strada/runtime";
+            }
+            last;
+        }
+    }
+
     if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
         my str $stradac_dir = core::dirname($g_stradac_path);
         my str $relative_runtime = $stradac_dir . "/../lib/strada/runtime";
