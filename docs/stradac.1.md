@@ -63,6 +63,29 @@ The compiler is self-hosting - it is written in Strada itself.
 - **--stack-trace**, **--no-stack-trace**
   Force stack-trace support on or off in the generated code. The default is auto-detected from the program's use of `try`/`throw`/`caller`.
 
+- **--no-gil**
+  Generate a program without the thread lock: threads run in parallel, and the program must lock all shared data itself. Recorded in the program that contains `main`.
+
+- **--gil-interval-us** *N*
+  How long a busy thread keeps the thread lock before handing it over, in microseconds (1 to 1000000, default 5000).
+
+- **--gil-polls**
+  Emit the loop handover checks in a library built on its own (a program that starts threads gets them automatically).
+
+- **--no-gc**
+  The program starts with the cycle collector off. `core::gc_enable()` turns it on.
+
+- **--exit-task-wait-ms** *N*
+  How long the program waits at exit for thread-pool tasks that are still running (0 to 3600000, default 1000).
+
+- **--no-pool**
+  Debugging: turn off the runtime's free-list pools, so valgrind and AddressSanitizer report each block at the call that allocated it. Slower.
+
+- **--debug-bless**
+  Debugging: trace `bless` and method dispatch to standard error.
+
+These settings are fixed when the program is built. A built program reads none of them from the environment.
+
 - **-v**, **--verbose**
   Show compilation progress.
 

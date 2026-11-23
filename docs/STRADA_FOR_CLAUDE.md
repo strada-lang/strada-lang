@@ -1384,7 +1384,13 @@ Disable trace globally with the `--no-stack-trace` compile flag.
 ./strada -O3 prog.strada             # LTO + -march=native
 ./strada -Ofast prog.strada          # aggressive optimization
 ./strada --no-stack-trace prog.strada
+./strada --no-gil prog.strada        # no thread lock (program locks shared data itself)
+./strada --no-gc prog.strada         # start with the cycle collector off
+./strada --exit-task-wait-ms 0 prog.strada   # do not wait for pool tasks at exit (default 1000)
 ```
+
+Runtime behaviour is fixed when a program is built: a built program reads no
+`STRADA_*` environment variable.
 
 ---
 

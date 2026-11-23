@@ -315,7 +315,7 @@ $(COMPILER_DIR)/Combined.strada: $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexe
 # Stage 1: Compile combined source to C using bootstrap compiler
 $(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_STRADAC)
 	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
-	STRADA_GC=off $(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
+	$(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
 
 # Build bootstrap compiler if it doesn't exist or its sources changed
 $(BOOTSTRAP_STRADAC): $(BOOTSTRAP_DIR)/main.c $(BOOTSTRAP_DIR)/lexer.c $(BOOTSTRAP_DIR)/lexer.h $(BOOTSTRAP_DIR)/parser.c $(BOOTSTRAP_DIR)/parser.h $(BOOTSTRAP_DIR)/ast.c $(BOOTSTRAP_DIR)/ast.h $(BOOTSTRAP_DIR)/codegen.c $(BOOTSTRAP_DIR)/codegen.h
@@ -337,7 +337,7 @@ stage1: stradac_stage1
 # Stage 2: Self-hosting compiler recompiles itself (with proper cleanup)
 $(COMPILER_DIR)/Combined.c: $(COMPILER_DIR)/Combined.strada stradac_stage1
 	@echo "=== Stage 2: Self-hosting compiler recompiles itself ==="
-	STRADA_GC=off ./stradac_stage1 $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+	./stradac_stage1 --no-gc $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
 
 # Build the final self-hosting compiler executable
 stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
@@ -355,7 +355,7 @@ stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
 # emit-C-then-link is enough.
 strada-driver: stradac $(RUNTIME_OBJ) tools/strada-driver.strada
 	@echo "=== Building strada-driver (compiled wrapper behind the shim) ==="
-	@STRADA_GC=off STRADA_DIR=$(CURDIR) ./stradac tools/strada-driver.strada strada-driver.tmp.c
+	@STRADA_DIR=$(CURDIR) ./stradac tools/strada-driver.strada strada-driver.tmp.c
 	$(CC) $(CFLAGS) -Wno-unused-function -o strada-driver strada-driver.tmp.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
 	@rm -f strada-driver.tmp.c
 	@echo "OK strada-driver built (the bash strada is now a thin shim)"
@@ -374,7 +374,7 @@ quick: $(COMPILER_DIR)/Combined.strada $(RUNTIME_OBJ)
 	    exit 1; \
 	fi
 	@echo "=== quick: regenerating Combined.c with existing ./stradac ==="
-	STRADA_GC=off ./stradac $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+	./stradac --no-gc $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
 ifneq ($(HAVE_TCC),)
 	@echo "=== quick: building ./stradac with tcc ==="
 	$(call TCC_COMPILER,$(COMPILER_DIR)/Combined.c,stradac.quick.tmp)

@@ -20,7 +20,7 @@ trap 'rm -f "$OUT"' EXIT
 
 best=""
 for ((r=1; r<=RUNS; r++)); do
-    t=$( { TIMEFORMAT='%R'; time env STRADA_GC=off "$STRADAC" "$CORPUS" "$OUT" > /dev/null 2>&1; } 2>&1 )
+    t=$( { TIMEFORMAT='%R'; time "$STRADAC" "$CORPUS" "$OUT" > /dev/null 2>&1; } 2>&1 )
     echo "  run $r: ${t}s"
     if [ -z "$best" ] || (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
 done

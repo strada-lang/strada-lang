@@ -147,15 +147,17 @@ static inline size_t strada_next_pow2(size_t n) {
  * NON-static: the header-inline ss_incref/ss_decref gate their atomic
  * branch on it from user TUs (mirrors strada_incref's gate). */
 extern int strada_threading_active;
-/* STRADA_NO_POOL=1 turns off every free-list pool (values, strings, metadata,
+/* `strada --no-pool` turns off every free-list pool (values, strings, metadata,
  * arrays, class instances) so valgrind/ASan report each leak at the call
  * that really allocated it rather than wherever a recycled block was first
- * malloc'd. Slower; for debugging only. */
+ * malloc'd. Slower; for debugging only. A build-time setting: generated
+ * main() calls strada_set_no_pool(1) first thing. Every free path decides by
+ * the block, not by this flag, so blocks pooled before the call (by global
+ * initialisers) are simply left in their pools. */
 static void ss_init_singletons(void);
 static int strada_no_pool = 0;
+void strada_set_no_pool(int on) { strada_no_pool = on ? 1 : 0; }
 __attribute__((constructor)) static void strada_no_pool_init(void) {
-    const char *e = getenv("STRADA_NO_POOL");
-    strada_no_pool = (e && *e && *e != '0');
     ss_init_singletons();
 }
 static StradaString *ss_pool_stack[SS_POOL_MAX];
@@ -903,21 +905,15 @@ static __thread StradaValue *strada_default_output;
 void strada_memprof_alloc(StradaType type, size_t bytes);
 void strada_memprof_free(StradaType type, size_t bytes);
 
-/* OOP debug tracing - set STRADA_DEBUG_BLESS=1 to enable */
-static int strada_debug_bless_checked = 0;
+/* OOP debug tracing - build with `strada --debug-bless` (generated main()
+ * calls strada_set_debug_bless(1)). */
 static int strada_debug_bless = 0;
-
-static void strada_check_debug_bless(void) {
-    if (!strada_debug_bless_checked) {
-        const char *env = getenv("STRADA_DEBUG_BLESS");
-        strada_debug_bless = env && env[0] == '1';
-        strada_debug_bless_checked = 1;
-    }
-}
+void strada_set_debug_bless(int on) { strada_debug_bless = on ? 1 : 0; }
+static void strada_check_debug_bless(void) { }
 
 /* Validate that a string pointer looks valid (basic sanity check).
  * Defensive — guards against use-after-free / heap corruption in the OOP path.
- * The full check is enabled via STRADA_DEBUG_BLESS=1; in normal builds we only
+ * The full check is enabled by building with --debug-bless; in normal builds we only
  * reject NULL, since callers already pass through strada_intern_str pointers
  * which are guaranteed valid. The defensive walk costs ~4% of OOP-heavy bench
  * time and only catches bugs that already corrupted memory elsewhere. */
@@ -1677,12 +1673,6 @@ void strada_break_self_cycle_impl(StradaValue *sv) {
  * after strada_free_hash() so it can reuse the pools and free helpers. The decref
  * hot path only needs the forward declaration + the gating flags here. */
 static int           cc_enabled    = 1;       /* automatic collection on by default */
-__attribute__((constructor)) static void strada_cc_env_init(void) {
-    const char *gc_env = getenv("STRADA_GC");
-    if (gc_env && (strcmp(gc_env, "off") == 0 || strcmp(gc_env, "0") == 0)) {
-        cc_enabled = 0;
-    }
-}
 /* Adaptive trigger: cc_threshold starts at the base and DOUBLES every time a
  * collection frees nothing (a cycle-free program converges to near-zero
  * collection work — profiling stradac showed ~18% of the whole compile spent
@@ -12335,8 +12325,12 @@ __thread int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
 void strada_cleanup_check_fail(const char *func_name, int entry_mark, int exit_mark) {
     fprintf(stderr, "strada: cleanup stack imbalance in %s(): depth %d at entry, %d at return\n",
             func_name ? func_name : "?", entry_mark, exit_mark);
-    if (getenv("STRADA_CLEANUP_CHECK_WARN")) return;
     abort();
+}
+/* --check-cleanup=warn builds (-DSTRADA_CLEANUP_CHECK_WARN) report and go on. */
+void strada_cleanup_check_warn(const char *func_name, int entry_mark, int exit_mark) {
+    fprintf(stderr, "strada: cleanup stack imbalance in %s(): depth %d at entry, %d at return\n",
+            func_name ? func_name : "?", entry_mark, exit_mark);
 }
 /* ---- Stack overflow report ---------------------------------------------
  * The recursion limit below is part of stack-trace tracking, which is only
@@ -21244,14 +21238,15 @@ static void strada_pool_atexit(void) {
  * would make the join below wait forever, so the process exits without
  * it: stdio is flushed and the status kept, the remaining exit handlers
  * are skipped. */
+/* How long exit waits for running pool tasks. Build-time setting:
+ * `strada --exit-task-wait-ms N` makes generated main() call the setter. */
+static long strada_exit_task_wait_ms = 1000;
+void strada_set_exit_task_wait_ms(long ms) { strada_exit_task_wait_ms = ms < 0 ? 0 : ms; }
 static void strada_pool_onexit(int status, void *arg) {
     (void)arg;
     StradaThreadPool *pool = __atomic_load_n(&strada_thread_pool, __ATOMIC_ACQUIRE);
     if (!pool) return;
-    long wait_ms = 1000;
-    const char *ev = getenv("STRADA_EXIT_TASK_WAIT_MS");
-    if (ev && *ev) wait_ms = strtol(ev, NULL, 10);
-    if (wait_ms < 0) wait_ms = 0;
+    long wait_ms = strada_exit_task_wait_ms;
     struct timespec dl;
     clock_gettime(CLOCK_REALTIME, &dl);
     dl.tv_sec += wait_ms / 1000;
@@ -30876,23 +30871,6 @@ void strada_init_proctitle(int argc, char **argv) {
             if (end > strada_argv_end) strada_argv_end = end;
         }
     }
-
-    /* STRADA_GC=off (or 0) disables the cycle collector for this process.
-     * Every generated main() calls this function first, so it doubles as
-     * process-startup init. One-shot batch programs free everything via
-     * refcounting + exit, making candidate buffering and periodic
-     * collections pure overhead — the strada wrapper sets this for stradac
-     * itself (~6% of compile time went to cc_tab_slot/cc_each_child).
-     * Placed here rather than as a compiler-emitted gc_disable() call
-     * because the frozen bootstrap can't compile new builtins in stage 1. */
-#ifdef STRADA_CYCLE_GC
-    {
-        const char *gc_env = getenv("STRADA_GC");
-        if (gc_env && (strcmp(gc_env, "off") == 0 || strcmp(gc_env, "0") == 0)) {
-            cc_enabled = 0;
-        }
-    }
-#endif
 }
 
 StradaValue* strada_setproctitle(StradaValue *title_val) {

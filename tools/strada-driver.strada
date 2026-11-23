@@ -54,6 +54,11 @@ our int $NO_STACK_TRACE = 0;
 our int $NO_GIL = 0;            # --no-gil
 our str $GIL_INTERVAL_US = "";  # --gil-interval-us N
 our int $GIL_POLLS = 0;         # --gil-polls
+our int $RT_NO_GC = 0;          # --no-gc
+our int $RT_NO_POOL = 0;        # --no-pool
+our int $RT_DEBUG_BLESS = 0;    # --debug-bless
+our str $RT_EXIT_WAIT_MS = "";  # --exit-task-wait-ms N
+our int $CHECK_CLEANUP_WARN = 0; # --check-cleanup=warn
 our int $CHECK_CLEANUP = 0;   # --check-cleanup / STRADA_CHECK_CLEANUP=1
 our int $NO_LTO = 0;
 our int $REPL_MODE = 0;
@@ -520,6 +525,12 @@ func parse_args(array @av) void {
         elsif ($a eq "--gil-interval-us") { $GIL_INTERVAL_US = need_arg(@av, $i, $n, $a); $i = $i + 2; }
         elsif (sw($a, "--gil-interval-us=")) { $GIL_INTERVAL_US = substr($a, 18, length($a) - 18); $i = $i + 1; }
         elsif ($a eq "--check-cleanup") { $CHECK_CLEANUP = 1; $i = $i + 1; }
+        elsif ($a eq "--check-cleanup=warn") { $CHECK_CLEANUP = 1; $CHECK_CLEANUP_WARN = 1; $i = $i + 1; }
+        elsif ($a eq "--no-gc") { $RT_NO_GC = 1; $i = $i + 1; }
+        elsif ($a eq "--no-pool") { $RT_NO_POOL = 1; $i = $i + 1; }
+        elsif ($a eq "--debug-bless") { $RT_DEBUG_BLESS = 1; $i = $i + 1; }
+        elsif ($a eq "--exit-task-wait-ms") { $RT_EXIT_WAIT_MS = need_arg(@av, $i, $n, $a); $i = $i + 2; }
+        elsif (sw($a, "--exit-task-wait-ms=")) { $RT_EXIT_WAIT_MS = substr($a, 20, length($a) - 20); $i = $i + 1; }
         elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
         elsif ($a eq "--no-use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "0"); $i = $i + 1; }
         elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
@@ -608,6 +619,11 @@ func usage() void {
     say("  --full-profile      Line-level profiling (writes strada-prof.out)");
     say("  --no-stack-trace    Omit stack-trace tracking (faster)");
     say("  --check-cleanup     Debug: abort when a function returns with an unbalanced cleanup stack");
+    say("  --check-cleanup=warn  The same check, reporting without aborting");
+    say("  --no-gc             The program starts with the cycle collector off");
+    say("  --exit-task-wait-ms N  How long exit waits for running pool tasks (default 1000)");
+    say("  --no-pool           Debug: no free-list pools (exact valgrind/ASan allocation sites)");
+    say("  --debug-bless       Debug: trace bless and method dispatch to stderr");
     say("  --no-gil            Build without the thread lock: threads run in parallel and");
     say("                      the program must lock all shared data itself");
     say("  --gil-interval-us N Lock handover interval for a busy thread (default 5000)");
@@ -931,6 +947,7 @@ func build_gcc_flags() array {
         @f = (@f, "-ffunction-sections", "-fdata-sections");
     }
     if ($CHECK_CLEANUP == 1) { @f = (@f, "-DSTRADA_CLEANUP_CHECK"); }
+    if ($CHECK_CLEANUP_WARN == 1) { @f = (@f, "-DSTRADA_CLEANUP_CHECK_WARN"); }
     # GCC-only flags (skip on clang)
     my int $is_clang = cc_is_clang();
     if ($is_clang == 0) {
@@ -1294,6 +1311,10 @@ func main() int {
     if ($NO_GIL == 1) { @sc = (@sc, "--no-gil"); }
     if (length($GIL_INTERVAL_US) > 0) { @sc = (@sc, "--gil-interval-us", $GIL_INTERVAL_US); }
     if ($GIL_POLLS == 1) { @sc = (@sc, "--gil-polls"); }
+    if ($RT_NO_GC == 1) { @sc = (@sc, "--no-gc"); }
+    if ($RT_NO_POOL == 1) { @sc = (@sc, "--no-pool"); }
+    if ($RT_DEBUG_BLESS == 1) { @sc = (@sc, "--debug-bless"); }
+    if (length($RT_EXIT_WAIT_MS) > 0) { @sc = (@sc, "--exit-task-wait-ms", $RT_EXIT_WAIT_MS); }
     my int $lp = 0;
     while ($lp < size(@LIB_PATHS)) { @sc = (@sc, "-L"); @sc = (@sc, $LIB_PATHS[$lp]); $lp = $lp + 1; }
     $lp = 0;
@@ -1311,7 +1332,6 @@ func main() int {
         @sc = (@sc, "--check");
         if ($VERBOSE == 1) { @sc = (@sc, "-v"); }
         @sc = (@sc, $actual_input);
-        core::setenv("STRADA_GC", "off");
         my int $check_rc = run_argv(@sc);
         cleanup();
         core::exit($check_rc);
@@ -1399,17 +1419,9 @@ func main() int {
     @sc = (@sc, $actual_input);
     @sc = (@sc, $cfile);
 
-    # STRADA_GC=off: stradac is a one-shot batch — skip the cycle collector.
-    # Restore STRADA_GC immediately afterward so `-r` runs user binaries with
-    # the caller's environment instead of inheriting STRADA_GC=off.
-    my scalar $saved_strada_gc = core::getenv("STRADA_GC");
-    core::setenv("STRADA_GC", "off");
+    # stradac itself is built with --no-gc (a one-shot batch needs no cycle
+    # collector), so nothing is set in the environment here.
     my int $sc_rc = run_argv(@sc);
-    if (defined($saved_strada_gc)) {
-        core::setenv("STRADA_GC", "" . $saved_strada_gc);
-    } else {
-        core::unsetenv("STRADA_GC");
-    }
     if ($sc_rc != 0) { error("Strada compilation failed"); }
 
     # ---- Extract link metadata markers from the generated C ----

@@ -2519,7 +2519,7 @@ When adding any new codegen predicate that classifies a function call, either:
 - **Hash key UTF-8 flag**: `StradaHashEntry.key_bytes` (struct padding) marks a key stored from a non-ASCII, non-UTF-8 string. `sv_key_extract_buf` sets the thread-local `strada_key_bytes_hint` to such a key's bytes; each insert sets `key_bytes = (key == hint)`. Readers use `strada_new_str_share_key(&entry)`. VM: `VMHashEntry.key_bytes`, set by `OP_HASH_SET` (`g_vm_key_bytes_hint`) and its two inline-insert fast paths; `vm_hash_make_key_str_b`.
 - **MRO**: `oop_walk_ancestors(name, fn, ud)` is an iterative, cycle-safe DFS with no size limits; `oop_mro(pkg, &arr)` caches the flattened array on the package (generation-validated) and replaced every `mro[64]` buffer; `oop_isa_check` and `strada_method_lookup_package` use it.
 - **END blocks**: `strada_register_end_block(fn, is_library)` keeps two LIFO lists run by one atexit handler: program first, libraries (shared-library constructors) after.
-- **Pool exit**: `StradaThreadPool.active` counts running tasks; `strada_pool_onexit` (glibc `on_exit`) cancels queued tasks, waits `STRADA_EXIT_TASK_WAIT_MS`, and `_exit(status)`s after `fflush(NULL)` if tasks are still running.
+- **Pool exit**: `StradaThreadPool.active` counts running tasks; `strada_pool_onexit` (glibc `on_exit`) cancels queued tasks, waits `strada_exit_task_wait_ms` (default 1000; build option `--exit-task-wait-ms N`), and `_exit(status)`s after `fflush(NULL)` if tasks are still running.
 - **Export metadata**: `func:` field 7 = per-parameter default tokens (`i<int>`, `n<num>`, `s<%-escaped>`, `u`, `f<generated fn>`, `x` = not exportable); `synthesize_default_funcs` (library builds) turns expression defaults into `<func>__dflt<N>` functions. `ownctor:NAME` lines mark constructors whose objects are always of their own class (`fn_ctor_own_class`); devirtualization after `Pkg::new` requires it.
 - **VM print to runtime handles**: `OP_PRINT_FH`/`OP_SAY_FH` write `VM_OBJ_NATIVE_SV` sockets/filehandles through `strada_print_fh`/`strada_say_fh`.
 
@@ -3106,6 +3106,30 @@ blocking call. A program that starts no thread never takes it.
     before any program code runs.
   - `core::gil_info()` (`strada_gil_info`) returns `enabled`, `active`,
     `interval_us`.
+- **The other runtime switches are build-time too (2026-11-23).** The runtime
+  has no `getenv("STRADA_...")` left. Same path as the lock options
+  (`%gil_cfg` keys `no_gc`, `no_pool`, `debug_bless`, `exit_wait_ms` ->
+  program node `rt_*` -> `$cg`), emitted after `strada_gil_configure`:
+  - `--no-gc` -> `strada_gc_set_enabled(0)` (was `STRADA_GC=off|0`, read in a
+    constructor and in `strada_init_proctitle`).
+  - `--exit-task-wait-ms N` (0..3600000) -> `strada_set_exit_task_wait_ms(NL)`.
+  - `--no-pool` -> `strada_set_no_pool(1)`. It used to be read in a
+    constructor; now it flips at the top of `main()`, after global
+    initialisers. That is safe because every free path decides by the block
+    (`hv_idx_in_block`, pool counters), never by the flag: blocks pooled
+    earlier just stay in their pools.
+  - `--debug-bless` -> `strada_set_debug_bless(1)`.
+  - `--check-cleanup=warn` is driver-only: it adds
+    `-DSTRADA_CLEANUP_CHECK_WARN`, and the header then maps
+    `strada_cleanup_check_fail` to `strada_cleanup_check_warn` in the
+    program's own code.
+  - stradac is built with `--no-gc` by the Makefile (the stage-2 emit and
+    `make quick`); the driver no longer sets `STRADA_GC` around stradac.
+    Stage 1 cannot take the flag (the bootstrap writes its `main()`), and
+    runs with the collector on: 21.0 s -> 21.3 s, 769 MB -> 785 MB, same
+    output.
+  - strada-interp takes `--no-gc`, `--exit-task-wait-ms N`, `--no-pool`,
+    `--debug-bless`.
   - `int(...)` is not accepted by the frozen bootstrap in compiler sources;
     Main.strada converts the option with `+ 0`.
   - Tests: a `# FLAGS: ...` line (lines 2-5) in a `t/bugfix_tests` file gives

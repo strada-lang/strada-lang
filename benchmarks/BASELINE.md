@@ -229,7 +229,7 @@ Same box and conventions as above; Strada at default `-O2` + LTO, best of
 
 Compiler speed (`bench_compiler.sh`, not in the table — Strada-only):
 best 1.76s to translate compiler/Combined.strada (35,105 lines) to C,
-~20k lines/sec, with STRADA_GC=off (as the strada driver invokes it).
+~20k lines/sec, with the cycle collector off (stradac is built with `--no-gc`).
 
 Per-section numbers are printed by each benchmark itself; rerun any of
 them directly for the breakdown. Notable per-section results from this

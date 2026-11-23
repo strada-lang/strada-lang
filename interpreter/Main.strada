@@ -699,6 +699,10 @@ func print_usage() void {
     say("  -L PATH       Add library search path");
     say("  --no-gil      Threads run in parallel with no interpreter lock");
     say("  --gil-interval-us N  Lock handover interval for a busy thread (default 5000)");
+    say("  --no-gc       Start with the runtime's cycle collector off");
+    say("  --exit-task-wait-ms N  How long exit waits for running pool tasks (default 1000)");
+    say("  --no-pool     Debug: no free-list pools in the runtime");
+    say("  --debug-bless Debug: trace bless and method dispatch to stderr");
     say("  -h, --help    Show this help message");
 }
 
@@ -816,6 +820,10 @@ func main() int {
     my int $parsing_opts = 1;
     my int $gil_enabled = 1;
     my int $gil_us = 0;
+    my int $rt_no_gc = 0;
+    my int $rt_no_pool = 0;
+    my int $rt_debug_bless = 0;
+    my int $rt_exit_ms = -1;
 
     while ($i < $argc) {
         my str $arg = $ARGV[$i];
@@ -839,6 +847,20 @@ func main() int {
             }
         } elsif ($parsing_opts == 1 && $arg eq "--no-gil") {
             $gil_enabled = 0;
+        } elsif ($parsing_opts == 1 && $arg eq "--no-gc") {
+            $rt_no_gc = 1;
+        } elsif ($parsing_opts == 1 && $arg eq "--no-pool") {
+            $rt_no_pool = 1;
+        } elsif ($parsing_opts == 1 && $arg eq "--debug-bless") {
+            $rt_debug_bless = 1;
+        } elsif ($parsing_opts == 1 && $arg eq "--exit-task-wait-ms") {
+            $i = $i + 1;
+            $rt_exit_ms = -1;
+            if ($i < $argc && $ARGV[$i] =~ /^[0-9]+$/) { $rt_exit_ms = int($ARGV[$i]); }
+            if ($rt_exit_ms < 0 || $rt_exit_ms > 3600000) {
+                say("Error: --exit-task-wait-ms requires a number of milliseconds from 0 to 3600000");
+                return 1;
+            }
         } elsif ($parsing_opts == 1 && $arg eq "--gil-polls") {
             # Compiler option; the VM always checks. Accepted so one flag set
             # works for both backends.
@@ -881,6 +903,14 @@ func main() int {
         __C__ {
             strada_gil_configure((int)strada_to_int(gil_enabled), (long)strada_to_int(gil_us));
         }
+    }
+
+    # Other runtime settings given on the command line (never the environment).
+    __C__ {
+        if (strada_to_int(rt_no_pool)) strada_set_no_pool(1);
+        if (strada_to_int(rt_no_gc)) strada_gc_set_enabled(0);
+        if (strada_to_int(rt_debug_bless)) strada_set_debug_bless(1);
+        if (strada_to_int(rt_exit_ms) >= 0) strada_set_exit_task_wait_ms((long)strada_to_int(rt_exit_ms));
     }
 
     # Eval mode (-e)

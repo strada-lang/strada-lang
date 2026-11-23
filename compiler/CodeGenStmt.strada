@@ -4144,6 +4144,12 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "    /* Thread lock settings chosen at build time */\n");
             emit($cg, "    strada_gil_configure(" . $gil_enabled . ", " . $cg->{"gil_interval_us"} . "L);\n\n");
         }
+        # Other build-time runtime settings (--no-gc, --no-pool,
+        # --debug-bless, --exit-task-wait-ms): never read from the environment.
+        if ($cg->{"rt_no_pool"} == 1) { emit($cg, "    strada_set_no_pool(1);\n"); }
+        if ($cg->{"rt_no_gc"} == 1) { emit($cg, "    strada_gc_set_enabled(0);\n"); }
+        if ($cg->{"rt_debug_bless"} == 1) { emit($cg, "    strada_set_debug_bless(1);\n"); }
+        if ($cg->{"rt_exit_wait_ms"} >= 0) { emit($cg, "    strada_set_exit_task_wait_ms(" . $cg->{"rt_exit_wait_ms"} . "L);\n"); }
 
         # Push stack frame for stack traces (if enabled)
         my str $src_file_c = c_str_lit($cg->{"filename"});
@@ -5287,6 +5293,11 @@ func gen_program(scalar $cg, scalar $program) void {
     # (main() calls strada_gil_configure before anything else runs).
     $cg->{"gil_off"} = $program->{"gil_off"} + 0;
     $cg->{"gil_interval_us"} = $program->{"gil_interval_us"} + 0;
+    $cg->{"rt_no_gc"} = $program->{"rt_no_gc"} + 0;
+    $cg->{"rt_no_pool"} = $program->{"rt_no_pool"} + 0;
+    $cg->{"rt_debug_bless"} = $program->{"rt_debug_bless"} + 0;
+    $cg->{"rt_exit_wait_ms"} = -1;
+    if (defined($program->{"rt_exit_wait_ms"})) { $cg->{"rt_exit_wait_ms"} = $program->{"rt_exit_wait_ms"} + 0; }
     if (defined($program->{"structs"})) {
         $cg->{"structs"} = $program->{"structs"};
         $cg->{"struct_names"} = $program->{"struct_names"};

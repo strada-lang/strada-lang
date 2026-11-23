@@ -33,7 +33,7 @@
 # Run with:
 #   ./strada examples/full_oop_test.strada
 #   valgrind --leak-check=full ./build/full_oop_test
-#   STRADA_DEBUG_BLESS=1 ./build/full_oop_test 2>&1 | head -100
+#   ./strada --debug-bless examples/full_oop_test.strada && ./full_oop_test 2>&1 | head -100
 
 # =============================================================================
 # Global tracking for DESTROY verification

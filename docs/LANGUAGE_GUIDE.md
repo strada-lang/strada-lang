@@ -2563,6 +2563,12 @@ thread::mutex_destroy($mutex);
   `{ enabled, active, interval_us }`. A C program that hosts Strada code
   calls `strada_gil_configure(enabled, interval_us)` before it starts a
   thread.
+- **Other build-time settings.** The same rule holds for every runtime
+  switch: `--no-gc` (start with the cycle collector off),
+  `--exit-task-wait-ms N` (how long exit waits for running pool tasks,
+  default 1000), and the debugging aids `--no-pool`, `--debug-bless` and
+  `--check-cleanup=warn`. None of them can be set from the environment of a
+  built program.
 - `each()` keeps one iterator per hash, and `keys()`/`values()` reset it:
   don't walk a hash with `each()` while another thread uses `each()`,
   `keys()` or `values()` on the same hash.

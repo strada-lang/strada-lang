@@ -965,6 +965,9 @@ void strada_gc_mutex_lock(pthread_mutex_t *mtx); /* pthread_mutex_lock that is G
 void strada_gil_release(void);
 void strada_gil_acquire(void);
 int strada_gil_enabled(void);
+void strada_set_no_pool(int on);            /* build option --no-pool */
+void strada_set_debug_bless(int on);        /* build option --debug-bless */
+void strada_set_exit_task_wait_ms(long ms); /* build option --exit-task-wait-ms */
 int strada_gil_configure(int enabled, long interval_us);
 StradaValue *strada_gil_info(void);
 int strada_gil_file_blocks(FILE *fp);  /* lock on and fp is a pipe/terminal/socket: a read may block */
@@ -1374,7 +1377,8 @@ extern __thread int strada_call_overflow;
 #endif
 #endif
 /* Cleanup-stack balance checking (debug builds: -DSTRADA_CLEANUP_CHECK, set by
- * `strada --check-cleanup` or STRADA_CHECK_CLEANUP=1). Each frame records the
+ * `strada --check-cleanup` or STRADA_CHECK_CLEANUP=1 when compiling;
+ * `--check-cleanup=warn` adds -DSTRADA_CLEANUP_CHECK_WARN). Each frame records the
  * pending-cleanup depth at entry; a normal return with a different depth means
  * codegen pushed without popping (or popped twice) -- reported and aborted. */
 #ifndef STRADA_TCC_COMPAT
@@ -1386,6 +1390,10 @@ extern __thread int strada_cs_marks[STRADA_MAX_CALL_DEPTH + 2];
 #endif
 int strada_cleanup_mark(void);
 void strada_cleanup_check_fail(const char *func_name, int entry_mark, int exit_mark);
+void strada_cleanup_check_warn(const char *func_name, int entry_mark, int exit_mark);
+#ifdef STRADA_CLEANUP_CHECK_WARN   /* strada --check-cleanup=warn: report, do not abort */
+#define strada_cleanup_check_fail strada_cleanup_check_warn
+#endif
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 
