@@ -62,7 +62,7 @@ endif
 # Source files (order matters - concatenated)
 # Stubs.strada provides sanitize_name() needed by Parser before Strada::Interpreter is loaded
 # Strada::Interpreter is pulled in via "use" from lib/Strada/Interpreter.strada
-COMPILER_SRCS = $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada Stubs.strada $(COMPILER_DIR)/Parser.strada
+COMPILER_SRCS = $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada Stubs.strada $(COMPILER_DIR)/Parser.strada $(COMPILER_DIR)/Semantic.strada
 INTERP_SRCS = Main.strada
 
 .PHONY: all clean test test-compiler-compat vm

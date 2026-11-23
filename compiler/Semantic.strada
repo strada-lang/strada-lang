@@ -1356,6 +1356,146 @@ func sem_resolve_vinfo_cname(scalar $ctx, scalar $vinfo, str $orig_name, int $li
 # miss and degrade to `scalar` — that can only SUPPRESS a warning, never
 # fabricate one (unlike needs_temp_cleanup, where divergence leaked).
 
+# Type diagnostics are errors in a file that says `use strict "types";`
+# (ctx "strict_err") and warnings under --strict-types.
+func sem_type_diag(scalar $ctx, str $msg, int $line) void {
+    if ($ctx->{"strict_err"} == 1) {
+        semantic_error($ctx, $msg, $line);
+        return;
+    }
+    semantic_warn($ctx, $msg, $line);
+}
+
+func stage0_is_float(int $t) int {
+    if ($t == TYPE_NUM() || $t == TYPE_FLOAT32() || $t == TYPE_FLOAT64() || $t == TYPE_LONG_DOUBLE()) {
+        return 1;
+    }
+    return 0;
+}
+
+# stage0_types_compatible, plus the strict rule: a fractional value does not
+# silently become an integer (write int(...)). int -> num stays implicit.
+func sem_types_ok(scalar $ctx, int $expected, int $actual) int {
+    if (stage0_types_compatible($expected, $actual) == 0) { return 0; }
+    if ($ctx->{"strict_err"} == 1 && stage0_is_numeric($expected) == 1
+        && stage0_is_float($expected) == 0 && stage0_is_float($actual) == 1) {
+        return 0;
+    }
+    return 1;
+}
+
+# Per-function / per-declaration switch for the type checks.
+func sem_set_strict(scalar $ctx, scalar $node) void {
+    my int $node_strict = 0;
+    if (is_valid_node($node) == 1) { $node_strict = $node->{"strict_types"} + 0; }
+    $ctx->{"strict_err"} = $node_strict;
+    if ($node_strict == 1 || $ctx->{"cli_strict"} == 1) {
+        $ctx->{"strict_types"} = 1;
+    } else {
+        $ctx->{"strict_types"} = 0;
+    }
+}
+
+# Declared element type of the array/hash variable a node names (0 = none).
+func sem_var_elem_type(scalar $ctx, scalar $vnode, str $sigil) int {
+    if (is_valid_node($vnode) == 0) { return 0; }
+    if ($vnode->{"type"} != NODE_VARIABLE()) { return 0; }
+    my str $vname = "" . $vnode->{"orig_name"};
+    if (length($vname) == 0) { $vname = "" . $vnode->{"name"}; }
+    my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $vname, $sigil);
+    if ($lk->{"found"} != 1) { return 0; }
+    return $lk->{"info"}->{"elem_type"} + 0;
+}
+
+func sem_var_display_name(scalar $vnode) str {
+    my str $vname = "" . $vnode->{"orig_name"};
+    if (length($vname) == 0) { $vname = "" . $vnode->{"name"}; }
+    return $vname;
+}
+
+func sem_elem_type_name(str $sigil, int $etype) str {
+    if ($sigil eq "%") { return "hash<" . ast_data_type_name($etype) . ">"; }
+    return "array<" . ast_data_type_name($etype) . ">";
+}
+
+# One value going into a typed container. A list literal is checked element
+# by element; an array variable by its own declared element type.
+func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str $csigil, int $line) void {
+    if (is_valid_node($val) == 0) { return; }
+    my int $vt = $val->{"type"};
+    if ($vt == NODE_ANON_ARRAY() && $val->{"is_list"} == 1) {
+        my scalar $elems = $val->{"elements"};
+        my int $ecount = $val->{"element_count"};
+        my int $ei = 0;
+        while ($ei < $ecount) {
+            sem_check_elem_value($ctx, $etype, $elems->[$ei], $cname, $csigil, $line);
+            $ei = $ei + 1;
+        }
+        return;
+    }
+    if ($vt == NODE_VARIABLE() && ("" . $val->{"sigil"}) eq "@") {
+        my int $src_et = sem_var_elem_type($ctx, $val, "@");
+        if ($src_et > 0 && sem_types_ok($ctx, $etype, $src_et) == 0) {
+            sem_type_diag($ctx, "putting the elements of '@" . sem_var_display_name($val) . "' ("
+                . sem_elem_type_name("@", $src_et) . ") into '" . $csigil . $cname . "' (declared "
+                . sem_elem_type_name($csigil, $etype) . ")", $line);
+        }
+        return;
+    }
+    if ($vt == NODE_VARIABLE() && ("" . $val->{"sigil"}) eq "%") { return; }
+    my int $atype = stage0_expr_type($ctx, $val);
+    if ($atype == TYPE_ARRAY() || $atype == TYPE_HASH()) { return; }
+    if (sem_types_ok($ctx, $etype, $atype) == 0) {
+        sem_type_diag($ctx, "storing a " . ast_data_type_name($atype) . " value in '" . $csigil . $cname
+            . "' (declared " . sem_elem_type_name($csigil, $etype) . ")", $line);
+    }
+}
+
+# `$a[i] = v`, `$h{k} = v`, `@a = LIST` on a container with a declared
+# element type.
+func sem_check_elem_assign(scalar $ctx, scalar $expr) void {
+    my scalar $tgt = $expr->{"target"};
+    if (is_valid_node($tgt) == 0) { return; }
+    my int $tt = $tgt->{"type"};
+    my scalar $cvar = 0;
+    my str $csigil = "@";
+    if ($tt == NODE_SUBSCRIPT()) {
+        $cvar = $tgt->{"array"};
+    } elsif ($tt == NODE_HASH_ACCESS()) {
+        $cvar = $tgt->{"hash"};
+        $csigil = "%";
+    } elsif ($tt == NODE_VARIABLE() && ("" . $tgt->{"sigil"}) eq "@") {
+        $cvar = $tgt;
+    } else {
+        return;
+    }
+    my int $etype = sem_var_elem_type($ctx, $cvar, $csigil);
+    if ($etype <= 0) { return; }
+    my int $aline = ast_get_line($expr);
+    if ($aline == 0) { $aline = ast_get_line($tgt); }
+    if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
+    sem_check_elem_value($ctx, $etype, $expr->{"value"}, sem_var_display_name($cvar), $csigil, $aline);
+}
+
+# push(@a, LIST) / unshift(@a, LIST) on an array with a declared element type.
+func sem_check_typed_push(scalar $ctx, scalar $expr, int $line) void {
+    my str $cname = "" . $expr->{"name"};
+    if ($cname ne "push" && $cname ne "unshift") { return; }
+    my scalar $args = $expr->{"args"};
+    my int $argc = $expr->{"arg_count"};
+    if ($argc < 2) { return; }
+    my scalar $first = $args->[0];
+    if (is_valid_node($first) == 0) { return; }
+    if ($first->{"type"} != NODE_VARIABLE() || ("" . $first->{"sigil"}) ne "@") { return; }
+    my int $etype = sem_var_elem_type($ctx, $first, "@");
+    if ($etype <= 0) { return; }
+    my int $ai = 1;
+    while ($ai < $argc) {
+        sem_check_elem_value($ctx, $etype, $args->[$ai], sem_var_display_name($first), "@", $line);
+        $ai = $ai + 1;
+    }
+}
+
 func stage0_is_numeric(int $t) int {
     if ($t == TYPE_INT() || $t == TYPE_NUM() || $t == TYPE_BOOL() || $t == TYPE_ENUM()
         || $t == TYPE_INT8() || $t == TYPE_INT16() || $t == TYPE_INT32() || $t == TYPE_INT64()
@@ -1397,6 +1537,16 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
             my scalar $info = $lk->{"info"};
             return $info->{"type"};
         }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_SUBSCRIPT()) {
+        my int $sub_et = sem_var_elem_type($ctx, $expr->{"array"}, "@");
+        if ($sub_et > 0) { return $sub_et; }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        my int $hacc_et = sem_var_elem_type($ctx, $expr->{"hash"}, "%");
+        if ($hacc_et > 0) { return $hacc_et; }
         return TYPE_SCALAR();
     }
     if ($t == NODE_BINARY_OP()) {
@@ -1450,6 +1600,14 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
         if ($name eq "substr" || $name eq "join" || $name eq "uc" || $name eq "lc"
             || $name eq "ucfirst" || $name eq "lcfirst" || $name eq "trim"
             || $name eq "chr" || $name eq "sprintf") { return TYPE_STR(); }
+        if (($name eq "shift" || $name eq "pop") && $expr->{"arg_count"} == 1) {
+            my scalar $sp_arg = $expr->{"args"}->[0];
+            if (is_valid_node($sp_arg) == 1 && $sp_arg->{"type"} == NODE_VARIABLE() && ("" . $sp_arg->{"sigil"}) eq "@") {
+                my int $sp_et = sem_var_elem_type($ctx, $sp_arg, "@");
+                if ($sp_et > 0) { return $sp_et; }
+            }
+            return TYPE_SCALAR();
+        }
         my scalar $fn_info = $ctx->{"functions"}->{$name};
         if ($fn_info->{"is_registered"} == 1) {
             return $fn_info->{"return_type"};
@@ -1884,6 +2042,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my str $name = $expr->{"name"};
         my scalar $args = $expr->{"args"};
         my int $arg_count = $expr->{"arg_count"};
+        if ($ctx->{"strict_types"} == 1) {
+            sem_check_typed_push($ctx, $expr, ast_get_line($expr));
+        }
 
         # Resolve unqualified calls imported via `use Module qw(names);`
         if (index($name, "::") < 0 && defined($ctx->{"qw_imports"})) {
@@ -2313,11 +2474,23 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     if ($psigil eq "$") {
                         my int $ptype = $cparam->{"param_type"};
                         my int $atype = stage0_expr_type($ctx, $args->[$i]);
-                        if (stage0_types_compatible($ptype, $atype) == 0) {
+                        if (sem_types_ok($ctx, $ptype, $atype) == 0) {
                             my int $argno = $i + 1;
-                            semantic_warn($ctx, "argument " . $argno . " to '" . $name
+                            sem_type_diag($ctx, "argument " . $argno . " to '" . $name
                                 . "': expected " . ast_data_type_name($ptype)
                                 . ", got " . ast_data_type_name($atype), $line);
+                        }
+                    } elsif (($psigil eq "@" || $psigil eq "%") && $cparam->{"elem_type"} + 0 > 0) {
+                        my scalar $carg = $args->[$i];
+                        if (is_valid_node($carg) == 1 && $carg->{"type"} == NODE_VARIABLE() && ("" . $carg->{"sigil"}) eq $psigil) {
+                            my int $want_et = $cparam->{"elem_type"} + 0;
+                            my int $have_et = sem_var_elem_type($ctx, $carg, $psigil);
+                            if ($have_et > 0 && $have_et != $want_et && sem_types_ok($ctx, $want_et, $have_et) == 0) {
+                                my int $cargno = $i + 1;
+                                sem_type_diag($ctx, "argument " . $cargno . " to '" . $name
+                                    . "': expected " . sem_elem_type_name($psigil, $want_et)
+                                    . ", got " . sem_elem_type_name($psigil, $have_et), $line);
+                            }
                         }
                     }
                 }
@@ -2429,6 +2602,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 $expr->{"value"} = sem_scalar_of($expr->{"value"});
             }
         }
+        if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
+            sem_check_elem_assign($ctx, $expr);
+        }
         # Stage-0 type check: plain `=` to a declared scalar variable.
         # Compound ops (+=, .=, ...) keep their own operand semantics.
         if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
@@ -2442,13 +2618,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     if ($lk->{"found"} == 1) {
                         my int $dtype = $lk->{"info"}->{"type"};
                         my int $atype = stage0_expr_type($ctx, $expr->{"value"});
-                        if (stage0_types_compatible($dtype, $atype) == 0) {
+                        if (sem_types_ok($ctx, $dtype, $atype) == 0) {
                             # Assign nodes don't always carry a line — fall
                             # back to the target, then the value expression.
                             my int $aline = ast_get_line($expr);
                             if ($aline == 0) { $aline = ast_get_line($tgt); }
                             if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
-                            semantic_warn($ctx, "assigning a " . ast_data_type_name($atype)
+                            sem_type_diag($ctx, "assigning a " . ast_data_type_name($atype)
                                 . " value to '$" . $t_orig . "' (declared "
                                 . ast_data_type_name($dtype) . ")", $aline);
                         }
@@ -2892,6 +3068,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my str $add_key = $name;
         if ($other_sigil == 1) { $add_key = $sigil . ":" . $name; }
         scope_add_var($current_scope, $add_key, $sigil, $var_type, $line);
+        if ($stmt->{"elem_type"} + 0 > 0) {
+            $current_scope->{"vars"}->{$add_key}->{"elem_type"} = $stmt->{"elem_type"} + 0;
+        }
         if (length($c_alias) > 0) {
             $stmt->{"orig_name"} = $name;
             $stmt->{"name"} = $c_alias;
@@ -2913,11 +3092,14 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             # initializers are flattening lists with their own semantics).
             if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
                 my int $atype = stage0_expr_type($ctx, $init_expr);
-                if (stage0_types_compatible($var_type, $atype) == 0) {
-                    semantic_warn($ctx, "initializing '" . $sigil . $name . "' (declared "
+                if (sem_types_ok($ctx, $var_type, $atype) == 0) {
+                    sem_type_diag($ctx, "initializing '" . $sigil . $name . "' (declared "
                         . ast_data_type_name($var_type) . ") with a "
                         . ast_data_type_name($atype) . " value", $line);
                 }
+            }
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "@" && $stmt->{"elem_type"} + 0 > 0) {
+                sem_check_elem_value($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, "@", $line);
             }
         }
         return;
@@ -3219,8 +3401,8 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 } elsif ($ctx->{"strict_types"} == 1 && $rtype != TYPE_DYNAMIC()) {
                     # Stage-0 type check: returned value vs declared return type.
                     my int $atype = stage0_expr_type($ctx, $ret_val);
-                    if (stage0_types_compatible($rtype, $atype) == 0) {
-                        semantic_warn($ctx, "returning a " . ast_data_type_name($atype)
+                    if (sem_types_ok($ctx, $rtype, $atype) == 0) {
+                        sem_type_diag($ctx, "returning a " . ast_data_type_name($atype)
                             . " value from '" . $cur->{"name"} . "' (declared to return "
                             . ast_data_type_name($rtype) . ")", $line);
                     }
@@ -3351,6 +3533,17 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             my str $fe_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $fe_vname);
             scope_add_var($ctx->{"scope"}, $fe_vname, $fe_sigil, $fe_vtype, $line);
             scope_mark_used_sigil($ctx->{"scope"}, $fe_vname, $fe_sigil);
+            if ($ctx->{"strict_types"} == 1) {
+                my scalar $fe_src = $stmt->{"array"};
+                if (is_valid_node($fe_src) == 1 && $fe_src->{"type"} == NODE_VARIABLE() && ("" . $fe_src->{"sigil"}) eq "@") {
+                    my int $fe_et = sem_var_elem_type($ctx, $fe_src, "@");
+                    if ($fe_et > 0 && sem_types_ok($ctx, $fe_vtype, $fe_et) == 0) {
+                        sem_type_diag($ctx, "loop variable '$" . $fe_vname . "' (declared "
+                            . ast_data_type_name($fe_vtype) . ") iterates over '@" . sem_var_display_name($fe_src)
+                            . "' (declared " . sem_elem_type_name("@", $fe_et) . ")", $line);
+                    }
+                }
+            }
             if (length($fe_calias) > 0) {
                 $fe_decl->{"orig_name"} = $fe_vname;
                 $fe_decl->{"name"} = $fe_calias;
@@ -3491,6 +3684,9 @@ func analyze_function(scalar $ctx, scalar $fn) void {
             $param->{"name"} = "__args_";
         } else {
             scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
+            if ($param->{"elem_type"} + 0 > 0) {
+                $ctx->{"scope"}->{"vars"}->{$pname}->{"elem_type"} = $param->{"elem_type"} + 0;
+            }
         }
     }
 
@@ -3514,6 +3710,8 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     my scalar $ctx = ctx_new();
     $ctx->{"show_warnings"} = $show_warnings;
     $ctx->{"strict_types"} = $strict_types;
+    $ctx->{"cli_strict"} = $strict_types;
+    $ctx->{"strict_err"} = 0;
     $ctx->{"qw_imports"} = $ast->{"qw_imports"};
     $ctx->{"module_only_mode"} = $ast->{"module_only_mode"} + 0;
 
@@ -3554,6 +3752,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $gi = 0; $gi < $gcount; $gi = $gi + 1) {
             my scalar $gvar = $globals->[$gi];
             $ctx->{"cur_file"} = "" . $gvar->{"file"};
+            sem_set_strict($ctx, $gvar);
             $ctx->{"cur_from_use"} = $gvar->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             my str $gpkg = "" . $gvar->{"package"};
@@ -3565,13 +3764,13 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             }
             if (is_valid_node($gvar->{"init"}) == 1) {
                 analyze_expression($ctx, $gvar->{"init"});
-                if ($strict_types == 1 && $gvar->{"type"} == NODE_VAR_DECL() && $gvar->{"sigil"} eq "$") {
+                if ($ctx->{"strict_types"} == 1 && $gvar->{"type"} == NODE_VAR_DECL() && $gvar->{"sigil"} eq "$") {
                     my int $gv_type = $gvar->{"var_type"};
                     my int $ga_type = stage0_expr_type($ctx, $gvar->{"init"});
-                    if (stage0_types_compatible($gv_type, $ga_type) == 0) {
+                    if (sem_types_ok($ctx, $gv_type, $ga_type) == 0) {
                         my str $gv_oname = "" . $gvar->{"orig_name"};
                         if (length($gv_oname) == 0) { $gv_oname = "" . $gvar->{"name"}; }
-                        semantic_warn($ctx, "initializing '$" . $gv_oname . "' (declared "
+                        sem_type_diag($ctx, "initializing '$" . $gv_oname . "' (declared "
                             . ast_data_type_name($gv_type) . ") with a "
                             . ast_data_type_name($ga_type) . " value", ast_get_line($gvar));
                     }
@@ -3588,6 +3787,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $bi = 0; $bi < $bcount; $bi = $bi + 1) {
             my scalar $bblk = $bblocks->[$bi];
             $ctx->{"cur_file"} = "" . $bblk->{"file"};
+            sem_set_strict($ctx, 0);
             $ctx->{"cur_from_use"} = $bblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             my str $bpkg = "" . $bblk->{"source_module"};
@@ -3604,6 +3804,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $ei = 0; $ei < $ecount; $ei = $ei + 1) {
             my scalar $eblk = $eblocks->[$ei];
             $ctx->{"cur_file"} = "" . $eblk->{"file"};
+            sem_set_strict($ctx, 0);
             $ctx->{"cur_from_use"} = $eblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             my str $epkg = "" . $eblk->{"source_module"};
@@ -3631,6 +3832,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         }
         $ctx->{"cur_file"} = $fn->{"file"};
         $ctx->{"cur_from_use"} = $fn->{"from_use"} + 0;
+        sem_set_strict($ctx, $fn);
         analyze_function($ctx, $fn);
     }
 

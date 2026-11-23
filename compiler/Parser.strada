@@ -692,12 +692,87 @@ func parse_var_name(scalar $parser) str {
 # Type Parsing
 # ============================================================
 
+# Element type named by a plain word: int, num, str, scalar, or a class.
+func parse_elem_type_word(scalar $parser, str $word) void {
+    $parser->{"last_elem_class"} = "";
+    if ($word eq "int") { $parser->{"last_elem_type"} = TYPE_INT(); return; }
+    if ($word eq "num") { $parser->{"last_elem_type"} = TYPE_NUM(); return; }
+    if ($word eq "str") { $parser->{"last_elem_type"} = TYPE_STR(); return; }
+    if ($word eq "scalar") { $parser->{"last_elem_type"} = TYPE_SCALAR(); return; }
+    if ($word eq "array" || $word eq "hash" || $word eq "void" || $word eq "dynamic") {
+        parser_error($parser, "element type must be int, num, str, scalar or a class name, got '" . $word . "'");
+    }
+    $parser->{"last_elem_type"} = TYPE_SCALAR();
+    $parser->{"last_elem_class"} = $word;
+}
+
+func parse_elem_type_tok(scalar $parser) void {
+    my scalar $etok = parser_current($parser);
+    my str $ett = $etok->{"type"};
+    if ($ett eq "TYPE_INT") { parser_advance($parser); parse_elem_type_word($parser, "int"); return; }
+    if ($ett eq "TYPE_NUM") { parser_advance($parser); parse_elem_type_word($parser, "num"); return; }
+    if ($ett eq "TYPE_STR") { parser_advance($parser); parse_elem_type_word($parser, "str"); return; }
+    if ($ett eq "TYPE_SCALAR") { parser_advance($parser); parse_elem_type_word($parser, "scalar"); return; }
+    if ($ett eq "IDENT") {
+        my str $cls = "" . $etok->{"value"};
+        parser_advance($parser);
+        while (parser_check($parser, "DOUBLE_COLON")) {
+            parser_advance($parser);
+            my scalar $ctok = parser_current($parser);
+            parser_expect_ident_like($parser);
+            $cls = $cls . "::" . $ctok->{"value"};
+        }
+        parse_elem_type_word($parser, $cls);
+        return;
+    }
+    parser_error($parser, "expected an element type (int, num, str, scalar or a class name), got " . friendly_token($ett, $etok->{"value"}));
+}
+
+# Element types after `array` / `hash`: array<T>, hash<T>, hash<str, T>.
+# `<T>` written without spaces arrives as ONE DIAMOND token (the lexer's
+# <BAREWORD> form); any other spelling arrives as LT ... GT.
+func parse_elem_types(scalar $parser, int $is_hash) void {
+    my scalar $etok = parser_current($parser);
+    my str $ett = $etok->{"type"};
+    if ($ett eq "DIAMOND") {
+        parser_advance($parser);
+        parse_elem_type_word($parser, "" . $etok->{"value"});
+        return;
+    }
+    if ($ett ne "LT") { return; }
+    parser_advance($parser);
+    parse_elem_type_tok($parser);
+    if ($is_hash == 1 && parser_check($parser, "COMMA")) {
+        if ($parser->{"last_elem_type"} != TYPE_STR()) {
+            parser_error($parser, "hash keys are strings: write hash<str, T> or hash<T>");
+        }
+        parser_advance($parser);
+        parse_elem_type_tok($parser);
+    }
+    if (!parser_check($parser, "GT")) {
+        parser_error($parser, "expected '>' to close the element type (nested element types are not supported)");
+    }
+    parser_advance($parser);
+}
+
+# Copy the element type parse_type() just read onto a declaration node.
+func parser_stamp_elem_type(scalar $parser, scalar $node) void {
+    my int $pet = $parser->{"last_elem_type"} + 0;
+    if ($pet > 0) {
+        $node->{"elem_type"} = $pet;
+        my str $pec = "" . $parser->{"last_elem_class"};
+        if (length($pec) > 0) { $node->{"elem_class"} = $pec; }
+    }
+}
+
 func parse_type(scalar $parser) int {
     my scalar $tok = parser_current($parser);
     my str $type_str = $tok->{"type"};
     
     # Clear last type name
     $parser->{"last_type_name"} = "";
+    $parser->{"last_elem_type"} = 0;
+    $parser->{"last_elem_class"} = "";
     
     if ($type_str eq "TYPE_INT") {
         parser_advance($parser);
@@ -717,10 +792,12 @@ func parse_type(scalar $parser) int {
     }
     if ($type_str eq "TYPE_ARRAY") {
         parser_advance($parser);
+        parse_elem_types($parser, 0);
         return TYPE_ARRAY();
     }
     if ($type_str eq "TYPE_HASH") {
         parser_advance($parser);
+        parse_elem_types($parser, 1);
         return TYPE_HASH();
     }
     if ($type_str eq "TYPE_SCALAR") {
@@ -3545,6 +3622,8 @@ func parse_var_decl(scalar $parser) scalar {
     my str $peek_type = $peek_tok->{"type"};
     my int $var_type = 0;
     my str $type_name = "";
+    my int $decl_et = 0;
+    my str $decl_ec = "";
 
     if ($peek_type eq "DOLLAR" || $peek_type eq "AT" || $peek_type eq "PERCENT") {
         # No explicit type — infer from sigil
@@ -3554,6 +3633,8 @@ func parse_var_decl(scalar $parser) scalar {
     } else {
         $var_type = parse_type($parser);
         $type_name = $parser->{"last_type_name"};
+        $decl_et = $parser->{"last_elem_type"} + 0;
+        $decl_ec = "" . $parser->{"last_elem_class"};
     }
 
     # Get sigil and name
@@ -3577,6 +3658,10 @@ func parse_var_decl(scalar $parser) scalar {
     ast_set_line($decl, $decl_line);
     if (length($type_name) > 0) {
         $decl->{"struct_name"} = $type_name;
+    }
+    if ($decl_et > 0) {
+        $decl->{"elem_type"} = $decl_et;
+        if (length($decl_ec) > 0) { $decl->{"elem_class"} = $decl_ec; }
     }
 
     # Optional initial capacity for arrays: my array $name[size];
@@ -4927,6 +5012,8 @@ func parse_function(scalar $parser) scalar {
             my str $pt_peek_type = $pt_peek->{"type"};
             my int $param_type = 0;
             my str $param_type_name = "";
+            my int $param_et = 0;
+            my str $param_ec = "";
 
             if ($pt_peek_type eq "DOLLAR" || $pt_peek_type eq "AT" || $pt_peek_type eq "PERCENT") {
                 # No explicit type — default to scalar/array/hash based on sigil
@@ -4939,6 +5026,8 @@ func parse_function(scalar $parser) scalar {
             } else {
                 $param_type = parse_type($parser);
                 $param_type_name = $parser->{"last_type_name"};
+                $param_et = $parser->{"last_elem_type"} + 0;
+                $param_ec = "" . $parser->{"last_elem_class"};
             }
 
             # Check for variadic parameter (...) after the type
@@ -4976,6 +5065,10 @@ func parse_function(scalar $parser) scalar {
             if (length($param_type_name) > 0) {
                 $param->{"struct_name"} = $param_type_name;
             }
+            if ($param_et > 0) {
+                $param->{"elem_type"} = $param_et;
+                if (length($param_ec) > 0) { $param->{"elem_class"} = $param_ec; }
+            }
             
             # Check for default value
             if (parser_check($parser, "ASSIGN")) {
@@ -5011,8 +5104,13 @@ func parse_function(scalar $parser) scalar {
     if (!parser_check($parser, "LBRACE")) {
         $ret_type = parse_type($parser);
         $ret_struct_name = $parser->{"last_type_name"};
+        if ($parser->{"last_elem_type"} + 0 > 0) {
+            $fn->{"return_elem_type"} = $parser->{"last_elem_type"} + 0;
+            if (length("" . $parser->{"last_elem_class"}) > 0) { $fn->{"return_elem_class"} = "" . $parser->{"last_elem_class"}; }
+        }
     }
     $fn->{"return_type"} = $ret_type;
+    $fn->{"strict_types"} = $parser->{"strict_types"} + 0;
     if (length($ret_struct_name) > 0) {
         $fn->{"return_struct_name"} = $ret_struct_name;
     }
@@ -6197,6 +6295,20 @@ func parse_use(scalar $parser, scalar $program) void {
         # Check for "use overload" - operator overloading
         if ($mod_name eq "overload") {
             parse_use_overload($parser, $program);
+            return;
+        }
+
+        # use strict "types";  -- from here to the end of this file, type
+        # mismatches are compile errors (functions carry "strict_types").
+        if ($mod_name eq "strict" && parser_check($parser, "STR_LITERAL")) {
+            my scalar $strict_tok = parser_current($parser);
+            my str $strict_what = "" . $strict_tok->{"value"};
+            if ($strict_what ne "types") {
+                parser_error($parser, "unknown strict category '" . $strict_what . "' (expected \"types\")");
+            }
+            parser_advance($parser);
+            parser_expect($parser, "SEMI");
+            $parser->{"strict_types"} = 1;
             return;
         }
 

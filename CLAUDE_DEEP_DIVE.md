@@ -3168,3 +3168,32 @@ reads `/dev/urandom` and returns undef if it cannot. Paths go through
 
 Tests: `t/bugfix_tests/sys_info_posix_additions.strada` (compiled and VM),
 `t/leak_tests/test_sys_info_additions.strada` (valgrind).
+
+## Checked types (2026-11-23, branch `typed-core`)
+
+Step 1 of the typed work: `use strict "types";` and element types. CLAUDE.md
+("Type System") lists the mechanism. Measurements taken before starting, to
+decide what steps 2 and 3 should be (Strada `-O2` against hand-written C with
+plain structs and no reference counting, so the C figures are upper bounds;
+best of 5):
+
+| Program | Strada | C | Where the time goes |
+|---|---|---|---|
+| Sum of a 2M-element int array, 50 passes | 0.12 s | 0.03 s | `strada_array_get` call and a re-boxed loop variable per element |
+| Mandelbrot 2000x2000 | 0.09 s | 0.02 s | inner loop already identical to C; `strada_safe_div` boxes each `/` |
+| 1000 objects, 20000 `step()` calls each | 1.96 s | 0.04 s | ~60% boxing nums in and out of hash slots, ~26% hash probes |
+
+`int` and `num` locals are already unboxed (`int64_t`, `double`). A C loop
+that keeps tagged ints in the element slots and untags inline runs in 0.07 s,
+so a new array representation buys 0.07 -> 0.03 at the cost of teaching every
+runtime array function about it. Typed values reach untyped code through
+`\@a`, plain `array` parameters, `__C__` blocks and the VM bridge, so any
+unboxed storage has to stay readable from there.
+
+Candidates, not started (performance changes are proposed first):
+- `num / num` as a plain division with a zero check.
+- `num`/`int` accessor calls typed in arithmetic, and an in-place update of
+  the attribute slot.
+- Inline tagged-int element reads for `array<int>`.
+- Fixed-layout classes, which need the receiver's class known statically
+  (`my Particle $p`, `array<Particle>`).

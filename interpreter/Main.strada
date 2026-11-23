@@ -683,7 +683,35 @@ func run_file_vm(str $filename, scalar $argv) int {
         $program->{"source_file"} = $filename;
     }
 
+    # A file that says `use strict "types";` gets the compiler's semantic
+    # pass, so the VM rejects the same programs. That pass rewrites the tree
+    # it checks, so it runs on a second parse.
+    if (defined($program) && vm_program_has_strict($program) == 1) {
+        my scalar $chk_tokens = lex_tokenize_file($source, $lex_fn);
+        my scalar $chk_parser = parser_new($chk_tokens);
+        parser_set_filename($chk_parser, $filename);
+        my scalar $chk_program = parse_program($chk_parser, \@lib_paths, \@empty, \@empty, \@empty);
+        try {
+            semantic_analyze($chk_program, 0, 0);
+        } catch ($chk_err) {
+            say(STDERR, "" . $chk_err);
+            core::chdir($saved_cwd);
+            return 1;
+        }
+    }
+
     return run_vm_program($program, $filename, $argv, $saved_cwd);
+}
+
+func vm_program_has_strict(scalar $program) int {
+    my scalar $pfuncs = $program->{"functions"};
+    my int $pcount = $program->{"function_count"};
+    my int $pi = 0;
+    while ($pi < $pcount) {
+        if ($pfuncs->[$pi]->{"strict_types"} == 1) { return 1; }
+        $pi = $pi + 1;
+    }
+    return 0;
 }
 
 func print_usage() void {

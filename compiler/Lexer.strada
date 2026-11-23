@@ -4927,6 +4927,8 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
             # named operator `%` is the sigil, not modulo
             my int $pct_hash_op = 0;
             if ($prev_type eq "TYPE_SCALAR") { $pct_hash_op = 1; }
+            # `hash<int> %h`: `<int>` lexes as one DIAMOND token
+            if ($prev_type eq "DIAMOND" && $prev2_type eq "TYPE_HASH") { $pct_hash_op = 1; }
             if ($prev_type eq "IDENT" && $prev2_type ne "DOLLAR" && $prev2_type ne "AT" && $prev2_type ne "PERCENT" &&
                 $prev2_type ne "ARROW" && $prev2_type ne "DOUBLE_COLON" && ($prev_word eq "keys" || $prev_word eq "values" || $prev_word eq "each" ||
                 $prev_word eq "delete" || $prev_word eq "exists" || $prev_word eq "scalar" || $prev_word eq "defined")) {

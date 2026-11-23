@@ -2264,6 +2264,7 @@ expr            := assignment | ternary | logical | comparison | arithmetic
 | `--tcc` | Compile with tcc (fast, unoptimized), link with the C compiler |
 | `--check` | Syntax/semantic check only; no output |
 | `--strict-types` | Stage-0 gradual type checking (warnings only) |
+| `use strict "types";` (in the source) | The same checks as errors for that file, plus `array<T>` / `hash<T>` element types |
 | `-g` | Emit `#line` directives and debug symbols |
 | `--c-debug` | C-level debugging only (DWARF symbols, no `#line`) |
 | `-p`, `--profile` | Function-level profiling (call counts + timing to stderr) |
