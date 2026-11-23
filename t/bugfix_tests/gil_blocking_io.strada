@@ -16,7 +16,6 @@ func spin_while_blocked(scalar $started, scalar $done) int {
 }
 
 func main() int {
-    core::setenv("STRADA_GIL", "1");
     my @res = ();
 
     my int $s1 = 0;

@@ -2550,12 +2550,19 @@ thread::mutex_destroy($mutex);
   full pipe or socket, or inside a C library call (a database query, a TLS
   read), holds it too; C code can bracket long work with
   `strada_gil_release()` / `strada_gil_acquire()`. A library compiled on its
-  own gets loop handover checks only when built with `STRADA_GIL_POLLS=1`.
-- **Turning it off.** Run with `STRADA_GIL=0` in the environment (or call
-  `core::setenv("STRADA_GIL", "0")` before the first thread starts) to let
+  own gets loop handover checks only when built with `strada --gil-polls`.
+- **Turning it off.** Build the program with `strada --no-gil` to let
   threads run in parallel. Then *every* read and write of data another
   thread may write needs a mutex: an unlocked concurrent write corrupts
   memory. Read-only sharing needs no lock either way.
+- **The setting is part of the built program.** `--no-gil` and
+  `--gil-interval-us N` (handover interval for a busy thread, default 5000)
+  are compiler options, recorded in the program that contains `main`; no
+  environment variable changes how a built program behaves. `strada-interp`
+  takes the same two options on its command line. `core::gil_info()` returns
+  `{ enabled, active, interval_us }`. A C program that hosts Strada code
+  calls `strada_gil_configure(enabled, interval_us)` before it starts a
+  thread.
 - `each()` keeps one iterator per hash, and `keys()`/`values()` reset it:
   don't walk a hash with `each()` while another thread uses `each()`,
   `keys()` or `values()` on the same hash.

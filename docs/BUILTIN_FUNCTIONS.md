@@ -402,6 +402,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::gethostname()` | `→ str` | gethostname(3). |
 | `core::uname()` | `→ hash` | uname(2): `sysname`, `nodename`, `release`, `version`, `machine`. |
 | `core::nproc()` | `→ int` | Processors this process may run on (at least 1). |
+| `core::gil_info()` | `→ hash` | Thread lock settings of this program: `enabled` (0 when built with `--no-gil`), `active` (1 once a thread has started and the lock is running), `interval_us` (handover interval). |
 | `core::getservbyname(name, proto)` | `str, str → int` | Port number of a service (`"https"`, `"tcp"` → 443); `proto` may be undef. undef when unknown. |
 | `core::gethostbyname(host)` | `str → str` | First IP for hostname. |
 | `core::gethostbyname_all(host)` | `str → array` | All IPs. |

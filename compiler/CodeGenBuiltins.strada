@@ -8396,6 +8396,10 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
             emit($cg, "strada_environ()");
             return 1;
         }
+        if ($name eq "sys::gil_info") {
+            emit($cg, "strada_gil_info()");
+            return 1;
+        }
         if ($name eq "sys::uname") {
             emit($cg, "strada_uname()");
             return 1;

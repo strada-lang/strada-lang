@@ -7683,6 +7683,7 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::unix_client"} = 1;
     $owned_set{"sys::initgroups"} = 1;
     $owned_set{"sys::environ"} = 1;
+    $owned_set{"sys::gil_info"} = 1;
     $owned_set{"sys::uname"} = 1;
     $owned_set{"sys::nproc"} = 1;
     $owned_set{"sys::socketpair"} = 1;

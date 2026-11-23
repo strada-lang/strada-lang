@@ -723,6 +723,7 @@ func get_builtins() scalar {
     $b{"sys::unix_client"} = 1;
     $b{"sys::initgroups"} = 1;
     $b{"sys::environ"} = 1;
+    $b{"sys::gil_info"} = 1;
     $b{"sys::uname"} = 1;
     $b{"sys::nproc"} = 1;
     $b{"sys::socketpair"} = 1;

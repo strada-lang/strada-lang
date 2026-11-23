@@ -1740,7 +1740,7 @@ static inline void cc_stw_blocking_leave(void)    {}
 static inline void cc_stw_blocking_leave_mutex(pthread_mutex_t *mtx) { (void)mtx; }
 #endif
 
-/* ===== Global interpreter lock (on by default; STRADA_GIL=0 turns it off) =====
+/* ===== Global interpreter lock (on by default; built with --no-gil turns it off) =====
  * Strada containers, variables and runtime caches have no locking of their
  * own: two threads writing shared data at once corrupt memory. With the lock
  * on, only the thread holding it runs Strada code. It is created when the
@@ -1765,7 +1765,7 @@ static unsigned long gil_switches = 0;
 static unsigned long gil_owner = 0;     /* pthread_self() of the holder, 0 = none */
 static STRADA_TLS int gil_block_depth = 0;
 static STRADA_TLS int gil_block_had = 0; /* held the lock when the outermost block began */
-static long gil_interval_ns = 5000000L;   /* STRADA_GIL_INTERVAL_US overrides (tests) */
+static long gil_interval_ns = 5000000L;   /* strada_gil_configure() overrides */
 
 static inline int gil_i_hold(void) {
     return __atomic_load_n(&gil_owner, __ATOMIC_ACQUIRE) == (unsigned long)pthread_self();
@@ -1820,25 +1820,16 @@ static void gil_atfork_child(void) {
 }
 /* Called by a thread running Strada code when the program becomes
  * multi-threaded (thread::create, the async pool, async::map, ...). The first
- * call decides from STRADA_GIL; the calling thread then holds the lock. */
+ * call fixes the build-time setting; the calling thread then holds the lock. */
+static int gil_cfg_on = 1;
 static void strada_gil_activate(void) {
     pthread_mutex_lock(&gil_mu);
     if (!gil_decided) {
-        /* On unless STRADA_GIL is 0/off/no/false (programs that do all their
-         * own locking and want threads to run in parallel). */
-        const char *e = getenv("STRADA_GIL");
-        strada_gil_on = 1;
-        if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'
-                  || ((e[0] == 'o' || e[0] == 'O') && (e[1] == 'f' || e[1] == 'F'))))
-            strada_gil_on = 0;
+        /* Fixed when the program was built (strada_gil_configure, emitted
+         * into main() for --no-gil / --gil-interval-us). The environment is
+         * never consulted: a built program behaves the same everywhere. */
+        strada_gil_on = gil_cfg_on;
         gil_decided = 1;
-        const char *iv = getenv("STRADA_GIL_INTERVAL_US");
-        if (iv && *iv) {
-            long us = strtol(iv, NULL, 10);
-            if (us < 1) us = 1;
-            if (us > 1000000) us = 1000000;
-            gil_interval_ns = us * 1000L;
-        }
         if (strada_gil_on) pthread_atfork(NULL, NULL, gil_atfork_child);
     }
     if (strada_gil_on && !gil_i_hold() && gil_block_depth == 0) gil_take_locked();
@@ -1909,6 +1900,43 @@ void strada_gil_yield_slow(void) {
     cc_blocking_leave();
 }
 int strada_gil_enabled(void) { return strada_gil_on; }
+
+/* Build-time lock settings. Generated main() calls this first thing when the
+ * program was compiled with --no-gil or --gil-interval-us; strada-interp calls
+ * it for its own switches; a C host calls it before it starts any thread.
+ * enabled: 0 = no lock (the program does its own locking), nonzero = lock.
+ * interval_us: handover interval for a busy thread, <= 0 keeps the default.
+ * Returns 1, or 0 when the program is already multi-threaded (too late: the
+ * settings stay as they were). */
+int strada_gil_configure(int enabled, long interval_us) {
+    int ok = 0;
+    pthread_mutex_lock(&gil_mu);
+    if (!gil_decided) {
+        gil_cfg_on = enabled ? 1 : 0;
+        if (interval_us > 0) {
+            if (interval_us > 1000000) interval_us = 1000000;
+            gil_interval_ns = interval_us * 1000L;
+        }
+        ok = 1;
+    }
+    pthread_mutex_unlock(&gil_mu);
+    return ok;
+}
+
+/* core::gil_info(): { enabled, active, interval_us }. enabled is the built-in
+ * setting; active is 1 once the program is multi-threaded and the lock runs. */
+StradaValue *strada_gil_info(void) {
+    StradaValue *h = strada_new_hash();
+    pthread_mutex_lock(&gil_mu);
+    int en = gil_decided ? strada_gil_on : gil_cfg_on;
+    int act = gil_decided && strada_gil_on;
+    long us = gil_interval_ns / 1000L;
+    pthread_mutex_unlock(&gil_mu);
+    strada_hash_set_take(h->value.hv, "enabled", strada_new_int(en));
+    strada_hash_set_take(h->value.hv, "active", strada_new_int(act));
+    strada_hash_set_take(h->value.hv, "interval_us", strada_new_int(us));
+    return h;
+}
 
 /* A blocking call on a handle (or with an argument whose bytes it reads):
  * hand the interpreter lock over and count as GC-safe, as the wrappers above

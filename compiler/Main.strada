@@ -399,7 +399,7 @@ func ast_needs_stack_trace(scalar $ast) int {
     return 0;
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines, str $output_file, int $verbose, str $split_dir) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines, str $output_file, int $verbose, str $split_dir, scalar $gil_cfg) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -465,6 +465,9 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     $ast->{"module_only_mode"} = $module_only_mode;
     $ast->{"module_target"} = $module_target;
     $ast->{"split_dir"} = $split_dir;
+    $ast->{"gil_off"} = $gil_cfg->{"off"} + 0;
+    $ast->{"gil_interval_us"} = $gil_cfg->{"interval_us"} + 0;
+    $ast->{"gil_polls"} = $gil_cfg->{"polls"} + 0;
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Parser:   " . ($t1 - $t0) . " seconds");
@@ -554,6 +557,11 @@ func print_usage() void {
     say("  --stack-trace     Force enable stack trace support");
     say("  --no-stack-trace  Force disable stack trace support");
     say("                    (default: auto-detect from try/throw/caller usage)");
+    say("  --no-gil          Threads run in parallel with no interpreter lock; the");
+    say("                    program must lock all shared data itself");
+    say("  --gil-interval-us N  Lock handover interval for a busy thread (default 5000)");
+    say("  --gil-polls       Emit loop handover checks even if this file starts no thread");
+    say("                    (for a library that a threaded program loads)");
     say("  -v, --verbose   Show compilation progress");
     say("  -h, --help      Show this help message");
     say("");
@@ -577,6 +585,10 @@ func main() int {
     my int $enable_profiling = 0;
     my int $full_profile = 0;
     my int $enable_stack_trace = -1;  # Auto-detect by default
+    my hash %gil_cfg = ();
+    $gil_cfg{"off"} = 0;
+    $gil_cfg{"interval_us"} = 0;
+    $gil_cfg{"polls"} = 0;
     my int $verbose = 0;
     my int $check_only = 0;
     my str $input_file = "";
@@ -635,6 +647,19 @@ func main() int {
             $enable_stack_trace = 0;
         } elsif ($arg eq "--stack-trace") {
             $enable_stack_trace = 1;
+        } elsif ($arg eq "--no-gil") {
+            $gil_cfg{"off"} = 1;
+        } elsif ($arg eq "--gil-polls") {
+            $gil_cfg{"polls"} = 1;
+        } elsif ($arg eq "--gil-interval-us") {
+            $i = $i + 1;
+            my int $gil_us = 0;
+            if ($i < $arg_count) { $gil_us = $ARGV[$i] + 0; }
+            if ($gil_us < 1 || $gil_us > 1000000) {
+                say("Error: --gil-interval-us requires a number of microseconds from 1 to 1000000");
+                return 1;
+            }
+            $gil_cfg{"interval_us"} = $gil_us;
         } elsif ($arg eq "-D") {
             # -D NAME[=VAL] - define a name for #ifdef/#ifndef (all files,
             # including modules); exported to the lexer via STRADA_DEFINES
@@ -799,7 +824,7 @@ func main() int {
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
     my str $diag_name = $input_file;
     if (length($source_name) > 0) { $diag_name = $source_name; }
-    my str $code = compile($source, $diag_name, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines, $output_file, $verbose, $split_dir);
+    my str $code = compile($source, $diag_name, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines, $output_file, $verbose, $split_dir, \%gil_cfg);
 
     if ($check_only == 1) {
         return 0;

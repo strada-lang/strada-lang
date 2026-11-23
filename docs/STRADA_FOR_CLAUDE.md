@@ -944,8 +944,10 @@ await, channels, sockets, pipes, `system`/`qx`) and inside loops. Consequences:
 CPU-bound threads take turns rather than run in parallel (use threads for
 waiting, not for computing); a single statement like `$n++` is safe, but a
 read-modify-write over several statements still needs `async::lock` or
-`thread::mutex_lock`. `STRADA_GIL=0` turns the lock off for parallel
-execution; then every access to data another thread may write needs a mutex.
+`thread::mutex_lock`. Building with `strada --no-gil` leaves the lock out for
+parallel execution; then every access to data another thread may write needs
+a mutex. The setting is fixed at build time (no environment variable changes
+a built program); `core::gil_info()` reports it.
 Prefer channels to pass results, and `async::atomic` for counters.
 
 ---

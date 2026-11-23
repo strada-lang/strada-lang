@@ -2,11 +2,10 @@
 # Threads share data and nothing locks it: four threads pushing to one array,
 # incrementing hash entries, bumping a counter and assigning one scalar
 # corrupted memory (segfault, "mremap_chunk(): invalid pointer") in both
-# backends. With the global interpreter lock (STRADA_GIL=1) only the lock
+# backends. With the global interpreter lock only the lock
 # holder runs Strada code, so the same program is safe without a mutex.
 # The lock is decided when the first thread starts, so set it before that.
 func main() int {
-    core::setenv("STRADA_GIL", "1");
     my @a = ();
     my %h = ();
     my int $n = 0;

@@ -232,7 +232,7 @@ compile_strada() {
     local exe_file="$BUILD_DIR/${name}"
 
     # Compile Strada to C (with memory limit to prevent OOM)
-    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
+    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" $STRADAC_TEST_FLAGS "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
         return 1
     fi
 
@@ -648,7 +648,7 @@ test_import_object() {
     local c_file="$BUILD_DIR/${name}.c"
     local exe_file="$BUILD_DIR/${name}"
 
-    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
+    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" $STRADAC_TEST_FLAGS "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${name}_strada.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "Compile failed: $err"
@@ -728,7 +728,7 @@ test_import_archive() {
     local c_file="$BUILD_DIR/${name}.c"
     local exe_file="$BUILD_DIR/${name}"
 
-    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
+    if ! timeout 30 bash -c "ulimit -v $STRADAC_MEM_LIMIT_KB 2>/dev/null; exec \"\$@\"" _ "$STRADAC" $STRADAC_TEST_FLAGS "$src" "$c_file" > "$BUILD_DIR/${name}_strada.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${name}_strada.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "Compile failed: $err"

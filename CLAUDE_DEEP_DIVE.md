@@ -3051,8 +3051,8 @@ each offset, so a `//g` loop was O(subject length) per match.
 
 ## Global interpreter lock (2026-11-21/22)
 
-On by default once a program becomes multi-threaded; `STRADA_GIL=0` turns it
-off, in which case none of this runs beyond one load of `strada_gil_on` per
+On by default once a program becomes multi-threaded; a program built with
+`--no-gil` has none, in which case none of this runs beyond one load of `strada_gil_on` per
 blocking call. A program that starts no thread never takes it.
 
 - **State** (strada_runtime.c, after the `cc_*` forward declarations):
@@ -3061,7 +3061,7 @@ blocking call. A program that starts no thread never takes it.
   `gil_i_hold`); `gil_free_cv` wakes a waiter when the lock is dropped and
   `gil_switch_cv` tells a yielding thread that someone else took it.
 - **Fairness.** A waiter uses `pthread_cond_timedwait` with a 5 ms interval
-  (`gil_interval_ns`; `STRADA_GIL_INTERVAL_US` overrides). If the lock did not change hands in that time it sets
+  (`gil_interval_ns`; `--gil-interval-us` sets it). If the lock did not change hands in that time it sets
   `strada_gil_drop_request`; the holder's next `strada_gil_poll()` calls
   `strada_gil_yield_slow`, which drops the lock and waits on `gil_switch_cv`
   until another thread has taken it, then queues again. Compiled loops and
@@ -3085,9 +3085,33 @@ blocking call. A program that starts no thread never takes it.
   An `async func` call in the VM passes its arguments as copies (the compiled
   backend shares them), which is a separate parity gap.
 - **Measured after stage 5** (2 cores): CPU-bound `async::map` with 2 workers
-  1.25 s with the lock (1.21 s with 1 worker), 0.65 s with `STRADA_GIL=0`;
+  1.25 s with the lock (1.21 s with 1 worker), 0.65 s without the lock;
   bench_async 0.55 s with the lock, 0.40 s without. Benchmarks that start no
   thread: instruction counts unchanged.
+- **Settings are build-time (2026-11-23).** The runtime reads no environment
+  variable for the lock. `strada_gil_configure(enabled, interval_us)` stores
+  the setting (`gil_cfg_on`, `gil_interval_ns`) and is ignored once
+  `gil_decided` is set, i.e. after the first thread started.
+  - `stradac --no-gil` / `--gil-interval-us N` / `--gil-polls` are parsed in
+    Main.strada into `%gil_cfg`, copied onto the program node (`gil_off`,
+    `gil_interval_us`, `gil_polls`) and from there into `$cg` in
+    `gen_program`. `main()` calls `strada_gil_configure` right after
+    `strada_init_proctitle`, before BEGIN blocks and `our` initializers.
+    A file without `main` emits nothing: the program that holds `main`
+    decides.
+  - The driver forwards all three to stradac, forwards `--gil-polls` to its
+    `-M` sub-builds and the module-cache warmer, and adds `gp` to the
+    module-cache key for it.
+  - `strada-interp --no-gil` / `--gil-interval-us N` call the same function
+    before any program code runs.
+  - `core::gil_info()` (`strada_gil_info`) returns `enabled`, `active`,
+    `interval_us`.
+  - `int(...)` is not accepted by the frozen bootstrap in compiler sources;
+    Main.strada converts the option with `+ 0`.
+  - Tests: a `# FLAGS: ...` line (lines 2-5) in a `t/bugfix_tests` file gives
+    compiler options, passed to stradac (`STRADAC_TEST_FLAGS` in
+    `compile_strada`) and to strada-interp. `gil_reader_writer` uses it and
+    prints the interval it got; `t/gil_options_test/run.sh` covers the rest.
 - **Why the VM skips a collection.** The root VM collects while holding the
   lock and waits for every worker to be GC-safe. A worker inside a runtime
   call that released the lock, at a call site not bracketed with

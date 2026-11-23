@@ -958,13 +958,15 @@ unsigned long strada_gc_objects_freed(void); /* Stats: cyclic objects reclaimed 
 void strada_gc_blocking_enter(void);     /* about to block outside the runtime: count as GC-safe */
 void strada_gc_blocking_leave(void);     /* ...returned (parks if a collection is running) */
 void strada_gc_mutex_lock(pthread_mutex_t *mtx); /* pthread_mutex_lock that is GC-safe while waiting */
-/* Global interpreter lock (on by default once a thread starts; STRADA_GIL=0
- * turns it off): only its holder runs Strada code.
+/* Global interpreter lock (on by default once a thread starts; a program
+ * built with --no-gil has none): only its holder runs Strada code.
  * C code doing long work that touches no Strada values brackets it with
  * strada_gil_release()/strada_gil_acquire(); no-ops when the lock is off. */
 void strada_gil_release(void);
 void strada_gil_acquire(void);
 int strada_gil_enabled(void);
+int strada_gil_configure(int enabled, long interval_us);
+StradaValue *strada_gil_info(void);
 int strada_gil_file_blocks(FILE *fp);  /* lock on and fp is a pipe/terminal/socket: a read may block */
 void strada_gil_yield_slow(void);
 extern int strada_gil_drop_request;

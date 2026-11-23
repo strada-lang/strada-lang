@@ -1,10 +1,11 @@
-# EXPECT: grep map foreach splice elem values each scalar nested append done
+# EXPECT: on 50 grep map foreach splice elem values each scalar nested append done
+# FLAGS: --gil-interval-us 50
 # With the interpreter lock handed over inside loops, one thread can replace
 # data another thread is in the middle of using: the array under a
 # grep/map/foreach, a hash under values()/each(), a captured scalar passed
 # down a call chain, a nested structure, a string being appended to. Each
 # phase runs a writer thread against a reader; the reader must never see
-# freed memory. STRADA_GIL_INTERVAL_US makes the handover far more frequent
+# freed memory. --gil-interval-us (the FLAGS line) makes the handover far more frequent
 # than the default 5 ms so the writer lands inside the reader's loops.
 func burn(int $n) int { my int $t = 0; for (my int $i = 0; $i < $n; $i++) { $t = ($t + $i) % 7919; } return $t; }
 func slen(str $s, int $n) int { my int $t = burn($n); return length($s) + $t - $t; }
@@ -20,11 +21,10 @@ func phase(scalar $writer, scalar $reader, int $rounds) void {
 }
 
 func main() int {
-    core::setenv("STRADA_GIL", "1");
-    core::setenv("STRADA_GIL_INTERVAL_US", "50");
     my int $rounds = 400;
     my int $acc = 0;
-    my @done = ();
+    my $gi = core::gil_info();
+    my @done = (($gi->{"enabled"} == 1 ? "on" : "off"), $gi->{"interval_us"});
 
     my @a = map { mk($_) } (1..40);
     phase(func (int $i) { shift(@a); push(@a, mk($i)); },

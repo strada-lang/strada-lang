@@ -1394,7 +1394,7 @@ Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race
 
 **Event loop + green tasks (2026-06, EXPERIMENTAL — branch `async-eventloop`):** `Async::Loop` (epoll reactor: `watch`/`unwatch`/`timer_after`/`run`/`stop`) + `Async::Task` (green tasks via `$loop->spawn`: `Async::Task::recv/send/accept/sleep` look blocking but park stackful ucontext coroutines; outside a task they fall back to blocking). `async::io_wait($fd, "r"/"w", $ms)` returns a future completed by a dedicated poller thread. Runtime primitives: `core::epoll_*`, `core::eventfd*`, `core::socket_try_recv/try_send/try_accept`, `core::mono_ms`, `core::coro_*` (compiled-only). Linux-only, configure-gated (`--without-epoll`); see **docs/EVENT_LOOP.md**. try/catch works inside tasks including across suspensions (the runtime swaps per-context try/cleanup/trace stacks at every switch); uncaught task exceptions are contained at the task boundary (`on_task_error`, default warn). Multiple watchers per fd (subscription ids, union masks). `Async::Task::connect/readline` + optional timeouts on recv/accept/connect; task sockets get TCP_NODELAY. Backends: epoll (Linux) or poll(2) (any POSIX) behind one internal `evb_*` API — the suite passes on both. `Async::TaskSSL` runs TLS handshake/IO over tasks (parks on WANT_READ/WANT_WRITE; `lib/ssl.strada` gained non-blocking primitives + `link_lib` auto-linking). Hostname resolution runs off-loop (`async::resolve`). Remaining caveats: regex state is per-OS-thread (capture before suspending); one loop = one OS thread. Valgrind-clean including a 100-connection echo stress (the once-suspected per-park leak was a pre-existing `strada_socket_close` bug — it discarded `strada_socket_flush`'s owned return, one SV per connection close — fixed here; `STRADA_RC_TRACE` refcount-trace hook retained in `strada_runtime.h` for future hunts). Coroutine context switches swap the per-thread pending-cleanup and call-trace stacks (`coro_ctx_install/stash` in the runtime).
 
-**Global interpreter lock (2026-11-21/22; on by default, `STRADA_GIL=0` turns it off)**: threads share data
+**Global interpreter lock (2026-11-21/22; on by default, building with `--no-gil` leaves it out)**: threads share data
 and nothing in the runtime locks arrays, hashes or variables, so two threads
 writing shared data corrupt memory (compiled and VM; see LANGUAGE_GUIDE
 "Thread Safety Notes"). Once a program is multi-threaded only the lock holder
@@ -1418,13 +1418,13 @@ runs Strada code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
   that touches no Strada values; `strada_gil_poll()` (header inline) is the
   handover check for the later stages.
 - **Stage 2 (compiled loops).** A waiter that has not got the lock within
-  5 ms (`STRADA_GIL_INTERVAL_US` overrides, for tests) sets
+  5 ms (`--gil-interval-us N` at build time overrides, for tests) sets
   `strada_gil_drop_request`; loops check it in their condition
   (`while ((strada_gil_poll(), COND))`, `gil_poll_prefix` in CodeGen.strada).
   - Only programs that can start threads get checks: Semantic sets
     `uses_threads` on a `thread::`/`async::` call, an `await` or an
     `async func`. A library built on its own gets none unless compiled with
-    `STRADA_GIL_POLLS=1`.
+    `--gil-polls`.
   - Only loops whose body calls something, contains another loop or is not
     leaf-safe get one. An innermost arithmetic loop has none: the check stops
     gcc from vectorizing or deleting such loops, so a thread inside one keeps
@@ -1477,6 +1477,16 @@ runs Strada code. Runtime only (`strada_gil_*` / `gil_*` in strada_runtime.c):
   safe; that was a real deadlock with `pclose`.
 - **Stage 5.** On by default. `strada_ffi_handler` takes the lock when a C
   callback arrives on a thread that does not hold it.
+- **Settings are build-time, never environment (2026-11-23).** `strada
+  --no-gil`, `--gil-interval-us N`, `--gil-polls` (same flags on stradac;
+  strada-interp takes the first two). `main()` calls
+  `strada_gil_configure(enabled, interval_us)` first thing, so a built
+  program behaves the same in every environment; the runtime no longer reads
+  `STRADA_GIL` / `STRADA_GIL_INTERVAL_US` and stradac no longer reads
+  `STRADA_GIL_POLLS`. The program holding `main` decides; a C host calls
+  `strada_gil_configure` itself. `core::gil_info()` reports `enabled`,
+  `active`, `interval_us`. Details in CLAUDE_DEEP_DIVE.md. Test:
+  `t/gil_options_test/run.sh`.
 - Tests: `t/bugfix_tests/gil_shared_writes.strada`, `gil_reader_writer.strada`,
   `gil_blocking_io.strada` (hangs without the stage 4 changes).
 - Per-object locking was considered and set aside: about 145 runtime
