@@ -1,4 +1,4 @@
-# EXPECT: 1.5 9.5|1.5 3|undef 4|7.25|12.5|2.5 tied-store|4 5.5
+# EXPECT: 1.5 9.5|1.5 3|undef 4|weak-gone 2.5|7.25|12.5|2.5 tied-store|4 5.5
 # num attributes read and written as doubles (typed accessor arithmetic, and
 # a setter that writes the number into the slot when nothing else refers to
 # it). A copy of the old value, a reference to the element and a weak
@@ -53,6 +53,14 @@ func main() int {
     $w->{"x"} = 1.0;
     $w->bump(3.0);
     $out = $out . "|" . (defined($weak) ? "alive" : "undef") . " " . $w->x();
+
+    # a weakened reference to the number itself goes undef when the setter
+    # replaces it (an in-place write would keep it alive with the new value)
+    my scalar $wn = P::new("x", 1.5);
+    my scalar $wr = \$wn->{"x"};
+    core::weaken($wr);
+    $wn->bump(1.0);
+    $out = $out . "|" . (defined($wr) ? "weak-alive" : "weak-gone") . " " . $wn->x();
 
     # receiver that is a hash element
     my hash %h = ();

@@ -1,0 +1,21 @@
+use strict "types";
+package W;
+has rw int $n = 0;
+func plain(scalar $self) int { my int $a = "x1"; return $a; }
+private func priv(int $k) int { my int $b = "x2"; return $b; }
+before "plain" func(scalar $self) void { my int $c = "x3"; }
+after "plain" func(scalar $self) void { my int $d = "x4"; }
+around "plain" func(scalar $self, scalar $orig) scalar { my int $e = "x5"; return $orig->($self); }
+package main;
+our int $g = "x6";
+my int $fm = "x7";
+async func af(int $k) int { my int $h = "x8"; return $h; }
+extern func ef(int $k) int { my int $i = "x9"; return $i; }
+fn shortf(int $k) int { my int $j = "x10"; return $j; }
+BEGIN { my int $bb = "x11"; }
+END { my int $ee = "x12"; }
+func main() int {
+    my scalar $cl = func (int $q) int { my int $m = "x13"; return $m; };
+    my int $z = "x14";
+    return 0;
+}

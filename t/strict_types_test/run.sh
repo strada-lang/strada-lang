@@ -184,6 +184,15 @@ if [ $rc -ne 0 ]; then echo "ok: strict module is checked"; else echo "FAIL: str
 check "error names the module"         "Strict.strada:4: error: initializing '\$n' (declared int) with a str value" "$out"
 check_not "loose user is not checked"  "loose_main.strada" "$out"
 
+# ---- every kind of code in a strict file is checked -------------------------
+# methods, private/async/extern-with-body/fn functions, before/after/around
+# modifiers, BEGIN/END blocks, closures, and file-level my/our initializers
+out=$("$STRADA" --check "$SCRIPT_DIR/forms.strada" 2>&1)
+check "all function and declaration forms" "compilation failed: 14 semantic errors" "$out"
+for ln in 4 5 6 7 8 10 11 12 13 14 15 16 18 19; do
+    check "forms.strada line $ln is checked" "forms.strada:$ln: error: initializing" "$out"
+done
+
 # ---- syntax errors ---------------------------------------------------------
 printf 'use strict "refs";\nfunc main() int { return 0; }\n' > p1.strada
 check "unknown strict category" "unknown strict category 'refs'" "$("$STRADA" -O0 -o p1 p1.strada 2>&1)"

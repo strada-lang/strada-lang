@@ -1736,6 +1736,7 @@ void strada_weaken_hv_entry_sv(StradaHash *hv, StradaValue *key_sv);  /* binary-
 void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx);  /* Weaken an array element */
 int strada_isweak(StradaValue *ref);
 StradaValue *strada_strong_copy_take(StradaValue *sv);  /* weak ref copy -> strong ref; consumes */        /* Check if reference is weak */
+extern int weak_registry_has_entries;       /* nonzero once any weak reference exists */
 void strada_weak_registry_init(void);       /* Initialize weak reference registry */
 void strada_weak_registry_remove_target(StradaValue *target);  /* Notify weak refs when target dies */
 void strada_weak_registry_unregister(StradaValue *ref);        /* Remove a weak ref from registry */
@@ -2894,6 +2895,7 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
     }
     strada_hash_set_ph_len(hv, key, key_len, hash, val);
 }
+extern int weak_registry_has_entries;
 /* ===== Attribute slot cache =====
  * One StradaAttrSite per attribute access site in generated code. It
  * remembers the entry index where the attribute was found last time. A later
@@ -2906,9 +2908,14 @@ STRADA_HOT_INLINE void strada_hv_store_ph_len(StradaValue *sv, const char *key, 
 typedef struct StradaAttrSite {
     StradaString *ss;      /* interned key (strada_intern_attr_ss), NULL until first miss */
     uint32_t idx;          /* entry index of the last hit */
-    uint32_t skip;         /* misses to let pass before trying to learn again */
+    uint16_t skip;         /* misses to let pass before trying to learn again */
+    uint16_t fails;        /* consecutive failed learns (doubles the next skip) */
 } StradaAttrSite;
 void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash);
+/* Store on a slot-cache miss. A plain hash that lacks the attribute gets it
+ * under the interned key (so later accesses can hit); every other case is
+ * the ordinary store. */
+void strada_attr_store_miss(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash, StradaValue *val);
 /* A class's declared attribute (has): bless() gives the object's entry for
  * it the interned key string, so objects built by any constructor can hit
  * the slot cache. */
@@ -2980,20 +2987,29 @@ STRADA_HOT_INLINE void strada_attr_store(StradaValue *sv, StradaAttrSite *site, 
             if (old) strada_decref(old);
             return;
         }
+    } else if (site->skip) {
+        site->skip--;
     } else {
-        strada_attr_site_miss(sv, site, key, key_len, hash);
+        strada_attr_store_miss(sv, site, key, key_len, hash, val);
+        return;
     }
     strada_hv_store_ph_len(sv, key, key_len, hash, val);
 }
 STRADA_HOT_INLINE void strada_hv_store_num_ph_len(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash, double d);
+int strada_hv_has_plain_key(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash);
 STRADA_HOT_INLINE void strada_attr_store_num(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash, double d) {
     StradaHashEntry *e = strada_attr_entry(sv, site);
     if (__builtin_expect(e != NULL, 1)) {
         StradaValue *ev = e->value;
-        if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta, 1)) {
+        if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta && !weak_registry_has_entries, 1)) {
             ev->value.nv = d;
             return;
         }
+    } else if (site->skip == 0 && !strada_hv_has_plain_key(sv, key, key_len, hash)) {
+        StradaValue *nv = strada_new_num(d);
+        strada_attr_store_miss(sv, site, key, key_len, hash, nv);
+        strada_decref(nv);
+        return;
     } else {
         strada_attr_site_miss(sv, site, key, key_len, hash);
     }
@@ -3017,7 +3033,7 @@ STRADA_HOT_INLINE void strada_hv_store_num_ph_len(StradaValue *sv, const char *k
                 StradaHashEntry *e = &hv->entries[idx];
                 if (__builtin_expect(e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0, 1)) {
                     StradaValue *ev = e->value;
-                    if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta, 1)) {
+                    if (__builtin_expect(ev && !STRADA_IS_TAGGED_INT(ev) && ev->type == STRADA_NUM && ev->refcount == 1 && !ev->meta && !weak_registry_has_entries, 1)) {
                         ev->value.nv = d;
                         return;
                     }

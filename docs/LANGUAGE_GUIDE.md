@@ -235,9 +235,12 @@ func main() int {
   a number to text needs `"" . $n`.
 - **Gradual:** `scalar`, unannotated variables and plain `array`/`hash` are
   not checked in either direction, so untyped code and typed code mix freely.
+- **Everything in the file:** functions, methods, method modifiers,
+  closures, BEGIN/END blocks and file-level `my`/`our` initializers.
 - **Per file:** a strict module does not make its users strict, and a strict
   program does not check the modules it uses.
-- `strada-interp` rejects the same programs. Without the pragma nothing
+- `strada-interp FILE` rejects the same programs (`-e` code and the REPL are
+  not checked). Without the pragma nothing
   changes; `--strict-types` reports the same mismatches as warnings (except
   `num` to `int`, which stays silent there).
 - Element types are checked at compile time only. Storage is unchanged, so a

@@ -3764,7 +3764,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             }
             if (is_valid_node($gvar->{"init"}) == 1) {
                 analyze_expression($ctx, $gvar->{"init"});
-                if ($ctx->{"strict_types"} == 1 && $gvar->{"type"} == NODE_VAR_DECL() && $gvar->{"sigil"} eq "$") {
+                if ($ctx->{"strict_types"} == 1 && ($gvar->{"type"} == NODE_VAR_DECL() || $gvar->{"type"} == NODE_OUR_DECL()) && $gvar->{"sigil"} eq "$") {
                     my int $gv_type = $gvar->{"var_type"};
                     my int $ga_type = stage0_expr_type($ctx, $gvar->{"init"});
                     if (sem_types_ok($ctx, $gv_type, $ga_type) == 0) {
@@ -3787,7 +3787,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $bi = 0; $bi < $bcount; $bi = $bi + 1) {
             my scalar $bblk = $bblocks->[$bi];
             $ctx->{"cur_file"} = "" . $bblk->{"file"};
-            sem_set_strict($ctx, 0);
+            sem_set_strict($ctx, $bblk);
             $ctx->{"cur_from_use"} = $bblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             my str $bpkg = "" . $bblk->{"source_module"};
@@ -3804,7 +3804,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $ei = 0; $ei < $ecount; $ei = $ei + 1) {
             my scalar $eblk = $eblocks->[$ei];
             $ctx->{"cur_file"} = "" . $eblk->{"file"};
-            sem_set_strict($ctx, 0);
+            sem_set_strict($ctx, $eblk);
             $ctx->{"cur_from_use"} = $eblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             my str $epkg = "" . $eblk->{"source_module"};

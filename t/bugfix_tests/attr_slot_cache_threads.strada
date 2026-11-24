@@ -1,0 +1,40 @@
+# EXPECT: 4 workers ok, total 40400
+# Objects of a class with `has` attributes built by a hand-written
+# constructor (keys are interned at bless) and used through the attribute
+# slot cache from several threads at once.
+package Hand;
+has rw int $p = 0;
+has rw num $q = 0.0;
+func new(int $p) scalar {
+    my hash %self = ();
+    $self{"extra"} = "hand";
+    $self{"q"} = 1.5;
+    $self{"p"} = $p;
+    return bless(\%self, "Hand");
+}
+func step(scalar $self) void { $self->set_p($self->p() + 1); $self->set_q($self->q() + 0.5); }
+
+package main;
+func work(int $base) int {
+    my int $sum = 0;
+    my int $n = 0;
+    while ($n < 100) {
+        my scalar $o = Hand::new($base);
+        my int $i = 0;
+        while ($i < 100) { $o->step(); $i++; }
+        $sum += $o->p() - $base;
+        if ($o->q() != 51.5) { return -1; }
+        $n++;
+    }
+    return $sum + $base;
+}
+
+func main() int {
+    my array @items = (100, 100, 100, 100);
+    my scalar $res = async::map(func (int $b) int { return work($b); }, \@items, 4);
+    my int $total = 0;
+    my int $good = 0;
+    foreach my $r (@{$res}) { $total += $r; if ($r == 10100) { $good++; } }
+    say($good . " workers ok, total " . $total);
+    return 0;
+}

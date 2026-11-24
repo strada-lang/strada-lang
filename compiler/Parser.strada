@@ -3656,6 +3656,7 @@ func parse_var_decl(scalar $parser) scalar {
 
     my scalar $decl = ast_new_var_decl($name, $var_type, $sigil);
     ast_set_line($decl, $decl_line);
+    $decl->{"strict_types"} = $parser->{"strict_types"} + 0;
     if (length($type_name) > 0) {
         $decl->{"struct_name"} = $type_name;
     }
@@ -3771,6 +3772,7 @@ func parse_our_decl(scalar $parser) scalar {
     my str $name = parse_var_name($parser);
 
     my scalar $decl = ast_new_our_decl($name, $var_type, $sigil);
+    $decl->{"strict_types"} = $parser->{"strict_types"} + 0;
     ast_set_line($decl, $decl_line);
 
     # Optional initialization
@@ -5796,6 +5798,7 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
                 ast_add_function($mod_program, $fn);
                 # The merge step package-qualifies the body function's name.
                 my scalar $mx_impl = extern_split_body($fn, "");
+                if ($mx_impl) { $mx_impl->{"strict_types"} = $mod_parser->{"strict_types"} + 0; }
                 if ($mx_impl) { ast_add_function($mod_program, $mx_impl); }
             }
         } elsif (parser_check($mod_parser, "ENUM")) {
@@ -5858,12 +5861,14 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         } elsif (parser_check($mod_parser, "BEGIN_BLOCK")) {
             parser_advance($mod_parser);
             my scalar $block = parse_block($mod_parser);
+            $block->{"strict_types"} = $mod_parser->{"strict_types"} + 0;
             $block->{"source_module"} = $current_mod_pkg;
             $block->{"file"} = $file_path;
             ast_add_begin_block($mod_program, $block);
         } elsif (parser_check($mod_parser, "END_BLOCK")) {
             parser_advance($mod_parser);
             my scalar $block = parse_block($mod_parser);
+            $block->{"strict_types"} = $mod_parser->{"strict_types"} + 0;
             $block->{"source_module"} = $current_mod_pkg;
             $block->{"file"} = $file_path;
             ast_add_end_block($mod_program, $block);
@@ -8653,6 +8658,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
     # Parse function parameters and body (reuse parse_function logic but without name)
     parser_expect($parser, "LPAREN");
     my scalar $fn = ast_new_function($mod_func_name, TYPE_VOID());
+    $fn->{"strict_types"} = $parser->{"strict_types"} + 0;
     # Parse params
     while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
         if ($fn->{"param_count"} > 0) {
@@ -8851,6 +8857,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
                     }
                 }
                 my scalar $x_impl = extern_split_body($fn, $xc_pkg);
+                if ($x_impl) { $x_impl->{"strict_types"} = $parser->{"strict_types"} + 0; }
                 if ($x_impl) { ast_add_function($program, $x_impl); }
             }
         } elsif (parser_check($parser, "ENUM")) {
@@ -8917,6 +8924,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             # BEGIN { ... } block - runs before main body
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            $block->{"strict_types"} = $parser->{"strict_types"} + 0;
             my str $bb_mod = $program->{"package"};
             if (length($bb_mod) == 0) { $bb_mod = "main"; }
             $block->{"source_module"} = $bb_mod;
@@ -8925,6 +8933,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             # END { ... } block - runs after main returns (via atexit)
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            $block->{"strict_types"} = $parser->{"strict_types"} + 0;
             my str $eb_mod = $program->{"package"};
             if (length($eb_mod) == 0) { $eb_mod = "main"; }
             $block->{"source_module"} = $eb_mod;

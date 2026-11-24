@@ -262,6 +262,7 @@ void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *k
                         if (e->key == site->ss) {
                             site->idx = idx;
                             site->skip = 0;
+                            site->fails = 0;
                             return;
                         }
                         break;
@@ -271,7 +272,55 @@ void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *k
             }
         }
     }
-    site->skip = site->skip ? (site->skip < 128 ? site->skip * 2 : 255) : 1;
+    /* Failed: wait 1, 3, 7, ... 255 misses before the next attempt. */
+    if (site->fails < 8) site->fails++;
+    site->skip = (uint16_t)((1u << site->fails) - 1);
+}
+
+/* Entry for a key in a plain (untied, unlocked) hash, or NULL. */
+static StradaHashEntry *attr_plain_entry(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash, StradaHash **hv_out) {
+    if (hv_out) *hv_out = NULL;
+    StradaValue *m = strada_hv_unwrap_meta_sv(sv);
+    if (!m || STRADA_IS_TAGGED_INT(m) || m->type != STRADA_HASH || !m->value.hv) return NULL;
+    if (m->meta && (m->meta->is_tied || m->meta->is_hash_locked)) return NULL;
+    StradaHash *hv = m->value.hv;
+    if (hv->index_dirty || !hv->num_buckets) return NULL;
+    if (hv_out) *hv_out = hv;
+    uint32_t mask = (uint32_t)hv->num_buckets - 1;
+    uint32_t pos = hash & mask;
+    for (size_t n = 0; n < hv->num_buckets; n++) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return NULL;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key && e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) return e;
+        }
+        pos = (pos + 1) & mask;
+    }
+    return NULL;
+}
+
+/* 1 when sv is a plain hash that already has the key; 0 when it is a plain
+ * hash without it. Anything else answers 1 (take the ordinary path). */
+int strada_hv_has_plain_key(StradaValue *sv, const char *key, uint32_t key_len, unsigned int hash) {
+    StradaHash *hv = NULL;
+    StradaHashEntry *e = attr_plain_entry(sv, key, key_len, hash, &hv);
+    return (e != NULL || hv == NULL) ? 1 : 0;
+}
+
+void strada_attr_store_miss(StradaValue *sv, StradaAttrSite *site, const char *key, uint32_t key_len, unsigned int hash, StradaValue *val) {
+    StradaHash *hv = NULL;
+    StradaHashEntry *e = attr_plain_entry(sv, key, key_len, hash, &hv);
+    if (hv && !e && val) {
+        /* A new key in a plain hash: insert it under the interned string. */
+        if (!site->ss) site->ss = strada_intern_attr_ss(key, hash);
+        if (!STRADA_IS_TAGGED_INT(val)) strada_incref(val);
+        strada_hash_set_ss_take(hv, site->ss, val);
+        strada_attr_site_learn(sv, site, key, key_len, hash);
+        return;
+    }
+    strada_attr_site_learn(sv, site, key, key_len, hash);
+    strada_hv_store_ph_len(sv, key, key_len, hash, val);
 }
 
 /* ===== StradaString implementation ===== */
@@ -2164,7 +2213,7 @@ typedef struct StradaWeakBucket {
 #define WEAK_REGISTRY_SIZE 256
 static StradaWeakBucket *weak_registry[WEAK_REGISTRY_SIZE];
 static pthread_mutex_t weak_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int weak_registry_has_entries = 0;  /* Phase 3: skip mutex when no weak refs */
+int weak_registry_has_entries = 0;  /* Phase 3: skip mutex when no weak refs */
 
 static unsigned int weak_hash_ptr(StradaValue *ptr) {
     uintptr_t val = (uintptr_t)ptr;
