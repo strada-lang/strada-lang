@@ -64,6 +64,13 @@ program on the bytecode VM, and `strada --repl` opens a REPL.
   counters and parameters makes arithmetic allocation-free. An `int` variable
   coerces what it receives (`my int $i = "12abc"` is 12). Function signatures:
   `func add(int $a, int $b) int { ... }`; the return type follows the `)`.
+- **Checked types.** A file that starts with `use strict "types";` turns type
+  mismatches into compile errors there (initializers, assignments, arguments,
+  returns, container elements). Then `num` to `int` needs `int(...)`, text to
+  a number needs `$s + 0`, a number to text needs `"" . $n`. Containers may
+  declare what they hold: `my array<int> @ids`, `my hash<str, num> %price`.
+  `scalar` and unannotated code are never checked. Keep the pragma when a
+  file already has it; add it to new files only if the project uses it.
 - **Element access uses `$`**: `$a[0]`, `$h{"k"}`, `$r->[0]`, `$r->{"k"}`.
   `@a[0]` is a slice.
 - **Namespaced builtins.** System and libc calls are `core::` (`core::open`,
