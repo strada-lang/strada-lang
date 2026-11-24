@@ -8617,6 +8617,25 @@
         {
           "type": "identifier",
           "named": true
+        },
+        {
+          "type": "type_arguments",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_arguments",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "package_name",
+          "named": true
         }
       ]
     }
@@ -9404,6 +9423,16 @@
     "type": "use_statement",
     "named": true,
     "fields": {
+      "category": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      },
       "module": {
         "multiple": false,
         "required": false,
@@ -10805,6 +10834,10 @@
   },
   {
     "type": "str",
+    "named": false
+  },
+  {
+    "type": "strict",
     "named": false
   },
   {

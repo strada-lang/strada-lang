@@ -133,6 +133,7 @@ module.exports = grammar({
       choice('use', 'no'),
       choice(
         seq('lib', field('path', $.string)),
+        seq('strict', optional(field('category', $.string))),
         seq('overload', $._expression_list),
         seq(field('module', $.package_name), optional($.qw_list)),
         field('path', $.string),
@@ -675,7 +676,21 @@ module.exports = grammar({
 
     function_name: $ => prec(1, choice($.identifier, $.namespaced_identifier)),
 
-    type: $ => choice(...TYPES, $.identifier),
+    // array<int>, hash<num>, hash<str, int>, array<Pkg::Class>
+    type: $ => choice(
+      seq(choice('array', 'hash'), optional($.type_arguments)),
+      ...TYPES.filter(t => t !== 'array' && t !== 'hash'),
+      $.identifier,
+    ),
+
+    type_arguments: $ => seq(
+      '<',
+      $._element_type,
+      optional(seq(',', $._element_type)),
+      '>',
+    ),
+
+    _element_type: $ => choice('int', 'num', 'str', 'scalar', $.package_name),
 
     number: $ => token(choice(
       /0[xX][0-9a-fA-F]+/,
