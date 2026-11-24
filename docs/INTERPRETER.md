@@ -61,9 +61,11 @@ make interpreter
 ./interpreter/strada-interp --no-jit program.strada
 ```
 
-A program file that says `use strict "types";` is checked by the same semantic
-pass the compiler uses before it runs, so type mismatches are reported and the
-program does not start. Code given with `-e` and REPL input are not checked.
+A program file that says `use strict "types";` gets the compiler's type checks
+before it runs: type mismatches are reported and the program does not start.
+Only the type checks are enforced; other things that only the compiler rejects
+still run in the VM as before. Code given with `-e` and REPL input are not
+checked.
 
 ### Interactive REPL
 

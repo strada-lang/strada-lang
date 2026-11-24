@@ -524,6 +524,11 @@ fi
 # spellings of historically-unqualified builtins; legacy names still work)
 test_output_contains "$EXAMPLES_DIR/test_namespaced_builtins.strada" "test_namespaced_builtins" "1..25" "Namespaced builtin aliases"
 
+# Test: the checked-types example (use strict "types", element types, typed
+# attributes). t/strict_types_test/run.sh also checks that each of its
+# "would not compile" lines is rejected.
+test_output_contains "$EXAMPLES_DIR/checked_types.strada" "checked_types" "account: Ann 165 after 2 moves" "Checked types example"
+
 # Test: --strict-types stage-0 type warnings (warning-only, gradual).
 # Expects exactly 5 warnings from the fixture's flagged lines, zero
 # without the flag, and successful compilation either way.

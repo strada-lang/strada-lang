@@ -149,29 +149,64 @@ func main() int {
 }
 ```
 
-- **What is checked:** `my` initializers, `=` assignments to declared
-  scalars, call arguments, `return` values, and values put into a container
-  declared with an element type (`array<T>`, `hash<T>`, `hash<str, T>`):
-  initializer lists, `$a[i] = v`, `$h{k} = v`, `@a = LIST`, `push`,
-  `unshift`, a `foreach` variable's declared type, and array arguments.
+- **What is checked:** `my` and `our` initializers, `=` assignments to
+  declared scalars, call arguments, `return` values, and values put into a
+  `my` variable or parameter declared with an element type (`array<T>`,
+  `hash<T>`, `hash<str, T>`): literal initializer and assignment lists
+  (`(1, 2)`, `(a => 1)`), `$a[i] = v`, `$h{k} = v`, `push`, `unshift`, a
+  `foreach` variable's declared type, and array arguments. A hash list that
+  contains something other than plain scalar expressions (`(%base, k => 1)`,
+  a call) is not checked.
 - **Element types** are `int`, `num`, `str`, `scalar` or a class name. An
   element read (`$list[0]`, `$age{"k"}`, `shift(@list)`) has that type.
-  Nested element types (`array<array<int>>`) are not supported.
-- **Conversions:** `int` to `num` is implicit. `num` to `int` needs
-  `int(...)`, text to a number needs arithmetic (`$s + 0`) or `int($s)`, and
-  a number to text needs `"" . $n`.
+- **Conversions:** `int` to `num` is implicit. `num` to `int` needs the
+  cast `int(...)`: `/` always gives a `num`, so integer division is written
+  `my int $days = int($diff / 86400);` (it truncates toward zero, as the
+  implicit conversion did). `%` is integer modulo and needs no cast. Text to
+  a number needs arithmetic (`$s + 0`) or `int($s)`, and a number to text
+  needs `"" . $n`. A one-character single-quoted literal fits both `int`
+  (its character code) and `str`: `my int $c = '/';`.
 - **Gradual:** `scalar`, unannotated variables and plain `array`/`hash` are
   not checked in either direction, so untyped code and typed code mix freely.
 - **Everything in the file:** functions, methods, method modifiers,
   closures, BEGIN/END blocks and file-level `my`/`our` initializers.
 - **Per file:** a strict module does not make its users strict, and a strict
   program does not check the modules it uses.
-- `strada-interp FILE` rejects the same programs (`-e` code and the REPL are
-  not checked). Without the pragma nothing
+- `strada-interp FILE` reports the same type errors and does not run the
+  program. It enforces the type checks only: other things only the compiler
+  rejects still run in the VM as before. `-e` code and the REPL are not
+  checked. Without the pragma nothing
   changes; `--strict-types` reports the same mismatches as warnings (except
   `num` to `int`, which stays silent there).
+- **Not checked yet:** arguments of method calls (`$obj->m("x")`: the
+  receiver's class is not known at compile time); element types on `our`
+  containers; a container
+  returned from a function against the declared `array<T>` return type (and
+  a container initialized from such a call); class element types
+  (`array<Point>` is accepted and recorded); nested element types are a
+  syntax error.
+- **Bare `use strict;`** is accepted and does nothing (Strada already
+  requires declared variables); it does not turn type checking on.
 - Element types are checked at compile time only. Storage is unchanged, so a
   value that reaches the container through untyped code is not converted.
+
+## What typing buys in speed
+
+The pragma itself only adds compile-time checks. The speed comes from the
+types, with or without it:
+
+| What you type | What the compiler does |
+|---|---|
+| `my int $i`, `my num $x` locals | plain C `int64_t` / `double`, no allocation |
+| `int` parameters | no reference counting on entry or exit |
+| `has rw num $x`, `has rw int $n`, used in the class's own methods | arithmetic in C numbers, written back into the attribute's slot; the call site remembers where the attribute lives |
+| `foreach my int $v (@a)` with a body that only reads `$v` | the loop variable is a C integer |
+| `/` and `**` assigned to a `num` | plain C arithmetic, no temporary value |
+
+No speed difference yet: element types (`array<int>`, `hash<str, num>` are
+checked, storage is unchanged), `str`, and method calls on an object whose
+class the compiler cannot see (one taken out of an array, a `scalar`
+parameter).
 
 ## Operators
 
@@ -1401,6 +1436,9 @@ The compiler already does these automatically — these notes help you write cod
 - **`has rw int $x` accessors are inlined** to direct hash fetches — zero method-dispatch overhead. Same for setters.
 - **`Pkg::new("name", val, ...)` constructors are inlined** to direct hash construction with precomputed key hashes — no method call to a `new()` function.
 - **`$obj->isa("Pkg")` is folded at compile time** when `$obj`'s class is statically known (e.g. just assigned from `Pkg::new(...)`).
+- **Type numeric attributes (`has rw num $x`, `has rw int $n`) and do the arithmetic in a method of the class.** `$self->set_x($self->x() + $self->v() * 0.01)` compiles to double arithmetic written into the attribute's existing slot, and accessor/setter calls on `$self` remember the attribute's slot instead of looking it up. A call on a variable of unknown class (an object out of an array) is an ordinary method call.
+- **`foreach my int $v (@a)` with a body that only reads `$v`** keeps `$v` as a C integer. Assigning `$v`, capturing it in a closure, taking `\$v`, or a `try`/`__C__` block in the function turns that off.
+- **`/` and `**` in `num` context** (`my num $r = $a / $b;`) are plain C arithmetic with no temporary value.
 - **CSE for repeated accessor reads.** `$self->x() * $self->x()` fetches `x` once and reuses.
 - **Pre-allocate containers** when you know the size: `my array @data[1000];`, `my hash %cache[500];`. Avoids resizes during fill.
 - **Build with `-O2` or `-O3`.** `-O2` adds LTO automatically (cross-function inlining); `-O3` adds `-march=native`. The default is already `-O2`.

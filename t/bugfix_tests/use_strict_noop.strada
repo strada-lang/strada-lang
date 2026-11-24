@@ -1,0 +1,16 @@
+# EXPECT: 12 ok
+# Bare `use strict;` (a Perl habit) is accepted and does nothing: Strada
+# already requires declared variables. It does not turn on type checking
+# (that is `use strict "types";`), so the conversion below still happens.
+use strict;
+
+package Helper;
+use strict;
+func twice(int $n) int { return $n * 2; }
+
+package main;
+func main() int {
+    my int $n = "12abc";
+    say($n . " " . (Helper::twice(3) == 6 ? "ok" : "bad"));
+    return 0;
+}

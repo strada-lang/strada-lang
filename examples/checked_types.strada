@@ -1,0 +1,118 @@
+# Checked types: `use strict "types";`
+#
+# In a file that says `use strict "types";` a type mismatch is a compile
+# error instead of a silent conversion, and arrays and hashes can declare
+# what they hold (array<int>, hash<str, num>). Untyped code (`scalar`, or no
+# annotation) is never checked, so typed and untyped code mix freely.
+#
+# The lines marked "would not compile" show what the compiler rejects; they
+# are comments so that this program builds. Try uncommenting one:
+#
+#   strada --check examples/checked_types.strada
+
+use strict "types";
+
+package Account;
+has ro str $owner (required);
+has rw num $balance = 0.0;
+has rw int $moves = 0;
+
+# Arithmetic over typed attributes in a method is compiled to plain numbers.
+func deposit(scalar $self, num $amount) void {
+    $self->set_balance($self->balance() + $amount);
+    $self->set_moves($self->moves() + 1);
+}
+
+func add_interest(scalar $self, num $rate) void {
+    $self->set_balance($self->balance() * (1 + $rate));
+    $self->set_moves($self->moves() + 1);
+}
+
+package main;
+
+# Element types work in parameters and return types too.
+func total(array<int> @prices, num $tax) num {
+    my int $sum = 0;
+    foreach my int $p (@prices) { $sum += $p; }
+    return $sum * (1 + $tax);
+}
+
+func longest(array<str> @words) str {
+    my str $best = "";
+    foreach my str $w (@words) {
+        if (length($w) > length($best)) { $best = $w; }
+    }
+    return $best;
+}
+
+func average(hash<str, num> %scores) num {
+    my num $sum = 0.0;
+    my int $n = 0;
+    foreach my str $k (sort(keys(%scores))) {
+        $sum = $sum + $scores{$k};
+        $n++;
+    }
+    if ($n == 0) { return 0.0; }
+    return $sum / $n;
+}
+
+# Untyped code is not checked: this accepts anything.
+func describe(scalar $v) str {
+    return "value: " . $v;
+}
+
+func main() int {
+    # ---- scalars -----------------------------------------------------
+    my int $count = 3;
+    my num $ratio = $count;              # int -> num is implicit
+    my int $half = int($count / 2);      # num -> int needs int()
+    my str $text = "42";
+    my int $parsed = int($text);         # text -> int needs int()
+    my num $scaled = $text + 0.5;        # ... or arithmetic
+    my str $label = "" . $count;         # number -> text needs "" .
+    say("scalars: " . $ratio . " " . $half . " " . $parsed . " " . $scaled . " " . $label);
+
+    # my int $bad = "three";             # would not compile: str into int
+    # my int $frac = $count / 2;         # would not compile: `/` gives a num
+    # $count = $text;                    # would not compile
+
+    # ---- arrays with an element type ----------------------------------
+    my array<int> @prices = (10, 20, 30);
+    push(@prices, 40);
+    $prices[0] = 5;
+    my int $first = $prices[0];          # an element read is an int
+    say("prices: " . join(",", @prices) . " first=" . $first . " total=" . total(@prices, 0.5));
+
+    # push(@prices, "forty");            # would not compile
+    # my str $s = $prices[0];            # would not compile: the element is an int
+
+    my array<str> @words = ("road", "strada", "via");
+    say("longest: " . longest(@words));
+    # total(@words, 0.1);                # would not compile: array<str> for array<int>
+
+    # ---- hashes with an element type ----------------------------------
+    my hash<str, num> %scores = ("ann" => 9.5, "bob" => 7);   # 7 is an int: fine for num
+    $scores{"cy"} = 8.25;
+    say("average: " . average(%scores));
+    # $scores{"dee"} = "high";           # would not compile
+
+    my hash<int> %stock = ();            # hash<int> is hash<str, int>
+    $stock{"bolts"} = 120;
+    $stock{"nuts"} = $stock{"bolts"} - 20;
+    say("stock: " . $stock{"bolts"} . " " . $stock{"nuts"});
+
+    # ---- typed attributes ----------------------------------------------
+    my scalar $acct = Account::new("owner", "Ann", "balance", 100.0);
+    $acct->deposit(50.0);
+    $acct->add_interest(0.1);
+    say("account: " . $acct->owner() . " " . $acct->balance() . " after " . $acct->moves() . " moves");
+    # Method call arguments are not checked yet (the receiver's class is not
+    # known at compile time): $acct->deposit("fifty") would still compile.
+
+    # ---- untyped code mixes in freely ----------------------------------
+    my scalar $anything = $text;
+    my int $from_any = $anything;        # scalar is never checked
+    my array @loose = (1, "two", 3.5);   # no element type: anything goes
+    say(describe($from_any) . ", loose has " . scalar(@loose));
+    return 0;
+}

@@ -29,6 +29,16 @@ my @items = (1, 2, 3);       # inferred: array
 my %config = ("debug" => 1); # inferred: hash
 ```
 
+Annotations convert by default (`my int $n = "12abc";` is 12). A file that
+says `use strict "types";` gets compile errors for mismatches instead, and
+containers can declare what they hold:
+
+```strada
+use strict "types";
+my array<int> @ids = (1, 2, 3);
+push(@ids, "x");        # compile error: storing a str value in '@ids'
+```
+
 ### Perl-Like Syntax
 
 Familiar sigils and operators:

@@ -180,28 +180,39 @@ func main() int {
 ```
 
 - **Checked:** `my`/`our` initializers, assignments to declared scalars, call
-  arguments, `return` values, and every value put into a container declared
-  with an element type: initializer lists, `$a[i] = v`, `$h{k} = v`,
-  `@a = LIST`, `push`, `unshift`, a `foreach` variable's declared type, and
-  array arguments.
+  arguments, `return` values, and values put into a `my` variable or
+  parameter declared with an element type: literal initializer and
+  assignment lists (`(1, 2)`, `(a => 1)`), `$a[i] = v`, `$h{k} = v`, `push`,
+  `unshift`, a `foreach` variable's declared type, and array arguments.
 - **Element types:** `array<T>`, `hash<T>` and `hash<str, T>`, where T is
   `int`, `num`, `str`, `scalar` or a class name. An element read
-  (`$list[0]`, `$age{"k"}`, `shift(@list)`) has that type. Nested element
-  types are not supported, and class element types are recorded but not
-  checked yet.
-- **Conversions:** `int` to `num` is implicit. `num` to `int` needs
-  `int(...)`, text to a number needs arithmetic (`$s + 0`) or `int($s)`, and
-  a number to text needs `"" . $n`.
+  (`$list[0]`, `$age{"k"}`, `shift(@list)`) has that type.
+- **Conversions:** `int` to `num` is implicit. `num` to `int` needs the
+  cast `int(...)`: `/` always gives a `num`, so integer division is written
+  `my int $days = int($diff / 86400);`. `%` is integer modulo and needs no
+  cast. Text to a number needs arithmetic (`$s + 0`) or `int($s)`, and a
+  number to text needs `"" . $n`. A one-character single-quoted literal fits
+  both `int` (its character code) and `str`.
 - **Gradual:** `scalar`, unannotated variables and plain `array`/`hash` are
   never checked, in either direction.
 - **Scope:** the pragma covers its own file from that line on: functions,
   methods, method modifiers, closures, BEGIN/END blocks and file-level
   initializers. A strict module does not make its users strict, and a strict
   program does not check the modules it uses.
-- **Backends:** `strada-interp FILE` rejects the same programs. `-e` code and
-  the REPL are not checked.
+- **Backends:** `strada-interp FILE` reports the same type errors and does
+  not run the program; it enforces the type checks only. `-e` code and the
+  REPL are not checked.
 - **Without the pragma** nothing changes. `--strict-types` reports the same
   mismatches as warnings (except `num` to `int`, which stays silent there).
+- **Not checked yet:** arguments of method calls (`$obj->m("x")`: the
+  receiver's class is not known at compile time); element types on `our`
+  containers; a container
+  returned from a function against the declared `array<T>` return type (and
+  a container initialized from such a call); class element types
+  (`array<Point>` is accepted and recorded); nested element types are a
+  syntax error.
+- **Bare `use strict;`** is accepted and does nothing (Strada already
+  requires declared variables); it does not turn type checking on.
 - Element types are checked at compile time only: a value that reaches a
   typed container through untyped code is not converted.
 

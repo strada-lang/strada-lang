@@ -3169,7 +3169,7 @@ reads `/dev/urandom` and returns undef if it cannot. Paths go through
 Tests: `t/bugfix_tests/sys_info_posix_additions.strada` (compiled and VM),
 `t/leak_tests/test_sys_info_additions.strada` (valgrind).
 
-## Checked types (2026-11-23, branch `typed-core`)
+## Checked types and typed fast paths (2026-11-23/24)
 
 Step 1 of the typed work: `use strict "types";` and element types. CLAUDE.md
 ("Type System") lists the mechanism. Measurements taken before starting, to
@@ -3192,17 +3192,17 @@ unboxed storage has to stay readable from there.
 
 What was built (same day; each has a test in `t/bugfix_tests/`):
 
-| Change | Benchmark | Before | After |
-|---|---|---|---|
-| `num` division and `**` in doubles | Mandelbrot 2000x2000 | 0.14 s | 0.03 s (= C) |
-| `num` attributes read/written as doubles | object benchmark | 3.05 s | 1.02 s |
-| `int` foreach variable as `int64_t` | array sum | 0.25 s | 0.18 s |
-| attribute slot cache + no-loop unwrap | object benchmark | 0.51 s | 0.41 s |
+| Change | Benchmark | Before | After | C |
+|---|---|---|---|---|
+| `num` division and `**` in doubles | Mandelbrot 2000x2000 | 0.09 s | 0.02 s | 0.02 s |
+| `num` attributes read/written as doubles | object benchmark | 1.92 s | 0.50 s | 0.02 s |
+| attribute slot cache + no-loop unwrap | object benchmark | 0.50 s | 0.40 s | 0.02 s |
+| `int` foreach variable as `int64_t` | array sum | 0.12 s | 0.10 s | 0.03 s |
 
-Times are best-of-N on a loaded machine, so compare within a row. Object
-benchmark in instructions (callgrind, 500 steps x 1000 objects): 592M at the
-start, 214M after typed num attributes, 202M with the no-loop unwrap, 170M
-with the slot cache.
+One interleaved best-of-five run of the saved binaries on a quiet machine
+(2026-11-24). Object benchmark in instructions (callgrind, 500 steps x 1000
+objects): 592M at the start, 214M after typed num attributes, 202M with the
+no-loop unwrap, 170M with the slot cache.
 
 Decisions and things measured that did not help:
 - Inline array element reads alone changed nothing: LTO already inlined

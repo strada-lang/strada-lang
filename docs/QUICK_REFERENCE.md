@@ -111,7 +111,8 @@ use strict "types";                    # this file: type mismatches are compile 
 
 my array<int> @ids = (1, 2, 3);        # element types: int, num, str, scalar, a class
 my hash<str, num> %price = ();         # hash<num> means the same
-my int $half = int($ids[0] / 2);       # num -> int needs int(); int -> num is implicit
+my int $half = int($ids[0] / 2);       # `/` gives a num: cast with int(); int -> num is implicit
+my int $rem = $ids[0] % 2;             # % is integer modulo: no cast
 my num $n = $text + 0;                 # text -> number needs arithmetic or int()
 push(@ids, "x");                       # error: storing a str value in '@ids' (declared array<int>)
 ```

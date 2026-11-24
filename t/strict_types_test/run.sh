@@ -193,6 +193,90 @@ for ln in 4 5 6 7 8 10 11 12 13 14 15 16 18 19; do
     check "forms.strada line $ln is checked" "forms.strada:$ln: error: initializing" "$out"
 done
 
+# ---- hash literals and `our` initializers inside a function ---------------
+cat > hl.strada <<'SRC'
+use strict "types";
+func main() int {
+    my str $k = "z";
+    my hash<str, int> %ok = ("a" => 1, $k => 2, "c", 3);
+    %ok = ("b" => 4);
+    our num $fine = 5;
+    my hash<str, int> %h = ("a" => "x");
+    %h = ("b" => "y");
+    our int $x = "s";
+    return 0;
+}
+SRC
+out=$("$STRADA" --check hl.strada 2>&1)
+check "hash literal initializer"  "hl.strada:7: error: storing a str value in '%h' (declared hash<int>)" "$out"
+check "hash literal assignment"   "hl.strada:8: error: storing a str value in '%h'" "$out"
+check "our initializer in a function" "hl.strada:9: error: initializing '\$x' (declared int) with a str value" "$out"
+check "correct hash literals pass" "compilation failed: 3 semantic errors" "$out"
+
+# ---- the example program: runs, and every "would not compile" line fails ---
+EX="$REPO_DIR/examples/checked_types.strada"
+out=$("$STRADA" -O0 -o ex_ct "$EX" 2>&1) || { echo "FAIL: examples/checked_types.strada does not compile: $out"; FAILURES=$((FAILURES + 1)); }
+EX_OUT=$(./ex_ct 2>&1)
+check "example: scalars"  "scalars: 3 1 42 42.5 3" "$EX_OUT"
+check "example: arrays"   "prices: 5,20,30,40 first=5 total=142.5" "$EX_OUT"
+check "example: hashes"   "average: 8.25" "$EX_OUT"
+check "example: objects"  "account: Ann 165 after 2 moves" "$EX_OUT"
+check "example: untyped"  "value: 42, loose has 3" "$EX_OUT"
+ex_lines=$(grep -n "# would not compile" "$EX" | cut -d: -f1)
+ex_n=0
+for ln in $ex_lines; do
+    ex_n=$((ex_n + 1))
+    # uncomment that one line (drop the leading "# " after the indentation)
+    awk -v L="$ln" 'NR == L { sub(/# /, ""); } { print }' "$EX" > ex_bad.strada
+    out=$("$STRADA" --check ex_bad.strada 2>&1); rc=$?
+    if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "ex_bad.strada:$ln: error:"; then
+        echo "ok: example line $ln is rejected"
+    else
+        echo "FAIL: example line $ln (marked 'would not compile') was accepted or failed elsewhere"
+        echo "  $(printf '%s' "$out" | head -3)"
+        FAILURES=$((FAILURES + 1))
+    fi
+done
+if [ $ex_n -ge 7 ]; then echo "ok: example has $ex_n rejected lines"; else echo "FAIL: expected at least 7 'would not compile' lines, found $ex_n"; FAILURES=$((FAILURES + 1)); fi
+
+# ---- bare `use strict;` is accepted and does nothing ------------------------
+cat > us.strada <<'SRC'
+use strict;
+func main() int {
+    my int $n = "12abc";
+    say($n);
+    return 0;
+}
+SRC
+out=$("$STRADA" -O0 -o us us.strada 2>&1); rc=$?
+if [ $rc -eq 0 ] && [ -z "$out" ]; then echo "ok: use strict; compiles silently"; else echo "FAIL: use strict;: $out"; FAILURES=$((FAILURES + 1)); fi
+check "use strict; does not check types" "12" "$(./us 2>&1)"
+printf 'use strict;\nuse strict "types";\nfunc main() int { my int $n = "x"; return 0; }\n' > us2.strada
+check "use strict; then use strict \"types\";" "us2.strada:3: error: initializing '\$n'" "$("$STRADA" --check us2.strada 2>&1)"
+
+# ---- valid code the checker must not reject --------------------------------
+cat > valid.strada <<'SRC'
+use strict "types";
+func main() int {
+    my hash<int> %base = ("a" => 1);
+    my array @pairs = ("x", 5);
+    my hash<int> %h = (%base, "k" => 2);          # another hash in the list
+    my hash<int> %g = (@pairs, "k" => 2);         # an array of pairs
+    %h = (%base, "z" => 3);
+    my int $v = 70000;
+    my int $b2 = ($v / 256) % 256;                # % is integer modulo
+    my int $c = '/';                              # a character code
+    $c = '(';
+    my str $s = 'x';                              # ... and still a string
+    my int $q = int($v / 256);
+    say(scalar(keys(%h)) . " " . scalar(keys(%g)) . " " . $b2 . " " . $c . " " . $s . " " . $q);
+    return 0;
+}
+SRC
+out=$("$STRADA" -O0 -o valid valid.strada 2>&1); rc=$?
+if [ $rc -eq 0 ] && [ -z "$out" ]; then echo "ok: spread hash literals, %, char literals compile"; else echo "FAIL: valid strict code rejected: $out"; FAILURES=$((FAILURES + 1)); fi
+check "valid strict program output" "2 2 17 40 x 273" "$(./valid 2>&1)"
+
 # ---- syntax errors ---------------------------------------------------------
 printf 'use strict "refs";\nfunc main() int { return 0; }\n' > p1.strada
 check "unknown strict category" "unknown strict category 'refs'" "$("$STRADA" -O0 -o p1 p1.strada 2>&1)"
@@ -211,6 +295,21 @@ if [ -x "$INTERP" ]; then
     out=$("$INTERP" loose.strada 2>&1); rc=$?
     check_not "VM runs the loose program" "semantic error" "$out"
     check "VM without --no-jit and with it agree" "157.5" "$("$INTERP" --no-jit ok.strada 2>&1)"
+    check "VM runs the example the same" "$EX_OUT" "$("$INTERP" "$EX" 2>&1)"
+    check "VM accepts use strict;" "12" "$("$INTERP" us.strada 2>&1)"
+    check "VM runs the valid strict program" "2 2 17 40 x 273" "$("$INTERP" valid.strada 2>&1)"
+    # The VM enforces the type checks only: code the compiler alone rejects
+    # for other reasons (too few arguments here) still runs.
+    cat > vmonly.strada <<'SRC'
+use strict "types";
+func three(int $a, int $b, int $c) int { return $a + 1; }
+func main() int {
+    say(three(4));
+    return 0;
+}
+SRC
+    check "VM: pragma does not add unrelated compiler errors" "5" "$("$INTERP" vmonly.strada 2>&1)"
+    check "compiler still rejects that program" "too few arguments" "$("$STRADA" --check vmonly.strada 2>&1)"
 else
     echo "skip: strada-interp not built"
 fi

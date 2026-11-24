@@ -8,26 +8,33 @@
   `return` values, and values put into typed containers. `num` to `int`
   needs `int(...)`; `int` to `num` stays implicit. `scalar` and unannotated
   code are never checked, and the pragma covers one file, so code can be
-  tightened a file at a time. `strada-interp FILE` enforces it too.
+  tightened a file at a time. `strada-interp FILE` enforces the type
+  checks too (and only those).
+- **Bare `use strict;`** is accepted and does nothing (it was a "cannot
+  find module strict" error). Example: `examples/checked_types.strada`.
 - **Element types** — `array<T>`, `hash<T>`, `hash<str, T>` with T = `int`,
   `num`, `str`, `scalar` or a class name. Element reads have that type;
   initializer lists, element stores, `push`/`unshift`, `foreach` variables
   and array arguments are checked.
-- **Existing programs are unaffected**: without the pragma the compiler
-  generates the same C as before for every example in the tree.
+- **Existing programs keep their meaning**: nothing is checked without the
+  pragma, and the fast paths below change speed only.
+- Timings below are one interleaved best-of-five run on a quiet machine.
 - **`num` arithmetic in C doubles** — `/` and `**` where a number is wanted
-  no longer allocate an intermediate value (a Mandelbrot loop went from
-  0.14 s to 0.03 s, the speed of the C version).
-- **`num` attributes** — arithmetic over `has num` accessors is computed in
-  doubles, and a setter writes the result into the attribute's existing
-  slot (object benchmark: 3.05 s to 1.02 s).
+  no longer allocate an intermediate value (a 2000x2000 Mandelbrot loop:
+  0.09 s to 0.02 s, the time of the C version).
+- **`num` attributes** — inside a class's methods, arithmetic over `has num`
+  accessors is computed in doubles, and a setter writes the result into the
+  attribute's existing slot (1000 objects x 20,000 calls of a method that
+  updates a `num` attribute: 1.92 s to 0.50 s).
+- **Attribute slot cache** — accessor and setter calls on `$self` (and
+  accessor reads on a variable whose class is known) remember where the
+  attribute lives in the object and skip the hash lookup on later calls
+  (same benchmark: 0.50 s to 0.40 s). Objects remain ordinary hashes;
+  hand-written `bless` constructors, `$obj->{...}`, `keys` and `clone` are
+  unchanged. Calls on a variable of unknown class are ordinary method calls.
 - **`foreach my int $v (@a)`** — the loop variable is a plain C integer when
-  the body never assigns it and nothing needs a boxed value.
-- **Attribute slot cache** — each accessor/setter call site remembers where
-  the attribute lives in the object and skips the hash lookup on later
-  calls (same object benchmark: 0.52 s to 0.42 s). Objects remain ordinary
-  hashes; hand-written `bless` constructors, `$obj->{...}`, `keys` and
-  `clone` are unchanged.
+  the body never assigns it and nothing needs a boxed value (sum of a
+  2M-element array, 50 passes: 0.12 s to 0.10 s).
 - **Runtime settings are build options** — `--no-gil`, `--gil-interval-us`,
   `--no-gc`, `--exit-task-wait-ms`, `--no-pool`, `--debug-bless`,
   `--check-cleanup=warn`; `strada-interp --no-jit`. No `STRADA_*`

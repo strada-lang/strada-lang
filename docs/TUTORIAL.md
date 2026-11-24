@@ -217,6 +217,9 @@ func main() int {
 }
 ```
 
+The one conversion you will write often is the integer cast: `/` always gives
+a `num`, so `my int $days = int($seconds / 86400);`.
+
 Arrays and hashes can say what they hold (`array<int>`, `hash<str, num>`), and
 the compiler checks every value that goes in. Code that uses `scalar` or no
 annotation is never checked, so you can tighten one file at a time. See the

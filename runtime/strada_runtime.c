@@ -250,7 +250,7 @@ void strada_attr_site_learn(StradaValue *sv, StradaAttrSite *site, const char *k
     if (m && !STRADA_IS_TAGGED_INT(m) && m->type == STRADA_HASH && m->value.hv
         && !(m->meta && (m->meta->is_tied || m->meta->is_hash_locked))) {
         StradaHash *hv = m->value.hv;
-        if (hv->num_buckets) {
+        if (hv->num_buckets && !hv->index_dirty) {
             uint32_t mask = (uint32_t)hv->num_buckets - 1;
             uint32_t pos = hash & mask;
             for (size_t n = 0; n < hv->num_buckets; n++) {
@@ -31384,7 +31384,7 @@ static void oop_intern_obj_attr_keys(StradaValue *ref, const char *package) {
     if (!m || STRADA_IS_TAGGED_INT(m) || m->type != STRADA_HASH || !m->value.hv) return;
     if (m->meta && (m->meta->is_tied || m->meta->is_hash_locked)) return;
     StradaHash *hv = m->value.hv;
-    if (!hv->num_buckets || hv->num_entries == 0) return;
+    if (!hv->num_buckets || hv->num_entries == 0 || hv->index_dirty) return;
     oop_lock();
     OopPackage **mro = NULL;
     int mn = oop_mro(package, &mro);

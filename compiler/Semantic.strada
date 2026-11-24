@@ -32,6 +32,10 @@
 # to fall through — an error must only suppress behavior, never leave state
 # that crashes later analysis.
 func semantic_error(scalar $ctx, str $msg, int $line) void {
+    # strada-interp runs this pass only for the type checks of a strict
+    # file: every other diagnostic is the compiled backend's business (the
+    # VM accepts some programs the compiler rejects).
+    if ($ctx->{"types_only"} == 1 && $ctx->{"in_type_diag"} != 1) { return; }
     my str $fname = $ctx->{"cur_file"};
     my str $full = "";
     if (length($fname) > 0 && $line > 0) {
@@ -48,6 +52,7 @@ func semantic_error(scalar $ctx, str $msg, int $line) void {
 }
 
 func semantic_warn(scalar $ctx, str $msg, int $line) void {
+    if ($ctx->{"types_only"} == 1) { return; }
     my str $fname = $ctx->{"cur_file"};
     if (length($fname) > 0 && $line > 0) {
         warn($fname . ":" . $line . ": warning: " . $msg);
@@ -1360,7 +1365,9 @@ func sem_resolve_vinfo_cname(scalar $ctx, scalar $vinfo, str $orig_name, int $li
 # (ctx "strict_err") and warnings under --strict-types.
 func sem_type_diag(scalar $ctx, str $msg, int $line) void {
     if ($ctx->{"strict_err"} == 1) {
+        $ctx->{"in_type_diag"} = 1;
         semantic_error($ctx, $msg, $line);
+        $ctx->{"in_type_diag"} = 0;
         return;
     }
     semantic_warn($ctx, $msg, $line);
@@ -1451,8 +1458,52 @@ func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str 
     }
 }
 
-# `$a[i] = v`, `$h{k} = v`, `@a = LIST` on a container with a declared
-# element type.
+# The values of a hash written as a literal list: `(k => v, ...)` (key/value
+# pairs flattened into a list, or a hash-literal node).
+func sem_check_hash_literal(scalar $ctx, int $etype, scalar $val, str $cname, int $line) void {
+    if (is_valid_node($val) == 0) { return; }
+    my int $hvt = $val->{"type"};
+    if ($hvt == NODE_ANON_HASH()) {
+        my scalar $hvals = $val->{"values"};
+        my int $hpc = $val->{"pair_count"};
+        my int $hpi = 0;
+        while ($hpi < $hpc) {
+            sem_check_elem_value($ctx, $etype, $hvals->[$hpi], $cname, "%", $line);
+            $hpi = $hpi + 1;
+        }
+        return;
+    }
+    if ($hvt == NODE_ANON_ARRAY()) {
+        # a parenthesized pair list arrives as a flat list: k, v, k, v
+        my scalar $helems = $val->{"elements"};
+        my int $hec = $val->{"element_count"};
+        # An element that can stand for several values (`%other`, `@pairs`,
+        # a call, a nested list) shifts which positions are values: only a
+        # list of plain scalar expressions is checked.
+        my int $hsi = 0;
+        while ($hsi < $hec) {
+            my scalar $hse = $helems->[$hsi];
+            if (is_valid_node($hse) == 0) { return; }
+            my int $hst = $hse->{"type"};
+            if ($hst == NODE_CALL() || $hst == NODE_METHOD_CALL() || $hst == NODE_ANON_ARRAY() || $hst == NODE_ANON_HASH()
+                || $hst == NODE_DEREF_ARRAY() || $hst == NODE_DEREF_HASH() || $hst == NODE_ARRAY_SLICE()
+                || $hst == NODE_TERNARY()) { return; }
+            if ($hst == NODE_VARIABLE() && ("" . $hse->{"sigil"}) ne "$") { return; }
+            $hsi = $hsi + 1;
+        }
+        my int $hei = 1;
+        while ($hei < $hec) {
+            my scalar $hel = $helems->[$hei];
+            if (is_valid_node($hel) == 1 && $hel->{"type"} != NODE_VARIABLE()) {
+                sem_check_elem_value($ctx, $etype, $hel, $cname, "%", $line);
+            }
+            $hei = $hei + 2;
+        }
+    }
+}
+
+# `$a[i] = v`, `$h{k} = v`, `@a = LIST`, `%h = (k => v)` on a container with a
+# declared element type.
 func sem_check_elem_assign(scalar $ctx, scalar $expr) void {
     my scalar $tgt = $expr->{"target"};
     if (is_valid_node($tgt) == 0) { return; }
@@ -1466,6 +1517,15 @@ func sem_check_elem_assign(scalar $ctx, scalar $expr) void {
         $csigil = "%";
     } elsif ($tt == NODE_VARIABLE() && ("" . $tgt->{"sigil"}) eq "@") {
         $cvar = $tgt;
+    } elsif ($tt == NODE_VARIABLE() && ("" . $tgt->{"sigil"}) eq "%") {
+        my int $whole_et = sem_var_elem_type($ctx, $tgt, "%");
+        if ($whole_et > 0) {
+            my int $wline = ast_get_line($expr);
+            if ($wline == 0) { $wline = ast_get_line($tgt); }
+            if ($wline == 0) { $wline = ast_get_line($expr->{"value"}); }
+            sem_check_hash_literal($ctx, $whole_et, $expr->{"value"}, sem_var_display_name($tgt), $wline);
+        }
+        return;
     } else {
         return;
     }
@@ -1525,7 +1585,12 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
     my int $t = $expr->{"type"};
     if ($t == NODE_INT_LITERAL()) { return TYPE_INT(); }
     if ($t == NODE_NUM_LITERAL()) { return TYPE_NUM(); }
-    if ($t == NODE_STR_LITERAL()) { return TYPE_STR(); }
+    if ($t == NODE_STR_LITERAL()) {
+        # A one-character single-quoted literal is also its character code
+        # where an int is wanted (`my int $c = '/';`): fits either type.
+        if (($expr->{"has_char_code"} + 0) == 1) { return TYPE_SCALAR(); }
+        return TYPE_STR();
+    }
     if ($t == NODE_VARIABLE()) {
         my str $sigil = $expr->{"sigil"};
         if ($sigil eq "@") { return TYPE_ARRAY(); }
@@ -1557,7 +1622,9 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
             || $op eq "<=>" || $op eq "cmp") { return TYPE_INT(); }
         if ($op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>") { return TYPE_INT(); }
         if ($op eq "/") { return TYPE_NUM(); }
-        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%" || $op eq "**") {
+        # `%` is integer modulo whatever its operands are
+        if ($op eq "%") { return TYPE_INT(); }
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "**") {
             my int $ltype = stage0_expr_type($ctx, $expr->{"left"});
             my int $rtype_op = stage0_expr_type($ctx, $expr->{"right"});
             if ($ltype == TYPE_INT() && $rtype_op == TYPE_INT()) { return TYPE_INT(); }
@@ -3101,6 +3168,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             if ($ctx->{"strict_types"} == 1 && $sigil eq "@" && $stmt->{"elem_type"} + 0 > 0) {
                 sem_check_elem_value($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, "@", $line);
             }
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "%" && $stmt->{"elem_type"} + 0 > 0) {
+                sem_check_hash_literal($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, $line);
+            }
         }
         return;
     }
@@ -3177,6 +3247,14 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
+                my int $our_atype = stage0_expr_type($ctx, $init_expr);
+                if (sem_types_ok($ctx, $var_type, $our_atype) == 0) {
+                    sem_type_diag($ctx, "initializing '$" . $name . "' (declared "
+                        . ast_data_type_name($var_type) . ") with a "
+                        . ast_data_type_name($our_atype) . " value", $line);
+                }
+            }
         }
         return;
     }
@@ -3709,6 +3787,14 @@ func analyze_function(scalar $ctx, scalar $fn) void {
 func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     my scalar $ctx = ctx_new();
     $ctx->{"show_warnings"} = $show_warnings;
+    # $strict_types: 0 = off, 1 = --strict-types (warnings), 2 = type checks
+    # only (strada-interp: report nothing but the errors of strict files)
+    $ctx->{"types_only"} = 0;
+    $ctx->{"in_type_diag"} = 0;
+    if ($strict_types == 2) {
+        $ctx->{"types_only"} = 1;
+        $strict_types = 0;
+    }
     $ctx->{"strict_types"} = $strict_types;
     $ctx->{"cli_strict"} = $strict_types;
     $ctx->{"strict_err"} = 0;

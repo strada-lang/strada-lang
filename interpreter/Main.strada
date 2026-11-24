@@ -684,15 +684,17 @@ func run_file_vm(str $filename, scalar $argv) int {
     }
 
     # A file that says `use strict "types";` gets the compiler's semantic
-    # pass, so the VM rejects the same programs. That pass rewrites the tree
-    # it checks, so it runs on a second parse.
+    # pass in types-only mode: its type errors stop the program, and nothing
+    # else it would report does (the VM accepts some programs the compiler
+    # rejects). That pass rewrites the tree it checks, so it runs on a
+    # second parse.
     if (defined($program) && vm_program_has_strict($program) == 1) {
         my scalar $chk_tokens = lex_tokenize_file($source, $lex_fn);
         my scalar $chk_parser = parser_new($chk_tokens);
         parser_set_filename($chk_parser, $filename);
         my scalar $chk_program = parse_program($chk_parser, \@lib_paths, \@empty, \@empty, \@empty);
         try {
-            semantic_analyze($chk_program, 0, 0);
+            semantic_analyze($chk_program, 0, 2);
         } catch ($chk_err) {
             say(STDERR, "" . $chk_err);
             core::chdir($saved_cwd);

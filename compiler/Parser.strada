@@ -6317,6 +6317,14 @@ func parse_use(scalar $parser, scalar $program) void {
             return;
         }
 
+        # Bare `use strict;` (Perl habit): accepted and does nothing. Strada
+        # already requires declared variables and known functions; type
+        # checking is the separate `use strict "types";`.
+        if ($mod_name eq "strict" && parser_check($parser, "SEMI")) {
+            parser_advance($parser);
+            return;
+        }
+
         # Check for "use lib" pattern followed by string
         if ($mod_name eq "lib") {
             if (parser_check($parser, "STR_LITERAL")) {
