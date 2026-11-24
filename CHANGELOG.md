@@ -2,6 +2,40 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Checked types and typed fast paths (2026-11-23/24)
+- **`use strict "types";`** — in a file that says it, type mismatches are
+  compile errors: `my`/`our` initializers, assignments, call arguments,
+  `return` values, and values put into typed containers. `num` to `int`
+  needs `int(...)`; `int` to `num` stays implicit. `scalar` and unannotated
+  code are never checked, and the pragma covers one file, so code can be
+  tightened a file at a time. `strada-interp FILE` enforces it too.
+- **Element types** — `array<T>`, `hash<T>`, `hash<str, T>` with T = `int`,
+  `num`, `str`, `scalar` or a class name. Element reads have that type;
+  initializer lists, element stores, `push`/`unshift`, `foreach` variables
+  and array arguments are checked.
+- **Existing programs are unaffected**: without the pragma the compiler
+  generates the same C as before for every example in the tree.
+- **`num` arithmetic in C doubles** — `/` and `**` where a number is wanted
+  no longer allocate an intermediate value (a Mandelbrot loop went from
+  0.14 s to 0.03 s, the speed of the C version).
+- **`num` attributes** — arithmetic over `has num` accessors is computed in
+  doubles, and a setter writes the result into the attribute's existing
+  slot (object benchmark: 3.05 s to 1.02 s).
+- **`foreach my int $v (@a)`** — the loop variable is a plain C integer when
+  the body never assigns it and nothing needs a boxed value.
+- **Attribute slot cache** — each accessor/setter call site remembers where
+  the attribute lives in the object and skips the hash lookup on later
+  calls (same object benchmark: 0.52 s to 0.42 s). Objects remain ordinary
+  hashes; hand-written `bless` constructors, `$obj->{...}`, `keys` and
+  `clone` are unchanged.
+- **Runtime settings are build options** — `--no-gil`, `--gil-interval-us`,
+  `--no-gc`, `--exit-task-wait-ms`, `--no-pool`, `--debug-bless`,
+  `--check-cleanup=warn`; `strada-interp --no-jit`. No `STRADA_*`
+  environment variable changes how a built program runs.
+- **Strada::JIT** uses the runtime headers that belong to the compiler it
+  found on PATH (it could pair a new compiler with an older installation's
+  headers).
+
 ### Language, runtime & DBI fixes (2026-11-07)
 - **`sort { $a <=> $b } @list`** — the documented form (no trailing `;`)
   was a parse error, and `sort { return $a cmp $b; }` generated invalid C.

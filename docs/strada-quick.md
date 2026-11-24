@@ -86,6 +86,12 @@ better generated code, especially in arithmetic-heavy paths.
 
 ### Types, sigils, and declarations
 
+`use strict "types";` at the top of a file makes type mismatches compile
+errors there (initializers, assignments, arguments, returns, container
+elements); `num` -> `int` then needs `int(...)`. Containers may declare an
+element type: `my array<int> @ids`, `my hash<str, num> %price`. `scalar` and
+unannotated code are never checked.
+
 ```strada
 my int $count = 0;
 my num $ratio = 0.75;

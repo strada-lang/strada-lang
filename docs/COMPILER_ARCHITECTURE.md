@@ -630,7 +630,7 @@ The self-hosting compiler applies several automatic optimizations during code ge
 ## Future Improvements
 
 1. **Optimization passes** - Dead code elimination, more constant folding
-2. **Type checking** - Enforce type annotations at compile time (today `--strict-types` only warns)
+2. **Type checking** - done for files that say `use strict "types";` (mismatches are errors; `array<T>`/`hash<T>` element types). Still open: class element types, nested element types, checks on `our` containers and returned containers, and using element types for unboxed storage
 3. **LLVM backend** - Alternative to C generation
 
 ---

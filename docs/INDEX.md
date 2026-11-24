@@ -74,6 +74,8 @@ Compile and run:
 
 ### Type System
 - **Static typing** with `int`, `num`, `str`, `scalar`, `array`, `hash`
+- **Checked types** per file with `use strict "types";`, and element types
+  for containers (`array<int>`, `hash<str, num>`)
 - **Type inference** for literals
 - **Reference types** with `\$var`, `\@arr`, `\%hash`
 

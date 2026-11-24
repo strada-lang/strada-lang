@@ -110,6 +110,9 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 - **--strict-types**
   Enable stage-0 gradual type checking: compares declared types against a best-effort static expression type and emits warnings (never errors) on likely mismatches. `scalar`/`dynamic`/unannotated values never warn.
 
+  A source file that says `use strict "types";` gets the same checks as
+  errors for that file, with or without this flag, plus element types
+  (`array<int>`, `hash<str, num>`).
 - **--no-stack-trace**
   Omit stack-trace frame tracking from the compiled program. Slightly faster; uncaught exceptions no longer print a Strada call stack.
 

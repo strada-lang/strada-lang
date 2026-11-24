@@ -25,6 +25,7 @@ EOF
 ## Features
 
 - **Static typing** with `int`, `num`, `str`, `scalar`, `array`, `hash`
+- **Checked types, a file at a time** - `use strict "types";` turns type mismatches into compile errors, with element types for containers (`array<int>`, `hash<str, num>`)
 - **Perl-like syntax** - familiar sigils, operators, and control structures
 - **Self-hosting** - the compiler is written in Strada (~37,000 lines of Strada source, generating ~70k lines of C during the build)
 - **Native compilation** - compiles to C, then to native executables

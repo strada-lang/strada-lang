@@ -62,6 +62,11 @@ func main(int $argc, array @argv) int {
 
 ## Types, sigils, and declarations
 
+`use strict "types";` (per file): mismatches at initializers, assignments,
+arguments, returns and container elements are compile errors; `num` -> `int`
+needs `int(...)`. Element types: `array<int>`, `hash<num>`, `hash<str, T>`.
+`scalar`/unannotated code is never checked.
+
 ```strada
 my int $count = 0;
 my num $price = 19.99;

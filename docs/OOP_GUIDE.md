@@ -750,6 +750,22 @@ func Connection_DESTROY(scalar $self) void {
 
 ---
 
+### Typed attributes are checked and fast
+
+Give attributes their real types (`has rw num $x`, `has rw int $count`):
+
+- In a file with `use strict "types";` the compiler checks what is passed to
+  typed parameters and returned from typed methods (see the Language Guide,
+  "Checked Types").
+- Arithmetic over `num` and `int` accessors is compiled to plain C numbers:
+  `$self->set_x($self->x() + $self->v() * 0.01)` reads two doubles, computes,
+  and writes the result into the attribute's existing slot, with no temporary
+  values.
+- Each accessor and setter call site remembers where the attribute lives in
+  the object, so repeated calls skip the hash lookup. Objects are still
+  ordinary hashes: `$self->{"x"}`, `keys`, `clone` and hand-written `bless`
+  constructors behave exactly as before.
+
 ## 9. Type Checking
 
 ### The isa() Function

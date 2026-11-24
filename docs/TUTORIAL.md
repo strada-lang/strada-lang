@@ -188,6 +188,40 @@ if (defined($value)) {
 
 ---
 
+### Checked Types
+
+Out of the box an annotation converts: `my int $n = "12abc";` quietly makes
+`$n` the integer 12. When you want the compiler to refuse instead, start the
+file with `use strict "types";`:
+
+```strada
+use strict "types";
+
+func total(array<int> @prices, num $tax) num {
+    my int $sum = 0;
+    foreach my int $p (@prices) { $sum += $p; }
+    return $sum * (1 + $tax);
+}
+
+func main() int {
+    my array<int> @list = (10, 20, 30);
+    my hash<str, int> %age = ();          # hash<int> means the same
+    my str $in = "0.5";
+
+    push(@list, "forty");                 # error: storing a str value in '@list' (declared array<int>)
+    $age{"bob"} = "old";                  # error
+    my int $half = $list[0] / 2;          # error: `/` gives a num; write int($list[0] / 2)
+    say(total(@list, $in));               # error: argument 2 to 'total': expected num, got str
+    say(total(@list, $in + 0));           # fine: explicit conversion
+    return 0;
+}
+```
+
+Arrays and hashes can say what they hold (`array<int>`, `hash<str, num>`), and
+the compiler checks every value that goes in. Code that uses `scalar` or no
+annotation is never checked, so you can tighten one file at a time. See the
+Language Guide, "Checked Types", for the full rules.
+
 ## 3. Operators
 
 ### Arithmetic Operators

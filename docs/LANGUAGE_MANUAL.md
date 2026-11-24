@@ -125,7 +125,7 @@ eq ne lt gt le ge   # String comparison
 
 ### 2.1 Type System Overview
 
-Strada is statically typed. Type annotations are optional in variable declarations and function signatures — when omitted, the type is inferred from the sigil (`$` → `scalar`, `@` → `array`, `%` → `hash`). Function return types default to `scalar` if omitted. Implicit conversions occur in certain contexts.
+Strada is statically typed. Type annotations are optional in variable declarations and function signatures — when omitted, the type is inferred from the sigil (`$` → `scalar`, `@` → `array`, `%` → `hash`). Function return types default to `scalar` if omitted. By default an annotation converts the value it is given; a file that says `use strict "types";` makes mismatches compile errors instead (section 2.4a).
 
 ### 2.2 Scalar Types
 
@@ -149,6 +149,61 @@ Strada is statically typed. Type annotations are optional in variable declaratio
 |------|-------------|
 | `void` | No value (for function returns) |
 | `undef` | Undefined/uninitialized value |
+
+### 2.4a Checked Types (`use strict "types";`)
+
+By default a type annotation converts (`my int $n = "12abc";` makes `$n` the
+integer 12). A file that says `use strict "types";` turns type mismatches into
+compile errors, and lets arrays and hashes declare an element type:
+
+```strada
+use strict "types";
+
+func total(array<int> @prices, num $tax) num {
+    my int $sum = 0;
+    foreach my int $p (@prices) { $sum += $p; }
+    return $sum * (1 + $tax);
+}
+
+func main() int {
+    my array<int> @list = (10, 20, 30);
+    my hash<str, int> %age = ();          # hash<int> means the same
+    my str $in = "0.5";
+
+    push(@list, "forty");                 # error: storing a str value in '@list' (declared array<int>)
+    $age{"bob"} = "old";                  # error
+    my int $half = $list[0] / 2;          # error: `/` gives a num; write int($list[0] / 2)
+    say(total(@list, $in));               # error: argument 2 to 'total': expected num, got str
+    say(total(@list, $in + 0));           # fine: explicit conversion
+    return 0;
+}
+```
+
+- **Checked:** `my`/`our` initializers, assignments to declared scalars, call
+  arguments, `return` values, and every value put into a container declared
+  with an element type: initializer lists, `$a[i] = v`, `$h{k} = v`,
+  `@a = LIST`, `push`, `unshift`, a `foreach` variable's declared type, and
+  array arguments.
+- **Element types:** `array<T>`, `hash<T>` and `hash<str, T>`, where T is
+  `int`, `num`, `str`, `scalar` or a class name. An element read
+  (`$list[0]`, `$age{"k"}`, `shift(@list)`) has that type. Nested element
+  types are not supported, and class element types are recorded but not
+  checked yet.
+- **Conversions:** `int` to `num` is implicit. `num` to `int` needs
+  `int(...)`, text to a number needs arithmetic (`$s + 0`) or `int($s)`, and
+  a number to text needs `"" . $n`.
+- **Gradual:** `scalar`, unannotated variables and plain `array`/`hash` are
+  never checked, in either direction.
+- **Scope:** the pragma covers its own file from that line on: functions,
+  methods, method modifiers, closures, BEGIN/END blocks and file-level
+  initializers. A strict module does not make its users strict, and a strict
+  program does not check the modules it uses.
+- **Backends:** `strada-interp FILE` rejects the same programs. `-e` code and
+  the REPL are not checked.
+- **Without the pragma** nothing changes. `--strict-types` reports the same
+  mismatches as warnings (except `num` to `int`, which stays silent there).
+- Element types are checked at compile time only: a value that reaches a
+  typed container through untyped code is not converted.
 
 ### 2.5 Reference Types
 

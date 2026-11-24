@@ -61,6 +61,10 @@ make interpreter
 ./interpreter/strada-interp --no-jit program.strada
 ```
 
+A program file that says `use strict "types";` is checked by the same semantic
+pass the compiler uses before it runs, so type mismatches are reported and the
+program does not start. Code given with `-e` and REPL input are not checked.
+
 ### Interactive REPL
 
 ```bash

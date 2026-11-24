@@ -57,6 +57,9 @@ The compiler is self-hosting - it is written in Strada itself.
 - **--strict-types**
   Stage-0 gradual type checking: warn (never error) where a declared type and the static type of an expression are likely to mismatch.
 
+  A source file that says `use strict "types";` gets the same checks as
+  errors for that file, with or without this flag, plus element types
+  (`array<int>`, `hash<str, num>`).
 - **--check**
   Syntax/semantic check only: no C output is written and *output.c* may be omitted. All errors found are reported. Exit status 0 if clean.
 
