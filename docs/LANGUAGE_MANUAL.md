@@ -221,11 +221,22 @@ func main() int {
   looped over: `my array<int> @a = names();` is an error when `names()`
   returns `array<str>`. A function-level `our @x;` without an element type
   is unchecked even when another declaration of `@x` has one.
+- **Class element types:** `array<Dog>`, `hash<str, Dog>` and
+  `hash<Dog>` hold objects of that class or a subclass (a role counts).
+  Storing an object the compiler knows to be of an unrelated class, or an
+  `int`/`num`/`str` value, is an error; so is putting an `array<Cat>` into
+  an `array<Dog>`. What is read back out (`$dogs[0]`, `shift`/`pop`, a
+  `foreach` variable, `my $d = $dogs[0]`) is known to be a `Dog`, so its
+  method calls are checked. An `array<Animal>` may go into an `array<Dog>`
+  (it may hold Dogs, and there is no cast). Objects of unknown class are
+  accepted, a class no package of the program declares is not checked,
+  and a program that calls `inherit()` at run time gets no class
+  comparisons. An object stored in an `array<int>` is not flagged.
 - **Not checked yet:** method calls on any other object (a parameter, a
-  function's result, a container element, a file-level variable), on a
+  function's result, an element of a container without a class element
+  type, a file-level variable), on a
   method with an `around` modifier, and through `$self` on a method a
-  subclass overrides; class element types
-  (`array<Point>` is accepted and recorded); nested element types are a
+  subclass overrides; nested element types are a
   syntax error.
 - **Bare `use strict;`** is accepted and does nothing (Strada already
   requires declared variables); it does not turn type checking on.

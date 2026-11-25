@@ -20,6 +20,17 @@
   elements) are unchecked. Compile-time only: generated C is unchanged.
   Also fixed: `(%$base, k => v)` in a typed hash initializer was a false
   error.
+- **Class element types are checked (2026-11-25)**: `array<Dog>` /
+  `hash<str, Dog>` take objects of that class or a subclass; an object of
+  an unrelated class, an `int`/`num`/`str` value or an unrelated typed
+  container is an error. Elements read back (`$dogs[0]`, `shift`/`pop`,
+  foreach variables, `my $d = $dogs[0]`) have that class, so their method
+  calls are checked, and `my $b = $a` carries a known class over.
+  `Pkg::new(...)` is also a known-class receiver and a checked value in a
+  typed hash list. Also fixed: in a program with `use overload`, an
+  operator applied to a value that may be an object no longer has a fixed
+  type (`my int $n = $vec . "x"` was a false error). Compile-time only:
+  generated C is unchanged.
 - **`our`, file-level and returned containers are checked (2026-11-25)**:
   `our array<int> @g` / `our hash<str> %h` (file level, in a function, and
   `local`), file-level `my` containers, `return` values of a function

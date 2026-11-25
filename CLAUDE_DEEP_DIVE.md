@@ -3223,6 +3223,48 @@ Decisions and things measured that did not help:
 - Strada::JIT paired the compiler on PATH with the headers of an older
   installation; it now takes the runtime that belongs to that compiler.
 
+### Class element types (2026-11-25)
+
+`array<Dog>` is `elem_type` scalar plus `elem_class` "Dog" on the declaration
+node. Semantic.strada carries one int for both: `sem_node_et` returns the
+TYPE_* value or `1000 + N` for class N of ctx `cls_names` (`sem_et_class`
+gives the name back, `sem_et_plain` the type an element read has as a value,
+which is scalar). Every place that reads an element type off a node goes
+through `sem_node_et`; scope entries hold the encoded value. A site that
+forgets passes 1000+N to `sem_types_ok`, which fails loudly, and only in
+programs that use class element types.
+
+- `sem_et_compat(dest, src)` is the container-to-container rule: two classes
+  must be related in either direction (`sem_classes_related`; an
+  `array<Animal>` may hold Dogs and there is no cast), a class container
+  takes no `int`/`num`/`str` container, and a class into a plain container is
+  not flagged (a single object stored in `array<int>` is not either).
+- A single value into a class container (`sem_check_elem_value`): its class
+  comes from `sem_value_class` (below). An exact class (a constructor call)
+  must be the class or a descendant; a may-be-subclass class must be related.
+  With no known class, an `int`/`num`/`str` static type is an error and
+  anything else passes.
+- Class comparisons happen only when both classes are in `known_packages`
+  and the program has no `inherit(...)` call in a function body
+  (`sem_classes_static`; the AST is walked once, lazily). Otherwise the
+  answer is "related".
+- `sem_recv_class` now also gives a class for `$a[i]` / `$h{k}` on a class
+  container, `shift(@a)` / `pop(@a)`, and a `Pkg::new(...)` call (exact).
+  `sem_value_class` is the same minus the class-name string, for values.
+  `my $v = EXPR` records `sem_value_class(EXPR)` (it was constructor calls
+  only), and a foreach variable over a class container records the class.
+- `sem_node_one_value` counts a constructor call of known class as one
+  value, so `(a => Cat::new())` in a typed hash list is checked.
+- "Related" also covers two classes with a common descendant (a Duck `with
+  Walker` and `with Swimmer` makes Walker and Swimmer related).
+- In a program with any `use overload` (`sem_prog_has_overloads`),
+  `stage0_expr_type` gives an operator with a scalar-typed operand the type
+  scalar: `$v . "x"` may be an object. Before, `.`, comparisons, `/`, `%`
+  and the bit operators had a fixed type whatever the operands were.
+- The stamped sweep exercises none of this (no corpus file uses a class
+  element type): coverage is `ce.strada` / `ceok.strada` / `cedyn.strada` in
+  `t/strict_types_test/run.sh`.
+
 ### `our`, file-level and returned containers (2026-11-25)
 
 Semantic.strada plus one stamp in `parse_our_decl`; generated C is

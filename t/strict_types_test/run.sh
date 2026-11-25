@@ -221,6 +221,7 @@ check "example: scalars"  "scalars: 3 1 42 42.5 3" "$EX_OUT"
 check "example: arrays"   "prices: 5,20,30,40 first=5 total=142.5" "$EX_OUT"
 check "example: hashes"   "average: 8.25" "$EX_OUT"
 check "example: objects"  "account: Ann 165 after 2 moves" "$EX_OUT"
+check "example: class containers" "accounts: 166 11" "$EX_OUT"
 check "example: untyped"  "value: 42, loose has 3" "$EX_OUT"
 ex_lines=$(grep -n "# would not compile" "$EX" | cut -d: -f1)
 ex_n=0
@@ -681,6 +682,224 @@ SRC
 "$STRADA" bn.strada -o bn 2>bn.err
 check "builtin names are not taken for package functions" "12q" "$(./bn 2>&1; cat bn.err)"
 
+# ---- class element types: array<Dog>, hash<str, Dog> -----------------------
+cat > ce.strada <<'SRC'
+use strict "types";
+package Animal;
+has ro str $name (required);
+func speak(scalar $self, int $n) str { return $self->name() . ":" . $n; }
+package Dog;
+extends Animal;
+func fetch(scalar $self, str $what) str { return $what; }
+package Cat;
+extends Animal;
+package Rock;
+has ro int $w = 1;
+package main;
+our array<Dog> @kennel = (Cat::new(name => "k"));
+func dogs() array<Dog> {
+    return (Dog::new(name => "a"), Rock::new());
+}
+func cats() array<Cat> { my array<Cat> @c = (); return @c; }
+func take(array<Dog> @d) int { return 0; }
+func main() int {
+    my array<Dog> @dogs = (Dog::new(name => "rex"), Cat::new(name => "tom"));
+    push(@dogs, Rock::new());
+    push(@dogs, 5);
+    push(@dogs, "Dog");
+    $dogs[0] = 1.5;
+    my $an = Animal::new(name => "x");
+    push(@dogs, $an);
+    my array<Cat> @cats = @dogs;
+    my array<int> @nums = (1, 2);
+    my array<Dog> @d2 = @nums;
+    my hash<str, Dog> %h = (a => Cat::new(name => "c"));
+    $h{"b"} = Rock::new();
+    my array<Dog> @d3 = cats();
+    take(@cats);
+    foreach my $d (@dogs) { say($d->fetch(1.5)); }
+    say($dogs[0]->speak("two"));
+    my $one = $dogs[0];
+    say($one->fetch(2.5));
+    my array<Rock> @rocks = ();
+    push(@rocks, $dogs[0]);
+    unshift(@kennel, Rock::new());
+    return 0;
+}
+func walk(array<Dog> @pack) str { return $pack[0]->fetch(1.5); }
+func first_of(array<Dog> @pack) str { return shift(@pack)->fetch(2.5); }
+func reg() void { our array<Dog> @reg = (); push(@reg, Rock::new()); }
+SRC
+out=$("$STRADA" --check ce.strada 2>&1)
+check "class: our initializer"      "ce.strada:13: error: storing a 'Cat' object in '@kennel' (declared array<Dog>)" "$out"
+check "class: return list"          "ce.strada:15: error: storing a 'Rock' object in the result of 'dogs' (declared to return array<Dog>)" "$out"
+check "class: initializer"          "ce.strada:20: error: storing a 'Cat' object in '@dogs' (declared array<Dog>)" "$out"
+check "class: push"                 "ce.strada:21: error: storing a 'Rock' object in '@dogs'" "$out"
+check "class: int"                  "ce.strada:22: error: storing a int value in '@dogs' (declared array<Dog>)" "$out"
+check "class: class-name string"    "ce.strada:23: error: storing a str value in '@dogs'" "$out"
+check "class: element store"        "ce.strada:24: error: storing a num value in '@dogs'" "$out"
+check "class: exact parent object"  "ce.strada:26: error: storing a 'Animal' object in '@dogs'" "$out"
+check "class: sibling container"    "ce.strada:27: error: putting the elements of '@dogs' (array<Dog>) into '@cats' (declared array<Cat>)" "$out"
+check "class: int container"        "ce.strada:29: error: putting the elements of '@nums' (array<int>) into '@d2' (declared array<Dog>)" "$out"
+check "class: hash list"            "ce.strada:30: error: storing a 'Cat' object in '%h' (declared hash<Dog>)" "$out"
+check "class: hash store"           "ce.strada:31: error: storing a 'Rock' object in '%h'" "$out"
+check "class: call result"          "ce.strada:32: error: putting the result of 'cats' (array<Cat>) into '@d3' (declared array<Dog>)" "$out"
+check "class: argument"             "ce.strada:33: error: argument 1 to 'take': expected array<Dog>, got array<Cat>" "$out"
+check "class: foreach receiver"     "ce.strada:34: error: argument 1 to 'Dog::fetch': expected str, got num" "$out"
+check "class: element receiver"     "ce.strada:35: error: argument 1 to 'Animal::speak': expected int, got str" "$out"
+check "class: variable from element" "ce.strada:37: error: argument 1 to 'Dog::fetch': expected str, got num" "$out"
+check "class: element into another" "ce.strada:39: error: storing a 'Dog' object in '@rocks' (declared array<Rock>)" "$out"
+check "class: unshift on our"       "ce.strada:40: error: storing a 'Rock' object in '@kennel'" "$out"
+check "class: parameter element"    "ce.strada:43: error: argument 1 to 'Dog::fetch': expected str, got num" "$out"
+check "class: shift receiver"       "ce.strada:44: error: argument 1 to 'Dog::fetch': expected str, got num" "$out"
+check "class: function-level our"   "ce.strada:45: error: storing a 'Rock' object in '@reg' (declared array<Dog>)" "$out"
+check "class: error count"          "compilation failed: 22 semantic errors" "$out"
+
+# Must compile: subclass and role consumer in a base container, a module's
+# class, objects of unknown class, undef, a reassigned variable, a container
+# that may hold the subclass, array<scalar> both ways, a class no package
+# declares, AUTOLOAD and `around` methods on element reads.
+mkdir -p celib
+cat > celib/CeMod.strada <<'SRC'
+package CeMod::Bird;
+has ro str $name (required);
+func sing(scalar $self, int $times) str { return $self->name() x $times; }
+1;
+SRC
+cat > ceok.strada <<'SRC'
+use strict "types";
+use lib "celib";
+use CeMod;
+
+package Walker;
+func legs(scalar $self) int { return 4; }
+
+package Animal;
+has ro str $name (required);
+func speak(scalar $self, int $n) str { return $self->name() . ":" . $n; }
+
+package Dog;
+extends Animal;
+with Walker;
+func fetch(scalar $self, str $what) str { return $self->name() . " fetches " . $what; }
+
+package Cat;
+extends Animal;
+around "speak" func(scalar $self, scalar $orig, scalar $n) str { return "cat"; }
+
+package Loose;
+func new(str $class) scalar { my hash %h = (); return bless(\%h, $class); }
+func AUTOLOAD(scalar $self) str { return "auto"; }
+
+package main;
+
+our array<Animal> @zoo = ();
+my hash<str, Dog> %byname = ();
+
+func make(str $n) scalar { return Dog::new(name => $n); }
+func pack_of() array<Dog> {
+    my array<Dog> @p = (Dog::new(name => "a"), Dog::new(name => "b"));
+    return @p;
+}
+func count(array<Animal> @as) int { return scalar(@as); }
+
+func main() int {
+    my array<Dog> @dogs = (Dog::new(name => "rex"));
+    push(@dogs, Dog::new(name => "fido"));
+    push(@dogs, make("m"));              # unknown class: passes
+    push(@dogs, undef);
+    my $later = Dog::new(name => "z");
+    $later = make("y");
+    push(@dogs, $later);
+    my array<Animal> @animals = (Dog::new(name => "d"), Cat::new(name => "c"), Animal::new(name => "an"));
+    push(@animals, $dogs[0]);
+    @animals = @dogs;                    # Dogs are Animals
+    my array<Dog> @down = @animals;      # may hold Dogs: allowed
+    my array<Walker> @walkers = (Dog::new(name => "w"));
+    my array<scalar> @any = @dogs;
+    my array<Dog> @from_any = @any;
+    my array<CeMod::Bird> @birds = (CeMod::Bird::new(name => "tw"));
+    my array<Loose> @loose = (Loose::new("Loose"), Loose::new("Loose"));   # two: the VM gives undef for a one-call list `(f("x"))`
+    my array<Nowhere> @nw = ();
+    push(@nw, make("q"));
+    foreach my $d (@dogs) {
+        if (defined($d)) { say($d->fetch("ball")); }
+    }
+    my $first = $dogs[0];
+    say($first->speak(2));
+    say($dogs[1]->fetch("stick"));
+    say($animals[1]->speak(3));
+    say($birds[0]->sing(2));
+    say($loose[0]->anything(1, 2, 3));
+    $byname{"rex"} = $dogs[0];
+    say($byname{"rex"}->legs());
+    my $popped = pop(@walkers);
+    say($popped->legs());
+    push(@zoo, Cat::new(name => "tom"));
+    say($zoo[0]->speak("x"));            # around modifier: unchecked
+    say(count(@dogs) . " " . scalar(pack_of()));
+    my array<Dog> @more = pack_of();
+    say($more[1]->name());
+    return 0;
+}
+SRC
+CEOK_EXPECT="rex fetches ball fido fetches ball m fetches ball y fetches ball rex:2 fido fetches stick fido:3 twtw auto 4 4 cat 5 2 b "
+"$STRADA" ceok.strada -o ceok 2>ceok.err
+check "class containers compile and run" "$CEOK_EXPECT" "$(./ceok 2>&1 | tr '\n' ' '; cat ceok.err)"
+# Two roles with a common consumer are related (a Duck is both); an
+# overloaded operator returns whatever the overload returns; a qualified
+# class name.
+cat > ceov.strada <<'SRC'
+use strict "types";
+package Walker; func legs(scalar $self) int { return 2; }
+package Swimmer; func fins(scalar $self) int { return 0; }
+package Duck; with Walker; with Swimmer; has ro int $n = 1;
+package Vec;
+has ro num $v = 1.0;
+func mul(scalar $self, scalar $o, int $rev) scalar { return Vec::new(v => 2.0); }
+func add(scalar $self, scalar $o, int $rev) scalar { return Vec::new(v => 2.0); }
+func cat(scalar $self, scalar $o, int $rev) scalar { return Vec::new(v => 2.0); }
+func neg(scalar $self, scalar $o, int $rev) scalar { return Vec::new(v => 2.0); }
+use overload "*" => "mul", "+" => "add", "." => "cat", "neg" => "neg";
+package My::Deep; has ro int $q = 1;
+package main;
+func main() int {
+    my array<Walker> @walkers = (Duck::new());
+    my array<Swimmer> @swimmers = ();
+    push(@swimmers, $walkers[0]);
+    my array<Swimmer> @s2 = @walkers;
+    my $v = Vec::new();
+    my $w = Vec::new();
+    my array<Vec> @vecs = ();
+    push(@vecs, $v * 2.0);
+    push(@vecs, $v + $w);
+    push(@vecs, $v . $w);
+    push(@vecs, -$v);
+    push(@vecs, $v * 2);
+    my array<My::Deep> @deep = (My::Deep::new());
+    my hash<str, My::Deep> %dh = ();
+    say(scalar(@vecs) . " " . scalar(@swimmers) . " " . scalar(@s2) . " " . scalar(@deep));
+    return 0;
+}
+SRC
+"$STRADA" ceov.strada -o ceov 2>ceov.err
+check "shared descendants and overloads compile" "5 1 1 1" "$(./ceov 2>&1; cat ceov.err)"
+# inherit() at run time: the declared classes say nothing certain
+cat > cedyn.strada <<'SRC'
+use strict "types";
+package A; func v(scalar $self) int { return 1; }
+package B; has ro int $w = 2;
+package main;
+func main() int {
+    inherit("B", "A");
+    my array<A> @as = (B::new());
+    say($as[0]->v());
+    return 0;
+}
+SRC
+"$STRADA" cedyn.strada -o cedyn 2>cedyn.err
+check "runtime inherit() turns the class check off" "1" "$(./cedyn 2>&1; cat cedyn.err)"
+
 if [ -x "$INTERP" ]; then
     check "typed program runs (VM)" "157.5" "$("$INTERP" ok.strada 2>&1)"
     out=$("$INTERP" bad.strada 2>&1); rc=$?
@@ -700,6 +919,9 @@ if [ -x "$INTERP" ]; then
     check "VM reports our-container errors" "gc.strada:20: error: storing a str value in '@g' (declared array<int>)" "$out"
     out=$("$INTERP" gr.strada 2>&1)
     check "VM reports returned-container errors" "gr.strada:12: error: putting the result of 'Lib::strs' (array<str>) into '@a'" "$out"
+    out=$("$INTERP" ce.strada 2>&1)
+    check "VM reports class-element errors" "ce.strada:21: error: storing a 'Rock' object in '@dogs'" "$out"
+    check "VM runs class containers" "$CEOK_EXPECT" "$("$INTERP" ceok.strada 2>&1 | tr '\n' ' ')"
     check "VM runs same-named globals" "$GCOK_EXPECT" "$("$INTERP" gcok.strada 2>&1)"
     check "VM runs uncertain receivers" "circle*big tag7 circle*x v=4 circle*f 6 tag5" "$("$INTERP" mcok.strada 2>&1 | tr '\n' ' ')"
     # The VM enforces the type checks only: code the compiler alone rejects

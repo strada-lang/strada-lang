@@ -128,6 +128,14 @@ func main() int {
     # my int $who = $acct->owner();        # would not compile: owner() returns a str
     # my scalar $b2 = Account::new("owner", 7);  # would not compile: owner is a str
 
+    # A container can be declared to hold objects of one class (or its
+    # subclasses); what is read back out is then known to be an Account.
+    my array<Account> @accounts = ($acct, Account::new("owner", "Bo", "balance", 10.0));
+    foreach my $a (@accounts) { $a->deposit(1.0); }
+    say("accounts: " . $accounts[0]->balance() . " " . $accounts[1]->balance());
+    # push(@accounts, "Cy");               # would not compile: a str is not an Account
+    # $accounts[1]->deposit("one");        # would not compile: deposit wants a num
+
     # ---- untyped code mixes in freely ----------------------------------
     my scalar $anything = $text;
     my int $from_any = $anything;        # scalar is never checked

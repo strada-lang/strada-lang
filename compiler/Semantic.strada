@@ -870,6 +870,10 @@ func ctx_new() scalar {
     my hash %desc_cache = ();
     $ctx{"mro_cache"} = \%mro_cache;
     $ctx{"desc_cache"} = \%desc_cache;
+    my hash %cls_ids = ();
+    my array @cls_names = ();
+    $ctx{"cls_ids"} = \%cls_ids;
+    $ctx{"cls_names"} = \@cls_names;
     $ctx{"asg_root"} = 0;
     $ctx{"asg_set"} = 0;
     $ctx{"prog"} = 0;
@@ -1412,6 +1416,139 @@ func sem_set_strict(scalar $ctx, scalar $node) void {
     }
 }
 
+# Element types as the checker carries them: a TYPE_* value, or 1000 + N for
+# class N of ctx "cls_names" (`array<Dog>`; the declaration node has
+# elem_type scalar and elem_class "Dog").
+func sem_node_et(scalar $ctx, scalar $node, str $tkey, str $ckey) int {
+    my int $raw_et = $node->{$tkey} + 0;
+    if ($raw_et <= 0) { return 0; }
+    my str $ecn = "" . $node->{$ckey};
+    if (length($ecn) == 0) { return $raw_et; }
+    my scalar $ids = $ctx->{"cls_ids"};
+    if (exists($ids->{$ecn})) { return $ids->{$ecn} + 0; }
+    my scalar $cnames = $ctx->{"cls_names"};
+    my int $nid = 1000 + size($cnames);
+    push(@{$cnames}, $ecn);
+    $ids->{$ecn} = $nid;
+    return $nid;
+}
+
+# Class an element type names ("" for int/num/str/scalar).
+func sem_et_class(scalar $ctx, int $etype) str {
+    if ($etype < 1000) { return ""; }
+    return "" . $ctx->{"cls_names"}->[$etype - 1000];
+}
+
+# The type an element read has as a value: an object is a scalar.
+func sem_et_plain(int $etype) int {
+    if ($etype >= 1000) { return TYPE_SCALAR(); }
+    return $etype;
+}
+
+# 1 when CLS is ANC or inherits from it (declared `extends` / `with`).
+func sem_class_isa(scalar $ctx, str $cls, str $anc) int {
+    if ($cls eq $anc) { return 1; }
+    my scalar $imro = sem_class_mro($ctx, $cls);
+    my int $imn = size($imro);
+    my int $imi = 0;
+    while ($imi < $imn) {
+        if (("" . $imro->[$imi]) eq $anc) { return 1; }
+        $imi = $imi + 1;
+    }
+    return 0;
+}
+
+func sem_inherit_call_walk(scalar $n, scalar $seen, scalar $out) void {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = size($n);
+        for (my int $i = 0; $i < $len; $i = $i + 1) {
+            my scalar $e = $n->[$i];
+            if (length(reftype($e)) > 0) { sem_inherit_call_walk($e, $seen, $out); }
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    my str $id = "" . $n;
+    if (exists($seen->{$id})) { return; }
+    $seen->{$id} = 1;
+    if (is_valid_node($n) == 1 && $n->{"type"} == NODE_CALL() && ("" . $n->{"name"}) eq "inherit") {
+        $out->{"found"} = 1;
+        return;
+    }
+    foreach my str $k (keys(%{$n})) {
+        my scalar $v = $n->{$k};
+        if (length(reftype($v)) > 0) { sem_inherit_call_walk($v, $seen, $out); }
+    }
+}
+
+# 1 when the declared inheritance of two classes is all there is: both are
+# packages of this program and nothing calls inherit() at run time. Only
+# then can the checker say two classes are unrelated.
+func sem_classes_static(scalar $ctx, str $cls_a, str $cls_b) int {
+    if ($ctx->{"known_packages"}->{$cls_a} != 1) { return 0; }
+    if ($ctx->{"known_packages"}->{$cls_b} != 1) { return 0; }
+    if (!defined($ctx->{"dyn_inherit"})) {
+        my hash %iseen = ();
+        my hash %iout = ();
+        sem_inherit_call_walk($ctx->{"prog"}, \%iseen, \%iout);
+        if (exists($iout{"found"})) { $ctx->{"dyn_inherit"} = 1; } else { $ctx->{"dyn_inherit"} = 0; }
+    }
+    if ($ctx->{"dyn_inherit"} == 1) { return 0; }
+    return 1;
+}
+
+# 1 when one object can be of both classes: one class is the other or
+# inherits from it, or some class inherits from both (a Duck `with Walker`
+# and `with Swimmer`). 1 too when that cannot be decided.
+func sem_classes_related(scalar $ctx, str $cls_a, str $cls_b) int {
+    if ($cls_a eq $cls_b) { return 1; }
+    if (sem_classes_static($ctx, $cls_a, $cls_b) == 0) { return 1; }
+    if (sem_class_isa($ctx, $cls_a, $cls_b) == 1) { return 1; }
+    if (sem_class_isa($ctx, $cls_b, $cls_a) == 1) { return 1; }
+    my scalar $rdesc = sem_class_descendants($ctx, $cls_a);
+    my int $rdn = size($rdesc);
+    my int $rdi = 0;
+    while ($rdi < $rdn) {
+        if (sem_class_isa($ctx, "" . $rdesc->[$rdi], $cls_b) == 1) { return 1; }
+        $rdi = $rdi + 1;
+    }
+    return 0;
+}
+
+# 1 when any package of the program declares `use overload`.
+func sem_prog_has_overloads(scalar $ctx) int {
+    if (defined($ctx->{"has_ov"})) { return $ctx->{"has_ov"} + 0; }
+    my int $ov_found = 0;
+    my scalar $ov_prog = $ctx->{"prog"};
+    if ($ov_prog) {
+        my scalar $ov_tab = $ov_prog->{"overloads"};
+        if ($ov_tab) {
+            my array @ov_keys = keys(%{$ov_tab});
+            if (size(@ov_keys) > 0) { $ov_found = 1; }
+        }
+    }
+    $ctx->{"has_ov"} = $ov_found;
+    return $ov_found;
+}
+
+# May elements of type SRC go into a container of element type DEST?
+# Classes: an error only when the two are unrelated (an `array<Animal>` may
+# hold Dogs, and there is no cast to say so). A class container takes no
+# int/num/str elements. Objects into an int/num/str container are not
+# flagged (a single object stored there is not either).
+func sem_et_compat(scalar $ctx, int $dest_et, int $src_et) int {
+    my str $dcl = sem_et_class($ctx, $dest_et);
+    my str $scl = sem_et_class($ctx, $src_et);
+    if (length($dcl) > 0 && length($scl) > 0) { return sem_classes_related($ctx, $dcl, $scl); }
+    if (length($dcl) > 0) {
+        if ($src_et == TYPE_INT() || $src_et == TYPE_NUM() || $src_et == TYPE_STR()) { return 0; }
+        return 1;
+    }
+    if (length($scl) > 0) { return 1; }
+    return sem_types_ok($ctx, $dest_et, $src_et);
+}
+
 # Declared element type of the array/hash variable a node names (0 = none).
 func sem_var_elem_type(scalar $ctx, scalar $vnode, str $sigil) int {
     if (is_valid_node($vnode) == 0) { return 0; }
@@ -1445,7 +1582,7 @@ func sem_name_elem_type(scalar $ctx, str $vname, str $sigil, int $line) int {
         my scalar $gd = resolve_global_decl_node($ctx, $nvinfo, $vname, $line, $sigil);
         if (is_valid_node($gd) == 0) { return 0; }
         if ($gd->{"type"} != NODE_VAR_DECL() && $gd->{"type"} != NODE_OUR_DECL()) { return 0; }
-        return $gd->{"elem_type"} + 0;
+        return sem_node_et($ctx, $gd, "elem_type", "elem_class");
     }
     return $nvinfo->{"elem_type"} + 0;
 }
@@ -1468,7 +1605,7 @@ func sem_src_elem_type(scalar $ctx, scalar $node, str $sigil) int {
         if ($cfi->{"return_type"} != $want_rt) { return 0; }
         my scalar $cfn = $cfi->{"node"};
         if (is_valid_node($cfn) == 0) { return 0; }
-        return $cfn->{"return_elem_type"} + 0;
+        return sem_node_et($ctx, $cfn, "return_elem_type", "return_elem_class");
     }
     return 0;
 }
@@ -1531,7 +1668,7 @@ func sem_src_display(scalar $ctx, scalar $node, str $sigil) str {
 func sem_elem_dest(scalar $ctx, str $cname, str $csigil, int $etype) str {
     my str $ew = "" . $ctx->{"elem_where"};
     if (length($ew) > 0) { return $ew; }
-    return "'" . $csigil . $cname . "' (declared " . sem_elem_type_name($csigil, $etype) . ")";
+    return "'" . $csigil . $cname . "' (declared " . sem_elem_type_name($ctx, $csigil, $etype) . ")";
 }
 
 func sem_var_display_name(scalar $vnode) str {
@@ -1540,9 +1677,11 @@ func sem_var_display_name(scalar $vnode) str {
     return $vname;
 }
 
-func sem_elem_type_name(str $sigil, int $etype) str {
-    if ($sigil eq "%") { return "hash<" . ast_data_type_name($etype) . ">"; }
-    return "array<" . ast_data_type_name($etype) . ">";
+func sem_elem_type_name(scalar $ctx, str $sigil, int $etype) str {
+    my str $etn = sem_et_class($ctx, $etype);
+    if (length($etn) == 0) { $etn = ast_data_type_name($etype); }
+    if ($sigil eq "%") { return "hash<" . $etn . ">"; }
+    return "array<" . $etn . ">";
 }
 
 # One value going into a typed container. A list literal is checked element
@@ -1562,18 +1701,18 @@ func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str 
     }
     if ($vt == NODE_VARIABLE() && ("" . $val->{"sigil"}) eq "@") {
         my int $src_et = sem_var_elem_type($ctx, $val, "@");
-        if ($src_et > 0 && sem_types_ok($ctx, $etype, $src_et) == 0) {
+        if ($src_et > 0 && sem_et_compat($ctx, $etype, $src_et) == 0) {
             sem_type_diag($ctx, "putting the elements of '@" . sem_var_display_name($val) . "' ("
-                . sem_elem_type_name("@", $src_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
+                . sem_elem_type_name($ctx, "@", $src_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
         }
         return;
     }
     if ($vt == NODE_CALL()) {
         my int $call_et = sem_src_elem_type($ctx, $val, "@");
         if ($call_et > 0) {
-            if (sem_types_ok($ctx, $etype, $call_et) == 0) {
+            if (sem_et_compat($ctx, $etype, $call_et) == 0) {
                 sem_type_diag($ctx, "putting " . sem_src_display($ctx, $val, "@") . " ("
-                    . sem_elem_type_name("@", $call_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
+                    . sem_elem_type_name($ctx, "@", $call_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
             }
             return;
         }
@@ -1581,6 +1720,29 @@ func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str 
     if ($vt == NODE_VARIABLE() && ("" . $val->{"sigil"}) eq "%") { return; }
     my int $atype = stage0_expr_type($ctx, $val);
     if ($atype == TYPE_ARRAY() || $atype == TYPE_HASH()) { return; }
+    my str $dest_cls = sem_et_class($ctx, $etype);
+    if (length($dest_cls) > 0) {
+        my str $val_cls = sem_value_class($ctx, $val);
+        my int $val_exact = $ctx->{"recv_exact"} + 0;
+        if (length($val_cls) > 0) {
+            my int $fits = 1;
+            if ($val_exact == 1) {
+                if (sem_classes_static($ctx, $val_cls, $dest_cls) == 1) { $fits = sem_class_isa($ctx, $val_cls, $dest_cls); }
+            } else {
+                $fits = sem_classes_related($ctx, $val_cls, $dest_cls);
+            }
+            if ($fits == 0) {
+                sem_type_diag($ctx, "storing a '" . $val_cls . "' object in "
+                    . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
+            }
+            return;
+        }
+        if ($atype == TYPE_INT() || $atype == TYPE_NUM() || $atype == TYPE_STR()) {
+            sem_type_diag($ctx, "storing a " . ast_data_type_name($atype) . " value in "
+                . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
+        }
+        return;
+    }
     if (sem_types_ok($ctx, $etype, $atype) == 0) {
         sem_type_diag($ctx, "storing a " . ast_data_type_name($atype) . " value in "
             . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
@@ -1595,9 +1757,9 @@ func sem_check_hash_literal(scalar $ctx, int $etype, scalar $val, str $cname, in
     if ($hvt == NODE_VARIABLE() || $hvt == NODE_CALL()) {
         # a whole hash: another typed hash, or a call returning one
         my int $hsrc_et = sem_src_elem_type($ctx, $val, "%");
-        if ($hsrc_et > 0 && sem_types_ok($ctx, $etype, $hsrc_et) == 0) {
+        if ($hsrc_et > 0 && sem_et_compat($ctx, $etype, $hsrc_et) == 0) {
             sem_type_diag($ctx, "putting the values of " . sem_src_display($ctx, $val, "%") . " ("
-                . sem_elem_type_name("%", $hsrc_et) . ") into " . sem_elem_dest($ctx, $cname, "%", $etype), $line);
+                . sem_elem_type_name($ctx, "%", $hsrc_et) . ") into " . sem_elem_dest($ctx, $cname, "%", $etype), $line);
         }
         return;
     }
@@ -1956,6 +2118,25 @@ func sem_recv_class(scalar $ctx, scalar $recv) str {
         $ctx->{"recv_exact"} = $lk->{"info"}->{"obj_exact"} + 0;
         return $ocls;
     }
+    if ($rt == NODE_SUBSCRIPT()) {
+        return sem_et_class($ctx, sem_var_elem_type($ctx, $recv->{"array"}, "@"));
+    }
+    if ($rt == NODE_HASH_ACCESS()) {
+        return sem_et_class($ctx, sem_var_elem_type($ctx, $recv->{"hash"}, "%"));
+    }
+    if ($rt == NODE_CALL()) {
+        my str $rcn = "" . $recv->{"name"};
+        if (($rcn eq "shift" || $rcn eq "pop") && $recv->{"arg_count"} == 1) {
+            my scalar $rsp = $recv->{"args"}->[0];
+            if (is_valid_node($rsp) == 1 && $rsp->{"type"} == NODE_VARIABLE() && ("" . $rsp->{"sigil"}) eq "@") {
+                return sem_et_class($ctx, sem_var_elem_type($ctx, $rsp, "@"));
+            }
+            return "";
+        }
+        my str $ccls = sem_ctor_class($ctx, $recv);
+        if (length($ccls) > 0) { $ctx->{"recv_exact"} = 1; }
+        return $ccls;
+    }
     if ($rt == NODE_STR_LITERAL()) {
         my str $lcls = "" . $recv->{"value"};
         if ($ctx->{"known_packages"}->{$lcls} == 1) {
@@ -1964,6 +2145,16 @@ func sem_recv_class(scalar $ctx, scalar $recv) str {
         }
     }
     return "";
+}
+
+# Class of the object an expression yields as a value ("" = not known);
+# sets ctx "recv_exact" like sem_recv_class. A class-name string is a
+# receiver, not an object.
+func sem_value_class(scalar $ctx, scalar $val) str {
+    $ctx->{"recv_exact"} = 0;
+    if (is_valid_node($val) == 0) { return ""; }
+    if ($val->{"type"} == NODE_STR_LITERAL()) { return ""; }
+    return sem_recv_class($ctx, $val);
 }
 
 # Record on a scalar's scope entry that it holds an object of CLS.
@@ -1996,6 +2187,7 @@ func sem_node_one_value(scalar $ctx, scalar $pa, int $in_list) int {
     if ($pt == NODE_CALL()) {
         # a user function with a scalar return type is one value; a
         # builtin (split, keys, ...) may be a list
+        if (length(sem_ctor_class($ctx, $pa)) > 0) { return 1; }
         my scalar $pfi = $ctx->{"functions"}->{"" . $pa->{"name"}};
         if ($pfi->{"is_registered"} != 1) { return 0; }
         my int $prt = $pfi->{"return_type"};
@@ -2165,16 +2357,22 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
     }
     if ($t == NODE_SUBSCRIPT()) {
         my int $sub_et = sem_var_elem_type($ctx, $expr->{"array"}, "@");
-        if ($sub_et > 0) { return $sub_et; }
+        if ($sub_et > 0) { return sem_et_plain($sub_et); }
         return TYPE_SCALAR();
     }
     if ($t == NODE_HASH_ACCESS()) {
         my int $hacc_et = sem_var_elem_type($ctx, $expr->{"hash"}, "%");
-        if ($hacc_et > 0) { return $hacc_et; }
+        if ($hacc_et > 0) { return sem_et_plain($hacc_et); }
         return TYPE_SCALAR();
     }
     if ($t == NODE_BINARY_OP()) {
         my str $op = $expr->{"op"};
+        # an operand that may be an object with that operator overloaded:
+        # the result is whatever the overload returns
+        if (sem_prog_has_overloads($ctx) == 1 && $op ne "&&" && $op ne "||" && $op ne "//") {
+            if (stage0_expr_type($ctx, $expr->{"left"}) == TYPE_SCALAR()) { return TYPE_SCALAR(); }
+            if (stage0_expr_type($ctx, $expr->{"right"}) == TYPE_SCALAR()) { return TYPE_SCALAR(); }
+        }
         if ($op eq "." || $op eq "x") { return TYPE_STR(); }
         if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">="
             || $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge"
@@ -2202,6 +2400,7 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
     }
     if ($t == NODE_UNARY_OP()) {
         my str $op = $expr->{"op"};
+        if (sem_prog_has_overloads($ctx) == 1 && stage0_expr_type($ctx, $expr->{"operand"}) == TYPE_SCALAR()) { return TYPE_SCALAR(); }
         if ($op eq "!" || $op eq "not" || $op eq "~") { return TYPE_INT(); }
         if ($op eq "-") {
             my int $ot = stage0_expr_type($ctx, $expr->{"operand"});
@@ -2230,7 +2429,7 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
             my scalar $sp_arg = $expr->{"args"}->[0];
             if (is_valid_node($sp_arg) == 1 && $sp_arg->{"type"} == NODE_VARIABLE() && ("" . $sp_arg->{"sigil"}) eq "@") {
                 my int $sp_et = sem_var_elem_type($ctx, $sp_arg, "@");
-                if ($sp_et > 0) { return $sp_et; }
+                if ($sp_et > 0) { return sem_et_plain($sp_et); }
             }
             return TYPE_SCALAR();
         }
@@ -3119,13 +3318,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     } elsif (($psigil eq "@" || $psigil eq "%") && $cparam->{"elem_type"} + 0 > 0) {
                         my scalar $carg = $args->[$i];
                         if (is_valid_node($carg) == 1 && (($carg->{"type"} == NODE_VARIABLE() && ("" . $carg->{"sigil"}) eq $psigil) || $carg->{"type"} == NODE_CALL())) {
-                            my int $want_et = $cparam->{"elem_type"} + 0;
+                            my int $want_et = sem_node_et($ctx, $cparam, "elem_type", "elem_class");
                             my int $have_et = sem_src_elem_type($ctx, $carg, $psigil);
-                            if ($have_et > 0 && $have_et != $want_et && sem_types_ok($ctx, $want_et, $have_et) == 0) {
+                            if ($have_et > 0 && $have_et != $want_et && sem_et_compat($ctx, $want_et, $have_et) == 0) {
                                 my int $cargno = $i + 1;
                                 sem_type_diag($ctx, "argument " . $cargno . " to '" . $name
-                                    . "': expected " . sem_elem_type_name($psigil, $want_et)
-                                    . ", got " . sem_elem_type_name($psigil, $have_et), $line);
+                                    . "': expected " . sem_elem_type_name($ctx, $psigil, $want_et)
+                                    . ", got " . sem_elem_type_name($ctx, $psigil, $have_et), $line);
                             }
                         }
                     }
@@ -3723,10 +3922,11 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($other_sigil == 1) { $add_key = $sigil . ":" . $name; }
         scope_add_var($current_scope, $add_key, $sigil, $var_type, $line);
         if ($stmt->{"elem_type"} + 0 > 0) {
-            $current_scope->{"vars"}->{$add_key}->{"elem_type"} = $stmt->{"elem_type"} + 0;
+            $current_scope->{"vars"}->{$add_key}->{"elem_type"} = sem_node_et($ctx, $stmt, "elem_type", "elem_class");
         }
         if ($sigil eq "$" && $ctx->{"strict_types"} == 1 && is_valid_node($init_expr) == 1) {
-            sem_note_obj_class($ctx, $current_scope, $add_key, sem_ctor_class($ctx, $init_expr), 1);
+            my str $init_cls = sem_value_class($ctx, $init_expr);
+            sem_note_obj_class($ctx, $current_scope, $add_key, $init_cls, $ctx->{"recv_exact"} + 0);
         }
         if (length($c_alias) > 0) {
             $stmt->{"orig_name"} = $name;
@@ -3756,10 +3956,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 }
             }
             if ($ctx->{"strict_types"} == 1 && $sigil eq "@" && $stmt->{"elem_type"} + 0 > 0) {
-                sem_check_elem_value($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, "@", $line);
+                sem_check_elem_value($ctx, sem_node_et($ctx, $stmt, "elem_type", "elem_class"), $init_expr, $name, "@", $line);
             }
             if ($ctx->{"strict_types"} == 1 && $sigil eq "%" && $stmt->{"elem_type"} + 0 > 0) {
-                sem_check_hash_literal($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, $line);
+                sem_check_hash_literal($ctx, sem_node_et($ctx, $stmt, "elem_type", "elem_class"), $init_expr, $name, $line);
             }
         }
         return;
@@ -3832,7 +4032,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         $oinfo->{"c_name"} = $our_cname;
         $oinfo->{"our_key"} = $our_key;
         if ($stmt->{"elem_type"} + 0 > 0) {
-            $oinfo->{"elem_type"} = $stmt->{"elem_type"} + 0;
+            $oinfo->{"elem_type"} = sem_node_et($ctx, $stmt, "elem_type", "elem_class");
         }
 
         # Analyze initializer if present
@@ -3849,10 +4049,10 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 }
             }
             if ($ctx->{"strict_types"} == 1 && $sigil eq "@" && $stmt->{"elem_type"} + 0 > 0) {
-                sem_check_elem_value($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, "@", $line);
+                sem_check_elem_value($ctx, sem_node_et($ctx, $stmt, "elem_type", "elem_class"), $init_expr, $name, "@", $line);
             }
             if ($ctx->{"strict_types"} == 1 && $sigil eq "%" && $stmt->{"elem_type"} + 0 > 0) {
-                sem_check_hash_literal($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, $line);
+                sem_check_hash_literal($ctx, sem_node_et($ctx, $stmt, "elem_type", "elem_class"), $init_expr, $name, $line);
             }
         }
         return;
@@ -4092,12 +4292,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                             . " value from '" . sem_fn_display("" . $cur->{"package"}, "" . $cur->{"name"}) . "' (declared to return "
                             . ast_data_type_name($rtype) . ")", $line);
                     }
-                    my int $ret_et = $cur->{"return_elem_type"} + 0;
+                    my int $ret_et = sem_node_et($ctx, $cur, "return_elem_type", "return_elem_class");
                     if ($ret_et > 0 && ($rtype == TYPE_ARRAY() || $rtype == TYPE_HASH())) {
                         my str $ret_sig = "@";
                         if ($rtype == TYPE_HASH()) { $ret_sig = "%"; }
                         $ctx->{"elem_where"} = "the result of '" . sem_fn_display("" . $cur->{"package"}, "" . $cur->{"name"}) . "' (declared to return "
-                            . sem_elem_type_name($ret_sig, $ret_et) . ")";
+                            . sem_elem_type_name($ctx, $ret_sig, $ret_et) . ")";
                         if ($rtype == TYPE_ARRAY()) {
                             sem_check_elem_value($ctx, $ret_et, $ret_val, "", "@", $line);
                         } else {
@@ -4236,10 +4436,11 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 my scalar $fe_src = $stmt->{"array"};
                 if (is_valid_node($fe_src) == 1 && (($fe_src->{"type"} == NODE_VARIABLE() && ("" . $fe_src->{"sigil"}) eq "@") || $fe_src->{"type"} == NODE_CALL())) {
                     my int $fe_et = sem_src_elem_type($ctx, $fe_src, "@");
-                    if ($fe_et > 0 && sem_types_ok($ctx, $fe_vtype, $fe_et) == 0) {
+                    if ($fe_sigil eq "$") { sem_note_obj_class($ctx, $ctx->{"scope"}, $fe_vname, sem_et_class($ctx, $fe_et), 0); }
+                    if ($fe_et > 0 && sem_et_compat($ctx, $fe_vtype, $fe_et) == 0) {
                         sem_type_diag($ctx, "loop variable '$" . $fe_vname . "' (declared "
                             . ast_data_type_name($fe_vtype) . ") iterates over " . sem_src_display($ctx, $fe_src, "@")
-                            . " (declared " . sem_elem_type_name("@", $fe_et) . ")", $line);
+                            . " (declared " . sem_elem_type_name($ctx, "@", $fe_et) . ")", $line);
                     }
                 }
             }
@@ -4394,7 +4595,7 @@ func analyze_function(scalar $ctx, scalar $fn) void {
         } else {
             scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
             if ($param->{"elem_type"} + 0 > 0) {
-                $ctx->{"scope"}->{"vars"}->{$pname}->{"elem_type"} = $param->{"elem_type"} + 0;
+                $ctx->{"scope"}->{"vars"}->{$pname}->{"elem_type"} = sem_node_et($ctx, $param, "elem_type", "elem_class");
             }
             if ($i == 0 && $pname eq "self" && $sigil eq "$" && $f_pkg ne "main") {
                 sem_note_obj_class($ctx, $ctx->{"scope"}, $pname, $f_pkg, 0);
@@ -4502,10 +4703,10 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
                     my str $ge_oname = "" . $gvar->{"orig_name"};
                     if (length($ge_oname) == 0) { $ge_oname = "" . $gvar->{"name"}; }
                     if ($gvar->{"sigil"} eq "@") {
-                        sem_check_elem_value($ctx, $gvar->{"elem_type"} + 0, $gvar->{"init"}, $ge_oname, "@", ast_get_line($gvar));
+                        sem_check_elem_value($ctx, sem_node_et($ctx, $gvar, "elem_type", "elem_class"), $gvar->{"init"}, $ge_oname, "@", ast_get_line($gvar));
                     }
                     if ($gvar->{"sigil"} eq "%") {
-                        sem_check_hash_literal($ctx, $gvar->{"elem_type"} + 0, $gvar->{"init"}, $ge_oname, ast_get_line($gvar));
+                        sem_check_hash_literal($ctx, sem_node_et($ctx, $gvar, "elem_type", "elem_class"), $gvar->{"init"}, $ge_oname, ast_get_line($gvar));
                     }
                 }
             }
