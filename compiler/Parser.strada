@@ -3745,6 +3745,8 @@ func parse_our_decl(scalar $parser) scalar {
     my scalar $peek_tok = parser_current($parser);
     my str $peek_type = $peek_tok->{"type"};
     my int $var_type = 0;
+    my int $our_et = 0;
+    my str $our_ec = "";
 
     if ($peek_type eq "DOLLAR" || $peek_type eq "AT" || $peek_type eq "PERCENT") {
         if ($peek_type eq "DOLLAR") { $var_type = TYPE_SCALAR(); }
@@ -3752,6 +3754,8 @@ func parse_our_decl(scalar $parser) scalar {
         elsif ($peek_type eq "PERCENT") { $var_type = TYPE_HASH(); }
     } else {
         $var_type = parse_type($parser);
+        $our_et = $parser->{"last_elem_type"} + 0;
+        $our_ec = "" . $parser->{"last_elem_class"};
     }
 
     # Get sigil and name
@@ -3774,6 +3778,10 @@ func parse_our_decl(scalar $parser) scalar {
     my scalar $decl = ast_new_our_decl($name, $var_type, $sigil);
     $decl->{"strict_types"} = $parser->{"strict_types"} + 0;
     ast_set_line($decl, $decl_line);
+    if ($our_et > 0) {
+        $decl->{"elem_type"} = $our_et;
+        if (length($our_ec) > 0) { $decl->{"elem_class"} = $our_ec; }
+    }
 
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {

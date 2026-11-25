@@ -20,6 +20,17 @@
   elements) are unchecked. Compile-time only: generated C is unchanged.
   Also fixed: `(%$base, k => v)` in a typed hash initializer was a false
   error.
+- **`our`, file-level and returned containers are checked (2026-11-25)**:
+  `our array<int> @g` / `our hash<str> %h` (file level, in a function, and
+  `local`), file-level `my` containers, `return` values of a function
+  declared `array<T>` / `hash<T>`, and such a function's result where it
+  is stored, pushed, passed or looped over. A call's declared return type
+  is now known however the call is written (unqualified inside a package,
+  `Pkg::f()`, `::f()`); before, only a call spelled like the function's
+  internal name was typed, so `my int $n = Pkg::ratio();` passed. A file
+  with the pragma that relied on that needs `int(...)`. Also fixed:
+  `our $x` next to `our @x` was checked against the array's type.
+  Compile-time only: generated C is unchanged.
 - **Bare `use strict;`** is accepted and does nothing (it was a "cannot
   find module strict" error). Example: `examples/checked_types.strada`.
 - **Element types** — `array<T>`, `hash<T>`, `hash<str, T>` with T = `int`,

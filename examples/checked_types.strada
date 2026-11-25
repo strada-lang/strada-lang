@@ -37,6 +37,16 @@ func total(array<int> @prices, num $tax) num {
     return $sum * (1 + $tax);
 }
 
+# A function's result can carry an element type, and so can an `our`.
+our array<str> @history = ();
+
+func doubled(array<int> @n) array<int> {
+    my array<int> @out = ();
+    foreach my int $v (@n) { push(@out, $v * 2); }
+    push(@history, "doubled");
+    return @out;
+}
+
 func longest(array<str> @words) str {
     my str $best = "";
     foreach my str $w (@words) {
@@ -85,6 +95,11 @@ func main() int {
 
     # push(@prices, "forty");            # would not compile
     # my str $s = $prices[0];            # would not compile: the element is an int
+
+    my array<int> @twice = doubled(@prices);
+    say("twice: " . join(",", @twice) . " history=" . join(",", @history));
+    # my array<str> @t2 = doubled(@prices);  # would not compile: the result is array<int>
+    # push(@history, 1);                 # would not compile: @history is array<str>
 
     my array<str> @words = ("road", "strada", "via");
     say("longest: " . longest(@words));

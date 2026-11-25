@@ -873,6 +873,7 @@ func ctx_new() scalar {
     $ctx{"asg_root"} = 0;
     $ctx{"asg_set"} = 0;
     $ctx{"prog"} = 0;
+    $ctx{"elem_where"} = "";
     $ctx{"cur_file"} = "";
     $ctx{"cur_pkg"} = "main";
     $ctx{"cur_block_line"} = 0;
@@ -1417,9 +1418,120 @@ func sem_var_elem_type(scalar $ctx, scalar $vnode, str $sigil) int {
     if ($vnode->{"type"} != NODE_VARIABLE()) { return 0; }
     my str $vname = "" . $vnode->{"orig_name"};
     if (length($vname) == 0) { $vname = "" . $vnode->{"name"}; }
+    return sem_name_elem_type($ctx, $vname, $sigil, ast_get_line($vnode));
+}
+
+# Declared type of a scalar variable. A file-level name is one root entry
+# for `$x`, `@x` and `%x` and every redeclaration, typed by the first of
+# them: the scalar's type comes from the declaration the reference binds to.
+func sem_scalar_decl_type(scalar $ctx, scalar $vinfo, str $vname, int $line) int {
+    if ($vinfo->{"is_global"} == 1 && defined($vinfo->{"decls"})) {
+        my scalar $sd = resolve_global_decl_node($ctx, $vinfo, $vname, $line, "$");
+        if (is_valid_node($sd) == 0) { return TYPE_SCALAR(); }
+        if ($sd->{"type"} == NODE_CONST_DECL()) { return $vinfo->{"type"}; }
+        return $sd->{"var_type"} + 0;
+    }
+    return $vinfo->{"type"};
+}
+
+# The same by name. A file-level variable takes the element type from the
+# declaration this reference binds to: the root scope keeps one entry per
+# bare name, shared by every package, sigil and file-level redeclaration.
+func sem_name_elem_type(scalar $ctx, str $vname, str $sigil, int $line) int {
     my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $vname, $sigil);
     if ($lk->{"found"} != 1) { return 0; }
-    return $lk->{"info"}->{"elem_type"} + 0;
+    my scalar $nvinfo = $lk->{"info"};
+    if ($nvinfo->{"is_global"} == 1 && defined($nvinfo->{"decls"})) {
+        my scalar $gd = resolve_global_decl_node($ctx, $nvinfo, $vname, $line, $sigil);
+        if (is_valid_node($gd) == 0) { return 0; }
+        if ($gd->{"type"} != NODE_VAR_DECL() && $gd->{"type"} != NODE_OUR_DECL()) { return 0; }
+        return $gd->{"elem_type"} + 0;
+    }
+    return $nvinfo->{"elem_type"} + 0;
+}
+
+# Declared element type of what an expression yields as a whole array ("@")
+# or hash ("%"): a variable's, or that of a call to a function whose return
+# type carries one. 0 = not known.
+func sem_src_elem_type(scalar $ctx, scalar $node, str $sigil) int {
+    if (is_valid_node($node) == 0) { return 0; }
+    my int $nt = $node->{"type"};
+    if ($nt == NODE_VARIABLE()) {
+        if (("" . $node->{"sigil"}) ne $sigil) { return 0; }
+        return sem_var_elem_type($ctx, $node, $sigil);
+    }
+    if ($nt == NODE_CALL()) {
+        my scalar $cfi = sem_call_fn_info($ctx, $node);
+        if ($cfi->{"is_registered"} != 1) { return 0; }
+        my int $want_rt = TYPE_ARRAY();
+        if ($sigil eq "%") { $want_rt = TYPE_HASH(); }
+        if ($cfi->{"return_type"} != $want_rt) { return 0; }
+        my scalar $cfn = $cfi->{"node"};
+        if (is_valid_node($cfn) == 0) { return 0; }
+        return $cfn->{"return_elem_type"} + 0;
+    }
+    return 0;
+}
+
+# The function table entry a call node resolved to (analyze_expression
+# records the key: an unqualified or `Pkg::f` call is registered under
+# another spelling than the node's name).
+func sem_call_fn_info(scalar $ctx, scalar $node) scalar {
+    my str $fk = "" . $node->{"sem_fn_key"};
+    if (length($fk) > 0) { return $ctx->{"functions"}->{$fk}; }
+    # not analyzed yet (a check that runs before the arguments are)
+    my str $cn = "" . $node->{"name"};
+    # a builtin always wins over a function of the same name, and the
+    # analyzer never records a key for it
+    if ($ctx->{"builtins"}->{$cn} == 1) { return $ctx->{"functions"}->{""}; }
+    my scalar $direct = $ctx->{"functions"}->{$cn};
+    if ($direct->{"is_registered"} == 1) { return $direct; }
+    my int $qcol = rindex($cn, "::");
+    if ($qcol > 0) {
+        return $ctx->{"functions"}->{sem_pkg_fn_key($ctx, substr($cn, 0, $qcol), substr($cn, $qcol + 2, length($cn) - $qcol - 2))};
+    }
+    my str $cpk = "" . $ctx->{"cur_pkg"};
+    if ($ctx->{"current_func"}) { $cpk = "" . $ctx->{"current_func"}->{"package"}; }
+    if (length($cpk) == 0 || $cpk eq "main") { return $direct; }
+    return $ctx->{"functions"}->{sem_pkg_fn_key($ctx, $cpk, $cn)};
+}
+
+# `Pkg::name` for a package function whose name carries the C prefix.
+func sem_fn_display(str $pkg, str $fname) str {
+    if (length($pkg) == 0 || $pkg eq "main") { return $fname; }
+    my str $c_pk = $pkg;
+    my int $pci = index($c_pk, "::");
+    while ($pci >= 0) {
+        $c_pk = substr($c_pk, 0, $pci) . "_" . substr($c_pk, $pci + 2, length($c_pk) - $pci - 2);
+        $pci = index($c_pk, "::");
+    }
+    my int $plen = length($c_pk) + 1;
+    if (length($fname) > $plen && substr($fname, 0, $plen) eq $c_pk . "_") {
+        return $pkg . "::" . substr($fname, $plen, length($fname) - $plen);
+    }
+    if (index($fname, "::") >= 0) { return $fname; }
+    return $pkg . "::" . $fname;
+}
+
+# How a diagnostic names such a source.
+func sem_src_display(scalar $ctx, scalar $node, str $sigil) str {
+    if ($node->{"type"} == NODE_CALL()) {
+        my str $dpkg = "" . $node->{"sem_fn_pkg"};
+        if (length("" . $node->{"sem_fn_key"}) == 0) {
+            my scalar $dfi = sem_call_fn_info($ctx, $node);
+            if ($dfi->{"is_registered"} == 1) { $dpkg = "" . $dfi->{"package"}; }
+        }
+        return "the result of '" . sem_fn_display($dpkg, "" . $node->{"name"}) . "'";
+    }
+    return "'" . $sigil . sem_var_display_name($node) . "'";
+}
+
+# How a diagnostic names the typed container being written: the variable, or
+# (ctx `elem_where`, set while a `return` is checked) the function's result.
+func sem_elem_dest(scalar $ctx, str $cname, str $csigil, int $etype) str {
+    my str $ew = "" . $ctx->{"elem_where"};
+    if (length($ew) > 0) { return $ew; }
+    return "'" . $csigil . $cname . "' (declared " . sem_elem_type_name($csigil, $etype) . ")";
 }
 
 func sem_var_display_name(scalar $vnode) str {
@@ -1452,17 +1564,26 @@ func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str 
         my int $src_et = sem_var_elem_type($ctx, $val, "@");
         if ($src_et > 0 && sem_types_ok($ctx, $etype, $src_et) == 0) {
             sem_type_diag($ctx, "putting the elements of '@" . sem_var_display_name($val) . "' ("
-                . sem_elem_type_name("@", $src_et) . ") into '" . $csigil . $cname . "' (declared "
-                . sem_elem_type_name($csigil, $etype) . ")", $line);
+                . sem_elem_type_name("@", $src_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
         }
         return;
+    }
+    if ($vt == NODE_CALL()) {
+        my int $call_et = sem_src_elem_type($ctx, $val, "@");
+        if ($call_et > 0) {
+            if (sem_types_ok($ctx, $etype, $call_et) == 0) {
+                sem_type_diag($ctx, "putting " . sem_src_display($ctx, $val, "@") . " ("
+                    . sem_elem_type_name("@", $call_et) . ") into " . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
+            }
+            return;
+        }
     }
     if ($vt == NODE_VARIABLE() && ("" . $val->{"sigil"}) eq "%") { return; }
     my int $atype = stage0_expr_type($ctx, $val);
     if ($atype == TYPE_ARRAY() || $atype == TYPE_HASH()) { return; }
     if (sem_types_ok($ctx, $etype, $atype) == 0) {
-        sem_type_diag($ctx, "storing a " . ast_data_type_name($atype) . " value in '" . $csigil . $cname
-            . "' (declared " . sem_elem_type_name($csigil, $etype) . ")", $line);
+        sem_type_diag($ctx, "storing a " . ast_data_type_name($atype) . " value in "
+            . sem_elem_dest($ctx, $cname, $csigil, $etype), $line);
     }
 }
 
@@ -1471,6 +1592,15 @@ func sem_check_elem_value(scalar $ctx, int $etype, scalar $val, str $cname, str 
 func sem_check_hash_literal(scalar $ctx, int $etype, scalar $val, str $cname, int $line) void {
     if (is_valid_node($val) == 0) { return; }
     my int $hvt = $val->{"type"};
+    if ($hvt == NODE_VARIABLE() || $hvt == NODE_CALL()) {
+        # a whole hash: another typed hash, or a call returning one
+        my int $hsrc_et = sem_src_elem_type($ctx, $val, "%");
+        if ($hsrc_et > 0 && sem_types_ok($ctx, $etype, $hsrc_et) == 0) {
+            sem_type_diag($ctx, "putting the values of " . sem_src_display($ctx, $val, "%") . " ("
+                . sem_elem_type_name("%", $hsrc_et) . ") into " . sem_elem_dest($ctx, $cname, "%", $etype), $line);
+        }
+        return;
+    }
     if ($hvt == NODE_ANON_HASH()) {
         my scalar $hvals = $val->{"values"};
         my int $hpc = $val->{"pair_count"};
@@ -2016,8 +2146,7 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
         if (length($vname) == 0) { $vname = "" . $expr->{"name"}; }
         my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $vname, "$");
         if ($lk->{"found"} == 1) {
-            my scalar $info = $lk->{"info"};
-            return $info->{"type"};
+            return sem_scalar_decl_type($ctx, $lk->{"info"}, $vname, ast_get_line($expr));
         }
         return TYPE_SCALAR();
     }
@@ -2105,7 +2234,7 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
             }
             return TYPE_SCALAR();
         }
-        my scalar $fn_info = $ctx->{"functions"}->{$name};
+        my scalar $fn_info = sem_call_fn_info($ctx, $expr);
         if ($fn_info->{"is_registered"} == 1) {
             return $fn_info->{"return_type"};
         }
@@ -2892,6 +3021,12 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             }
         }
 
+        # the function this call resolved to, for the type checks
+        if ($fn_info->{"is_registered"} == 1) {
+            $expr->{"sem_fn_key"} = $lookup_name;
+            $expr->{"sem_fn_pkg"} = "" . $fn_info->{"package"};
+        }
+
         if ($fn_info->{"is_private"} == 1) {
             my str $callee_pkg = "" . $fn_info->{"package"};
             if (length($callee_pkg) == 0) { $callee_pkg = "main"; }
@@ -2983,9 +3118,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                         }
                     } elsif (($psigil eq "@" || $psigil eq "%") && $cparam->{"elem_type"} + 0 > 0) {
                         my scalar $carg = $args->[$i];
-                        if (is_valid_node($carg) == 1 && $carg->{"type"} == NODE_VARIABLE() && ("" . $carg->{"sigil"}) eq $psigil) {
+                        if (is_valid_node($carg) == 1 && (($carg->{"type"} == NODE_VARIABLE() && ("" . $carg->{"sigil"}) eq $psigil) || $carg->{"type"} == NODE_CALL())) {
                             my int $want_et = $cparam->{"elem_type"} + 0;
-                            my int $have_et = sem_var_elem_type($ctx, $carg, $psigil);
+                            my int $have_et = sem_src_elem_type($ctx, $carg, $psigil);
                             if ($have_et > 0 && $have_et != $want_et && sem_types_ok($ctx, $want_et, $have_et) == 0) {
                                 my int $cargno = $i + 1;
                                 sem_type_diag($ctx, "argument " . $cargno . " to '" . $name
@@ -3117,7 +3252,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     if (length($t_orig) == 0) { $t_orig = "" . $tgt->{"name"}; }
                     my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $t_orig, "$");
                     if ($lk->{"found"} == 1) {
-                        my int $dtype = $lk->{"info"}->{"type"};
+                        my int $dtype = sem_scalar_decl_type($ctx, $lk->{"info"}, $t_orig, ast_get_line($tgt));
                         my int $atype = stage0_expr_type($ctx, $expr->{"value"});
                         if (sem_types_ok($ctx, $dtype, $atype) == 0) {
                             # Assign nodes don't always carry a line — fall
@@ -3696,6 +3831,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         $oinfo->{"is_our"} = 1;
         $oinfo->{"c_name"} = $our_cname;
         $oinfo->{"our_key"} = $our_key;
+        if ($stmt->{"elem_type"} + 0 > 0) {
+            $oinfo->{"elem_type"} = $stmt->{"elem_type"} + 0;
+        }
 
         # Analyze initializer if present
         sem_scalar_decl_count($ctx, $stmt);
@@ -3709,6 +3847,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                         . ast_data_type_name($var_type) . ") with a "
                         . ast_data_type_name($our_atype) . " value", $line);
                 }
+            }
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "@" && $stmt->{"elem_type"} + 0 > 0) {
+                sem_check_elem_value($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, "@", $line);
+            }
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "%" && $stmt->{"elem_type"} + 0 > 0) {
+                sem_check_hash_literal($ctx, $stmt->{"elem_type"} + 0, $init_expr, $name, $line);
             }
         }
         return;
@@ -3787,6 +3931,15 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
+            if ($ctx->{"strict_types"} == 1 && $stmt->{"is_hash_elem"} != 1 && index($name, "::") < 0 && ($sigil eq "@" || $sigil eq "%")) {
+                my int $loc_et = sem_name_elem_type($ctx, $name, $sigil, $line);
+                if ($loc_et > 0 && $sigil eq "@") {
+                    sem_check_elem_value($ctx, $loc_et, $init_expr, $name, "@", $line);
+                }
+                if ($loc_et > 0 && $sigil eq "%") {
+                    sem_check_hash_literal($ctx, $loc_et, $init_expr, $name, $line);
+                }
+            }
         }
         return;
     }
@@ -3936,8 +4089,21 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     my int $atype = stage0_expr_type($ctx, $ret_val);
                     if (sem_types_ok($ctx, $rtype, $atype) == 0) {
                         sem_type_diag($ctx, "returning a " . ast_data_type_name($atype)
-                            . " value from '" . $cur->{"name"} . "' (declared to return "
+                            . " value from '" . sem_fn_display("" . $cur->{"package"}, "" . $cur->{"name"}) . "' (declared to return "
                             . ast_data_type_name($rtype) . ")", $line);
+                    }
+                    my int $ret_et = $cur->{"return_elem_type"} + 0;
+                    if ($ret_et > 0 && ($rtype == TYPE_ARRAY() || $rtype == TYPE_HASH())) {
+                        my str $ret_sig = "@";
+                        if ($rtype == TYPE_HASH()) { $ret_sig = "%"; }
+                        $ctx->{"elem_where"} = "the result of '" . sem_fn_display("" . $cur->{"package"}, "" . $cur->{"name"}) . "' (declared to return "
+                            . sem_elem_type_name($ret_sig, $ret_et) . ")";
+                        if ($rtype == TYPE_ARRAY()) {
+                            sem_check_elem_value($ctx, $ret_et, $ret_val, "", "@", $line);
+                        } else {
+                            sem_check_hash_literal($ctx, $ret_et, $ret_val, "", $line);
+                        }
+                        $ctx->{"elem_where"} = "";
                     }
                 }
             }
@@ -4068,12 +4234,12 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             scope_mark_used_sigil($ctx->{"scope"}, $fe_vname, $fe_sigil);
             if ($ctx->{"strict_types"} == 1) {
                 my scalar $fe_src = $stmt->{"array"};
-                if (is_valid_node($fe_src) == 1 && $fe_src->{"type"} == NODE_VARIABLE() && ("" . $fe_src->{"sigil"}) eq "@") {
-                    my int $fe_et = sem_var_elem_type($ctx, $fe_src, "@");
+                if (is_valid_node($fe_src) == 1 && (($fe_src->{"type"} == NODE_VARIABLE() && ("" . $fe_src->{"sigil"}) eq "@") || $fe_src->{"type"} == NODE_CALL())) {
+                    my int $fe_et = sem_src_elem_type($ctx, $fe_src, "@");
                     if ($fe_et > 0 && sem_types_ok($ctx, $fe_vtype, $fe_et) == 0) {
                         sem_type_diag($ctx, "loop variable '$" . $fe_vname . "' (declared "
-                            . ast_data_type_name($fe_vtype) . ") iterates over '@" . sem_var_display_name($fe_src)
-                            . "' (declared " . sem_elem_type_name("@", $fe_et) . ")", $line);
+                            . ast_data_type_name($fe_vtype) . ") iterates over " . sem_src_display($ctx, $fe_src, "@")
+                            . " (declared " . sem_elem_type_name("@", $fe_et) . ")", $line);
                     }
                 }
             }
@@ -4330,6 +4496,16 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
                         sem_type_diag($ctx, "initializing '$" . $gv_oname . "' (declared "
                             . ast_data_type_name($gv_type) . ") with a "
                             . ast_data_type_name($ga_type) . " value", ast_get_line($gvar));
+                    }
+                }
+                if ($ctx->{"strict_types"} == 1 && ($gvar->{"type"} == NODE_VAR_DECL() || $gvar->{"type"} == NODE_OUR_DECL()) && $gvar->{"elem_type"} + 0 > 0) {
+                    my str $ge_oname = "" . $gvar->{"orig_name"};
+                    if (length($ge_oname) == 0) { $ge_oname = "" . $gvar->{"name"}; }
+                    if ($gvar->{"sigil"} eq "@") {
+                        sem_check_elem_value($ctx, $gvar->{"elem_type"} + 0, $gvar->{"init"}, $ge_oname, "@", ast_get_line($gvar));
+                    }
+                    if ($gvar->{"sigil"} eq "%") {
+                        sem_check_hash_literal($ctx, $gvar->{"elem_type"} + 0, $gvar->{"init"}, $ge_oname, ast_get_line($gvar));
                     }
                 }
             }

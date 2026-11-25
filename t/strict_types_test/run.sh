@@ -480,6 +480,207 @@ printf 'func main() int { my hash<int, str> %%h = (); return 0; }\n' > p3.strada
 check "hash key type" "hash keys are strings" "$("$STRADA" -O0 -o p3 p3.strada 2>&1)"
 
 # ---- the VM agrees ---------------------------------------------------------
+# ---- our / file-level containers and returned containers -----------------
+# A file-level `my`, an `our` (file level or in a function) and `local` are
+# checked like a `my` container; each reference uses the declaration it
+# binds to (same name in another package, other sigils of the same name).
+cat > gc.strada <<'SRC'
+use strict "types";
+our array<int> @g = (1, "two");
+our hash<int> %gh = (a => 1, b => "x");
+my array<num> @fm = (1.5, "s");
+our array<int> @ok = (1, 2);
+our $g = "a scalar of the same name";
+
+package Lib;
+our array<str> @g = ("a", 3);
+func touch() void {
+    push(@g, 5);
+    $g[0] = 7;
+    our array<int> @fl = (1, "q");
+    push(@fl, "z");
+    local @g = ("a", 1);
+}
+
+package main;
+func main() int {
+    push(@g, "s");
+    $g[0] = "t";
+    $gh{"k"} = "v";
+    push(@fm, "w");
+    @g = (1, "u");
+    %gh = (a => "b");
+    my str $e = $g[0];
+    my int $n = shift(@fm);
+    foreach my str $q (@g) { say($q); }
+    $g = $g . "!";
+    return 0;
+}
+SRC
+out=$("$STRADA" --check gc.strada 2>&1)
+check "our array initializer"        "gc.strada:2: error: storing a str value in '@g' (declared array<int>)" "$out"
+check "our hash initializer"         "gc.strada:3: error: storing a str value in '%gh' (declared hash<int>)" "$out"
+check "file-level my initializer"    "gc.strada:4: error: storing a str value in '@fm' (declared array<num>)" "$out"
+check "our in another package"       "gc.strada:9: error: storing a int value in '@g' (declared array<str>)" "$out"
+check "push onto that package's our" "gc.strada:11: error: storing a int value in '@g' (declared array<str>)" "$out"
+check "element of that our"          "gc.strada:12: error: storing a int value in '@g' (declared array<str>)" "$out"
+check "our in a function"            "gc.strada:13: error: storing a str value in '@fl' (declared array<int>)" "$out"
+check "push onto a function's our"   "gc.strada:14: error: storing a str value in '@fl'" "$out"
+check "local list"                   "gc.strada:15: error: storing a int value in '@g' (declared array<str>)" "$out"
+check "push onto main's our"         "gc.strada:20: error: storing a str value in '@g' (declared array<int>)" "$out"
+check "our element assignment"       "gc.strada:21: error: storing a str value in '@g' (declared array<int>)" "$out"
+check "our hash element"             "gc.strada:22: error: storing a str value in '%gh' (declared hash<int>)" "$out"
+check "push onto a file-level my"    "gc.strada:23: error: storing a str value in '@fm' (declared array<num>)" "$out"
+check "our list assignment"          "gc.strada:24: error: storing a str value in '@g'" "$out"
+check "our hash assignment"          "gc.strada:25: error: storing a str value in '%gh'" "$out"
+check "our element read is typed"    "gc.strada:26: error: initializing '\$e' (declared str) with a int value" "$out"
+check "shift of a file-level my"     "gc.strada:27: error: initializing '\$n' (declared int) with a num value" "$out"
+check "foreach over an our"          "gc.strada:28: error: loop variable '\$q' (declared str) iterates over '@g' (declared array<int>)" "$out"
+check "our: nothing else reported"   "compilation failed: 18 semantic errors" "$out"
+
+# A function's declared element type is checked at its `return`s and where
+# its result goes (called unqualified, as Pkg::f() and as ::f()).
+cat > gr.strada <<'SRC'
+use strict "types";
+package Lib;
+func strs() array<str> { return ("a", "b"); }
+func cnt() hash<int> { my hash<int> %c = (a => 1); return %c; }
+func bad1() array<int> { return (1, "x"); }
+func bad2() array<int> { my array<str> @s = ("a"); return @s; }
+func bad3() hash<int> { return (a => "x"); }
+func bad4() array<int> { return strs(); }
+func bad5() hash<int> { my hash<str> %s = (a => "b"); return %s; }
+func take(array<int> @a) int { return scalar(@a); }
+func use_them() void {
+    my array<int> @a = strs();
+    my array<int> @b = Lib::strs();
+    my array<int> @c = ::strs();
+    my hash<str> %h = cnt();
+    push(@a, strs());
+    @a = strs();
+    foreach my int $v (strs()) { say($v); }
+    take(strs());
+}
+package main;
+our hash<str> %gh = ();
+func half() num { return 0.5; }
+func main() int {
+    %gh = Lib::cnt();
+    my hash<str> %hs = Lib::cnt();
+    my array<int> @m = (1, Lib::strs());
+    my int $i = half();
+    return 0;
+}
+SRC
+out=$("$STRADA" --check gr.strada 2>&1)
+check "return list"            "gr.strada:5: error: storing a str value in the result of 'Lib::bad1' (declared to return array<int>)" "$out"
+check "return typed array"     "gr.strada:6: error: putting the elements of '@s' (array<str>) into the result of 'Lib::bad2' (declared to return array<int>)" "$out"
+check "return hash list"       "gr.strada:7: error: storing a str value in the result of 'Lib::bad3' (declared to return hash<int>)" "$out"
+check "return a call"          "gr.strada:8: error: putting the result of 'Lib::strs' (array<str>) into the result of 'Lib::bad4'" "$out"
+check "return typed hash"      "gr.strada:9: error: putting the values of '%s' (hash<str>) into the result of 'Lib::bad5' (declared to return hash<int>)" "$out"
+check "result: unqualified"    "gr.strada:12: error: putting the result of 'Lib::strs' (array<str>) into '@a' (declared array<int>)" "$out"
+check "result: Pkg::f()"       "gr.strada:13: error: putting the result of 'Lib::strs' (array<str>) into '@b'" "$out"
+check "result: ::f()"          "gr.strada:14: error: putting the result of 'Lib::strs' (array<str>) into '@c'" "$out"
+check "result: hash"           "gr.strada:15: error: putting the values of the result of 'Lib::cnt' (hash<int>) into '%h' (declared hash<str>)" "$out"
+check "result: push"           "gr.strada:16: error: putting the result of 'Lib::strs' (array<str>) into '@a'" "$out"
+check "result: assignment"     "gr.strada:17: error: putting the result of 'Lib::strs' (array<str>) into '@a'" "$out"
+check "result: foreach"        "gr.strada:18: error: loop variable '\$v' (declared int) iterates over the result of 'Lib::strs' (declared array<str>)" "$out"
+check "result: argument"       "gr.strada:19: error: argument 1 to 'take': expected array<int>, got array<str>" "$out"
+check "result: into an our"    "gr.strada:25: error: putting the values of the result of 'Lib::cnt' (hash<int>) into '%gh'" "$out"
+check "result: from main"      "gr.strada:26: error: putting the values of the result of 'Lib::cnt' (hash<int>) into '%hs'" "$out"
+check "result: inside a list"  "gr.strada:27: error: putting the result of 'Lib::strs' (array<str>) into '@m'" "$out"
+check "scalar result: Pkg-less call in main" "gr.strada:28: error: initializing '\$i' (declared int) with a num value" "$out"
+check "returns: nothing else reported" "compilation failed: 17 semantic errors" "$out"
+
+# Must compile: the same name as `our` in two packages with different
+# element types, $g / @g / %g together, a file-level `my` declared twice, a
+# parameter and a `my` hiding typed globals, an untyped `our` in a function,
+# a module's global of the same name, a closure's `return` inside a typed
+# function, array<int> into array<num>.
+mkdir -p gclib
+cat > gclib/OcMod.strada <<'SRC'
+package OcMod;
+use strict "types";
+our array<str> @shared = ("m");
+my array<str> @x = ("mod");
+func names() array<str> { return @shared; }
+func nx() int { return scalar(@x); }
+1;
+SRC
+cat > gcok.strada <<'SRC'
+use strict "types";
+use lib "gclib";
+use OcMod;
+our array<int> @g = (1, 2);
+our $g = "scalar g";
+our hash<str> %g = (a => "b");
+my array<int> @x = (1, 2);
+our array<str> @shared = ("main");
+
+package A;
+our array<str> @t = ("a");
+func add(str $s) void { push(@t, $s); }
+func all() array<str> { return @t; }
+func cnt() hash<int> { my hash<int> %c = (a => 1); return %c; }
+package B;
+our array<int> @t = (1);
+func add(int $n) void { push(@t, $n); }
+func all() array<int> { return @t; }
+func shadow(array<str> @g) int { push(@g, "p"); my array<str> @t = ("l"); push(@t, "m"); return scalar(@g) + scalar(@t); }
+func untyped() int { our @u; push(@u, "a"); push(@u, 1); return scalar(@u); }
+func cl() array<int> { my $f = func () { return "str"; }; my $r = $f->(); return (1, 2); }
+
+package main;
+my array<str> @x = ("later", "decl");
+func main() int {
+    push(@g, 3); $g{"c"} = "d"; $g = $g . "!";
+    A::add("b"); B::add(2);
+    my array<str> @as = A::all();
+    my array<int> @bs = B::all();
+    my hash<int> %c = A::cnt();
+    my array<num> @ns = B::all();
+    push(@x, "s");
+    push(@shared, "m2");
+    my array<str> @mn = OcMod::names();
+    my int $sum = 0;
+    foreach my int $v (B::all()) { $sum = $sum + $v; }
+    say(join(",", @g) . " " . $g . " " . $g{"c"} . " " . join(",", @as) . " " . join(",", @bs) . " " . $c{"a"} . " " . scalar(@ns) . " " . join(",", @x) . " " . join(",", @shared) . " " . join(",", @mn) . " " . OcMod::nx() . " " . B::shadow("z") . " " . B::untyped() . " " . scalar(B::cl()) . " " . $sum);
+    return 0;
+}
+SRC
+GCOK_EXPECT="1,2,3 scalar g! d a,b 1,2 1 2 later,decl,s main,m2 m 1 2 2 2 3"
+"$STRADA" gcok.strada -o gcok 2>gcok.err
+check "same-named globals compile and run" "$GCOK_EXPECT" "$(./gcok 2>&1; cat gcok.err)"
+
+# A package function named like a builtin: the builtin is what an
+# unqualified call means, and it is not typed as that function.
+cat > bn.strada <<'SRC'
+use strict "types";
+package Lib;
+func sort(scalar $self) array<str> { return ("a", "b"); }
+func reverse(scalar $self) array<str> { return ("a", "b"); }
+func keys(scalar $self) array<str> { return ("a", "b"); }
+func shift(scalar $self) int { return 1; }
+func length(scalar $self) str { return "x"; }
+func take(array<int> @a) int { return scalar(@a); }
+func first { my str $n = shift; return $n; }
+func go() int {
+    my array<int> @n = (3, 1, 2);
+    my hash<int> %h = (a => 1);
+    my array<int> @s = sort(@n);
+    my array<int> @ints = ();
+    push(@ints, reverse(@n));
+    my array<int> @ks = (1);
+    foreach my int $v (sort(@n)) { push(@ks, $v); }
+    my int $len = length("abc");
+    return take(sort(@n)) + scalar(@s) + scalar(@ints) + $len;
+}
+package main;
+func main() int { say(Lib::go() . Lib::first("q")); return 0; }
+SRC
+"$STRADA" bn.strada -o bn 2>bn.err
+check "builtin names are not taken for package functions" "12q" "$(./bn 2>&1; cat bn.err)"
+
 if [ -x "$INTERP" ]; then
     check "typed program runs (VM)" "157.5" "$("$INTERP" ok.strada 2>&1)"
     out=$("$INTERP" bad.strada 2>&1); rc=$?
@@ -495,6 +696,11 @@ if [ -x "$INTERP" ]; then
     out=$("$INTERP" mc.strada 2>&1); rc=$?
     if [ $rc -ne 0 ]; then echo "ok: VM rejects method mismatches"; else echo "FAIL: VM ran mc.strada"; FAILURES=$((FAILURES + 1)); fi
     check "VM reports method errors" "mc.strada:20: error: argument 1 to 'Acct::deposit': expected int, got str" "$out"
+    out=$("$INTERP" gc.strada 2>&1)
+    check "VM reports our-container errors" "gc.strada:20: error: storing a str value in '@g' (declared array<int>)" "$out"
+    out=$("$INTERP" gr.strada 2>&1)
+    check "VM reports returned-container errors" "gr.strada:12: error: putting the result of 'Lib::strs' (array<str>) into '@a'" "$out"
+    check "VM runs same-named globals" "$GCOK_EXPECT" "$("$INTERP" gcok.strada 2>&1)"
     check "VM runs uncertain receivers" "circle*big tag7 circle*x v=4 circle*f 6 tag5" "$("$INTERP" mcok.strada 2>&1 | tr '\n' ' ')"
     # The VM enforces the type checks only: code the compiler alone rejects
     # for other reasons (too few arguments here) still runs.

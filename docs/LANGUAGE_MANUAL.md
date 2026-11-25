@@ -180,8 +180,8 @@ func main() int {
 ```
 
 - **Checked:** `my`/`our` initializers, assignments to declared scalars, call
-  arguments, `return` values, and values put into a `my` variable or
-  parameter declared with an element type: literal initializer and
+  arguments, `return` values, and values put into a variable,
+  parameter or function result declared with an element type: literal initializer and
   assignment lists (`(1, 2)`, `(a => 1)`), `$a[i] = v`, `$h{k} = v`, `push`,
   `unshift`, a `foreach` variable's declared type, and array arguments.
 - **Element types:** `array<T>`, `hash<T>` and `hash<str, T>`, where T is
@@ -212,13 +212,19 @@ func main() int {
   `my $v = Pkg::new(...)` that the function never assigns again, a typed
   `catch (Pkg $e)` variable, a class name (`Pkg->m(...)`) and
   `SUPER::m(...)`.
+- **`our`, file-level and returned containers:** an `our` or file-level
+  `my` container with an element type is checked like a local one, wherever
+  it is used (each use follows the declaration it refers to, so `@log` may
+  be `array<str>` in one package and `array<int>` in another). A function
+  declared `array<T>` / `hash<T>` has its `return` values checked, and its
+  result counts as a typed container where it is stored, pushed, passed or
+  looped over: `my array<int> @a = names();` is an error when `names()`
+  returns `array<str>`. A function-level `our @x;` without an element type
+  is unchecked even when another declaration of `@x` has one.
 - **Not checked yet:** method calls on any other object (a parameter, a
   function's result, a container element, a file-level variable), on a
   method with an `around` modifier, and through `$self` on a method a
-  subclass overrides; element types on `our`
-  containers; a container
-  returned from a function against the declared `array<T>` return type (and
-  a container initialized from such a call); class element types
+  subclass overrides; class element types
   (`array<Point>` is accepted and recorded); nested element types are a
   syntax error.
 - **Bare `use strict;`** is accepted and does nothing (Strada already

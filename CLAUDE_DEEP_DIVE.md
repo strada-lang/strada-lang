@@ -3223,6 +3223,35 @@ Decisions and things measured that did not help:
 - Strada::JIT paired the compiler on PATH with the headers of an older
   installation; it now takes the runtime that belongs to that compiler.
 
+### `our`, file-level and returned containers (2026-11-25)
+
+Semantic.strada plus one stamp in `parse_our_decl`; generated C is
+byte-identical (508 files compared).
+
+- **Globals.** The root scope has one entry per bare name, shared by every
+  package's `our`, all three sigils and file-level `my` redeclarations. An
+  element type (or a scalar's type) must come from the declaration node
+  the reference binds to: `sem_name_elem_type`, `sem_scalar_decl_type`,
+  both through `resolve_global_decl_node`. Storing a type on the root entry
+  would leak it onto other variables.
+- **Write sites added:** function-level `our` initializers, the file-level
+  initializer loop in `semantic_analyze`, `local @x = LIST` / `local %h`.
+- **Returns.** `sem_check_elem_value` / `sem_check_hash_literal` run on the
+  `return` value with ctx `elem_where` set, which replaces the
+  "'@name' (declared ...)" part of the message (`sem_elem_dest`). A
+  closure's `return` is checked against the closure (`current_func`).
+- **Call results.** `sem_src_elem_type($ctx, $node, $sigil)`: a variable's
+  element type, or `functions{key}{node}{return_elem_type}` for a call whose
+  return type matches the sigil. Entries without a node (import_lib etc.)
+  give 0.
+- **Call resolution.** `analyze_expression` stamps `sem_fn_key` /
+  `sem_fn_pkg` on a call node once it has found the function;
+  `sem_call_fn_info` reads it, falling back to name-based lookup
+  (`sem_pkg_fn_key`) for checks that run before the node is analyzed.
+  `stage0_expr_type` uses it, so every spelling of a call is typed.
+- Tests: the `gc.strada`, `gr.strada` and `gcok.strada` sections of
+  `t/strict_types_test/run.sh`.
+
 ### Method-call checking (2026-11-25)
 
 All in `compiler/Semantic.strada`; generated C is byte-identical (536 files
