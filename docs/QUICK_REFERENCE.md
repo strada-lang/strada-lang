@@ -115,8 +115,12 @@ my int $half = int($ids[0] / 2);       # `/` gives a num: cast with int(); int -
 my int $rem = $ids[0] % 2;             # % is integer modulo: no cast
 my num $n = $text + 0;                 # text -> number needs arithmetic or int()
 push(@ids, "x");                       # error: storing a str value in '@ids' (declared array<int>)
+my scalar $acct = Account::new(owner => "Ann");
+$acct->deposit("fifty");               # error: argument 1 to 'Account::deposit': expected num, got str
 ```
 
+Method calls are checked where the object's class is known (`$self`, a
+variable declared with `Pkg::new(...)` and never assigned again).
 `scalar` and unannotated variables are never checked. The pragma covers its
 own file only. Without it, `--strict-types` gives the same reports as warnings.
 

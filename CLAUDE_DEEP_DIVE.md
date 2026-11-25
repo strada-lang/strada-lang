@@ -3222,3 +3222,27 @@ Decisions and things measured that did not help:
   value can run `DESTROY`, which can drop the caller's last reference.
 - Strada::JIT paired the compiler on PATH with the headers of an older
   installation; it now takes the runtime that belongs to that compiler.
+
+### Method-call checking (2026-11-25)
+
+All in `compiler/Semantic.strada`; generated C is byte-identical (536 files
+compared, with and without the pragma).
+
+| Piece | Function |
+|---|---|
+| Receiver class | `sem_recv_class` (scope entry `obj_class`/`obj_exact`, or a class-name string) |
+| Recording a class | `sem_note_obj_class` from `my $v = Pkg::new(...)` (`sem_ctor_class`), typed catch, `$self` parameter |
+| "Never written again" | `sem_assigned_walk` -> ctx `asg_set` (per named function, before analysis), `sem_var_stable` |
+| Method lookup | `sem_class_mro`, `sem_mro_find`, `sem_class_descendants`, `sem_method_target` |
+| Argument check | `sem_check_method_args` (parameter 0 is the invocant) |
+| Constructor check | `sem_check_ctor_args` (program `has_attrs`) |
+| One value or several | `sem_node_one_value` |
+
+Rules that keep it free of false errors: a may-be-subclass receiver
+(`$self`, catch variable) is checked only when every known descendant
+resolves the method to the same function; a method with an `around`
+modifier is never checked; a variable written anywhere in the function
+(by name) has no class; a file-level variable never has one. To re-verify
+after a change, stamp `use strict "types";` on copies of examples/, lib/,
+the VM tests and outside projects and diff `--check` errors against the
+previous compiler.

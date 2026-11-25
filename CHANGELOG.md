@@ -10,6 +10,16 @@
   code are never checked, and the pragma covers one file, so code can be
   tightened a file at a time. `strada-interp FILE` enforces the type
   checks too (and only those).
+- **Method calls are checked (2026-11-25)** where the compiler knows the
+  object's class: `$self` in a class's own functions, a variable declared
+  `my $v = Pkg::new(...)` that the function never assigns again, a typed
+  catch variable, `Pkg->m(...)` and `SUPER::m(...)`. Arguments are checked
+  against the method's parameters, the call has the method's declared
+  return type, and `Pkg::new(name => value)` is checked against the
+  attribute types. Other objects (parameters, function results, container
+  elements) are unchecked. Compile-time only: generated C is unchanged.
+  Also fixed: `(%$base, k => v)` in a typed hash initializer was a false
+  error.
 - **Bare `use strict;`** is accepted and does nothing (it was a "cannot
   find module strict" error). Example: `examples/checked_types.strada`.
 - **Element types** — `array<T>`, `hash<T>`, `hash<str, T>` with T = `int`,

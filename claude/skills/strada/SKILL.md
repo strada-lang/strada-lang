@@ -69,7 +69,9 @@ program on the bytecode VM, and `strada --repl` opens a REPL.
   returns, container elements). Then `num` to `int` needs `int(...)`, text to
   a number needs `$s + 0`, a number to text needs `"" . $n`. Containers may
   declare what they hold: `my array<int> @ids`, `my hash<str, num> %price`.
-  `scalar` and unannotated code are never checked. Keep the pragma when a
+  Method arguments and `Pkg::new(name => value)` are checked where the
+  object's class is known (`$self`, `my $v = Pkg::new(...)` never assigned
+  again). `scalar` and unannotated code are never checked. Keep the pragma when a
   file already has it; add it to new files only if the project uses it.
 - **Element access uses `$`**: `$a[0]`, `$h{"k"}`, `$r->[0]`, `$r->{"k"}`.
   `@a[0]` is a slice.

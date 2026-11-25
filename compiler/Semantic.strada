@@ -866,6 +866,13 @@ func ctx_new() scalar {
     $ctx{"builtins"} = get_builtins();
     $ctx{"scope"} = scope_new(0);
     $ctx{"current_func"} = 0;
+    my hash %mro_cache = ();
+    my hash %desc_cache = ();
+    $ctx{"mro_cache"} = \%mro_cache;
+    $ctx{"desc_cache"} = \%desc_cache;
+    $ctx{"asg_root"} = 0;
+    $ctx{"asg_set"} = 0;
+    $ctx{"prog"} = 0;
     $ctx{"cur_file"} = "";
     $ctx{"cur_pkg"} = "main";
     $ctx{"cur_block_line"} = 0;
@@ -958,6 +965,7 @@ func register_functions(scalar $ctx, scalar $ast) void {
             $info{"from_use"} = $fn->{"from_use"} + 0;
             $info{"file"} = "" . $fn->{"file"};
             $info{"line"} = $line;
+            $info{"node"} = $fn;
             $ctx->{"functions"}->{$name} = \%info;
         }
     }
@@ -1482,13 +1490,7 @@ func sem_check_hash_literal(scalar $ctx, int $etype, scalar $val, str $cname, in
         # list of plain scalar expressions is checked.
         my int $hsi = 0;
         while ($hsi < $hec) {
-            my scalar $hse = $helems->[$hsi];
-            if (is_valid_node($hse) == 0) { return; }
-            my int $hst = $hse->{"type"};
-            if ($hst == NODE_CALL() || $hst == NODE_METHOD_CALL() || $hst == NODE_ANON_ARRAY() || $hst == NODE_ANON_HASH()
-                || $hst == NODE_DEREF_ARRAY() || $hst == NODE_DEREF_HASH() || $hst == NODE_ARRAY_SLICE()
-                || $hst == NODE_TERNARY()) { return; }
-            if ($hst == NODE_VARIABLE() && ("" . $hse->{"sigil"}) ne "$") { return; }
+            if (sem_node_one_value($ctx, $helems->[$hsi], 1) == 0) { return; }
             $hsi = $hsi + 1;
         }
         my int $hei = 1;
@@ -1556,6 +1558,421 @@ func sem_check_typed_push(scalar $ctx, scalar $expr, int $line) void {
     }
 }
 
+# ------------------------------------------------------------------
+# Method calls: what the checker knows about the receiver's class.
+#
+# A receiver has a known class when it is `$self` in a package's function, a
+# variable declared `my $v = Pkg::new(...)`, a typed catch variable, or a
+# class name (`Pkg->m()`), and (for variables) the function never assigns
+# the variable again. The method is then looked up along the class's
+# inheritance chain. Everything else is unchecked, like untyped code.
+# ------------------------------------------------------------------
+
+# 1 if this function, used as a constructor, always returns an object of its
+# own package: the synthesized `has` constructor, or a function whose every
+# bless() names its own package literally (or uses the 1-argument form).
+# A hand-written `new($class)` that blesses into its argument may return a
+# subclass, so devirtualizing on its package would call the wrong method.
+# (Codegen uses it for devirtualization, the type checker for receivers.)
+func fn_ctor_own_class(scalar $fn) int {
+    if (defined($fn->{"ctor_own_class"})) { return $fn->{"ctor_own_class"} + 0; }
+    if (($fn->{"is_synthesized"} + 0) == 1) { return 1; }
+    my scalar $body = $fn->{"body"};
+    if (!$body) { return 0; }
+    my str $pkg = "" . $fn->{"package"};
+    my hash %st = ();
+    $st{"bless"} = 0;
+    $st{"bad"} = 0;
+    ctor_bless_scan($body, $pkg, \%st, 0);
+    if ($st{"bless"} > 0 && $st{"bad"} == 0) { return 1; }
+    return 0;
+}
+
+func ctor_bless_scan(scalar $n, str $pkg, scalar $st, int $depth) void {
+    if ($depth > 300) { $st->{"bad"} = 1; return; }
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $k = 0;
+        while ($k < size($n)) {
+            ctor_bless_scan($n->[$k], $pkg, $st, $depth + 1);
+            $k = $k + 1;
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    if (($n->{"type"} + 0) == NODE_CALL() && ("" . $n->{"name"}) eq "bless") {
+        $st->{"bless"} = $st->{"bless"} + 1;
+        my scalar $bargs = $n->{"args"};
+        my int $bac = $n->{"arg_count"} + 0;
+        if ($bac >= 2) {
+            my scalar $cls = $bargs->[1];
+            if (!$cls || ($cls->{"type"} + 0) != NODE_STR_LITERAL() || ("" . $cls->{"value"}) ne $pkg) {
+                $st->{"bad"} = 1;
+            }
+        }
+    }
+    foreach my str $key (keys(%{$n})) {
+        my scalar $v = $n->{$key};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            ctor_bless_scan($v, $pkg, $st, $depth + 1);
+        }
+    }
+}
+
+# Key in ctx "functions" of PKG's own function MNAME ("" = none).
+func sem_pkg_fn_key(scalar $ctx, str $pkg, str $mname) str {
+    if (length($pkg) == 0 || $pkg eq "main") { return ""; }
+    my scalar $fns = $ctx->{"functions"};
+    my str $cpk = sem_sanitize_pkg($pkg);
+    my str $k1 = $cpk . "_" . $mname;
+    if (exists($fns->{$k1})) { return $k1; }
+    my str $k2 = $pkg . "::" . $mname;
+    if (exists($fns->{$k2})) { return $k2; }
+    my str $k3 = $cpk . "::" . $mname;
+    if (exists($fns->{$k3})) { return $k3; }
+    return "";
+}
+
+func sem_class_mro(scalar $ctx, str $pkg) scalar {
+    my scalar $cache = $ctx->{"mro_cache"};
+    if (exists($cache->{$pkg})) { return $cache->{$pkg}; }
+    my array @chain = ();
+    my hash %seen = ();
+    my scalar $prog = $ctx->{"prog"};
+    collect_mro_dfs($prog->{"inherits"}, $prog->{"inherit_count"} + 0, $pkg, \@chain, \%seen);
+    $cache->{$pkg} = \@chain;
+    return \@chain;
+}
+
+# Every class that inherits from PKG, directly or not.
+func sem_class_descendants(scalar $ctx, str $pkg) scalar {
+    my scalar $cache = $ctx->{"desc_cache"};
+    if (exists($cache->{$pkg})) { return $cache->{$pkg}; }
+    my array @found = ();
+    my hash %seen = ();
+    $seen{$pkg} = 1;
+    my array @work = ();
+    push(@work, $pkg);
+    my scalar $prog = $ctx->{"prog"};
+    my scalar $inhs = $prog->{"inherits"};
+    my int $inh_n = $prog->{"inherit_count"} + 0;
+    my int $wi = 0;
+    while ($wi < size(@work)) {
+        my str $cur = "" . $work[$wi];
+        $wi = $wi + 1;
+        my int $ii = 0;
+        while ($ii < $inh_n) {
+            my scalar $ent = $inhs->[$ii];
+            my str $ch = "" . $ent->{"child"};
+            if (("" . $ent->{"parent"}) eq $cur && !exists($seen{$ch})) {
+                $seen{$ch} = 1;
+                push(@work, $ch);
+                push(@found, $ch);
+            }
+            $ii = $ii + 1;
+        }
+    }
+    $cache->{$pkg} = \@found;
+    return \@found;
+}
+
+# First function named MNAME along CLS's inheritance chain, starting at
+# position FROM (1 = skip the class itself, for SUPER::).
+func sem_mro_find(scalar $ctx, str $cls, str $mname, int $from) str {
+    my scalar $mro = sem_class_mro($ctx, $cls);
+    my int $mn = size($mro);
+    my int $mi = $from;
+    while ($mi < $mn) {
+        my str $fk = sem_pkg_fn_key($ctx, "" . $mro->[$mi], $mname);
+        if (length($fk) > 0) { return $fk; }
+        $mi = $mi + 1;
+    }
+    return "";
+}
+
+# The function a call of MNAME on a CLS object runs, as a key in ctx
+# "functions", or "" when that is not certain: no such method is known, an
+# `around` modifier may change the arguments, or (EXACT 0: the object may be
+# of a subclass) some subclass resolves the name to another function.
+func sem_method_target(scalar $ctx, str $cls, int $exact, str $mname, int $from) str {
+    if (length($cls) == 0) { return ""; }
+    my str $fk = sem_mro_find($ctx, $cls, $mname, $from);
+    if (length($fk) == 0) { return ""; }
+    my scalar $prog = $ctx->{"prog"};
+    my scalar $mods = $prog->{"method_modifiers"};
+    my int $mod_n = $prog->{"method_modifier_count"} + 0;
+    my int $mdi = 0;
+    while ($mdi < $mod_n) {
+        my scalar $md = $mods->[$mdi];
+        if (("" . $md->{"method_name"}) eq $mname) {
+            my str $mkind = lc("" . $md->{"mod_type"});
+            if ($mkind ne "before" && $mkind ne "after") { return ""; }
+        }
+        $mdi = $mdi + 1;
+    }
+    if ($exact == 0) {
+        my scalar $desc = sem_class_descendants($ctx, $cls);
+        my int $dn = size($desc);
+        my int $di = 0;
+        while ($di < $dn) {
+            if (sem_mro_find($ctx, "" . $desc->[$di], $mname, 0) ne $fk) { return ""; }
+            $di = $di + 1;
+        }
+    }
+    return $fk;
+}
+
+# Scalar variables the function writes anywhere after their declaration
+# (by name: a nested block's variable of the same name counts too).
+func sem_assigned_walk(scalar $n, scalar $seen, scalar $out) void {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = size($n);
+        for (my int $i = 0; $i < $len; $i = $i + 1) {
+            my scalar $e = $n->[$i];
+            if (length(reftype($e)) > 0) { sem_assigned_walk($e, $seen, $out); }
+        }
+        return;
+    }
+    if ($rt ne "HASH") { return; }
+    my str $id = "" . $n;
+    if (exists($seen->{$id})) { return; }
+    $seen->{$id} = 1;
+    if (exists($n->{"type"})) {
+        my int $t = $n->{"type"} + 0;
+        my scalar $wr = 0;
+        if ($t == NODE_ASSIGN()) { $wr = $n->{"target"}; }
+        if ($t == NODE_INCREMENT()) { $wr = $n->{"operand"}; }
+        if ($t == NODE_REF()) { $wr = $n->{"target"}; }
+        if (is_valid_node($wr) == 1 && $wr->{"type"} == NODE_VARIABLE()) {
+            my str $wname = sem_var_display_name($wr);
+            $out->{$wname} = 1;
+        }
+        if ($t == NODE_DESTRUCTURE() && ($n->{"is_decl"} + 0) == 0) {
+            my scalar $dvars = $n->{"vars"};
+            my int $dvn = $n->{"var_count"} + 0;
+            for (my int $dvi = 0; $dvi < $dvn; $dvi = $dvi + 1) {
+                my scalar $dv = $dvars->[$dvi];
+                if (is_valid_node($dv) == 1 && $dv->{"type"} == NODE_VARIABLE()) {
+                    my str $dname = sem_var_display_name($dv);
+                    $out->{$dname} = 1;
+                } elsif (length(reftype($dv)) == 0) {
+                    my str $dstr = "" . $dv;
+                    $out->{$dstr} = 1;
+                } elsif (reftype($dv) eq "HASH" && exists($dv->{"name"})) {
+                    my str $dhn = "" . $dv->{"name"};
+                    $out->{$dhn} = 1;
+                }
+            }
+        }
+        if ($t == NODE_FOREACH_STMT() && is_valid_node($n->{"var_decl"}) == 0) {
+            my str $fvn = "" . $n->{"var_name"};
+            $out->{$fvn} = 1;
+        }
+        if ($t == NODE_C_BLOCK()) { $out->{"\x01all"} = 1; }
+    }
+    foreach my str $k (keys(%{$n})) {
+        my scalar $v = $n->{$k};
+        if (length(reftype($v)) > 0) { sem_assigned_walk($v, $seen, $out); }
+    }
+}
+
+# 1 when the function being analyzed never writes scalar NAME after its
+# declaration, so a class recorded for it holds wherever it is read.
+func sem_var_stable(scalar $ctx, str $name) int {
+    my scalar $root = $ctx->{"asg_root"};
+    if (is_valid_node($root) == 0) { return 0; }
+    my scalar $aset = $ctx->{"asg_set"};
+    if (!$aset) { return 0; }
+    if (exists($aset->{"\x01all"}) || exists($aset->{$name})) { return 0; }
+    return 1;
+}
+
+# Class of the object a `Pkg::new(...)` call returns ("" = not known).
+func sem_ctor_class(scalar $ctx, scalar $call) str {
+    if (is_valid_node($call) == 0) { return ""; }
+    if ($call->{"type"} != NODE_CALL()) { return ""; }
+    my str $cname = "" . $call->{"name"};
+    my int $lc2 = rindex($cname, "::");
+    if ($lc2 <= 0) { return ""; }
+    if (substr($cname, $lc2 + 2, length($cname) - $lc2 - 2) ne "new") { return ""; }
+    my str $cpkg = substr($cname, 0, $lc2);
+    if ($cpkg eq "main") { return ""; }
+    my str $fk = sem_pkg_fn_key($ctx, $cpkg, "new");
+    if (length($fk) == 0) {
+        # no constructor: the call builds a blessed hash of that class
+        if ($ctx->{"known_packages"}->{$cpkg} == 1) { return $cpkg; }
+        return "";
+    }
+    my scalar $cnode = $ctx->{"functions"}->{$fk}->{"node"};
+    if (is_valid_node($cnode) == 1 && fn_ctor_own_class($cnode) == 1) { return $cpkg; }
+    return "";
+}
+
+# Class of a method call's receiver ("" = not known). Sets ctx "recv_exact":
+# 1 when the object is of exactly that class, 0 when it may be a subclass.
+func sem_recv_class(scalar $ctx, scalar $recv) str {
+    $ctx->{"recv_exact"} = 0;
+    if (is_valid_node($recv) == 0) { return ""; }
+    my int $rt = $recv->{"type"};
+    if ($rt == NODE_VARIABLE() && ("" . $recv->{"sigil"}) eq "$") {
+        my str $vname = sem_var_display_name($recv);
+        my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $vname, "$");
+        if ($lk->{"found"} != 1) { return ""; }
+        my str $ocls = "" . $lk->{"info"}->{"obj_class"};
+        if (length($ocls) == 0) { return ""; }
+        if (sem_var_stable($ctx, $vname) == 0) { return ""; }
+        $ctx->{"recv_exact"} = $lk->{"info"}->{"obj_exact"} + 0;
+        return $ocls;
+    }
+    if ($rt == NODE_STR_LITERAL()) {
+        my str $lcls = "" . $recv->{"value"};
+        if ($ctx->{"known_packages"}->{$lcls} == 1) {
+            $ctx->{"recv_exact"} = 1;
+            return $lcls;
+        }
+    }
+    return "";
+}
+
+# Record on a scalar's scope entry that it holds an object of CLS.
+func sem_note_obj_class(scalar $ctx, scalar $scope, str $key, str $cls, int $exact) void {
+    if (length($cls) == 0) { return; }
+    if ($ctx->{"strict_types"} != 1) { return; }
+    # only inside a function: a file-level variable can be assigned by any
+    # function, which the per-function write scan does not see
+    if (is_valid_node($ctx->{"asg_root"}) == 0) { return; }
+    my scalar $vinfo = $scope->{"vars"}->{$key};
+    if (!$vinfo) { return; }
+    $vinfo->{"obj_class"} = $cls;
+    $vinfo->{"obj_exact"} = $exact;
+}
+
+# 1 when the expression stands for exactly one value. An array, hash, list,
+# slice, `@{...}` / `%{...}`, spread or list-returning call can stand for
+# several, which shifts the position of everything after it in a list.
+# IN_LIST 1: the expression is an element of a list (a method call or `?:`
+# there may yield a list); 0: it is a method-call argument.
+func sem_node_one_value(scalar $ctx, scalar $pa, int $in_list) int {
+    if (is_valid_node($pa) == 0) { return 0; }
+    my int $pt = $pa->{"type"};
+    if ($pt == NODE_SPREAD() || $pt == NODE_ARRAY_SLICE() || $pt == NODE_HASH_SLICE()) { return 0; }
+    if ($pt == NODE_MAP() || $pt == NODE_GREP() || $pt == NODE_SORT() || $pt == NODE_RANGE()) { return 0; }
+    if ($pt == NODE_ANON_ARRAY() || $pt == NODE_ANON_HASH()) { return 0; }
+    if ($pt == NODE_DEREF_SCALAR() && ("" . $pa->{"sigil"}) ne "$") { return 0; }
+    if ($pt == NODE_VARIABLE() && ("" . $pa->{"sigil"}) ne "$") { return 0; }
+    if ($in_list == 1 && ($pt == NODE_METHOD_CALL() || $pt == NODE_TERNARY())) { return 0; }
+    if ($pt == NODE_CALL()) {
+        # a user function with a scalar return type is one value; a
+        # builtin (split, keys, ...) may be a list
+        my scalar $pfi = $ctx->{"functions"}->{"" . $pa->{"name"}};
+        if ($pfi->{"is_registered"} != 1) { return 0; }
+        my int $prt = $pfi->{"return_type"};
+        if ($prt == TYPE_ARRAY() || $prt == TYPE_HASH() || $prt == TYPE_DYNAMIC()) { return 0; }
+    }
+    return 1;
+}
+
+func sem_args_positional(scalar $ctx, scalar $args, int $argc) int {
+    my int $pi = 0;
+    while ($pi < $argc) {
+        if (sem_node_one_value($ctx, $args->[$pi], 1) == 0) { return 0; }
+        $pi = $pi + 1;
+    }
+    return 1;
+}
+
+# Arguments of `$obj->m(...)` / `SUPER::m(...)` against the parameters of the
+# function FK names. Parameter 0 is the invocant.
+func sem_check_method_args(scalar $ctx, str $fk, str $mname, scalar $args, int $argc, int $line) void {
+    my scalar $fn_info = $ctx->{"functions"}->{$fk};
+    # a method-call node may carry no line: use its first argument's
+    if ($line <= 0) { $line = ast_get_line($args->[0]); }
+    if ($line <= 0) { $line = $ctx->{"cur_stmt_line"} + 0; }
+    if ($fn_info->{"is_registered"} != 1) { return; }
+    # Method arguments are not flattened: only a spread moves positions.
+    my int $spi = 0;
+    while ($spi < $argc) {
+        if (is_valid_node($args->[$spi]) == 0) { return; }
+        if ($args->[$spi]->{"type"} == NODE_SPREAD()) { return; }
+        $spi = $spi + 1;
+    }
+    my scalar $params = $fn_info->{"params"};
+    my int $pcount = $fn_info->{"param_count"} + 0;
+    my int $ai = 0;
+    while ($ai < $argc) {
+        my int $pidx = $ai + 1;
+        if ($pidx >= $pcount) { return; }
+        my scalar $mparam = $params->[$pidx];
+        if (($mparam->{"is_variadic"} + 0) == 1) { return; }
+        if (("" . $mparam->{"sigil"}) eq "$" && sem_node_one_value($ctx, $args->[$ai], 0) == 1) {
+            my int $ptype = $mparam->{"param_type"};
+            my int $atype = stage0_expr_type($ctx, $args->[$ai]);
+            if (sem_types_ok($ctx, $ptype, $atype) == 0) {
+                my int $argno = $ai + 1;
+                sem_type_diag($ctx, "argument " . $argno . " to '" . $fn_info->{"package"} . "::" . $mname
+                    . "': expected " . ast_data_type_name($ptype)
+                    . ", got " . ast_data_type_name($atype), $line);
+            }
+        }
+        $ai = $ai + 1;
+    }
+}
+
+# `Pkg::new(name => v, ...)` on a class with a generated constructor: each
+# value against its attribute's declared type (own and inherited attributes).
+func sem_check_ctor_args(scalar $ctx, scalar $call, int $line) void {
+    my str $cls = sem_ctor_class($ctx, $call);
+    if (length($cls) == 0) { return; }
+    my str $fk = sem_pkg_fn_key($ctx, $cls, "new");
+    if (length($fk) == 0) { return; }
+    my scalar $cnode = $ctx->{"functions"}->{$fk}->{"node"};
+    if (is_valid_node($cnode) == 0) { return; }
+    if (($cnode->{"is_synthesized"} + 0) != 1) { return; }
+    my scalar $args = $call->{"args"};
+    my int $argc = $call->{"arg_count"} + 0;
+    if (($argc % 2) != 0) { return; }
+    if (sem_args_positional($ctx, $args, $argc) == 0) { return; }
+    my scalar $prog = $ctx->{"prog"};
+    my scalar $attrs = $prog->{"has_attrs"};
+    my int $attr_n = $prog->{"has_attr_count"} + 0;
+    my scalar $mro = sem_class_mro($ctx, $cls);
+    my int $mn = size($mro);
+    my int $ki = 0;
+    while ($ki < $argc) {
+        my scalar $knode = $args->[$ki];
+        if ($knode->{"type"} == NODE_STR_LITERAL()) {
+            my str $kname = "" . $knode->{"value"};
+            my int $want = 0;
+            my str $owner = "";
+            my int $mi = 0;
+            while ($mi < $mn && $want == 0) {
+                my str $mpkg = "" . $mro->[$mi];
+                my int $ati = 0;
+                while ($ati < $attr_n && $want == 0) {
+                    my scalar $att = $attrs->[$ati];
+                    if (("" . $att->{"name"}) eq $kname && ("" . $att->{"package"}) eq $mpkg) {
+                        $want = $att->{"attr_type"} + 0;
+                        $owner = $mpkg;
+                    }
+                    $ati = $ati + 1;
+                }
+                $mi = $mi + 1;
+            }
+            if ($want > 0) {
+                my int $have = stage0_expr_type($ctx, $args->[$ki + 1]);
+                if (sem_types_ok($ctx, $want, $have) == 0) {
+                    sem_type_diag($ctx, "attribute '" . $kname . "' of '" . $owner
+                        . "': expected " . ast_data_type_name($want)
+                        . ", got " . ast_data_type_name($have), $line);
+                }
+            }
+        }
+        $ki = $ki + 2;
+    }
+}
+
 func stage0_is_numeric(int $t) int {
     if ($t == TYPE_INT() || $t == TYPE_NUM() || $t == TYPE_BOOL() || $t == TYPE_ENUM()
         || $t == TYPE_INT8() || $t == TYPE_INT16() || $t == TYPE_INT32() || $t == TYPE_INT64()
@@ -1601,6 +2018,19 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
         if ($lk->{"found"} == 1) {
             my scalar $info = $lk->{"info"};
             return $info->{"type"};
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_METHOD_CALL()) {
+        # the declared return type, when the receiver's class is known
+        my str $mt_name = "" . $expr->{"method"};
+        my str $mt_cls = sem_recv_class($ctx, $expr->{"base_object"});
+        if (length($mt_cls) > 0 && $mt_name ne "isa" && $mt_name ne "can") {
+            my str $mt_fk = sem_method_target($ctx, $mt_cls, $ctx->{"recv_exact"} + 0, $mt_name, 0);
+            if (length($mt_fk) > 0) {
+                my int $mt_rt = $ctx->{"functions"}->{$mt_fk}->{"return_type"};
+                if ($mt_rt != TYPE_VOID() && $mt_rt > 0) { return $mt_rt; }
+            }
         }
         return TYPE_SCALAR();
     }
@@ -2206,6 +2636,10 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         }
         if ($name eq "weaken" || $name eq "core::weaken" || $name eq "sys::weaken") {
             $ctx->{"uses_weaken"} = 1;
+        }
+
+        if ($ctx->{"strict_types"} == 1 && $arg_count > 0) {
+            sem_check_ctor_args($ctx, $expr, $line);
         }
 
         # Check if builtin (builtins hash stores 1 for each builtin)
@@ -2871,6 +3305,16 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         for (my int $i = 0; $i < $count; $i = $i + 1) {
             analyze_expression($ctx, $args->[$i]);
         }
+        if ($ctx->{"strict_types"} == 1 && $count > 0) {
+            my str $mc_name = "" . $expr->{"method"};
+            my str $mc_cls = sem_recv_class($ctx, $expr->{"base_object"});
+            if (length($mc_cls) > 0 && $mc_name ne "isa" && $mc_name ne "can") {
+                my str $mc_fk = sem_method_target($ctx, $mc_cls, $ctx->{"recv_exact"} + 0, $mc_name, 0);
+                if (length($mc_fk) > 0) {
+                    sem_check_method_args($ctx, $mc_fk, $mc_name, $args, $count, $line);
+                }
+            }
+        }
         return;
     }
 
@@ -2892,6 +3336,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my int $count = $expr->{"arg_count"};
         for (my int $i = 0; $i < $count; $i = $i + 1) {
             analyze_expression($ctx, $args->[$i]);
+        }
+        if ($ctx->{"strict_types"} == 1 && $count > 0 && is_valid_node($ctx->{"asg_root"}) == 1) {
+            my str $sc_name = "" . $expr->{"method"};
+            my str $sc_fk = sem_method_target($ctx, "" . $ctx->{"asg_root"}->{"package"}, 1, $sc_name, 1);
+            if (length($sc_fk) > 0) {
+                sem_check_method_args($ctx, $sc_fk, $sc_name, $args, $count, $line);
+            }
         }
         return;
     }
@@ -3035,6 +3486,7 @@ func scope_check_param_redecl(scalar $ctx, scalar $current_scope, str $name, str
 func analyze_statement(scalar $ctx, scalar $stmt) void {
     my int $node_type = $stmt->{"type"};
     my int $line = ast_get_line($stmt);
+    if ($line > 0) { $ctx->{"cur_stmt_line"} = $line; }
 
     # Variable declaration
     if ($node_type == NODE_VAR_DECL()) {
@@ -3137,6 +3589,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         scope_add_var($current_scope, $add_key, $sigil, $var_type, $line);
         if ($stmt->{"elem_type"} + 0 > 0) {
             $current_scope->{"vars"}->{$add_key}->{"elem_type"} = $stmt->{"elem_type"} + 0;
+        }
+        if ($sigil eq "$" && $ctx->{"strict_types"} == 1 && is_valid_node($init_expr) == 1) {
+            sem_note_obj_class($ctx, $current_scope, $add_key, sem_ctor_class($ctx, $init_expr), 1);
         }
         if (length($c_alias) > 0) {
             $stmt->{"orig_name"} = $name;
@@ -3665,6 +4120,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             if (length($catch_var) > 0) {
                 my str $c_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $catch_var);
                 scope_add_var($ctx->{"scope"}, $catch_var, "$", TYPE_SCALAR(), $line);
+                sem_note_obj_class($ctx, $ctx->{"scope"}, $catch_var, "" . $clause->{"catch_type"}, 0);
                 scope_mark_used_sigil($ctx->{"scope"}, $catch_var, "$");
                 if (length($c_calias) > 0) {
                     $clause->{"orig_catch_var"} = $catch_var;
@@ -3720,6 +4176,15 @@ func analyze_function(scalar $ctx, scalar $fn) void {
     my str $f_pkg = "" . $fn->{"package"};
     if (length($f_pkg) == 0) { $f_pkg = "main"; }
     $ctx->{"cur_pkg"} = $f_pkg;
+    $ctx->{"asg_root"} = $fn;
+    $ctx->{"asg_set"} = 0;
+    if ($ctx->{"strict_types"} == 1) {
+        # before the body is analyzed (analysis renames and rewrites nodes)
+        my hash %asg_out = ();
+        my hash %asg_seen = ();
+        sem_assigned_walk($fn, \%asg_seen, \%asg_out);
+        $ctx->{"asg_set"} = \%asg_out;
+    }
 
     # Create function scope
     my scalar $old_scope = $ctx->{"scope"};
@@ -3765,6 +4230,9 @@ func analyze_function(scalar $ctx, scalar $fn) void {
             if ($param->{"elem_type"} + 0 > 0) {
                 $ctx->{"scope"}->{"vars"}->{$pname}->{"elem_type"} = $param->{"elem_type"} + 0;
             }
+            if ($i == 0 && $pname eq "self" && $sigil eq "$" && $f_pkg ne "main") {
+                sem_note_obj_class($ctx, $ctx->{"scope"}, $pname, $f_pkg, 0);
+            }
         }
     }
 
@@ -3777,6 +4245,8 @@ func analyze_function(scalar $ctx, scalar $fn) void {
     # Restore scope
     $ctx->{"scope"} = $old_scope;
     $ctx->{"current_func"} = 0;
+    $ctx->{"asg_root"} = 0;
+    $ctx->{"asg_set"} = 0;
     $ctx->{"cur_pkg"} = "main";
 }
 
@@ -3816,6 +4286,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         $ctx->{"c_blocks_str"} = "";
     }
 
+    $ctx->{"prog"} = $ast;
     # First pass: register all functions and globals
     register_functions($ctx, $ast);
     my int $inh_n = $ast->{"inherit_count"} + 0;

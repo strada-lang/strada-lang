@@ -178,8 +178,18 @@ func main() int {
   checked. Without the pragma nothing
   changes; `--strict-types` reports the same mismatches as warnings (except
   `num` to `int`, which stays silent there).
-- **Not checked yet:** arguments of method calls (`$obj->m("x")`: the
-  receiver's class is not known at compile time); element types on `our`
+- **Objects:** where the compiler knows an object's class it checks method
+  arguments against the method's parameters, gives the call the method's
+  declared return type, and checks `Pkg::new(name => value)` against the
+  attribute types (generated constructors; inherited attributes too). The
+  class is known for `$self` in a class's own functions, a variable declared
+  `my $v = Pkg::new(...)` that the function never assigns again, a typed
+  `catch (Pkg $e)` variable, a class name (`Pkg->m(...)`) and
+  `SUPER::m(...)`.
+- **Not checked yet:** method calls on any other object (a parameter, a
+  function's result, a container element, a file-level variable), on a
+  method with an `around` modifier, and through `$self` on a method a
+  subclass overrides; element types on `our`
   containers; a container
   returned from a function against the declared `array<T>` return type (and
   a container initialized from such a call); class element types

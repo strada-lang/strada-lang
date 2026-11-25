@@ -106,8 +106,12 @@ func main() int {
     $acct->deposit(50.0);
     $acct->add_interest(0.1);
     say("account: " . $acct->owner() . " " . $acct->balance() . " after " . $acct->moves() . " moves");
-    # Method call arguments are not checked yet (the receiver's class is not
-    # known at compile time): $acct->deposit("fifty") would still compile.
+    # The compiler knows $acct is an Account (it was declared with
+    # Account::new and is never assigned again), so method arguments,
+    # constructor arguments and method results are checked too.
+    # $acct->deposit("fifty");             # would not compile: deposit wants a num
+    # my int $who = $acct->owner();        # would not compile: owner() returns a str
+    # my scalar $b2 = Account::new("owner", 7);  # would not compile: owner is a str
 
     # ---- untyped code mixes in freely ----------------------------------
     my scalar $anything = $text;

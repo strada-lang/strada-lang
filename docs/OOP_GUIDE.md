@@ -756,7 +756,21 @@ Give attributes their real types (`has rw num $x`, `has rw int $count`):
 
 - In a file with `use strict "types";` the compiler checks what is passed to
   typed parameters and returned from typed methods (see the Language Guide,
-  "Checked Types").
+  "Checked Types"). That includes method calls where it knows the object's
+  class: `$self->m(...)` in the class's own functions, calls on a variable
+  declared `my $v = Pkg::new(...)` and never assigned again, a typed catch
+  variable, `Pkg->m(...)` and `SUPER::m(...)`. `Pkg::new(name => value)` is
+  checked against the attribute types.
+
+  ```strada
+  my scalar $acct = Account::new(owner => "Ann");
+  $acct->deposit("fifty");          # error: argument 1 to 'Account::deposit': expected num, got str
+  my int $who = $acct->owner();     # error: initializing '$who' (declared int) with a str value
+  my scalar $b = Account::new(owner => 7);   # error: attribute 'owner' of 'Account': expected str, got int
+  ```
+
+  An object that arrives as a parameter, from a function or out of a
+  container has no known class, and calls on it are not checked.
 - Inside the class's own methods, arithmetic over `num` and `int` accessors
   is compiled to plain C numbers:
   `$self->set_x($self->x() + $self->v() * 0.01)` reads two doubles, computes,
