@@ -896,7 +896,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 1; }
                         emit($cg, "({ StradaValue *__lr = ");
                         gen_expression($cg, $init);
-                        emit($cg, "; if (!strada_sv_is_array_or_aref(__lr)) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
+                        emit($cg, "; strada_list_result_take(__lr); })");
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 0; }
                     } else {
                         # Set array context for dynamic function calls
@@ -4044,7 +4044,19 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     if ($type == NODE_C_BLOCK()) {
         my str $code = $stmt->{"code"};
         emit($cg, "/* Begin __C__ block */\n");
+        # A C `return` in the block skips the function's epilogue. Before
+        # it leaves, put the pending-cleanup stack back to its depth at
+        # entry and drop the call frame: the variable slots left on that
+        # stack pointed into the dead C frame, and a later throw released
+        # through them (a crash). The locals' values are not released: the
+        # block may be returning one of them.
+        my int $c_guard = 0;
+        if (length("" . $cg->{"c_ret_mark"}) > 0 && $cg->{"in_anon_func"} != 1 && index($code, "return") >= 0) { $c_guard = 1; }
+        if ($c_guard == 1) {
+            emit($cg, "\n#define return for (strada_cblock_leave(" . $cg->{"c_ret_mark"} . ", " . ($cg->{"func_tracks_depth"} + 0) . ");;) return\n");
+        }
         emit($cg, $code);
+        if ($c_guard == 1) { emit($cg, "\n#undef return\n"); }
         emit($cg, "\n/* End __C__ block */\n");
         return;
     }
@@ -4060,6 +4072,7 @@ func gen_function(scalar $cg, scalar $fn) void {
     my int $ret_type_id = $fn->{"return_type"};
 
     foreach_cleanup_reset($cg);
+    $cg->{"c_ret_mark"} = "";
     # Parameters hide `our` variables of the same name for the whole function.
     # (Restoring to 0 first also drops the previous function's shadows.)
     our_shadow_restore($cg, 0);
@@ -4646,6 +4659,13 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Add full profiling entry if enabled
         if ($cg->{"full_profile"} == 1) {
             emit($cg, "    strada_full_profile_enter(\"" . $name . "\");\n");
+        }
+
+        # A __C__ block of this function has a C `return` (see NODE_C_BLOCK)
+        $cg->{"c_ret_mark"} = "";
+        if ($fn->{"c_block_returns"}) {
+            emit($cg, "    int __fn_cmark = strada_cleanup_mark(); (void)__fn_cmark;\n");
+            $cg->{"c_ret_mark"} = "__fn_cmark";
         }
 
         # Store current function name for profiling exit in return statements

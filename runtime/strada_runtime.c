@@ -4165,6 +4165,35 @@ void strada_array_push(StradaArray *av, StradaValue *sv) {
 
 /* Deep copy an array - creates a new StradaValue wrapping a new StradaArray
    with incref'd copies of each element. Follows references. Caller owns the returned value. */
+/* The value of a call that initializes or is assigned to an array
+ * (`my @a = f()`, `@a = $o->m()`), owned by the caller: a plain scalar
+ * becomes a one-item array, undef an empty one, and an array or array
+ * reference is the list. A list that anything else can still reach (an
+ * object's stored array, an `our` array, a captured one) is copied: taken
+ * as it was, `push(@a, ...)` grew the original. A fresh one (`return @local`,
+ * `[...]`) is taken without copying. */
+StradaValue* strada_list_result_take_slow(StradaValue *lr) {
+    if (!strada_sv_is_array_or_aref(lr)) {
+        StradaValue *one = strada_new_array();
+        if (lr && (STRADA_IS_TAGGED_INT(lr) || lr->type != STRADA_UNDEF)) strada_array_push_take(one->value.av, lr);
+        else if (lr) strada_decref(lr);
+        return one;
+    }
+    int shared = 0;
+    StradaValue *cur = lr;
+    while (cur && !STRADA_IS_TAGGED_INT(cur)) {
+        if (cur->refcount != 1 || cur->meta) { shared = 1; break; }
+        if (cur->type != STRADA_REF) break;
+        if (strada_is_slot_ref(cur)) { shared = 1; break; }
+        cur = cur->value.rv;
+    }
+    if (!shared) return lr;
+    strada_cleanup_push(lr);
+    StradaValue *copy = strada_array_copy(lr);
+    strada_cleanup_pop_decref(lr);
+    return copy;
+}
+
 StradaValue* strada_array_copy(StradaValue *src) {
     StradaValue *dst = strada_new_array();
     if (!src || STRADA_IS_TAGGED_INT(src)) return dst;
@@ -32763,6 +32792,57 @@ StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev) {
     StradaValue *one = strada_new_array();
     strada_array_push_take(one->value.av, r);
     return one;
+}
+
+/* The same call where one value is wanted (my $n = $o->parts()): the count
+ * of an `array` method's list, as for a function declared `array`. */
+StradaValue* strada_ret_list_count(StradaValue *r, int is_list, int *prev) {
+    strada_ret_list_slot = prev;
+    if (!is_list || !strada_sv_is_array_or_aref(r)) return r;
+    StradaValue *av = r->type == STRADA_REF ? r->value.rv : r;
+    int64_t n = av->value.av ? (int64_t)av->value.av->size : 0;
+    if (av->meta && av->meta->is_tied) {
+        strada_cleanup_push(r);
+        n = strada_tied_array_fetchsize(av);
+        strada_cleanup_pop();
+    }
+    strada_decref(r);
+    return strada_new_int(n);
+}
+
+/* The same call as an argument of another method call: the result goes on
+ * as it is, and its bit is set in the outer call's mask when the method is
+ * declared `array` (strada_pack_args_dyn reads the mask after every
+ * argument has run). */
+StradaValue* strada_ret_list_arg(StradaValue *r, int is_list, int *prev, uint64_t *dyn, uint64_t bit) {
+    strada_ret_list_slot = prev;
+    if (is_list && dyn) *dyn |= bit;
+    return r;
+}
+
+StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = strada_array_new_cap((size_t)count + 1);
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
+    va_list args;
+    va_start(args, count);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        StradaValue *arg = va_arg(args, StradaValue*);
+        strada_incref(arg);
+        av->elements[i] = arg;
+    }
+    va_end(args);
+    av->size = (size_t)count;
+    if (dyn) mask |= *dyn;
+    if (mask != 0) {
+        av->elements[count] = STRADA_MAKE_TAGGED_INT((int64_t)(mask & (((uint64_t)1 << 60) - 1)));
+        sv->flags |= STRADA_SVf_SPREAD_ARGS;
+    }
+    return sv;
 }
 
 StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, StradaListSite *ls) {

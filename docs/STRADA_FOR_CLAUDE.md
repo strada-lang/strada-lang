@@ -155,9 +155,11 @@ say(join("/", $o->parts()));               # a/b/c
 my array @one = (0, $o->aref(), 9);        # 3 elements: the reference is one item
 ```
 
-Declare the return type `array` on methods meant to return lists. Passing
-such a call straight to another METHOD passes one argument; assign it to an
-array first (`my array @p = $o->parts(); $log->add(@p);`).
+Declare the return type `array` on methods meant to return lists. Such a
+method then behaves like a function declared `array` everywhere:
+`my $n = $o->parts();` is the count (write `[$o->parts()]` to keep the list
+in a scalar), and `$log->add($o->parts())` spreads it into a list-taking
+method.
 
 Method calls spread list arguments into a method that takes a list (a
 variadic method or the no-parens `@_` form), exactly as function calls do:

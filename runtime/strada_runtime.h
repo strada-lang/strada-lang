@@ -1386,6 +1386,12 @@ typedef struct {
     const char *func_name;   /* Function name */
     const char *file_name;   /* Source file name */
     int line;                /* Current line number */
+    int cs_mark;             /* cleanup-check builds: pending-cleanup depth at entry.
+                              * Kept in the frame (in what was padding), so a
+                              * coroutine switch, which swaps the frames, swaps
+                              * the marks with them: in a separate array, host
+                              * and coroutine frames at the same depth overwrote
+                              * each other's marks and the check misfired. */
 } StradaStackFrame;
 
 /* Slot 0 is a permanent sentinel frame; live frames occupy 1..depth. This
@@ -1475,7 +1481,7 @@ static inline void strada_stack_push_il(const char *func_name, const char *file_
     f->file_name = file_name;
     f->line = 0;
 #ifdef STRADA_CLEANUP_CHECK
-    strada_cs_marks[d + 1] = strada_cleanup_mark();
+    f->cs_mark = strada_cleanup_mark();
 #endif
     if (__builtin_expect(strada_sig_pending_any != 0, 0)) strada_dispatch_signals();
 }
@@ -1484,9 +1490,9 @@ static inline void strada_stack_pop_il(void) {
 #ifdef STRADA_CLEANUP_CHECK
     if (strada_call_depth > 0) {
         int __csm = strada_cleanup_mark();
-        if (__builtin_expect(__csm != strada_cs_marks[strada_call_depth], 0))
+        if (__builtin_expect(__csm != strada_call_stack[strada_call_depth].cs_mark, 0))
             strada_cleanup_check_fail(strada_call_stack[strada_call_depth].func_name,
-                                      strada_cs_marks[strada_call_depth], __csm);
+                                      strada_call_stack[strada_call_depth].cs_mark, __csm);
     }
 #endif
     if (strada_call_depth > 0) strada_call_depth--;
@@ -1513,6 +1519,15 @@ static inline void strada_stack_line_il(int line) {
     strada_call_stack[strada_call_depth].line = line;
 }
 #endif /* STRADA_TCC_COMPAT */
+/* A C `return` inside a __C__ block (generated code defines `return` around
+ * such a block): restore the pending-cleanup depth of function entry without
+ * releasing anything, and leave the call frame, as the skipped epilogue
+ * would. kind is the function's frame tracking: 1 frames, 2 depth only. */
+static inline void strada_cblock_leave(int mark, int kind) {
+    strada_cleanup_restore(mark);
+    if (kind == 1) strada_stack_pop_il();
+    else if (kind == 2) strada_depth_pop_il();
+}
 StradaValue* strada_caller_info(StradaValue *level);
 void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);
@@ -1737,6 +1752,9 @@ typedef struct StradaListSite {
 void strada_method_mark_ret_list(StradaMethod func);   /* this method wrapper's function is declared `array` */
 int* strada_ret_list_arm(int *slot);
 StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev);
+StradaValue* strada_ret_list_count(StradaValue *r, int is_list, int *prev);
+StradaValue* strada_ret_list_arg(StradaValue *r, int is_list, int *prev, uint64_t *dyn, uint64_t bit);
+StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...);
 StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, StradaListSite *ls);
 StradaValue* strada_super_call_lst(StradaValue *obj, const char *from_package, const char *method, StradaValue *args);
 void strada_method_mark_list(StradaMethod func);   /* this method wrapper takes a list (variadic / @_ form) */
@@ -1802,6 +1820,7 @@ StradaValue* strada_foreach_list_take(StradaValue *v);
 StradaValue* strada_reverse_list1(StradaValue *sv);
 StradaValue* strada_reverse_scalar(StradaValue *sv);
 StradaValue* strada_list_last_take(StradaValue *list);
+StradaValue* strada_list_result_take_slow(StradaValue *lr);
 char* strada_to_str_take(StradaValue *sv);   /* strada_to_str, then release sv (bootstrap-generated code) */
 /* An `int` parameter's value as an integer (borrowed in, borrowed out):
  * tagged / plain heap ints as is, anything else converted once at entry. */
@@ -2657,6 +2676,20 @@ static inline int strada_sv_is_array_or_aref(StradaValue *sv) {
         return 1;
     }
     return 0;
+}
+/* my @a = CALL: the call's list, owned by the caller. A fresh list (one
+ * reference to an array nothing else holds) is taken as it is; everything
+ * else goes to strada_list_result_take_slow (a scalar becomes one item, a
+ * list something else still holds is copied). */
+static inline StradaValue* strada_list_result_take(StradaValue *lr) {
+    if (__builtin_expect(lr != NULL && !STRADA_IS_TAGGED_INT(lr) && lr->refcount == 1 && !lr->meta, 1)) {
+        if (lr->type == STRADA_ARRAY) return lr;
+        if (lr->type == STRADA_REF && !strada_is_slot_ref(lr)) {
+            StradaValue *t = lr->value.rv;
+            if (t && !STRADA_IS_TAGGED_INT(t) && t->type == STRADA_ARRAY && t->refcount == 1 && !t->meta) return lr;
+        }
+    }
+    return strada_list_result_take_slow(lr);
 }
 static inline void strada_av_append_all(StradaArray *dst, StradaValue *src) {
     if (!dst || !src || STRADA_IS_TAGGED_INT(src)) return;

@@ -1,0 +1,31 @@
+# EXPECT: caught boom ok
+# VM-SKIP: the hazard is the compiled function epilogue
+# A C `return` inside a __C__ block skipped the function's epilogue and left
+# the slot of `$z` on the pending-cleanup stack, pointing into the dead C
+# frame. A later throw released through it: a crash at -O0. The block's
+# `return` now restores the cleanup depth and the call frame first.
+func make_nan() num {
+    my str $z = "hello" . "x";
+    __C__ {
+        return strada_new_num(0.0 / 0.0);
+    }
+    return 1.0;
+}
+func clobber() void {
+    __C__ {
+        volatile uintptr_t buf[64];
+        for (int i = 0; i < 64; i++) buf[i] = (uintptr_t)0x4040404040404040ULL;
+        strada_throw("boom");
+    }
+}
+func main() int {
+    my str $out = "";
+    try {
+        my num $n = make_nan();
+        clobber();
+    } catch ($e) {
+        $out = "caught " . $e;
+    }
+    say($out . " ok");
+    return 0;
+}

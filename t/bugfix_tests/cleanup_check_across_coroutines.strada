@@ -1,0 +1,26 @@
+# EXPECT: ok
+# VM-SKIP: coroutines and the cleanup check are compiled-only
+# (The check itself is a driver option: this file exercises it when the
+# suite runs with STRADA_CHECK_CLEANUP=1, as the release gate does.)
+# The cleanup-balance check (--check-cleanup) kept each frame's entry depth
+# in an array that a coroutine switch did not swap, so host and coroutine
+# frames at the same call depth overwrote each other's marks and balanced
+# code aborted with "cleanup stack imbalance" (Async::Loop, async tests).
+# The mark now lives in the call frame, which the switch already swaps.
+func body() void {
+    my str $s = "a" . "b";
+    core::coro_yield_io(-1, "", 0);
+}
+func drive(int $coro) int {
+    my str $h = "x" . "y";
+    my str $h2 = "x" . "y";
+    return core::coro_resume($coro);
+}
+func main() int {
+    my int $coro = core::coro_create(func () void { body(); });
+    drive($coro);
+    drive($coro);
+    core::coro_free($coro);
+    say("ok");
+    return 0;
+}

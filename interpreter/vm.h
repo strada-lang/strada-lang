@@ -652,6 +652,8 @@ enum {
     BUILTIN_METHOD_ARGS_FLAT,  /* (obj, args, name, mask) -> args with masked arrays/hashes spread when the method takes a list */
     BUILTIN_DYN_SPREAD_MASK,   /* (mask): the next OP_DYN_METHOD_CALL spreads those arguments when its method takes a list */
     BUILTIN_RET_LIST_FIX,      /* (r, obj, name[, SUPER pkg]): a method call as a list item: r as it is when the method is declared `array`, else an array (or undef) r as one item */
+    BUILTIN_RET_LIST_COUNT,    /* (r, obj, name[, SUPER pkg]): one value wanted: the count when the method is declared `array`, else r */
+    BUILTIN_RET_LIST_IS,       /* (r, obj, name[, SUPER pkg]): 1 when r is the list of a method declared `array` (an argument of another method call) */
 };
 
 /* Heap object type tag */

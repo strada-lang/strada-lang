@@ -1,0 +1,46 @@
+# EXPECT: 3 ARRAY ARRAY 3 3 3 3 3 k3 | 3 1 1 5 6 | arr3 arr2 s:n 3 2 | 3 2 104 3
+# Two more places a method declared `array` now behaves like a function
+# declared `array`:
+# - where one value is wanted (my $n = $o->parts(), $h{k} = ..., $a[i] = ...)
+#   it is the count; it stored the array.
+# - as an argument of another method call it is spread into a method that
+#   takes a list ($out->cnt($in->parts())); it arrived as one argument. A
+#   method with a scalar or `array @p` parameter still gets it whole, and a
+#   method that is not declared `array` is one argument whatever it returns.
+package In;
+func new() scalar { my hash %s = (); return bless(\%s, "In"); }
+func parts(scalar $self) array { return ("a", "b", "c"); }
+func aref(scalar $self) scalar { return [1, 2]; }
+func name(scalar $self) str { return "n"; }
+package Kin;
+extends In;
+func parts(scalar $self) array { my $n = SUPER::parts($self); return ("k" . $n); }
+package Coll;
+func new() scalar { my hash %s = (); return bless(\%s, "Coll"); }
+func parts($self) { return [7, 8]; }
+package Out;
+func new() scalar { my hash %s = (); return bless(\%s, "Out"); }
+func cnt { my $self = shift; return scalar(@_); }
+func one(scalar $self, scalar $v) str { return ref($v) eq "ARRAY" || typeof($v) eq "array" ? "arr" . scalar(@{$v}) : "s:" . $v; }
+func arr(scalar $self, array @v) int { return scalar(@v); }
+package Kid;
+extends Out;
+func cnt { my $self = shift; return 100 + SUPER::cnt($self, $_[0]->parts(), "x"); }
+package main;
+func main() int {
+    my scalar $i = In::new(); my scalar $c = Coll::new(); my scalar $o = Out::new(); my scalar $k = Kid::new();
+    my scalar $ki = Kin::new();
+    my $n1 = $i->parts(); my scalar $n2 = $i->aref(); my $n3 = $c->parts();
+    my hash %h = (); $h{"n"} = $i->parts();
+    my array @a = (0); $a[0] = $i->parts();
+    my $v; $v = $i->parts();
+    my str $m = "parts"; my $d = $i->$m();
+    my $cl = In->parts();
+    my str $s1 = join(" ", $n1, ref($n2), ref($n3), $h{"n"}, $a[0], $v, $d, $cl, join("", $ki->parts()));
+    my str $s2 = join(" ", $o->cnt($i->parts()), $o->cnt($c->parts()), $o->cnt($i->name()), $o->cnt(1, $i->parts(), 2), $o->cnt($i->parts(), $i->parts()));
+    my str $s3 = join(" ", $o->one($i->parts()), $o->one($c->parts()), $o->one($i->name()), $o->arr($i->parts()), $o->arr($c->parts()));
+    my str $mc = "cnt";
+    my str $s4 = join(" ", $o->$mc($i->parts()), $o->$mc(0, $c->parts()), $k->cnt($i), Out->cnt($i->parts()));
+    say($s1 . " | " . $s2 . " | " . $s3 . " | " . $s4);
+    return 0;
+}

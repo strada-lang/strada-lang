@@ -2633,6 +2633,20 @@ func sem_is_array_value(scalar $ctx, scalar $n) int {
 # wanted (`my $n = f()`, `$v = f()`, `$h{k} = f()`): the element count, as
 # for an array variable there (Perl; it stored the array). Functions without
 # a declared `array` return type are not affected.
+# A method call where one value is wanted (`my $n = $o->parts()`,
+# `$h{k} = $o->parts()`): the count when the method that runs is declared
+# `array`, as for a function (sem_call_returns_array). Which method runs is
+# known at run time, so the node is only flagged; the code generator asks
+# the dispatch (strada_ret_list_count) when some `array` function could
+# answer to the name.
+func sem_method_scalar_want(scalar $n) void {
+    if (is_valid_node($n) == 0) { return; }
+    my int $msw_t = $n->{"type"};
+    if ($msw_t == NODE_METHOD_CALL() || $msw_t == NODE_DYN_METHOD_CALL() || $msw_t == NODE_SUPER_CALL()) {
+        $n->{"scalar_want"} = 1;
+    }
+}
+
 func sem_call_returns_array(scalar $ctx, scalar $n) int {
     if (is_valid_node($n) == 0) { return 0; }
     if ($n->{"type"} != NODE_CALL()) { return 0; }
@@ -2729,6 +2743,7 @@ func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
     if ($it == NODE_MAP() || $it == NODE_GREP()) { $hit = 1; }
     if (sem_call_returns_array($ctx, $ini) == 1) { $hit = 1; }
     if ($hit == 1) { $decl->{"init"} = sem_scalar_of($ini); }
+    else { sem_method_scalar_want($ini); }
 }
 
 # A reverse(...) call evaluated in scalar context: the list joined and the
@@ -3480,6 +3495,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                  || $cat == NODE_SUBSCRIPT() || $cat == NODE_DEREF_HASH() || $cat == NODE_DEREF_ARRAY())
                 && sem_call_returns_array($ctx, $expr->{"value"}) == 1) {
                 $expr->{"value"} = sem_scalar_of($expr->{"value"});
+            } elsif (($cat == NODE_VARIABLE() && ("" . $expr->{"target"}->{"sigil"}) eq "$") || $cat == NODE_HASH_ACCESS()
+                 || $cat == NODE_SUBSCRIPT() || $cat == NODE_DEREF_HASH() || $cat == NODE_DEREF_ARRAY()) {
+                sem_method_scalar_want($expr->{"value"});
             }
         }
         # `$h{n} = @a` / `$a[0] = @{$r}`: an array assigned to an element is
@@ -3960,6 +3978,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$" && $stmt->{"init"} && sem_call_returns_array($ctx, $stmt->{"init"}) == 1) {
             $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
         }
+        if ($sigil eq "$" && $stmt->{"init"}) { sem_method_scalar_want($stmt->{"init"}); }
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {
             my int $iit = $stmt->{"init"}->{"type"};
             # `my $n = @{$r}` / `@$r`: the count, like `my $n = @a` (it

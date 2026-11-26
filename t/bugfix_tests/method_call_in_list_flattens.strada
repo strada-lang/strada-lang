@@ -52,7 +52,7 @@ func main() int {
     push(@out, join("/", Base->parts()));
     my scalar $ar = [$o->parts()];
     push(@out, scalar(@{$ar}));
-    my scalar $held = $o->parts();
+    my scalar $held = [$o->parts()];
     push(@out, scalar(@{$held}));
     my array @z = ($o->aref(), $held);
     push(@out, scalar(@z));

@@ -9022,15 +9022,21 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             }
             break;
         }
-        case BUILTIN_RET_LIST_FIX: {
-            /* The result of a method call that is a list item. Only an
-             * array (or undef) needs the question asked: is the method the
-             * call resolved to declared `array`? Then the list takes its
-             * elements; otherwise it is one item. */
+        case BUILTIN_RET_LIST_FIX:
+        case BUILTIN_RET_LIST_IS:
+        case BUILTIN_RET_LIST_COUNT: {
+            /* The result of a method call that is a list item (FIX) or
+             * where one value is wanted (COUNT). Only an array (or, for a
+             * list item, undef) needs the question asked: is the method the
+             * call resolved to declared `array`? Then a list takes its
+             * elements and a scalar its count; otherwise the result is one
+             * value. */
             VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
-            int candidate = VM_IS_UNDEF(rv) ||
-                            (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL);
-            if (!candidate) { SP_PUSH(vm_val_copy(rv)); break; }
+            int want_count = (bid == BUILTIN_RET_LIST_COUNT);
+            int want_is = (bid == BUILTIN_RET_LIST_IS);
+            int is_arr = VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL;
+            if (want_is && !is_arr) { SP_PUSH(VM_MAKE_INT(0)); break; }
+            if (!is_arr && !(VM_IS_UNDEF(rv) && !want_count)) { SP_PUSH(vm_val_copy(rv)); break; }
             const char *mname = (argc >= 3 && VM_IS_PTR(args[2]) && VM_PTR_TYPE(args[2]) == VM_OBJ_STR) ? VM_AS_STR(args[2])->data : NULL;
             int is_list = 0;
             if (mname) {
@@ -9050,7 +9056,12 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 if (mfi >= 0 && (size_t)mfi < vm->program->func_count &&
                     vm->program->funcs[mfi].return_type == 4 /* AST_TYPE_ARRAY */) is_list = 1;
             }
-            if (is_list) {
+            if (want_is) {
+                SP_PUSH(VM_MAKE_INT(is_list));
+            } else if (want_count) {
+                if (is_list) SP_PUSH(VM_MAKE_INT(VM_AS_ARRAY(rv)->size));
+                else SP_PUSH(vm_val_copy(rv));
+            } else if (is_list) {
                 SP_PUSH(vm_val_copy(rv));
             } else {
                 VMArray *one = vm_array_new(1);

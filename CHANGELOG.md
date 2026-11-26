@@ -2,6 +2,26 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Methods declared `array`: scalar context and arguments (2026-11-26)
+- `my $n = $obj->parts()` (also `$h{k} = ...`, `$a[i] = ...`) is the count
+  when the method is declared `array`, as for a function declared `array`.
+  It stored the array. Use `[$obj->parts()]` to keep the list.
+- `$log->add($obj->parts())` spreads the list into a method that takes a
+  list (`@_` form or variadic). It arrived as one argument.
+- Only method names that some `array` method declares are affected.
+- Test: `t/bugfix_tests/method_call_scalar_and_args.strada`.
+
+### Fixes (2026-11-26)
+- `my @a = $obj->items()` and `@a = f()` copy a list that something else
+  still holds. In compiled code `push(@a, ...)` used to grow the object's
+  own array. Test: `list_result_is_copied`.
+- A C `return` inside a `__C__` block no longer leaves stale entries on the
+  cleanup stack (a later exception could crash). Test:
+  `cblock_return_restores_cleanup`.
+- `strada --check-cleanup` no longer reports false imbalances in programs
+  that use coroutines (Async::Loop, green tasks). The whole suite now passes
+  under `STRADA_CHECK_CLEANUP=1`. Test: `cleanup_check_across_coroutines`.
+
 ### A method call in a list flattens (2026-11-26)
 - `(0, $obj->parts(), 9)`, `push(@a, $obj->parts())`,
   `join("/", File::Spec->splitdir($d))`, `[...]`, `{ ... }` and variadic
@@ -13,8 +33,6 @@
   array reference or does an untyped `return @list`.
 - Only method names that some `array` function could answer to take the new
   path; every other method call compiles to the same code as before.
-- Not covered: a method call as an argument of another method call
-  (`$log->add($obj->parts())` passes one argument).
 - Test: `t/bugfix_tests/method_call_in_list_flattens.strada`.
 
 ### Smaller fixes (2026-11-26)

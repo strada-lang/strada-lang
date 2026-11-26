@@ -4763,6 +4763,9 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $c_stmt = ast_new_c_block($c_code);
         ast_set_line($c_stmt, $stmt_line);
+        # a C `return` in the block leaves the function without its
+        # epilogue: parse_function notes it (gen_function, c_block_returns)
+        if (index($c_code, "return") >= 0) { $parser->{"c_ret_seen"} = 1; }
         return $c_stmt;
     }
 
@@ -5184,7 +5187,11 @@ func parse_function(scalar $parser) scalar {
     }
 
     # Parse body
+    my int $outer_c_ret = $parser->{"c_ret_seen"} + 0;
+    $parser->{"c_ret_seen"} = 0;
     $fn->{"body"} = parse_block($parser);
+    if ($parser->{"c_ret_seen"}) { $fn->{"c_block_returns"} = 1; }
+    $parser->{"c_ret_seen"} = $outer_c_ret;
     
     return $fn;
 }
