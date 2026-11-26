@@ -4763,6 +4763,16 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                 $mc_extra = "";
                 $mc_decl = "";
             }
+            # A call that is a list item, whose name some `array` function
+            # could answer to: the entry that also says whether the method
+            # it resolved to is one (it spreads list arguments too).
+            if ($expr->{"ret_list_fix"}) {
+                my int $ml_id = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $ml_id + 1;
+                $mc_decl = "static StradaListSite __mls_" . $ml_id . "; ";
+                $mc_fn = "strada_method_call_lst(";
+                $mc_extra = ", &__mls_" . $ml_id;
+            }
 
             # Check if any argument has spread operator
             my int $has_spread = 0;
@@ -4837,6 +4847,12 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
 
                     # Skip devirtualization for methods with before/after/around hooks
                     if (length($resolved_fn) > 0 && has_method_modifier($cg, $method) == 1) {
+                        $resolved_fn = "";
+                    }
+                    # A list item whose method is declared `array` goes
+                    # through the dispatch wrapper, which records the list
+                    # it returns (strada_ret_list_mark).
+                    if (length($resolved_fn) > 0 && $expr->{"ret_list_fix"} && $resolved_ret_type == TYPE_ARRAY()) {
                         $resolved_fn = "";
                     }
                     my scalar $rf_i = 0;
@@ -5633,6 +5649,25 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
     if ($t == NODE_RANGE() || $t == NODE_ARRAY_SLICE() || $t == NODE_HASH_SLICE()) { return 2; }
     if ($t == NODE_DEREF_SCALAR() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) { return 2; }
+    # A method call as a list item gives the elements a method declared
+    # `array` returns (Perl); from any other method it is one item, also
+    # when that is an array reference. Which method runs is known only at
+    # run time: see strada_ret_list_fix.
+    if ($t == NODE_METHOD_CALL() || $t == NODE_DYN_METHOD_CALL() || $t == NODE_SUPER_CALL()) {
+        if ($elem->{"ret_list_fix"}) { return 2; }
+        my scalar $mfk_set = $cg->{"array_method_names"};
+        if (!$mfk_set) { return 0; }
+        if ($t == NODE_DYN_METHOD_CALL()) {
+            # the name is known at run time: any `array` method may answer
+            if (size(%{$mfk_set}) == 0) { return 0; }
+        } else {
+            my str $mfk_name = "" . $elem->{"method"};
+            if ($mfk_name eq "isa" || $mfk_name eq "can") { return 0; }
+            if (!$mfk_set->{$mfk_name} && !$mfk_set->{"*"}) { return 0; }
+        }
+        $elem->{"ret_list_fix"} = 1;
+        return 2;
+    }
     if ($t == NODE_CALL()) {
         my str $nm = "" . $elem->{"name"};
         if (length($nm) > 6 && substr($nm, 0, 6) eq "core::") {
@@ -7629,6 +7664,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
     }
     
     # Method call ($obj->method(args)) - Perl-style blessed reference method dispatch
+    # A method call that is a list item (array_flatten_kind set the flag):
+    # the list of a method declared `array`, or one item. The slot is this
+    # call's; strada_method_call_lst / strada_super_call_lst fill it.
+    if (($type == NODE_METHOD_CALL() || $type == NODE_DYN_METHOD_CALL() || $type == NODE_SUPER_CALL()) && ($expr->{"ret_list_fix"} + 0) == 1 && !$in_extern) {
+        my int $rl_id = $cg->{"tmp_counter"} + 0;
+        $cg->{"tmp_counter"} = $rl_id + 1;
+        my str $rl_s = "__rl" . $rl_id;
+        $expr->{"ret_list_fix"} = 2;
+        emit($cg, "({ int " . $rl_s . " = 0; int *" . $rl_s . "p = strada_ret_list_arm(&" . $rl_s . "); StradaValue *" . $rl_s . "r = ");
+        gen_expression($cg, $expr);
+        emit($cg, "; strada_ret_list_done(" . $rl_s . "r, " . $rl_s . ", " . $rl_s . "p); })");
+        $expr->{"ret_list_fix"} = 1;
+        return;
+    }
     if ($type == NODE_METHOD_CALL()) { gen_method_call_node($cg, $expr); return; }
 
     # Dynamic method call: $obj->$method(args)
@@ -7732,9 +7781,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
             if ($dm_push == 1 && $dm_clean == 1) { emit($cg, "strada_cleanup_pop(); "); }
             if ($dm_arg_count > 0 && method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0) {
-                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+                if ($expr->{"ret_list_fix"}) {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
+                } else {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+                }
             } else {
-                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+                if ($expr->{"ret_list_fix"}) {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
+                } else {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+                }
             }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         } else {
@@ -7777,9 +7834,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "StradaValue *__dm_pa = strada_pack_args(0); ");
             }
             if ($dm_arg_count > 0 && method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0) {
-                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+                if ($expr->{"ret_list_fix"}) {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
+                } else {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+                }
             } else {
-                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+                if ($expr->{"ret_list_fix"}) {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
+                } else {
+                    emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+                }
             }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         }
@@ -7848,9 +7913,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($sp_mask != 0) { emit($cg, "strada_args_mark_spread(__super_pa, " . $sp_mask . "ULL); "); }
         if ($sp_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         if ($sp_mask != 0) {
-            emit($cg, "StradaValue *__super_res = strada_super_call_spread(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            if ($expr->{"ret_list_fix"}) {
+                emit($cg, "StradaValue *__super_res = strada_super_call_lst(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            } else {
+                emit($cg, "StradaValue *__super_res = strada_super_call_spread(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            }
         } else {
-            emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            if ($expr->{"ret_list_fix"}) {
+                emit($cg, "StradaValue *__super_res = strada_super_call_lst(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            } else {
+                emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+            }
         }
         emit($cg, "strada_tmps_free(" . $sp_tm . "); __super_res; })");
         return;

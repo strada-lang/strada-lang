@@ -1,0 +1,7 @@
+# COMPILE-ERROR: already declares 'strlen'
+# VM-COMPILE-ERROR: already declares 'strlen'
+# `extern func NAME` names a C symbol. A name the C library or the runtime
+# headers already declare reached gcc as "conflicting types for 'strlen'"
+# (and the form with a body ran in the VM). Now a located Strada error.
+extern func strlen(str $s) int;
+func main() int { say(strlen("abcd")); return 0; }

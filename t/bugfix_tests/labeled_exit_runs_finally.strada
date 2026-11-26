@@ -1,0 +1,34 @@
+# EXPECT: i1 o1 i2 o2 i3 o3 f1.1 f2.1 B f1.2 f2.2 f1.3 f2.3 4 caught late
+# A labeled next/last/redo that leaves a try runs its finally blocks, the
+# nested ones too, and leaves the try stack balanced: a throw afterwards
+# reaches the enclosing catch. (An old note said the finally was skipped.)
+func main() int {
+    my array @out = ();
+    my int $n = 0;
+    try {
+        OUTER: foreach my $i (1, 2, 3) {
+            try {
+                foreach my $j (1, 2) {
+                    try { if ($j == 1) { next OUTER; } push(@out, "body"); }
+                    finally { push(@out, "i" . $i); }
+                }
+            } finally { push(@out, "o" . $i); }
+        }
+        A: while ($n < 3) {
+            $n++;
+            B: while (1) {
+                try {
+                    try { last B if $n == 1; next A if $n == 2; last A; }
+                    finally { push(@out, "f1." . $n); }
+                } finally { push(@out, "f2." . $n); }
+            }
+            push(@out, "B");
+        }
+        my int $r = 0;
+        R: foreach my $i (1 .. 3) { try { $r++; if ($r == 2) { redo R; } } catch ($e) { push(@out, "no"); } }
+        push(@out, $r);
+        die("late");
+    } catch ($e) { push(@out, "caught " . $e); }
+    say(join(" ", @out));
+    return 0;
+}

@@ -1,0 +1,24 @@
+# EXPECT: p,q m z,y z 2 y 9
+# `@{core::argv()} = LIST` and `@{$av} = LIST` (with $av = core::argv())
+# replace @ARGV; compiled code changed nothing (the value is the array
+# itself, not a reference to it). `@ARGV = LIST` was "undeclared variable"
+# in the VM.
+our array @G = (1, 2, 3);
+func gref() scalar { return \@G; }
+func main() int {
+    my array @out = ();
+    @{core::argv()} = ("p", "q");
+    push(@out, join(",", @ARGV));
+    my scalar $av = core::argv();
+    @{$av} = ("m");
+    push(@out, join(",", @ARGV));
+    @ARGV = ("z", "y");
+    push(@out, join(",", @{core::argv()}));
+    push(@ARGV, "w");
+    my $f = shift(@ARGV);
+    push(@out, $f . " " . scalar(@ARGV) . " " . $ARGV[0]);
+    @{gref()} = (9);
+    push(@out, join(",", @G));
+    say(join(" ", @out));
+    return 0;
+}

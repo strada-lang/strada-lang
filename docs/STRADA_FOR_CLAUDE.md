@@ -142,6 +142,23 @@ my array @one = $aref;        # ONE element (the reference); copy with @{$aref}
 An untyped function that does `return @list;` still hands back the array when
 assigned to a scalar; only functions declared `array` give a count.
 
+A method call in a list gives its elements when the method is declared
+`array`; any other method call is one item, also when it returns an array
+reference:
+
+```strada
+func parts(scalar $self) array { return ("a", "b", "c"); }
+func aref(scalar $self) scalar { return [1, 2]; }
+
+my array @all = (0, $o->parts(), 9);       # 5 elements
+say(join("/", $o->parts()));               # a/b/c
+my array @one = (0, $o->aref(), 9);        # 3 elements: the reference is one item
+```
+
+Declare the return type `array` on methods meant to return lists. Passing
+such a call straight to another METHOD passes one argument; assign it to an
+array first (`my array @p = $o->parts(); $log->add(@p);`).
+
 Method calls spread list arguments into a method that takes a list (a
 variadic method or the no-parens `@_` form), exactly as function calls do:
 
@@ -152,6 +169,10 @@ func one(scalar $self, array @items) int { return scalar(@items); }
 $log->add(@m, "z");   # 3 arguments when @m has 2 elements
 $log->one(@m);        # an `array` parameter receives @m whole
 ```
+
+Spreading copies the elements on every call. In a hot loop, pass a reference
+(`$log->add(\@m)`) or declare the parameter `array @items`: both hand the
+array over without copying.
 
 ---
 

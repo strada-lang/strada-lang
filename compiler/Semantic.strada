@@ -4364,6 +4364,16 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if (is_valid_node($ret_val) == 1) {
             # `return @a` from an int/num function returns the count.
             my scalar $rcur = $ctx->{"current_func"};
+            # One plain value from an array function is a one-item list
+            # (it was returned as the bare value: `my $n = f()` counted 0).
+            if ($rcur && $rcur->{"return_type"} == TYPE_ARRAY() && ast_is_plain_value($ret_val) == 1) {
+                my scalar $one_lst = ast_new_anon_array();
+                $one_lst->{"is_list"} = 1;
+                $one_lst->{"line"} = $ret_val->{"line"};
+                ast_add_array_elem($one_lst, $ret_val);
+                $ret_val = $one_lst;
+                $stmt->{"value"} = $ret_val;
+            }
             if ($rcur) {
                 my int $rrt = $rcur->{"return_type"} + 0;
                 if ($rrt != TYPE_ARRAY() && $rrt != TYPE_HASH() && $rrt != TYPE_DYNAMIC() && $rrt != TYPE_VOID()) {

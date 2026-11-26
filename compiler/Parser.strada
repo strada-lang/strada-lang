@@ -5215,6 +5215,12 @@ func parse_extern_function(scalar $parser) scalar {
         $__ext_name = $__ext_name . "::" . $__ext_next_tok->{"value"};
     }
 
+    # NAME is the C symbol. One the C library or the runtime already
+    # declares cannot be declared again with another signature, or defined.
+    if (index($__ext_name, "::") < 0 && c_ident_reserved($__ext_name) == 1) {
+        parser_error($parser, "extern func '" . $__ext_name . "': the C library or the Strada runtime already declares '" . $__ext_name . "'; call it from a __C__ block, or give the function another name");
+    }
+
     my scalar $fn = ast_new_extern_func($__ext_name);
     ast_set_line($fn, $ext_line);
 

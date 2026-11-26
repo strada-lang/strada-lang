@@ -1,0 +1,20 @@
+# EXPECT: 1 1 3 1 3 2 x
+# `return ("a");` / `return "a";` from a function declared `array` returns a
+# one-item list. It returned the bare value: `my $n = one()` counted 0, and
+# `use strict "types"` reported "returning a str value".
+use strict "types";
+func one() array { return ("a"); }
+func bare() array<str> { return "x" . "y"; }
+func num1() array { return (1 + 2); }
+func two() array { return ("a", "b"); }
+func main() int {
+    my int $n = one();
+    my array @m = one();
+    my array @l = (0, one(), 9);
+    my int $b = bare();
+    my array @k = (0, num1(), 9);
+    my int $t = two();
+    my array @f = one();
+    say($n . " " . scalar(@m) . " " . scalar(@l) . " " . $b . " " . scalar(@k) . " " . $t . " " . (scalar(@f) == 1 ? "x" : "?"));
+    return 0;
+}

@@ -651,6 +651,7 @@ enum {
     BUILTIN_READ_ALL_LINES,    /* (fh) -> array of the remaining lines, newlines removed */
     BUILTIN_METHOD_ARGS_FLAT,  /* (obj, args, name, mask) -> args with masked arrays/hashes spread when the method takes a list */
     BUILTIN_DYN_SPREAD_MASK,   /* (mask): the next OP_DYN_METHOD_CALL spreads those arguments when its method takes a list */
+    BUILTIN_RET_LIST_FIX,      /* (r, obj, name[, SUPER pkg]): a method call as a list item: r as it is when the method is declared `array`, else an array (or undef) r as one item */
 };
 
 /* Heap object type tag */

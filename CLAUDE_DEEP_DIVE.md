@@ -3344,3 +3344,23 @@ the list of a `foreach` unconditionally. The VM flags the node instead
 (`list_tern` set by `vm_array_flatten_kind`, read by `compile_expr`'s
 NI_TERNARY case, branches built by `compile_tern_list_branch`).
 
+## Method calls as list items (2026-11-26)
+
+`(0, $o->parts(), 9)` takes the elements when the method that runs is
+declared `array`. Pieces:
+
+| Piece | Where |
+|-------|-------|
+| `array_method_names` (which names are affected) | CodeGenStmt.strada, next to `all_func_names` |
+| `ret_list_fix` node flag, kind 2 | `array_flatten_kind` (CodeGenExpr.strada) |
+| slot on the caller's stack, wrap | `gen_expression`: `strada_ret_list_arm` / `strada_ret_list_done` |
+| dispatch + answer | `strada_method_call_lst`, `strada_super_call_lst` (runtime), `StradaListSite` |
+| which wrappers are `array` methods | `strada_method_mark_ret_list(__wrap_F)` in the package's OOP init |
+| VM | `vm_array_method_name`, `compile_expr` top (hidden locals), `BUILTIN_RET_LIST_FIX` |
+
+The slot pointer is per thread and taken by the dispatch entry on entry, so
+nothing the method runs sees it; a nested list-item call in the arguments
+arms its own slot and restores the outer one in `strada_ret_list_done`. The
+answer is written into the caller's stack, so a destructor that runs between
+the call and the read cannot change it. After a throw the pointer may be
+stale, but it is only ever read by an entry whose caller has just armed it.

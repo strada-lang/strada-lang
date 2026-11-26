@@ -9022,6 +9022,43 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             }
             break;
         }
+        case BUILTIN_RET_LIST_FIX: {
+            /* The result of a method call that is a list item. Only an
+             * array (or undef) needs the question asked: is the method the
+             * call resolved to declared `array`? Then the list takes its
+             * elements; otherwise it is one item. */
+            VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            int candidate = VM_IS_UNDEF(rv) ||
+                            (VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL);
+            if (!candidate) { SP_PUSH(vm_val_copy(rv)); break; }
+            const char *mname = (argc >= 3 && VM_IS_PTR(args[2]) && VM_PTR_TYPE(args[2]) == VM_OBJ_STR) ? VM_AS_STR(args[2])->data : NULL;
+            int is_list = 0;
+            if (mname) {
+                int mfi = -1;
+                if (argc >= 4 && VM_IS_PTR(args[3]) && VM_PTR_TYPE(args[3]) == VM_OBJ_STR) {
+                    const char *spkg = VM_AS_STR(args[3])->data;
+                    mfi = vm_find_super_method(vm->program, spkg, mname, 0);
+                    if (mfi < 0) mfi = vm_find_super_method(vm->program, spkg, "AUTOLOAD", 0);
+                } else {
+                    const char *cls = vm_obj_class_name(args[1]);
+                    if (!cls && VM_IS_PTR(args[1]) && VM_PTR_TYPE(args[1]) == VM_OBJ_STR) cls = VM_AS_STR(args[1])->data;
+                    if (cls) {
+                        mfi = vm_find_method_cached(vm, cls, mname);
+                        if (mfi < 0) mfi = vm_find_method_cached(vm, cls, "AUTOLOAD");
+                    }
+                }
+                if (mfi >= 0 && (size_t)mfi < vm->program->func_count &&
+                    vm->program->funcs[mfi].return_type == 4 /* AST_TYPE_ARRAY */) is_list = 1;
+            }
+            if (is_list) {
+                SP_PUSH(vm_val_copy(rv));
+            } else {
+                VMArray *one = vm_array_new(1);
+                vm_array_push(one, vm_val_copy(rv));
+                SP_PUSH(VM_MAKE_PTR(one));
+            }
+            break;
+        }
         case BUILTIN_DYN_SPREAD_MASK: {
             vm->dyn_spread_mask = argc >= 1 ? (uint64_t)vm_to_int(args[0]) : 0;
             SP_PUSH(VM_UNDEF_VAL);

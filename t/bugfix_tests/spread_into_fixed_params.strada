@@ -1,0 +1,12 @@
+# EXPECT: 8 3 1 6
+# `f(...@a)` into a function with a fixed parameter list fills the
+# parameters in order: missing ones are 0 / undef, extra elements are
+# dropped. (An old note said this reached gcc as "too few arguments".)
+func f(int $a, int $b, int $c) int { return $a + $b + $c; }
+func main() int {
+    my array @v = (1, 2);
+    my array @one = (1);
+    my array @four = (1, 2, 3, 4);
+    say(f(5, ...@v) . " " . f(...@v) . " " . f(...@one) . " " . f(...@four));
+    return 0;
+}

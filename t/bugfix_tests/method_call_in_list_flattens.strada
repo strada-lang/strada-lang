@@ -1,0 +1,67 @@
+# EXPECT: a/b/c h/a/b/c a-b-c 5 5 6 3 3 3 2 3 k/a/b/c w1/w2 nosuch/auto a/b/c a/b/c 3 3 2 a,c,p 5 a/b/c
+# A method call as a list item gives the elements a method declared `array`
+# returns (Perl): list literals, push, join, sprintf, [...], { ... },
+# variadic calls. It was one item (ARRAY(0x...) in join). Any other method
+# is one item, also when it returns an array reference or an untyped
+# `return @list`. Dynamic names, Pkg->m, SUPER::m, around and AUTOLOAD too.
+package Base;
+func new() scalar { my hash %s = (); return bless(\%s, "Base"); }
+func parts(scalar $self) array { my array @p = ("a", "b", "c"); return @p; }
+func none(scalar $self) array { return (); }
+func untyped($self) { my array @p = ("x", "y"); return @p; }
+func aref(scalar $self) scalar { return [1, 2]; }
+func nothing(scalar $self) scalar { return undef; }
+func name(scalar $self) str { return "n"; }
+func stale(scalar $self) scalar { { my $t = $self->parts(); } return [1, 2]; }
+func wrapped(scalar $self) array { return ("w1", "w2"); }
+around "wrapped" func(scalar $orig, scalar $self) scalar { return $orig->($self); }
+func AUTOLOAD(scalar $self, str $m, scalar ...@r) array { return ($m, "auto"); }
+package Kid;
+extends Base;
+func parts(scalar $self) array { return ("k", SUPER::parts($self)); }
+package main;
+func cnt(scalar ...@r) int { return scalar(@r); }
+func main() int {
+    my scalar $o = Base::new();
+    my scalar $k = Kid::new();
+    my array @out = ();
+    push(@out, join("/", $o->parts()));
+    push(@out, join("/", "h", $o->parts()));
+    push(@out, sprintf("%s-%s-%s", $o->parts()));
+    my array @a = (0, $o->parts(), 9);
+    push(@out, scalar(@a));
+    my array @b = (0, $o->parts(), $o->none(), 9);
+    push(@out, scalar(@b));
+    push(@b, $o->name());
+    push(@out, scalar(@b));
+    my array @u = (0, $o->untyped(), 9);
+    push(@out, scalar(@u));
+    my array @r = (0, $o->aref(), 9);
+    push(@out, scalar(@r));
+    my array @n = (0, $o->nothing(), 9);
+    push(@out, scalar(@n));
+    my array @w = $o->untyped();
+    push(@out, scalar(@w));
+    my array @st = (0, $o->stale(), 9);
+    push(@out, scalar(@st));
+    push(@out, join("/", $k->parts()));
+    push(@out, join("/", $o->wrapped()));
+    push(@out, join("/", $o->nosuch()));
+    my str $m = "parts";
+    push(@out, join("/", $o->$m()));
+    push(@out, join("/", Base->parts()));
+    my scalar $ar = [$o->parts()];
+    push(@out, scalar(@{$ar}));
+    my scalar $held = $o->parts();
+    push(@out, scalar(@{$held}));
+    my array @z = ($o->aref(), $held);
+    push(@out, scalar(@z));
+    my scalar $h = { "p" => 1, $o->parts(), "z" };
+    push(@out, join(",", sort(keys(%{$h}))));
+    push(@out, cnt($o->parts(), $o->aref(), $o->name()));
+    my array @e = ();
+    foreach my $v ($o->parts()) { push(@e, $v); }
+    push(@out, join("/", @e));
+    say(join(" ", @out));
+    return 0;
+}

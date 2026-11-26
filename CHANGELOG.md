@@ -2,6 +2,38 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### A method call in a list flattens (2026-11-26)
+- `(0, $obj->parts(), 9)`, `push(@a, $obj->parts())`,
+  `join("/", File::Spec->splitdir($d))`, `[...]`, `{ ... }` and variadic
+  function arguments take the elements a method declared `array` returns, as
+  Perl does and as a call to an `array` function already did. Before, the
+  result was one item (`join` printed `ARRAY(0x...)`). Also `$obj->$name()`,
+  `Pkg->m()`, `SUPER::m($self)`, methods with modifiers and AUTOLOAD.
+- A method not declared `array` is still one item, also when it returns an
+  array reference or does an untyped `return @list`.
+- Only method names that some `array` function could answer to take the new
+  path; every other method call compiles to the same code as before.
+- Not covered: a method call as an argument of another method call
+  (`$log->add($obj->parts())` passes one argument).
+- Test: `t/bugfix_tests/method_call_in_list_flattens.strada`.
+
+### Smaller fixes (2026-11-26)
+- `return ("a");` or `return "a";` from a function declared `array` returns
+  a one-item list. It returned the bare value, so `my $n = f()` counted 0
+  and `use strict "types"` rejected it. Note: `if (f())` for such a function
+  that returns `0` is now true (a one-item list).
+- `extern func NAME` is a compile error when the C library or the Strada
+  runtime already declares NAME (`strlen`, `getenv`, `sqrt`, ...). It used
+  to fail in gcc with "conflicting types". A declaration whose prototype
+  happened to match exactly (`extern func getpid() int;`) compiled before
+  and is an error now: use a `__C__` block or the `core::` builtin.
+- `@{core::argv()} = LIST` replaces `@ARGV` in compiled code (it changed
+  nothing), and `@ARGV = LIST` works in the VM (it was "undeclared
+  variable").
+- Tests: `array_func_returns_one_value`, `extern_reserved_name`,
+  `argv_replace_in_place`, and two that pin behaviour an old note had wrong:
+  `spread_into_fixed_params`, `labeled_exit_runs_finally`.
+
 ### `?:` as the value of an array (2026-11-26)
 - `my @a = COND ? LIST : LIST;` (also `our`, `@a = ...` and `@{$r} = ...`)
   gave a one-element array in compiled code whichever branch ran, including

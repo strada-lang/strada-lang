@@ -28050,11 +28050,19 @@ static StradaValue* strada_finish_pinned_target(StradaValue *target) {
 }
 
 StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil) {
-    if (!ref || STRADA_IS_TAGGED_INT(ref) || ref->type != STRADA_REF) return strada_deref_set(ref, value);
-    StradaValue *target = strada_is_slot_ref(ref)
-        ? (ref->value.ptr ? *(StradaValue**)ref->value.ptr : NULL)
-        : ref->value.rv;
-    if (!target || STRADA_IS_TAGGED_INT(target)) return strada_deref_set(ref, value);
+    StradaValue *target;
+    /* The container itself, not a reference to it: core::argv(), or a scalar
+     * that holds an array/hash value. */
+    if (ref && !STRADA_IS_TAGGED_INT(ref) &&
+        ((sigil == '@' && ref->type == STRADA_ARRAY) || (sigil == '%' && ref->type == STRADA_HASH))) {
+        target = ref;
+    } else {
+        if (!ref || STRADA_IS_TAGGED_INT(ref) || ref->type != STRADA_REF) return strada_deref_set(ref, value);
+        target = strada_is_slot_ref(ref)
+            ? (ref->value.ptr ? *(StradaValue**)ref->value.ptr : NULL)
+            : ref->value.rv;
+        if (!target || STRADA_IS_TAGGED_INT(target)) return strada_deref_set(ref, value);
+    }
 
     /* What the RHS really is, looking through one reference. */
     StradaValue *rv = strada_unwrap_ref_safe(value);
@@ -32702,6 +32710,113 @@ StradaValue* strada_super_call_spread(StradaValue *obj, const char *from_package
         args = oop_resolve_spread(args, takes_list);
     }
     return strada_super_call(obj, from_package, method, args);
+}
+
+/* ---- methods that return a list, called as a list item ----
+ * (0, $obj->parts(), 9): the list takes the elements a method declared
+ * `array` returns (Perl); the result of any other method is one item, also
+ * when it is an array reference. The caller cannot know which method runs,
+ * so such a call (only one whose name some `array` function could answer
+ * to) arms a slot on its own stack (strada_ret_list_arm), dispatches through
+ * strada_method_call_lst / strada_super_call_lst, which look the method up
+ * and write the answer into the slot, and passes the result through
+ * strada_ret_list_done. A call the compiler resolved without dispatch never
+ * writes the slot, so its result is one item. Wrappers of `array` methods
+ * are recorded at init (strada_method_mark_ret_list). */
+static StradaMethod *oop_retlist_fns = NULL;
+static size_t oop_retlist_fn_count = 0, oop_retlist_fn_cap = 0;
+static __thread int *strada_ret_list_slot = NULL;
+
+void strada_method_mark_ret_list(StradaMethod func) {
+    if (!func) return;
+    oop_lock();
+    for (size_t i = 0; i < oop_retlist_fn_count; i++) {
+        if (oop_retlist_fns[i] == func) { oop_unlock(); return; }
+    }
+    if (oop_retlist_fn_count == oop_retlist_fn_cap) {
+        oop_retlist_fn_cap = oop_retlist_fn_cap ? oop_retlist_fn_cap * 2 : 64;
+        oop_retlist_fns = realloc(oop_retlist_fns, oop_retlist_fn_cap * sizeof(StradaMethod));
+    }
+    oop_retlist_fns[oop_retlist_fn_count++] = func;
+    oop_unlock();
+}
+
+/* caller holds oop_lock */
+static int oop_fn_returns_list(StradaMethod func) {
+    if (!func) return 0;
+    for (size_t i = 0; i < oop_retlist_fn_count; i++) {
+        if (oop_retlist_fns[i] == func) return 1;
+    }
+    return 0;
+}
+
+int* strada_ret_list_arm(int *slot) {
+    int *prev = strada_ret_list_slot;
+    strada_ret_list_slot = slot;
+    return prev;
+}
+
+StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev) {
+    strada_ret_list_slot = prev;
+    if (is_list || !r || STRADA_IS_TAGGED_INT(r)) return r;
+    if (!strada_sv_is_array_or_aref(r)) return r;
+    StradaValue *one = strada_new_array();
+    strada_array_push_take(one->value.av, r);
+    return one;
+}
+
+StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, StradaListSite *ls) {
+    /* taken at entry: nothing the method runs may see this call's slot */
+    int *slot = strada_ret_list_slot;
+    strada_ret_list_slot = NULL;
+    int is_list = 0;
+    if (slot && obj && !STRADA_IS_TAGGED_INT(obj) && method) {
+        const char *bp = SV_BLESSED(obj);
+        if (bp && ls && !strada_threading_active && ls->gen == mc_cache_gen && ls->pkg == bp) {
+            is_list = ls->is_list;
+        } else {
+            const char *pkg = bp;
+            char *pkg_owned = NULL;
+            if (!pkg && obj->type == STRADA_STR) { pkg_owned = strada_to_str(obj); pkg = pkg_owned; }   /* Pkg->m(...) */
+            if (pkg) {
+                oop_lock();
+                StradaMethod fn = oop_lookup_method(pkg, method);
+                if (!fn) fn = oop_lookup_method(pkg, "AUTOLOAD");
+                is_list = oop_fn_returns_list(fn);
+                oop_unlock();
+            }
+            if (pkg_owned) free(pkg_owned);
+            if (bp && ls && !strada_threading_active) {
+                ls->pkg = bp;
+                ls->is_list = (int8_t)is_list;
+                ls->gen = mc_cache_gen;
+            }
+        }
+    }
+    StradaValue *r = STRADA_ARGS_HAVE_SPREAD(args) ? strada_method_call_spread(obj, method, args)
+                                                   : strada_method_call(obj, method, args);
+    if (slot) *slot = is_list;
+    return r;
+}
+
+StradaValue* strada_super_call_lst(StradaValue *obj, const char *from_package, const char *method, StradaValue *args) {
+    int *slot = strada_ret_list_slot;
+    strada_ret_list_slot = NULL;
+    int is_list = 0;
+    if (slot && method && from_package) {
+        oop_lock();
+        if (!__atomic_load_n(&oop_initialized, __ATOMIC_ACQUIRE)) strada_oop_init();
+        OopPackage *pkg = oop_find_package(from_package);
+        StradaMethod fn = NULL;
+        for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], method);
+        for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], "AUTOLOAD");
+        is_list = oop_fn_returns_list(fn);
+        oop_unlock();
+    }
+    StradaValue *r = STRADA_ARGS_HAVE_SPREAD(args) ? strada_super_call_spread(obj, from_package, method, args)
+                                                   : strada_super_call(obj, from_package, method, args);
+    if (slot) *slot = is_list;
+    return r;
 }
 
 /* Set current method package (for SUPER:: context) */

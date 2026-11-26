@@ -3631,6 +3631,40 @@ static int vm_tern_branch_is_list(CompCtx *ctx, StradaValue *b) {
 
 /* One branch of a list ?: as a new array: `()` empty, a list its elements,
  * anything else one element. */
+/* Could a method call named `mn` (NULL: any name) reach a function declared
+ * `array`? Only such calls get the run-time list check as list items. A
+ * function name ending in `::mn` / `_mn`, or an AUTOLOAD, counts. */
+static int vm_array_method_name(CompCtx *ctx, const char *mn) {
+    if (!ctx->prog) return 0;
+    size_t ml = mn ? strlen(mn) : 0;
+    for (size_t i = 0; i < ctx->prog->func_count; i++) {
+        if (ctx->prog->funcs[i].return_type != AST_TYPE_ARRAY) continue;
+        const char *fnm = ctx->prog->funcs[i].name;
+        if (!fnm) continue;
+        if (!mn) return 1;
+        size_t fl = strlen(fnm);
+        if (fl >= 8 && strcmp(fnm + fl - 8, "AUTOLOAD") == 0) return 1;
+        if (fl < ml || strcmp(fnm + fl - ml, mn) != 0) continue;
+        if (fl == ml || fnm[fl - ml - 1] == ':' || fnm[fl - ml - 1] == '_') return 1;
+    }
+    return 0;
+}
+
+/* ast_is_plain_value (compiler/AST.strada): a literal, or arithmetic /
+ * concatenation. */
+static int vm_is_plain_value_node(StradaValue *d) {
+    if (!d || STRADA_IS_TAGGED_INT(d) || d->type != STRADA_HASH) return 0;
+    int t = (int)ast_int(d, "type");
+    if (t == NI_INT_LITERAL || t == NI_NUM_LITERAL) return 1;
+    if (t == NI_STR_LITERAL) return ast_int(d, "is_regex") != 1;
+    if (t == NI_BINARY_OP) {
+        const char *o = ast_str(d, "op");
+        return o && (!strcmp(o, ".") || !strcmp(o, "+") || !strcmp(o, "-") || !strcmp(o, "*") ||
+                     !strcmp(o, "/") || !strcmp(o, "%") || !strcmp(o, "**"));
+    }
+    return 0;
+}
+
 static void compile_tern_list_branch(CompCtx *ctx, StradaValue *b) {
     StradaValue *d = ast_deref(b);
     if (d && !STRADA_IS_TAGGED_INT(d) && (int)ast_int(d, "type") == NI_TERNARY &&
@@ -3694,6 +3728,16 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
     }
     if (t == NI_ANON_ARRAY && (int)ast_int(elem, "is_list") == 1) return 2;
     if (t == NI_MAP || t == NI_GREP || t == NI_SORT) return 2;
+    /* A method call as a list item: the elements a method declared `array`
+     * returns, one item from any other (compiled array_flatten_kind). */
+    if ((t == NI_METHOD_CALL || t == NI_DYN_METHOD_CALL || t == NI_SUPER_CALL) && elem->type == STRADA_HASH) {
+        if (ast_int(elem, "ret_list_fix") != 0) return 2;
+        const char *mn = t == NI_DYN_METHOD_CALL ? NULL : ast_str(elem, "method");
+        if (mn && (strcmp(mn, "isa") == 0 || strcmp(mn, "can") == 0)) return 0;
+        if (!vm_array_method_name(ctx, mn)) return 0;
+        strada_hash_set(elem->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
+        return 2;
+    }
     /* as compiled array_flatten_kind: ranges, slices and @{...} derefs */
     if (t == NI_RANGE || t == NI_ARRAY_SLICE || t == NI_HASH_SLICE) return 2;
     if (t == NI_CALL) {
@@ -3760,6 +3804,67 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     node = ast_deref(node);
     if (!node || STRADA_IS_TAGGED_INT(node)) {
         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+        return;
+    }
+
+    /* A method call that is a list item (vm_array_flatten_kind set the
+     * flag): the list of a method declared `array`, or one item. Which
+     * method ran is known from the receiver, so it is evaluated into a
+     * hidden local first and the call is compiled on that local;
+     * BUILTIN_RET_LIST_FIX looks the method up when the result is an array. */
+    if (node->type == STRADA_HASH && ast_int(node, "ret_list_fix") == 1) {
+        int rl_type = (int)ast_int(node, "type");
+        char rl_nm[64];
+        static int rl_serial = 0;
+        int rl_id = rl_serial++;
+        int obj_slot = -1, name_slot = -1;
+        strada_hash_set(node->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(2));
+        StradaValue *saved_obj = NULL, *saved_mexpr = NULL;
+        if (rl_type != NI_SUPER_CALL) {
+            snprintf(rl_nm, sizeof(rl_nm), "__rl_obj%d", rl_id);
+            obj_slot = ctx_get_or_add_local(ctx, rl_nm, '$');
+            saved_obj = ast_get(node, "base_object");
+            if (saved_obj) strada_incref(saved_obj);
+            compile_expr(ctx, saved_obj);
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)obj_slot);
+            strada_hash_set_take(node->value.hv, "base_object", rx_mk_var(rl_nm, strlen(rl_nm), "$"));
+            if (rl_type == NI_DYN_METHOD_CALL) {
+                snprintf(rl_nm, sizeof(rl_nm), "__rl_name%d", rl_id);
+                name_slot = ctx_get_or_add_local(ctx, rl_nm, '$');
+                saved_mexpr = ast_get(node, "method_expr");
+                if (saved_mexpr) strada_incref(saved_mexpr);
+                compile_expr(ctx, saved_mexpr);
+                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)name_slot);
+                strada_hash_set_take(node->value.hv, "method_expr", rx_mk_var(rl_nm, strlen(rl_nm), "$"));
+            }
+        }
+        compile_expr(ctx, node);
+        if (rl_type == NI_SUPER_CALL) {
+            const char *spkg = (ctx->cur_package && ctx->cur_package[0]) ? ctx->cur_package : "";
+            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, ast_str(node, "method")));
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, spkg));
+        } else {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)obj_slot);
+            if (rl_type == NI_DYN_METHOD_CALL) {
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)name_slot);
+            } else {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, ast_str(node, "method")));
+            }
+        }
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_RET_LIST_FIX);
+        vm_chunk_emit(ctx->chunk, rl_type == NI_SUPER_CALL ? 4 : 3);
+        if (saved_obj) strada_hash_set_take(node->value.hv, "base_object", saved_obj);
+        if (saved_mexpr) strada_hash_set_take(node->value.hv, "method_expr", saved_mexpr);
+        strada_hash_set(node->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
         return;
     }
 
@@ -7143,6 +7248,17 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
                     break;
                 }
+                /* @ARGV = LIST: replace the argument array in place. */
+                if (vsigil[0] == '@' && strcmp(vname, "ARGV") == 0 && strcmp(op, "=") == 0) {
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_ARGV);
+                    vm_chunk_emit(ctx->chunk, 0);
+                    compile_array_init_expr(ctx, NULL, value, 0);
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_CONTAINER_REPLACE);
+                    vm_chunk_emit(ctx->chunk, 2);
+                    break;
+                }
                 vm_report_undeclared_var(ctx, target, vsigil, vname);
                 compile_expr(ctx, value);
                 break;
@@ -9138,6 +9254,17 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_RETURN);
             break;
         }
+        if (ret_type == AST_TYPE_ARRAY && vm_is_plain_value_node(rvd)) {
+            /* one plain value from an array function: a one-item list */
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, 4);
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            compile_expr(ctx, val);
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            emit_try_unwind_for_return(ctx);
+            vm_chunk_emit(ctx->chunk, OP_RETURN);
+            break;
+        }
         if (val && !STRADA_IS_TAGGED_INT(val) && (val->type == STRADA_HASH || val->type == STRADA_REF)) {
             int can_tc = (!ctx->try_ctx && ctx->local_restore_count == 0 && !g_vm_no_tail_calls);
             StradaValue *vn = can_tc ? ast_deref(val) : NULL;
@@ -10864,6 +10991,8 @@ static void synthesize_modifier_wrappers(VMProgram *prog) {
         VMChunk *w = &prog->funcs[w_idx];
         w->fixed_param_count = 0;
         w->has_variadic = 1;
+        /* an `array` method stays one for BUILTIN_METHOD_RET_LIST */
+        if (prog->funcs[raw_orig].return_type == AST_TYPE_ARRAY) w->return_type = AST_TYPE_ARRAY;
         w->local_count = 2; /* slot 0 = packed args [$self, ...], slot 1 = result */
 
         /* before hooks across MRO (derived-first, registration order per package) */

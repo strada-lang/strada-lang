@@ -675,8 +675,8 @@ Gotchas:
 
 **Perl-compatible modules (2026-11-20)**: `Getopt::Long` (rewritten to Perl's
 API: `GetOptions("v+" => \$v, ...)`, hash storage, `Configure`,
-`GetOptionsFromArray`; it changes `@ARGV` in place with splice/push, because
-`@{core::argv()} = LIST` does not change `@ARGV` in compiled code), `File::Basename`,
+`GetOptionsFromArray`; it changes `@ARGV` in place with splice/push; `@{core::argv()} = LIST`
+did not change `@ARGV` in compiled code until 2026-11-26), `File::Basename`,
 `File::Temp`, `File::Spec` (class-method style) + `File::Spec::Functions`,
 `File::Path`, `File::Copy`, `Cwd`, `Carp`, `Scalar::Util`. `make install`
 installs everything under `lib/`. They follow Perl's behaviour, including
@@ -686,8 +686,8 @@ Getopt::Long `GetOptions([SPECS], \%opts)` form still works; `GetOptions(@specs,
 %opts)` does not (the hash arrives as a copy: use `GetOptions(\%opts, @specs)`).
 Limits: no `qr//` (File::Basename takes regex strings); library functions
 cannot provide `weaken` (arguments are copies), so Scalar::Util leaves it to
-`core::weaken`; a method returning a list gives an array ref inside another
-call's argument list (`join("/", File::Spec->splitdir($d))`).
+`core::weaken`. `join("/", File::Spec->splitdir($d))` gives the parts since
+2026-11-26 (a method declared `array` flattens as a list item).
 `use Mod qw(NAME)` no longer emits an unused `extern StradaValue* NAME();` when
 NAME resolves to the module's function (it clashed with libc's `basename`,
 `getcwd`; test `t/bugfix_tests/qw_import_libc_name.strada`).
@@ -1296,7 +1296,7 @@ try {
 }
 ```
 
-`finally` notes: runs after the try (or catch) completes, before an unmatched/re-thrown exception propagates, and before `return`/`next`/`last` leave the construct (return value is captured first, Java-style). `try { } finally { }` without catch is allowed. Labeled `next`/`last` jumping out of a try/finally skip the finally (documented limitation, mirrors their existing try-frame gap).
+`finally` notes: runs after the try (or catch) completes, before an unmatched/re-thrown exception propagates, and before `return`/`next`/`last` leave the construct (return value is captured first, Java-style). `try { } finally { }` without catch is allowed. Labeled `next`/`last`/`redo` that leave a try run its finally blocks too, nested ones included, and leave the try stack balanced (test `t/bugfix_tests/labeled_exit_runs_finally.strada`; an older note said the finally was skipped).
 
 **Error chaining**: `core::exception_trace()` returns the Strada call stack captured at the most recent `throw` in this thread (works for plain thrown values, readable inside `catch`). `lib/Exception.strada` provides structured exceptions: `Exception::new($msg)` (captures construction trace), `Exception::wrap($msg, $cause)` (chains any caught value), `->message/->cause/->trace/->describe()` (renders the whole chain).
 
@@ -1538,10 +1538,11 @@ correctly instead of being pushed as a single array-ref element (which silently
 produced garbage when the callee read it as a scalar). Regression:
 `examples/spread_operator.strada`.
 
-Limits (unchanged): spread is a *call-argument* form only — `(0, ...@a, 9)` in a
-list literal is a parse error, and spread into a **fixed-arity** (non-variadic)
-function does not expand into the parameters (it currently emits a raw C
-"too few arguments" error rather than a clean Strada diagnostic).
+Limits: spread is a *call-argument* form only — `(0, ...@a, 9)` in a list
+literal is a parse error. Spread into a **fixed-arity** function fills the
+parameters in order (missing ones 0 / undef, extra elements dropped; test
+`t/bugfix_tests/spread_into_fixed_params.strada`). An older note here said it
+reached gcc as "too few arguments"; that was no longer true by 2026-11-26.
 
 ### Regex (PCRE2 with POSIX fallback)
 
@@ -1813,6 +1814,17 @@ compiler:
 - **A `dynamic` function as a list item is called in list context (2026-11-26)** and flattens when it returns an array: `array_flatten_kind` sets `want_list` on the call node and returns 2 (`gen_user_call` reads it into the call context; VM `vm_array_flatten_kind` / `compile_expr`). `(0, f())` called `f` in scalar context on both backends. Test: `t/bugfix_tests/dynamic_call_in_list.strada`.
 - **Method arguments are spread into list-taking methods (2026-11-26)**: `$obj->m(@a)`, `$obj->$name(@a)`, `Pkg->m(@a)` and `SUPER::m($self, @a)` spread an array, hash, list literal, range/slice, map/grep/sort, list `?:` or `array`-function call into a method that is variadic or uses the `@_` form, as a function call does (Perl). It used to arrive as one argument. A method with an `array @p` or scalar parameter still gets it whole. The caller cannot know the callee, so it only marks the arguments: `method_pack_open` / `method_spread_mask` (CodeGenExpr.strada) emit `strada_pack_args_spread(MASK, N, ...)`, which sets `STRADA_SVf_SPREAD_ARGS` on the pack and keeps the mask (a tagged int, at most 60 arguments) after the last element, outside `size`; SUPER calls use `strada_args_mark_spread`. Such a call is emitted through `strada_method_call_spread` / `strada_super_call_spread` (no call-site cache), which look the method up, spread the pack (`strada_args_spread`) when its wrapper was recorded as list-taking (`strada_method_mark_list(__wrap_F)`, emitted next to `strada_method_register` for variadic and `@_`-form methods; an unresolved name falls back to AUTOLOAD's wrapper), clear the mark otherwise, and then call the ordinary dispatch. A call without a list argument is emitted exactly as before, and no wrapper changed: an earlier version tested the flag inside each list-taking wrapper and cost 9% on a loop of `@_`-method calls, where this costs nothing (414,320,278 vs 414,320,562 instructions on that loop, the difference being the init-time marks). An array variable arrives as a REF to its container, which `strada_args_spread` looks through; a tied or blessed container is passed whole. VM: `BUILTIN_METHOD_ARGS_FLAT` (obj, args, name, mask[, SUPER package]) resolves the method (falling back to AUTOLOAD) and spreads when its chunk `has_variadic`, then `OP_METHOD_CALL_SPREAD` / `OP_SUPER_CALL` run as before; a dynamic name uses `BUILTIN_DYN_SPREAD_MASK` (sets `VM.dyn_spread_mask`, consumed by the next `OP_DYN_METHOD_CALL`). A call with an explicit `...spread` keeps the old path. Test: `t/bugfix_tests/method_args_flatten.strada`.
 - **A call to an `array` function where one value is wanted is its count (2026-11-26)**: `my $n = f()`, `our $n = f()`, `$v = f()`, `$h{k} = f()`, `$a[i] = f()`, `$r->{k} = f()` (Semantic `sem_call_returns_array`, wrapped in `scalar(...)`; VM `vm_call_returns_array` at the declaration and assignment cases, including `compile_void_expr`). It stored the array. Only functions DECLARED `array` are affected: an untyped function that does `return @a` still returns the array (most Strada code depends on that). To keep the list, write `my array @t = f(); my scalar $r = \@t;` (the compiler's `lex_tokenize*` callers were the only in-repo sites, 11 of them) or `[f()]`. Test: `t/bugfix_tests/array_call_in_scalar_is_count.strada`.
+- **A method call as a list item flattens when the method is declared `array` (2026-11-26, Perl)**: `(0, $o->parts(), 9)`, `push`, `join`/`sprintf`/`say`, `[...]`, `{ ... }`, variadic function arguments; `$o->$name()`, `Pkg->m()`, `SUPER::m($self)`, methods with modifiers and AUTOLOAD too. It was one item (`join("/", File::Spec->splitdir($d))` printed `ARRAY(0x...)`). A method not declared `array` is one item, also when it returns an array reference or does an untyped `return @list` (the rule plain function calls have). The caller cannot know which method runs, so:
+  - Only names some `array` function could answer to are affected: `$cg->{"array_method_names"}` (CodeGenStmt.strada: this program's functions by package prefix, `orig_method` of linked libraries/objects, `*` for an `array` AUTOLOAD); VM `vm_array_method_name`. Every other method call compiles exactly as before (identical instruction counts on a `push(@a, $o->get())` loop).
+  - Compiled: `array_flatten_kind` sets `ret_list_fix` on the node and returns 2. `gen_expression` wraps the call: `strada_ret_list_arm(&slot)` puts a stack slot in a per-thread pointer, the call is emitted through `strada_method_call_lst` (a `static StradaListSite` per site caches class -> answer under `strada_mc_cache_gen`) or `strada_super_call_lst`, which take the slot at entry, look the method up (`strada_method_mark_ret_list(__wrap_F)` records wrappers of `array` methods at init), dispatch as usual (spreading list arguments too) and write the answer; `strada_ret_list_done` passes a list on and puts any other array or array reference into a one-item array. A flagged call is not devirtualized to an `array` function (the direct call would skip the lookup); one devirtualized to another function, or an inlined accessor, never writes the slot and is one item.
+  - Two earlier designs were dropped: marking the returned value in the wrapper made the answer depend on earlier calls (a cached list returned later by an untyped method flattened the first time only), and wrapping every list-item method call cost 8% on `push(@a, $o->get())`.
+  - VM: `compile_expr` evaluates the receiver (and a dynamic name) into hidden locals `__rl_objN` / `__rl_nameN`, compiles the call on them, then `BUILTIN_RET_LIST_FIX(r, obj, name[, SUPER package])` looks the method up only when the result is an array or undef (chunk `return_type` array; a `__modwrap` wrapper inherits it).
+  - Cost when the name collides with an `array` method elsewhere but the call is not a list: about 12 instructions per call compiled; one builtin call in the VM.
+  - Not done: a method call as an argument of another METHOD call is still one argument (`$log->add($o->parts())`); in scalar context (`my $n = $o->parts()`) the array is stored, not its count. A module compiled on its own (`-M`) sees only the classes it `use`s.
+  - Test: `t/bugfix_tests/method_call_in_list_flattens.strada`.
+- **One plain value returned from an `array` function is a one-item list (2026-11-26)**: `return ("a");` / `return "a";` / `return $x + 1;` (the parentheses are gone by then). It returned the bare value: `my $n = one()` counted 0 and `use strict "types"` reported "returning a str value". `ast_is_plain_value` (AST.strada: a literal, or arithmetic / concatenation) decides, in Semantic's return handling and VM `vm_is_plain_value_node`. `if (f())` with `return 0;` in an `array` function is now true (one item), where it used to be false; no such function exists in the repo or the outside projects. Test: `t/bugfix_tests/array_func_returns_one_value.strada`.
+- **`extern func NAME` with a name the C library or runtime declares is a compile error (2026-11-26)**, with or without a body (`parse_extern_function`; `c_ident_reserved` moved to AST.strada so the VM front end has it). It reached gcc as "conflicting types for 'strlen'", and the form with a body ran in the VM. A declaration whose C prototype happened to match exactly (`extern func getpid() int;`) used to compile and is an error too: use a `__C__` block or the `core::` builtin. Test: `t/bugfix_tests/extern_reserved_name.strada`.
+- **`@{core::argv()} = LIST` replaces `@ARGV` (2026-11-26)**: `strada_deref_assign_container` took only references, and `core::argv()` (or a scalar copy of it) is the array itself, so compiled code changed nothing. VM: `@ARGV = LIST` was "undeclared variable". Test: `t/bugfix_tests/argv_replace_in_place.strada`.
 - `$_` in a module without `main()` is a weak C definition (it was undeclared).
 - Assigning to a tied **parameter** (`func f($v) { $v = ...; }` called with a
   tied scalar) STOREs into the caller's tied scalar; rebind with a new `my`.
