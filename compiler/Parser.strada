@@ -964,6 +964,7 @@ func parse_anon_func_args(scalar $parser, int $line) scalar {
     $na->{"is_variadic"} = 1;
     ast_add_param($na, $nup);
     my int $na_outer_dyn = $parser->{"fn_ret_dyn"} + 0;
+    my int $na_outer_rl = $parser->{"fn_ret_list"} + 0;
     my int $na_outer_cret = $parser->{"c_ret_seen"} + 0;
     $parser->{"c_ret_seen"} = 0;
     $parser->{"fn_ret_dyn"} = 1;
@@ -971,6 +972,7 @@ func parse_anon_func_args(scalar $parser, int $line) scalar {
     $parser->{"fn_ret_dyn"} = $na_outer_dyn;
     if ($parser->{"c_ret_seen"}) { $na->{"c_block_returns"} = 1; }
     $parser->{"c_ret_seen"} = $na_outer_cret;
+    $parser->{"fn_ret_list"} = $na_outer_rl;
     ast_set_line($na, $line);
     return $na;
 }
@@ -1063,6 +1065,7 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     }
 
     # Parse body
+    my int $anon_outer_rl = $parser->{"fn_ret_list"} + 0;
     my int $anon_outer_cret = $parser->{"c_ret_seen"} + 0;
     $parser->{"c_ret_seen"} = 0;
     my int $anon_outer_dyn = $parser->{"fn_ret_dyn"} + 0;
@@ -1072,6 +1075,7 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     $parser->{"fn_ret_dyn"} = $anon_outer_dyn;
     if ($parser->{"c_ret_seen"}) { $anon->{"c_block_returns"} = 1; }
     $parser->{"c_ret_seen"} = $anon_outer_cret;
+    $parser->{"fn_ret_list"} = $anon_outer_rl;
 
     ast_set_line($anon, $line);
     return $anon;
@@ -4400,6 +4404,9 @@ func parser_make_return(scalar $parser, scalar $value, int $ret_line) scalar {
     my scalar $mr_stmt = ast_new_return_stmt($value);
     ast_set_line($mr_stmt, $ret_line);
     $mr_stmt->{"ret_form"} = $mr_form;
+    # anything but one plain value: the function may hand back a list (or
+    # nothing, or what another call yields); see ret_never_list
+    if ($mr_form != 6 && $mr_form != 7) { $parser->{"fn_ret_list"} = 1; }
     return $mr_stmt;
 }
 
@@ -5245,10 +5252,17 @@ func parse_function(scalar $parser) scalar {
     my int $outer_c_ret = $parser->{"c_ret_seen"} + 0;
     $parser->{"c_ret_seen"} = 0;
     my int $outer_ret_dyn = $parser->{"fn_ret_dyn"} + 0;
+    my int $outer_ret_list = $parser->{"fn_ret_list"} + 0;
+    $parser->{"fn_ret_list"} = 0;
     $parser->{"fn_ret_dyn"} = 2;
     if ($ret_type == TYPE_SCALAR() || $ret_type == TYPE_DYNAMIC()) { $parser->{"fn_ret_dyn"} = 1; }
     $fn->{"body"} = parse_block($parser);
     $parser->{"fn_ret_dyn"} = $outer_ret_dyn;
+    # Every `return` of this scalar-typed function is one plain value: a
+    # call to it can never yield a list, so callers need no check
+    # (cg_ucall_kind, vm_ucall_kind).
+    if ($ret_type == TYPE_SCALAR() && ($parser->{"fn_ret_list"} + 0) == 0) { $fn->{"ret_never_list"} = 1; }
+    $parser->{"fn_ret_list"} = $outer_ret_list;
     if ($parser->{"c_ret_seen"}) { $fn->{"c_block_returns"} = 1; }
     $parser->{"c_ret_seen"} = $outer_c_ret;
     

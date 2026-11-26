@@ -2692,9 +2692,14 @@ static inline StradaValue* strada_ucall_scalar(StradaValue *v) {
 }
 static inline StradaValue* strada_ucall_item(StradaValue *v) {
     if (v == NULL || STRADA_IS_TAGGED_INT(v)) return v;
-    if (v->type == STRADA_ARRAY || v->type == STRADA_HASH || v->type == STRADA_REF || v->type == STRADA_UNDEF)
+    if (__builtin_expect(v->type == STRADA_ARRAY || v->type == STRADA_HASH || v->type == STRADA_UNDEF, 0))
         return strada_ucall_item_slow(v);
     return v;
+}
+/* Is the result of a user call (after strada_ucall_item) a list to splice
+ * in? Only a bare, unblessed array; a reference to an array is one item. */
+static inline int strada_ucall_is_list(StradaValue *v) {
+    return v != NULL && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_ARRAY && !SV_BLESSED(v);
 }
 /* my @a = CALL: the call's list, owned by the caller. A fresh list (one
  * reference to an array nothing else holds) is taken as it is; everything

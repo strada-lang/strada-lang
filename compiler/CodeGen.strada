@@ -1065,6 +1065,7 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     $info{"return_type"} = $fn->{"return_type"};
     $info{"return_struct_name"} = "" . $fn->{"return_struct_name"};
     $info{"uses_wantarray"} = $fn->{"uses_wantarray"} + 0;
+    $info{"ret_never_list"} = $fn->{"ret_never_list"} + 0;
     # Track if this is an extern function for call site conversion
     if ($fn->{"type"} == NODE_EXTERN_FUNC()) {
         # A `is_strada_extern_decl` extern is a body-less qualified extern

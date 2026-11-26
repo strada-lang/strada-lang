@@ -656,6 +656,7 @@ enum {
     BUILTIN_UCALL_ARRAY,       /* (r): my @a = f(): the noted list, or r as a one-item array */
     BUILTIN_UCALL_ARG,         /* (r): a call that is an argument of a function: as it came back (nothing is undef) */
     BUILTIN_UCALL_IS,          /* (r): 1 when r is the noted list (an argument of a method call: joins the spread mask) */
+    BUILTIN_UCALL_APPEND,      /* (dst, r): BUILTIN_UCALL_ITEM + OP_ARRAY_EXTEND in one: the noted list's elements, or r as one item; yields dst */
     BUILTIN_SCALAR_OF,         /* (v): scalar(f()): an array's count, a hash's key count, anything else itself */
     BUILTIN_CLOSURE_ARGS_FLAT, /* (args, closure, mask): the arguments flagged in mask spread when the closure takes a list */
 };
@@ -998,6 +999,7 @@ typedef struct {
     int is_async;          /* async func: calls return a future */
     int has_variadic;
     int arity_known;       /* fixed_param_count/has_variadic come from a declared parameter list */
+    int ret_never_list;    /* every `return` is one plain value (the parser's ret_never_list): callers need no list check */
     int return_type;
     int int_only;
     char *name;
@@ -1296,6 +1298,11 @@ void vm_set_no_jit(int on);  /* strada-interp --no-jit: whole process, set befor
 VMProgram *vm_program_new(void);
 void vm_program_retain(VMProgram *prog);
 void vm_program_free(VMProgram *prog);
+/* Set by the compiler right after it emits BUILTIN_UCALL_ITEM: an
+ * OP_ARRAY_EXTEND emitted next (the same chunk, the same position) is fused
+ * with it into BUILTIN_UCALL_APPEND (vm_chunk_emit). */
+extern VMChunk *vm_peep_item_chunk;
+extern size_t vm_peep_item_end;
 VMChunk *vm_program_add_func(VMProgram *prog, const char *name);
 int vm_program_find_func(VMProgram *prog, const char *name);
 

@@ -3720,6 +3720,8 @@ static int vm_ucall_kind(CompCtx *ctx, StradaValue *n) {
         if (fidx < 0) return 0;
         int rt = ctx->prog->funcs[fidx].return_type;
         if (rt == AST_TYPE_ARRAY) return 2;
+        /* every return is one plain value: one value in every context */
+        if (rt == 6 && ctx->prog->funcs[fidx].ret_never_list) return 3;
         if (rt == 6 /* scalar */ || rt == 25 /* dynamic */ || rt == AST_TYPE_HASH_RET) return 1;
     }
     return 0;
@@ -3747,7 +3749,8 @@ static void vm_ucall_args_mark(CompCtx *ctx, StradaValue *node) {
             }
             continue;
         }
-        if (vm_ucall_kind(ctx, a) != 0 && ast_int(a, "uc_ctx") == 0 && ast_int(a, "uc_arg") == 0)
+        int auk = vm_ucall_kind(ctx, a);
+        if ((auk == 1 || auk == 2) && ast_int(a, "uc_ctx") == 0 && ast_int(a, "uc_arg") == 0)
             strada_hash_set(a->value.hv, "uc_arg", STRADA_MAKE_TAGGED_INT(1));
     }
 }
@@ -3865,6 +3868,7 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
     if ((t == NI_METHOD_CALL || t == NI_DYN_METHOD_CALL || t == NI_SUPER_CALL || t == NI_CLOSURE_CALL || t == NI_CALL) &&
         elem->type == STRADA_HASH) {
         int uk = vm_ucall_kind(ctx, elem);
+        if (uk == 3) return 0;   /* never a list: one item */
         if (uk != 0 && !(t == NI_CALL && ast_int(elem, "scalar_ctx") == 1)) {
             strada_hash_set(elem->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(1));
             return 2;
@@ -3950,6 +3954,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
      * scalar call and needs nothing. */
     if (node->type == STRADA_HASH && ast_int(node, "uc_busy") == 0) {
         int uk = vm_ucall_kind(ctx, node);
+        /* a function that never returns a list needs nothing here, unless a
+         * list consumer wants its one value as a list (compile_ucall_as_list) */
+        if (uk == 3 && ast_int(node, "uc_list") == 0) uk = 0;
         if (uk != 0) {
             int ucx = (int)ast_int(node, "uc_ctx");
             int as_list = (ucx == 1) || ast_int(node, "uc_list") == 1 || ast_int(node, "uc_arg") == 1;
@@ -3988,6 +3995,11 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_BUILTIN);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)consumer);
                 vm_chunk_emit(ctx->chunk, 1);
+                if (consumer == BUILTIN_UCALL_ITEM) {
+                    /* an OP_ARRAY_EXTEND right after this is fused with it */
+                    vm_peep_item_chunk = ctx->chunk;
+                    vm_peep_item_end = ctx->chunk->code_len;
+                }
             }
             return;
         }
@@ -10742,6 +10754,7 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
 
     /* Add parameters as locals, detect variadic */
     chunk->return_type = (int)ast_int(func_node, "return_type");
+    chunk->ret_never_list = (int)ast_int(func_node, "ret_never_list") == 1;
     chunk->is_async = ((int)ast_int(func_node, "type") == NI_ASYNC_FUNC);
     int is_synth = (int)ast_int(func_node, "is_synthesized");
     StradaValue *params = ast_get(func_node, "params");
@@ -11650,6 +11663,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
             }
         }
         fc->return_type = (int)ast_int(func, "return_type");
+        fc->ret_never_list = (int)ast_int(func, "ret_never_list") == 1;
         fc->is_async = ((int)ast_int(func, "type") == NI_ASYNC_FUNC);
         int is_synth = (int)ast_int(func, "is_synthesized");
         StradaValue *fparams = ast_get(func, "params");

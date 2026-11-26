@@ -1181,7 +1181,20 @@ static VMChunk vm_chunk_new(const char *name) {
     return c;
 }
 
+VMChunk *vm_peep_item_chunk = NULL;
+size_t vm_peep_item_end = 0;
 void vm_chunk_emit(VMChunk *c, uint8_t byte) {
+    /* `OP_BUILTIN UCALL_ITEM 1; OP_ARRAY_EXTEND` -> `OP_BUILTIN UCALL_APPEND
+     * 2; OP_POP`: a call's one value is pushed without a temporary array.
+     * The byte after a complete instruction is always an opcode. */
+    if (byte == OP_ARRAY_EXTEND && c == vm_peep_item_chunk && c->code_len == vm_peep_item_end && c->code_len >= 4 &&
+        c->code[c->code_len - 4] == OP_BUILTIN) {
+        c->code[c->code_len - 3] = (uint8_t)(BUILTIN_UCALL_APPEND & 0xFF);
+        c->code[c->code_len - 2] = (uint8_t)((BUILTIN_UCALL_APPEND >> 8) & 0xFF);
+        c->code[c->code_len - 1] = 2;
+        vm_peep_item_chunk = NULL;
+        byte = OP_POP;
+    }
     if (c->code_len >= c->code_cap) {
         c->code_cap = c->code_cap ? c->code_cap * 2 : 256;
         c->code = realloc(c->code, c->code_cap);
@@ -9110,6 +9123,41 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 res = VM_MAKE_PTR(out);
             }
             SP_PUSH(res);
+            break;
+        }
+        case BUILTIN_UCALL_APPEND: {
+            /* dst, r: the fused form of UCALL_ITEM + OP_ARRAY_EXTEND */
+            VMValue dstv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            VMValue rv = argc >= 2 ? args[1] : VM_UNDEF_VAL;
+            int noted = vm->list_ret_set != 0 && vm->list_ret == rv;
+            vm->list_ret_set = 0;
+            vm->list_ret = VM_UNDEF_VAL;
+            if (VM_IS_PTR(dstv) && VM_PTR_TYPE(dstv) == VM_OBJ_ARRAY) {
+                VMArray *da = VM_AS_ARRAY(dstv);
+                VMValue one = rv;
+                VMValue *items = &one;
+                int n = 1;
+                if (noted && VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY) {
+                    items = VM_AS_ARRAY(rv)->items;
+                    n = VM_AS_ARRAY(rv)->size;
+                }
+                if (__builtin_expect(!VM_IS_UNDEF(da->tied_obj), 0)) {
+                    int pfidx = vm_tied_array_find_method(vm, da->tied_obj, "PUSH");
+                    if (pfidx >= 0 && n > 0) {
+                        vm->stack_top = sp; vm->gc_pause++;
+                        vm_tied_array_call(vm, da->tied_obj, pfidx, items, n);
+                        vm->gc_pause--;
+                        stack = vm->stack; RELOAD();
+                        if (vm->has_pending_exc) {
+                            throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                            goto L_builtin_throw_exc;
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < n; i++) vm_array_push(da, vm_val_copy(items[i]));
+                }
+            }
+            SP_PUSH(dstv);
             break;
         }
         case BUILTIN_UCALL_ITEM:

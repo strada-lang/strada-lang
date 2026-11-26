@@ -5529,6 +5529,31 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
 # Declared/static return type of a call by name, or -1 if unknown. Mirrors
 # gen_user_call's resolver (plain name, then package-prefixed fallback for
 # unqualified calls inside a non-main package) so the two never diverge.
+# 1 when the function a call resolves to (the same lookups as
+# resolve_call_return_type) was stamped ret_never_list by the parser.
+func resolve_call_never_list(scalar $cg, str $name) int {
+    my str $nl_c = sanitize_name($name);
+    my scalar $nl_fi = $cg->{"functions"}->{$nl_c};
+    if ($nl_fi) {
+        if (($nl_fi->{"return_type"} + 0) > 0 || $nl_fi->{"is_extern"} == 1) { return $nl_fi->{"ret_never_list"} + 0; }
+    }
+    my str $nl_pkg = "" . $cg->{"current_fn_package"};
+    if (length($nl_pkg) > 0 && $nl_pkg ne "main" && index($name, "::") < 0) {
+        my scalar $nl_fi2 = $cg->{"functions"}->{sanitize_name($nl_pkg) . "_" . $nl_c};
+        if ($nl_fi2) { return $nl_fi2->{"ret_never_list"} + 0; }
+    }
+    return 0;
+}
+
+# The run-time test a list consumer applies to an item it may have to
+# flatten: a call to a user function is a list only when it handed back a
+# bare array (strada_ucall_is_list); a builtin's or list temp's result is one
+# when it is an array or a reference to one.
+func flat_pred_name(scalar $cg, scalar $el) str {
+    if (($el->{"uc_ctx"} + 0) == 1 && cg_ucall_kind($cg, $el) == 1) { return "strada_ucall_is_list"; }
+    return "strada_sv_is_array_or_aref";
+}
+
 func resolve_call_return_type(scalar $cg, str $name) int {
     my str $c_name = sanitize_name($name);
     my scalar $fi = $cg->{"functions"}->{$c_name};
@@ -5672,6 +5697,9 @@ func ucall_mark_list_source(scalar $cg, scalar $target, scalar $value) void {
 #   1  a method, a closure call, or a function declared scalar (the
 #      default), dynamic or hash: known only when it has run
 #   2  a function declared `array`: always a list
+#   3  a user function whose every return is one plain value (the parser's
+#      ret_never_list): one value in every context, no check; a consumer
+#      that wants a list (my @a = f(), foreach) still gets it as one item
 func cg_ucall_kind(scalar $cg, scalar $n) int {
     my int $uk_t = $n->{"type"};
     if ($uk_t == NODE_METHOD_CALL()) {
@@ -5685,6 +5713,9 @@ func cg_ucall_kind(scalar $cg, scalar $n) int {
         # same name as some package's function is not one
         if (length("" . $n->{"sem_fn_key"}) == 0) { return 0; }
         my int $uk_rt = resolve_call_return_type($cg, $n->{"name"});
+        # every return of the function is one plain value (the parser's
+        # ret_never_list): nothing to check
+        if ($uk_rt == TYPE_SCALAR() && resolve_call_never_list($cg, "" . $n->{"name"}) == 1) { return 3; }
         if ($uk_rt == TYPE_SCALAR() || $uk_rt == TYPE_DYNAMIC() || $uk_rt == TYPE_HASH()) { return 1; }
         if ($uk_rt == TYPE_ARRAY()) { return 2; }
     }
@@ -5741,7 +5772,7 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
         if ($crt == TYPE_ARRAY()) { $elem->{"uc_ctx"} = 2; return 2; }
         # a function declared scalar (the default) or hash: a list when its
         # `return` was one (strada_ucall_item)
-        if (($crt == TYPE_SCALAR() || $crt == TYPE_HASH()) && length("" . $elem->{"sem_fn_key"}) > 0) { $elem->{"uc_ctx"} = 1; return 2; }
+        if (($crt == TYPE_SCALAR() || $crt == TYPE_HASH()) && cg_ucall_kind($cg, $elem) == 1) { $elem->{"uc_ctx"} = 1; return 2; }
         # A `dynamic` function as a list item is called in list context
         # (Perl) and flattens when it returns an array; it was called in
         # scalar context there.
@@ -5840,7 +5871,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($uc_kind == 1 && $uc_want == 1) { $uc_fn = "strada_ucall_item("; }
             if ($uc_want == 3) { $uc_fn = "strada_ucall_array("; }
             if ($uc_want == 4) { $uc_fn = "strada_ucall_hash("; }
-            if ($uc_kind != 0 && $uc_want == 0) { $uc_fn = "strada_ucall_scalar("; }
+            if (($uc_kind == 1 || $uc_kind == 2) && $uc_want == 0) { $uc_fn = "strada_ucall_scalar("; }
             if (length($uc_fn) > 0) {
                 $expr->{"uc_busy"} = 1;
                 emit($cg, $uc_fn);
@@ -8432,7 +8463,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     gen_expression($cg, $fl_elem);
                     emit($cg, "; ");
                     if ($fl_push == 1) { emit($cg, "strada_cleanup_push(__fl_tmp); "); }
-                    emit($cg, "if (strada_sv_is_array_or_aref(__fl_tmp)) { strada_av_append_all(__fl_arr->value.av, __fl_tmp); ");
+                    emit($cg, "if (" . flat_pred_name($cg, $fl_elem) . "(__fl_tmp)) { strada_av_append_all(__fl_arr->value.av, __fl_tmp); ");
                     if ($fl_push == 1) { emit($cg, "strada_cleanup_pop_decref(__fl_tmp); "); }
                     else { emit($cg, "strada_decref(__fl_tmp); "); }
                     emit($cg, "} else { ");

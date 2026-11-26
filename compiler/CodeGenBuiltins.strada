@@ -146,7 +146,7 @@ func emit_list_elem_append(scalar $cg, str $av, scalar $el, int $use_push) void 
         gen_expression($cg, $src);
         emit($cg, "; ");
         if ($own == 1 && $use_push == 1) { emit($cg, "strada_cleanup_push(__le_v); "); }
-        emit($cg, "if (strada_sv_is_array_or_aref(__le_v)) { strada_av_append_all(" . $av . ", __le_v); } else { strada_array_push(" . $av . ", __le_v); } ");
+        emit($cg, "if (" . flat_pred_name($cg, $src) . "(__le_v)) { strada_av_append_all(" . $av . ", __le_v); } else { strada_array_push(" . $av . ", __le_v); } ");
         if ($own == 1) {
             if ($use_push == 1) { emit($cg, "strada_cleanup_pop_decref(__le_v); "); }
             else { emit($cg, "strada_decref(__le_v); "); }
@@ -1981,7 +1981,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             gen_expression($cg, $sep_arg);
             emit($cg, "; ");
             if ($jn_sp == 1 && $jn_s_cl == 1) { emit($cg, "strada_cleanup_push(__join_sep); "); }
-            if ($argc == 2 && $join_has_spread == 0 && array_flatten_kind($cg, $args->[1]) > 0) {
+            if ($argc == 2 && $join_has_spread == 0 && array_flatten_kind($cg, $args->[1]) > 0 && cg_ucall_kind($cg, $args->[1]) != 1) {
                 my int $arr_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[1]) == 1;
                 if ($arr_needs_cleanup == 1) {
                     emit($cg, "StradaValue *__join_arr = ");
@@ -10045,11 +10045,11 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     if ($fl_cl == 1) {
                         emit($cg, "{ StradaValue *__flat = strada_mortal(");
                         gen_expression($cg, $arg);
-                        emit($cg, "); if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
+                        emit($cg, "); if (" . flat_pred_name($cg, $arg) . "(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
                     } else {
                         emit($cg, "{ StradaValue *__flat = ");
                         gen_expression($cg, $arg);
-                        emit($cg, "; if (strada_sv_is_array_or_aref(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
+                        emit($cg, "; if (" . flat_pred_name($cg, $arg) . "(__flat)) { strada_av_append_all(strada_deref_array(__va_arr), __flat); } else { strada_array_push(strada_deref_array(__va_arr), __flat); } } ");
                     }
                 } else {
                     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {

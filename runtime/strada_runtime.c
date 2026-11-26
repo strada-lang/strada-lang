@@ -32854,23 +32854,21 @@ static StradaValue *ucall_one_item(StradaValue *v) {
 }
 
 /* A call that is an item of a list: its elements, or itself as one item.
- * Every consumer of such an item flattens arrays and array references, so
- * a reference (one value) is handed over inside a one-item array. */
+ * The consumer asks strada_ucall_is_list of what this returns: a bare
+ * array is the list (nothing: an empty one; a hash: its pairs), anything
+ * else, a reference to an array too, is one item. */
 StradaValue* strada_ucall_item_slow(StradaValue *v) {
     if (v == &__strada_empty_ret) return strada_new_array();
     if (v->type == STRADA_ARRAY) {
-        if (SV_BLESSED(v)) return ucall_one_item(v);
-        if (!(v->flags & STRADA_SVf_IMMORTAL)) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+        if (!SV_BLESSED(v) && !(v->flags & STRADA_SVf_IMMORTAL)) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
         return v;
     }
-    if (v->type == STRADA_HASH) {
-        if (SV_BLESSED(v)) return v;
+    if (v->type == STRADA_HASH && !SV_BLESSED(v)) {
         strada_cleanup_push(v);
         StradaValue *flat = strada_hash_to_flat_array(v);
         strada_cleanup_pop_decref(v);
         return flat;
     }
-    if (v->type == STRADA_REF && strada_sv_is_array_or_aref(v)) return ucall_one_item(v);
     return v;
 }
 
