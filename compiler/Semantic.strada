@@ -2664,8 +2664,32 @@ func sem_tern_branch_list(scalar $branch) scalar {
     return $lst;
 }
 
+func sem_is_or_empty(scalar $n) int {
+    if (is_valid_node($n) == 0) { return 0; }
+    if ($n->{"type"} != NODE_BINARY_OP()) { return 0; }
+    my str $oe_op = "" . $n->{"op"};
+    if ($oe_op ne "//" && $oe_op ne "||") { return 0; }
+    my scalar $oe_r = $n->{"right"};
+    if (is_valid_node($oe_r) == 1 && $oe_r->{"is_empty_list"}) { return 1; }
+    return 0;
+}
+
+func sem_tern_empty_undef(scalar $tern) void {
+    if (is_valid_node($tern) == 0) { return; }
+    if ($tern->{"type"} != NODE_TERNARY()) { return; }
+    my scalar $teu_a = $tern->{"true_expr"};
+    my scalar $teu_b = $tern->{"false_expr"};
+    if (is_valid_node($teu_a) == 1 && $teu_a->{"is_empty_list"}) { $tern->{"true_expr"} = ast_new_undef(); }
+    else { sem_tern_empty_undef($teu_a); }
+    if (is_valid_node($teu_b) == 1 && $teu_b->{"is_empty_list"}) { $tern->{"false_expr"} = ast_new_undef(); }
+    else { sem_tern_empty_undef($teu_b); }
+}
+
 func sem_tern_as_lists(scalar $tern) void {
     if (is_valid_node($tern) == 0) { return; }
+    # `A // ()` / `A || ()` where a list is wanted: A as one item, or nothing
+    # (Perl). The code generator builds the 0- or 1-element array.
+    if (sem_is_or_empty($tern) == 1) { $tern->{"list_or_empty"} = 1; return; }
     if ($tern->{"type"} != NODE_TERNARY()) { return; }
     if ($tern->{"list_tern"}) { return; }
     $tern->{"true_expr"} = sem_tern_branch_list($tern->{"true_expr"});
@@ -4317,6 +4341,16 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 my int $rrt = $rcur->{"return_type"} + 0;
                 if ($rrt != TYPE_ARRAY() && $rrt != TYPE_HASH() && $rrt != TYPE_DYNAMIC() && $rrt != TYPE_VOID()) {
                     sem_rev_scalar($ret_val);
+                    # return C ? X : (): the `()` branch is undef, as a bare
+                    # `return ()` is here; in an int/num function an array
+                    # branch is its count, as a bare `return @a` is.
+                    if ($ret_val->{"type"} == NODE_TERNARY()) {
+                        if ($rrt == TYPE_INT() || $rrt == TYPE_NUM()) {
+                            ast_tern_scalar($ret_val, 1);
+                        } else {
+                            sem_tern_empty_undef($ret_val);
+                        }
+                    }
                 }
             }
             if ($rcur && ($rcur->{"return_type"} == TYPE_INT() || $rcur->{"return_type"} == TYPE_NUM()) && sem_is_array_value($ctx, $ret_val) == 1) {

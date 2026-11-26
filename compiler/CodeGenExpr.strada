@@ -2023,7 +2023,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $target);
                         emit($cg, "; })");
                     }
-                } elsif ($val_type == NODE_ANON_ARRAY() || ($val_type == NODE_TERNARY() && $val->{"list_tern"})) {
+                } elsif ($val_type == NODE_ANON_ARRAY() || ($val_type == NODE_TERNARY() && $val->{"list_tern"}) || ($val_type == NODE_BINARY_OP() && $val->{"list_or_empty"})) {
                     emit($cg, "({ StradaValue *__new_a = ");
                     gen_expression($cg, $val);
                     emit($cg, "; ");
@@ -5562,7 +5562,8 @@ func tern_branch_is_list(scalar $cg, scalar $branch) int {
         my str $bnm = "" . $branch->{"name"};
         if ($bnm eq "reverse" && ($branch->{"scalar_ctx"} + 0) == 1) { return 0; }
         if ($bnm eq "split" || $bnm eq "keys" || $bnm eq "values" || $bnm eq "reverse") { return 1; }
-        if (resolve_call_return_type($cg, $bnm) == TYPE_ARRAY()) { return 1; }
+        my int $brt = resolve_call_return_type($cg, $bnm);
+        if ($brt == TYPE_ARRAY() || $brt == TYPE_DYNAMIC()) { return 1; }
     }
     return 0;
 }
@@ -5572,6 +5573,10 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
     # C ? LIST : LIST in a list: the chosen branch's elements (Perl). The
     # branches become list literals the first time a list context asks
     # (sem_tern_as_lists), after which the ?: always yields a new array.
+    if ($t == NODE_BINARY_OP() && ($elem->{"list_or_empty"} || sem_is_or_empty($elem) == 1)) {
+        $elem->{"list_or_empty"} = 1;
+        return 2;
+    }
     if ($t == NODE_TERNARY()) {
         if ($elem->{"list_tern"}) { return 2; }
         if (tern_branch_is_list($cg, $elem) == 1) {
@@ -5603,6 +5608,13 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
         }
         my int $crt = resolve_call_return_type($cg, $elem->{"name"});
         if ($crt == TYPE_ARRAY()) { return 2; }
+        # A `dynamic` function as a list item is called in list context
+        # (Perl) and flattens when it returns an array; it was called in
+        # scalar context there.
+        if ($crt == TYPE_DYNAMIC()) {
+            $elem->{"want_list"} = 1;
+            return 2;
+        }
         # A runtime builtin (core::unpack, core::readdir, re::captures, ...)
         # with no declared Strada return type: decided at run time (every
         # kind-2 consumer checks strada_sv_is_array_or_aref), so a builtin
@@ -5829,6 +5841,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
     }
     
     # Binary operation
+    if ($type == NODE_BINARY_OP() && $expr->{"list_or_empty"}) {
+        # A // () / A || () as a list: a new array holding A, or empty
+        my scalar $oe_left = $expr->{"left"};
+        emit($cg, "({ StradaValue *__oe = ");
+        gen_expression($cg, $oe_left);
+        if (needs_temp_cleanup($cg, $oe_left) == 0) {
+            emit($cg, "; strada_incref(__oe)");
+        }
+        emit($cg, "; StradaValue *__oa = strada_new_array(); if (");
+        if ($expr->{"op"} eq "//") {
+            emit($cg, "strada_defined_bool(__oe)");
+        } else {
+            emit($cg, "strada_to_bool(__oe)");
+        }
+        emit($cg, ") { strada_array_push_take(__oa->value.av, __oe); } else { strada_decref(__oe); } __oa; })");
+        return;
+    }
     if ($type == NODE_BINARY_OP()) { gen_binop_node($cg, $expr); return; }
 
     # Regex match: $str =~ /pattern/flags or $str !~ /pattern/flags

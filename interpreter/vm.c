@@ -2877,8 +2877,8 @@ static int vm_regex_find_u8(VM *vm, const char *str, size_t slen, int is_utf8, c
 /* s/// done in the VM when the replacement is plain text (no '$' or '\'):
  * a literal pattern without flags is a byte search, anything else loops
  * pcre2_match over the VM's cached pattern. Captures follow the runtime
- * path: the first match is recorded; a pattern without groups keeps the
- * earlier $1.. and sets only $&. Returns the number of substitutions, or
+ * path: the first match is recorded; a pattern without groups sets $& and
+ * leaves $1.. undef. Returns the number of substitutions, or
  * -1 when the runtime must do it (the caller then uses
  * strada_regex_replace_capture_len2). *res_out is malloc'd when > 0. */
 static int vm_rx_has_meta(const char *p, size_t plen) {
@@ -2909,11 +2909,11 @@ static int vm_sb_put(VMSubstBuf *b, const char *p, size_t n) {
 }
 
 static void vm_subst_set_amp(VM *vm, const char *p, size_t n, int u8) {
-    /* group-less match: $1.. stay, $& is the match */
-    if (vm->rx_lazy) vm_rx_materialize(vm);
-    int ng = vm->regex_ngroups;
+    /* group-less match: $& is the match and $1.. are undef (Perl; they
+     * used to keep the previous match's groups) */
+    vm_clear_regex_captures(vm);
     vm_store_regex_capture(vm, 0, p, n, u8);
-    if (ng > vm->regex_ngroups) vm->regex_ngroups = ng;
+    vm->regex_ngroups = 1;
 }
 
 static int vm_subst_native(VM *vm, const char *s, size_t slen, int s_u8, const char *pat, size_t plen,

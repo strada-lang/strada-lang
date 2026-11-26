@@ -10,6 +10,26 @@
   argument is still one value. Test:
   `t/bugfix_tests/array_ternary_list_branches.strada`.
 
+### Perl's list and scalar rules (2026-11-26)
+Both backends; each item was different from Perl before.
+- `my $n = $t ? @a : @b;` is a count (it was the array); the same for a
+  `?:` used as an operand or a condition. A `()` branch is undef.
+- `my $n = %h;` is the key count (it kept the hash).
+- `my $n = (7, 8, 9);` is 9: every item is evaluated, the last is the value.
+- `my @a = $x // ();` and `$x || ()` give an empty array when the left side
+  fails, and work as list items (`(1, $x // (), 2)`).
+- `my @a = $ref;`, `$r->[0]`, `$r->{k}` is one element. The VM copied a
+  referenced array's elements; compiled code took `$r->[0]` for the array.
+  Write `@{$ref}` to copy.
+- `foreach my $v ($t ? @a : @b) { $v = ... }` changes the chosen array.
+- `{ %base, k => 1 }`, `{ $t ? (k => 1) : (), z => 2 }`, `{ f() }` and
+  `{ map { $_ => 1 } @a }` build a hash (they were parse errors).
+- After a successful `s///` whose pattern has no groups, `$1..` are undef
+  (they kept the previous match's groups).
+- Tests: `ternary_scalar_context`, `hash_literal_list_items`,
+  `or_empty_list`, `array_init_from_scalar_is_one_element`,
+  `subst_without_groups_clears_captures` in `t/bugfix_tests/`.
+
 ### `?:` in a list flattens (2026-11-26)
 - A `?:` with a list branch, used as an item of a list, contributes the
   chosen branch's elements, as in Perl: `(0, $t ? @a : @b)`,

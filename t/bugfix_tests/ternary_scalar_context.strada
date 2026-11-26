@@ -1,0 +1,44 @@
+# EXPECT: 3 3 3 3 3 3 3 3 3 13 n=3 3 3 1 3 U 3 3 3 3|1 1 1 2 2 s 2 1 1 11 n=1 1 R 0 1 A 0 9 6 1
+# A ?: where one value is wanted applies that context to its branches
+# (Perl): an array or hash branch is its count, `()` is undef, a slice its
+# last element, a list its last item. `my $n = $t ? @a : @b` was the array.
+# A call that returns an array still yields the array. Also: `my $n = %h`
+# is the key count and `my $n = (7, 8, 9)` is 9.
+func two() array { return (8, 9); }
+func sc(int $t, array @m) scalar { return $t ? @m : (); }
+func si(int $t, array @m) int { return $t ? 0 : @m; }
+func main() int {
+    my array @OUT = ();
+    my array @m = (5, 6, 7);
+    my array @o = (1);
+    my hash %h = (a => 1, b => 2);
+    my $r = [4, 4];
+    my hash %st = ();
+    my array @el = (0);
+    foreach my $t (0, 1) {
+        my $a = $t ? @o : @m;
+        my int $b = $t ? @o : @m;
+        my $c; $c = $t ? @o : @m;
+        my $d = $t ? @{$r} : @m;
+        my $e = $t ? %h : @m;
+        my $f = $t ? "s" : @m;
+        my $g = $t ? keys(%h) : @m;
+        my $i = $t ? two() : @m;
+        $st{"k"} = $t ? @o : @m;
+        $el[0] = $t ? @o : @m;
+        my $j = ($t ? @o : @m) + 10;
+        my str $k = "n=" . ($t ? @o : @m);
+        my $l = $t ? @o : $t ? @o : @m;
+        my $n = $t ? $r : @m;
+        my int $p = 0; if (($t ? @o : @m) > 2) { $p = 1; }
+        my $q = scalar($t ? @o : @m);
+        my $u = sc($t, @m);
+        my $w = si($t, @m);
+        my $y = $t ? (7, 8, 9) : @m;
+        my $z = $t ? @m[0, 1] : @m;
+        our $G = $t ? @o : @m;
+        push(@OUT, join(" ", $a, $b, $c, $d, $e, $f, $g, $st{"k"}, $el[0], $j, $k, $l, ref($n) ? "R" : $n, $p, $q, defined($u) ? (ref($u) ? "A" : $u) : "U", $w, $y, $z, $G));
+    }
+    say(join("|", @OUT));
+    return 0;
+}

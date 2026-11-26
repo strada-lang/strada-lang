@@ -15681,41 +15681,20 @@ char* strada_regex_replace_all(const char *str, const char *pattern, const char 
     return pcre2_do_substitute(str, pattern, replacement, flags, 1);
 }
 
-/* After a group-less s/// match has been pm_record'ed: keep $1..$N from the
- * previous match and update only index 0 ($&). pm_build_captures() must have
- * run before pm_record. */
-static void pm_keep_groups_set_amp(const char *str, const PCRE2_SIZE *ovector) {
-    if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY
-        && last_regex_captures->value.av && last_regex_captures->value.av->size > 1) {
-        StradaArray *old_av = last_regex_captures->value.av;
-        StradaValue *new_zero = (ovector[0] != PCRE2_UNSET)
-            ? strada_regex_new_capture(str + ovector[0], (size_t)(ovector[1] - ovector[0]))
-            : strada_new_undef();
-        StradaValue *old_zero = old_av->elements[old_av->head + 0];
-        old_av->elements[old_av->head + 0] = new_zero;
-        strada_decref(old_zero);
-        pm_state.cap_gen = pm_state.gen;
-    }
-}
-
 /* A literal s/// (strada_subst_sv_cnt) that matched at byte OFF: record the
  * first match like a group-less regex s/// does, so $& (captures()->[0]),
- * @-/@+ and $`/$' are set and $1..$N are kept. SHARE: SRC is a plain
- * string's buffer, which pm_state may hold by reference instead of copying. */
+ * @-/@+ and $`/$' are set and $1..$N are undef (Perl: a successful match
+ * without groups leaves no $1; they used to keep the previous match's).
+ * SHARE: SRC is a plain string's buffer, which pm_state may hold by
+ * reference instead of copying. */
 static void strada_subst_record_literal(const char *src, size_t src_len, int utf8,
                                         size_t off, size_t flen, int share) {
     pthread_once(&regex_cleanup_once, register_regex_cleanup_atexit);
-    /* last_regex_captures is current when the eager setters own it or it
-     * was built for this gen. Otherwise build it only if the previous match
-     * had groups to keep: building per s/// cost a third of a literal s///. */
-    int cur = pm_state.external || pm_state.cap_gen == pm_state.gen;
-    if (!cur && pm_state.ovec_count > 1) { pm_build_captures(); cur = 1; }
     PCRE2_SIZE ov[2] = { (PCRE2_SIZE)off, (PCRE2_SIZE)(off + flen) };
     const char *saved_pv = strada_regex_subject_pv;
     strada_regex_subject_pv = share ? src : NULL;
     pm_record(src, src_len, utf8, ov, 1);
     strada_regex_subject_pv = saved_pv;
-    if (cur) pm_keep_groups_set_amp(src, ov);
 }
 
 /* strada_regex_replace_capture_len2: substitute AND set capture variables, return match count and byte length */
@@ -15759,14 +15738,7 @@ int strada_regex_replace_capture_len2(const char *str, size_t subject_length, in
     PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(cap_md);
     uint32_t count = strada_md_valid_pairs(re, cap_md);
 
-    /* When s/// succeeds without user capture groups (count == 1), Perl
-     * preserves $1..$9 from the prior match while updating $&, $`, $',
-     * @-, @+, and %+. Materialize prior captures first before pm_record
-     * advances pm_state.gen. */
-    if (count == 1) {
-        pm_build_captures();
-    }
-
+    /* A pattern without groups (count == 1) leaves $1.. undef, as in Perl. */
     /* Record subject + ovector for lazy $`, $', @-, @+, %+ (and $&/$1..$N) */
     pm_record(str, slen, is_utf8, ovector, count);
 
@@ -15800,8 +15772,6 @@ int strada_regex_replace_capture_len2(const char *str, size_t subject_length, in
         last_named_captures = nh;
         pm_state.named_gen = pm_state.gen;
     }
-
-    if (count == 1) pm_keep_groups_set_amp(str, ovector);
 
     strada_md_release(cap_md);
 

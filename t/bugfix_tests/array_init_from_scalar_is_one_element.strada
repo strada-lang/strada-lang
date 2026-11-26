@@ -1,0 +1,26 @@
+# EXPECT: 1 1 1 1 1 1 2 3 2 1 1 3
+# `my @a = $s` / `$r->[i]` / `$r->{k}` / `$h{k}` / `C ? $p : $q` is one
+# element, also when the value is an array reference. The VM copied the
+# referenced array's elements; compiled code treated `$r->[i]` and
+# `$r->{k}` as the array itself.
+func main() int {
+    my $r = [4, 4];
+    my hash %h = (k => [1, 2, 3]);
+    my array @n = ([7, 8]);
+    my int $t = 1;
+    my array @a = $r;
+    my array @b; @b = $r;
+    my array @c = $h{"k"};
+    my array @d = $n[0];
+    my array @e = $t ? $r : 0;
+    my array @f = $$r[0];
+    my array @g = @$r;
+    my array @i = @{$h{"k"}};
+    my array @j = [1, 2];
+    my array @k = ($r);
+    my $u;
+    my array @l = $u;
+    my array @m = $r->[0]; my $hr = { z => [1, 2] }; my array @o = $hr->{"z"}; my array @p; @p = $hr->{"z"}; push(@m, scalar(@o), scalar(@p));
+    say(join(" ", scalar(@a), scalar(@b), scalar(@c), scalar(@d), scalar(@e), scalar(@f), scalar(@g), scalar(@i), scalar(@j), scalar(@k), scalar(@l), scalar(@m)));
+    return 0;
+}

@@ -1,9 +1,9 @@
-# EXPECT: a-bXc 1=q amp=X|a-b-c amp=X|12x45 amp=3|hello amp=é|kEEp keep amp=e|aBc 1=U amp=b|aBCabc 1=a amp=c|aXbXc amp=q1
+# EXPECT: a-bXc 1= amp=X|a-b-c amp=X|12x45 amp=3|hello amp=é|kEEp keep amp=e|aBc 1=U amp=b|aBCabc 1= amp=c|aXbXc amp=q1
 # A literal s/// (no regex metacharacters, no flags but /g) takes a fast path
 # in compiled code (strada_subst_sv_cnt) that never recorded the match, so
 # $& (captures()->[0]) kept the previous match's text. It now records the
-# first match like the regex path: $& is set and $1..$N are kept, as the VM
-# does. A stale group array from an older match is not resurrected.
+# first match like the regex path: $& is set and $1..$N are undef (Perl;
+# until 2026-11-26 they kept the previous match's groups). A stale group array from an older match is not resurrected.
 func amp() str { my $a = captures()->[0]; return defined($a) ? $a : "U"; }
 func main() int {
     my @r = ();

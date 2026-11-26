@@ -539,9 +539,75 @@ func ast_new_our_decl(str $name, int $var_type, str $sigil) scalar {
 # Arrays and hashes are references at run time and a reference is always
 # true, so the count must be asked for explicitly. NOT for value contexts
 # (return, =, my): `return @a` must stay the array.
+# A ?: where one value is wanted (`my $n = $t ? @a : @b`, an operand of
+# arithmetic/comparison/concatenation, a condition): each branch gives what
+# the same expression gives there on its own (Perl applies the context to
+# the branches). An array (and, with $with_hash, a hash), map/grep and
+# keys/values/split are counts, `()` is undef, a slice its last element, a
+# list literal its last item. Other branches are left alone, so a call that
+# returns an array still yields the array.
+func ast_tern_scalar(scalar $tern, int $with_hash) scalar {
+    if (!$tern) { return $tern; }
+    if ($tern->{"type"} != NODE_TERNARY()) { return $tern; }
+    $tern->{"true_expr"} = ast_tern_scalar_branch($tern->{"true_expr"}, $with_hash);
+    $tern->{"false_expr"} = ast_tern_scalar_branch($tern->{"false_expr"}, $with_hash);
+    return $tern;
+}
+
+func ast_tern_scalar_branch(scalar $branch, int $with_hash) scalar {
+    if (!$branch) { return $branch; }
+    my int $tsb_t = $branch->{"type"};
+    if ($tsb_t == NODE_TERNARY()) { return ast_tern_scalar($branch, $with_hash); }
+    my int $tsb_count = 0;
+    if ($tsb_t == NODE_VARIABLE() || $tsb_t == NODE_DEREF_SCALAR()) {
+        my str $tsb_sigil = "" . $branch->{"sigil"};
+        if ($tsb_sigil eq "@") { $tsb_count = 1; }
+        if ($tsb_sigil eq "%" && $with_hash == 1) { $tsb_count = 1; }
+    }
+    if ($tsb_t == NODE_MAP() || $tsb_t == NODE_GREP()) { $tsb_count = 1; }
+    if ($tsb_t == NODE_CALL()) {
+        my str $tsb_name = "" . $branch->{"name"};
+        if ($tsb_name eq "keys" || $tsb_name eq "values" || $tsb_name eq "split" || $tsb_name eq "sys::split") { $tsb_count = 1; }
+    }
+    if ($tsb_count == 1) {
+        my scalar $tsb_cnt = ast_new_call("scalar");
+        ast_add_arg($tsb_cnt, $branch);
+        $tsb_cnt->{"line"} = $branch->{"line"};
+        return $tsb_cnt;
+    }
+    if ($tsb_t == NODE_ANON_HASH() && $branch->{"is_empty_list"}) { return ast_new_undef(); }
+    if ($tsb_t == NODE_ARRAY_SLICE() || $tsb_t == NODE_HASH_SLICE()) { $branch->{"scalar_ctx"} = 1; return $branch; }
+    return ast_scalar_list_value($branch);
+}
+
+# The value of `my $v = EXPR` / `$v = EXPR` / `$h{k} = EXPR` where EXPR has
+# a list shape: a list literal is its last item, a ?: applies the context to
+# its branches, and a hash is its key count (Perl; `my $n = %h` kept the
+# hash). An array is counted later, by Semantic and the code generators.
+func ast_scalar_ctx_value(scalar $val) scalar {
+    if (!$val) { return $val; }
+    my scalar $scv = ast_tern_scalar(ast_scalar_list_value($val), 1);
+    if (!$scv) { return $scv; }
+    my int $scv_t = $scv->{"type"};
+    # `$x // ()` / `$x || ()` as one value: the `()` side is undef
+    if ($scv_t == NODE_BINARY_OP() && ($scv->{"op"} eq "//" || $scv->{"op"} eq "||")
+        && $scv->{"right"} && $scv->{"right"}->{"is_empty_list"}) {
+        $scv->{"right"} = ast_new_undef();
+        return $scv;
+    }
+    if (($scv_t == NODE_VARIABLE() || $scv_t == NODE_DEREF_SCALAR()) && ("" . $scv->{"sigil"}) eq "%") {
+        my scalar $scv_cnt = ast_new_call("scalar");
+        ast_add_arg($scv_cnt, $scv);
+        $scv_cnt->{"line"} = $scv->{"line"};
+        return $scv_cnt;
+    }
+    return $scv;
+}
+
 func ast_regex_truth(scalar $cond) scalar {
     if (!$cond) { return $cond; }
     my int $ct = $cond->{"type"};
+    if ($ct == NODE_TERNARY()) { return ast_tern_scalar($cond, 1); }
     if (($ct == NODE_VARIABLE() || $ct == NODE_DEREF_SCALAR()) && (("" . $cond->{"sigil"}) eq "@" || ("" . $cond->{"sigil"}) eq "%")) {
         my scalar $cnt = ast_new_call("scalar");
         ast_add_arg($cnt, $cond);
@@ -624,6 +690,9 @@ func ast_new_foreach_stmt(scalar $var_decl, str $var_name, scalar $array_expr, s
     # is a one-element list. The parser hands it over as the bare literal (the
     # parentheses are just grouping), and iterating a non-array iterated zero
     # times. Wrap it so it goes down the ordinary list path.
+    if ($array_expr && $array_expr->{"type"} == NODE_TERNARY() && ast_tern_array_refs($array_expr) == 1) {
+        $array_expr = ast_new_deref_scalar(ast_tern_to_refs($array_expr), "@");
+    }
     if ($array_expr) {
         my int $fe_kind = $array_expr->{"type"};
         # Likewise any scalar-shaped expression: `foreach my $x ($s)`,
@@ -683,6 +752,12 @@ func ast_new_expr_stmt(scalar $expr) scalar {
 
 # Create binary operation
 func ast_new_binary_op(str $op, scalar $left, scalar $right) scalar {
+    if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "/" || $op eq "%" || $op eq "**" || $op eq "=="
+        || $op eq "!=" || $op eq "<" || $op eq "<=" || $op eq ">" || $op eq ">=" || $op eq "<=>" || $op eq "."
+        || $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge" || $op eq "cmp") {
+        $left = ast_tern_scalar($left, 1);
+        $right = ast_tern_scalar($right, 1);
+    }
     if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq "<=" || $op eq ">" || $op eq ">=" || $op eq "<=>") {
         my int $l_char = 0;
         my int $l_nonchar_lit = 0;
@@ -951,7 +1026,16 @@ func ast_new_assign(str $op, scalar $target, scalar $value) scalar {
     $node->{"op"} = $op;
     $node->{"target"} = $target;
     $node->{"value"} = $value;
-    if ($op eq "=") { $node->{"value"} = ast_regex_value($value); }
+    if ($op eq "=") {
+        $node->{"value"} = ast_regex_value($value);
+        if ($target) {
+            my int $asg_tt = $target->{"type"};
+            if (($asg_tt == NODE_VARIABLE() && $target->{"sigil"} eq "$") || $asg_tt == NODE_SUBSCRIPT()
+                || $asg_tt == NODE_HASH_ACCESS() || $asg_tt == NODE_DEREF_HASH() || $asg_tt == NODE_DEREF_ARRAY()) {
+                $node->{"value"} = ast_scalar_ctx_value($node->{"value"});
+            }
+        }
+    }
     return $node;
 }
 
@@ -1019,6 +1103,64 @@ func ast_new_deref_scalar(scalar $ref_expr, str $sigil) scalar {
     $node->{"ref"} = $ref_expr;
     $node->{"sigil"} = $sigil;
     return $node;
+}
+
+# A list literal where one value is wanted, `my $n = (7, 8, 9)` /
+# `$h{k} = (f(), $v)`: Perl's comma operator. Every item is evaluated and
+# the last one is the value. Items without effects are dropped; with effects
+# the list becomes `do { item; ...; last }`. (`()` is handled elsewhere: undef.)
+func ast_scalar_list_value(scalar $val) scalar {
+    if (!$val) { return $val; }
+    if ($val->{"type"} != NODE_ANON_ARRAY() || !$val->{"is_list"}) { return $val; }
+    my int $slv_n = $val->{"element_count"};
+    if ($slv_n < 1) { return $val; }
+    my scalar $slv_items = $val->{"elements"};
+    my scalar $slv_last = $slv_items->[$slv_n - 1];
+    my int $slv_pure = 1;
+    my int $slv_i = 0;
+    while ($slv_i < $slv_n - 1) {
+        my int $slv_t = $slv_items->[$slv_i]->{"type"};
+        if ($slv_t != NODE_STR_LITERAL() && $slv_t != NODE_INT_LITERAL() && $slv_t != NODE_NUM_LITERAL()
+            && $slv_t != NODE_VARIABLE()) {
+            $slv_pure = 0;
+        }
+        $slv_i = $slv_i + 1;
+    }
+    if ($slv_pure == 1) { return ast_scalar_list_value($slv_last); }
+    my scalar $slv_blk = ast_new_block();
+    $slv_i = 0;
+    while ($slv_i < $slv_n - 1) {
+        ast_add_statement($slv_blk, ast_new_expr_stmt($slv_items->[$slv_i]));
+        $slv_i = $slv_i + 1;
+    }
+    ast_add_statement($slv_blk, ast_new_expr_stmt(ast_scalar_list_value($slv_last)));
+    return ast_new_do_expr($slv_blk);
+}
+
+# foreach over `C ? @a : @b` aliases the chosen array's elements (Perl).
+# With array branches only, the list becomes `@{ C ? \@a : \@b }`, which
+# iterates the array itself. Returns 0 when a branch is anything else.
+func ast_tern_array_refs(scalar $tern) int {
+    if (!$tern) { return 0; }
+    my int $tar_t = $tern->{"type"};
+    if ($tar_t == NODE_VARIABLE() && $tern->{"sigil"} eq "@") { return 1; }
+    if ($tar_t == NODE_DEREF_SCALAR() && $tern->{"sigil"} eq "@") { return 1; }
+    if ($tar_t == NODE_TERNARY()) {
+        if (ast_tern_array_refs($tern->{"true_expr"}) == 0) { return 0; }
+        return ast_tern_array_refs($tern->{"false_expr"});
+    }
+    return 0;
+}
+
+func ast_tern_to_refs(scalar $branch) scalar {
+    my int $ttr_t = $branch->{"type"};
+    if ($ttr_t == NODE_TERNARY()) {
+        $branch->{"true_expr"} = ast_tern_to_refs($branch->{"true_expr"});
+        $branch->{"false_expr"} = ast_tern_to_refs($branch->{"false_expr"});
+        return $branch;
+    }
+    if ($ttr_t == NODE_DEREF_SCALAR()) { return $branch->{"ref"}; }
+    return ast_new_ref($branch, "@");
 }
 
 # Create anonymous hash ({ key => value, ... })

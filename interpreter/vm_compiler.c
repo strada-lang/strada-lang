@@ -2306,46 +2306,37 @@ static int vm_has_empty_list_branch(StradaValue *n) {
 }
 /* The value of such an expression where an array is wanted: `()` is an
  * empty array, any other branch its ordinary value. */
-static void compile_empty_list_as_array(CompCtx *ctx, StradaValue *n) {
+static void compile_empty_list_as(CompCtx *ctx, StradaValue *n, int as_undef) {
     StradaValue *d = ast_deref(n);
     if (vm_is_empty_list_node(d)) {
-        vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
-        vm_chunk_emit_u32(ctx->chunk, 4);
+        if (as_undef) {
+            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+        } else {
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, 4);
+        }
     } else if (vm_has_empty_list_branch(d)) {
         compile_expr(ctx, ast_get(d, "condition"));
         vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
         size_t else_patch = emit_patch_u16(ctx);
-        compile_empty_list_as_array(ctx, ast_get(d, "true_expr"));
+        compile_empty_list_as(ctx, ast_get(d, "true_expr"), as_undef);
         vm_chunk_emit(ctx->chunk, OP_JMP);
         size_t end_patch = emit_patch_u16(ctx);
         patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
-        compile_empty_list_as_array(ctx, ast_get(d, "false_expr"));
+        compile_empty_list_as(ctx, ast_get(d, "false_expr"), as_undef);
         patch_u16(ctx, end_patch, (uint16_t)ctx->chunk->code_len);
     } else {
-        compile_expr_in_ctx(ctx, n, 1);
+        compile_expr_in_ctx(ctx, n, as_undef ? 0 : 1);
     }
+}
+static void compile_empty_list_as_array(CompCtx *ctx, StradaValue *n) {
+    compile_empty_list_as(ctx, n, 0);
 }
 
 static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue *init, int shallow_copy) {
     int init_type = (init && !STRADA_IS_TAGGED_INT(init)) ? (int)ast_int(init, "type") : 0;
     if (init_type == NI_READLINE && compile_readline_list(ctx, init)) return;
-    if (init_type == NI_TERNARY) {
-        /* C ? LIST : () -- each branch is its own initializer, so `()` is
-         * the empty array (as a value it is an empty hash, which the copy
-         * below keeps as one element). */
-        if (vm_has_empty_list_branch(init)) {
-            compile_expr(ctx, ast_get(init, "condition"));
-            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
-            size_t else_patch = emit_patch_u16(ctx);
-            compile_array_init_expr(ctx, NULL, ast_get(init, "true_expr"), shallow_copy);
-            vm_chunk_emit(ctx->chunk, OP_JMP);
-            size_t end_patch = emit_patch_u16(ctx);
-            patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
-            compile_array_init_expr(ctx, NULL, ast_get(init, "false_expr"), shallow_copy);
-            patch_u16(ctx, end_patch, (uint16_t)ctx->chunk->code_len);
-            return;
-        }
-    }
+    if (init_type == NI_BINARY_OP) (void)vm_array_flatten_kind(ctx, init);   /* flags `A // ()` */
     /* () is parsed as empty ANON_HASH — treat as empty array for @ sigil */
     if (init_type == NI_ANON_HASH && ast_int(init, "is_empty_list") == 1) {
         init_type = 0;
@@ -2385,6 +2376,29 @@ static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue
         && ast_int(init, "in_parens") == 1) {
         if (!(init_type == NI_ANON_HASH && ast_int(init, "is_empty_list") == 1)) {
             /* my @b = ([1, 2]) / ({...}) / (\$v): ONE element, a reference */
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, 1);
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            compile_expr(ctx, init);
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            return;
+        }
+    }
+    {
+        /* my @a = $s / $a[i] / $h{k} / $$r / C ? $p : $q: ONE element, also
+         * when the scalar holds an array reference (the compiled backend's
+         * is_scalar_expr; the copy below would take the referenced array's
+         * elements, since the VM keeps the container itself in a scalar). */
+        int one = 0;
+        if (init_type == NI_VARIABLE || init_type == NI_DEREF_SCALAR) {
+            const char *isg = ast_str(init, "sigil");
+            one = (isg && isg[0] == '$');
+        } else if (init_type == NI_SUBSCRIPT || init_type == NI_HASH_ACCESS || init_type == NI_DEREF_ARRAY || init_type == NI_DEREF_HASH) {
+            one = 1;
+        } else if (init_type == NI_TERNARY) {
+            one = (vm_array_flatten_kind(ctx, init) == 0);
+        }
+        if (one) {
             vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
             vm_chunk_emit_u32(ctx->chunk, 1);
             vm_chunk_emit(ctx->chunk, OP_DUP);
@@ -3521,7 +3535,7 @@ static void compile_list_src(CompCtx *ctx, StradaValue *e) {
         int t = (int)ast_int(d, "type");
         /* a list ?: is flagged by the question, which some callers ask
          * only after compiling the source */
-        if (t == NI_TERNARY) (void)vm_array_flatten_kind(ctx, d);
+        if (t == NI_TERNARY || t == NI_CALL) (void)vm_array_flatten_kind(ctx, d);
         if (t == NI_VARIABLE || t == NI_DEREF_SCALAR) {
             const char *sig = ast_str(d, "sigil");
             if (sig && sig[0] == '%') {
@@ -3576,7 +3590,7 @@ static int vm_tern_branch_is_list(CompCtx *ctx, StradaValue *b) {
         if (strcmp(nm, "split") == 0 || strcmp(nm, "keys") == 0 ||
             strcmp(nm, "values") == 0 || strcmp(nm, "reverse") == 0) return 1;
         int fidx = resolve_vm_func_idx(ctx, nm);
-        if (fidx >= 0 && ctx->prog->funcs[fidx].return_type == AST_TYPE_ARRAY) return 1;
+        if (fidx >= 0 && (ctx->prog->funcs[fidx].return_type == AST_TYPE_ARRAY || ctx->prog->funcs[fidx].return_type == 25)) return 1;
     }
     return 0;
 }
@@ -3593,6 +3607,16 @@ static void compile_tern_list_branch(CompCtx *ctx, StradaValue *b) {
     vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
     vm_chunk_emit_u32(ctx->chunk, 4);
     if (vm_is_empty_list_node(d)) return;
+    if (d && !STRADA_IS_TAGGED_INT(d) && (int)ast_int(d, "type") == NI_ANON_ARRAY && ast_int(d, "is_pair") == 1) {
+        /* (k => v): two items */
+        StradaValue *pe = ast_deref(ast_get(d, "elements"));
+        for (int pi = 0; pi < 2; pi++) {
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            compile_expr(ctx, ast_arr_get(pe, pi));
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+        }
+        return;
+    }
     vm_chunk_emit(ctx->chunk, OP_DUP);
     compile_list_src(ctx, b);
     vm_chunk_emit(ctx->chunk, vm_array_flatten_kind(ctx, b) != 0 ? OP_ARRAY_EXTEND : OP_ARRAY_PUSH);
@@ -3605,6 +3629,15 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
     /* C ? LIST : LIST in a list: the chosen branch's elements (Perl). The
      * node is flagged the first time a list context asks; compile_expr then
      * makes every branch a new array. */
+    if (t == NI_BINARY_OP && elem->type == STRADA_HASH) {
+        /* A // () / A || () in a list: A as one item, or nothing (Perl) */
+        if (ast_int(elem, "list_or_empty") == 1) return 2;
+        const char *oop = ast_str(elem, "op");
+        if (oop && (strcmp(oop, "//") == 0 || strcmp(oop, "||") == 0) && vm_is_empty_list_node(ast_get(elem, "right"))) {
+            strada_hash_set(elem->value.hv, "list_or_empty", STRADA_MAKE_TAGGED_INT(1));
+            return 2;
+        }
+    }
     if (t == NI_TERNARY) {
         if (ast_int(elem, "list_tern") == 1) return 2;
         if (elem->type == STRADA_HASH && vm_tern_branch_is_list(ctx, elem)) {
@@ -3647,6 +3680,12 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
         }
         int fidx = resolve_vm_func_idx(ctx, nm);
         if (fidx >= 0 && ctx->prog->funcs[fidx].return_type == AST_TYPE_ARRAY) {
+            return 2;
+        }
+        /* a `dynamic` function as a list item: list context, flattened when
+         * it returns an array (compiled array_flatten_kind) */
+        if (fidx >= 0 && ctx->prog->funcs[fidx].return_type == 25 && elem->type == STRADA_HASH) {
+            strada_hash_set(elem->value.hv, "want_list", STRADA_MAKE_TAGGED_INT(1));
             return 2;
         }
         /* runtime builtins returning a list (core::unpack, re::captures, ...) */
@@ -3694,6 +3733,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     ctx->call_context = 0;
 
     int type = (int)ast_int(node, "type");
+    /* a `dynamic` call flagged as a list item (vm_array_flatten_kind) */
+    if (type == NI_CALL && ast_int(node, "want_list") == 1) expr_call_ctx = 1;
 
     switch (type) {
     case NI_INT_LITERAL: {
@@ -3817,6 +3858,25 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_BINARY_OP: {
+        if (ast_int(node, "list_or_empty") == 1) {
+            /* flagged by vm_array_flatten_kind: a new 0- or 1-element array */
+            int oe_slot = ctx_get_or_add_local(ctx, "__oe_tmp", '$');
+            compile_expr(ctx, ast_get(node, "left"));
+            emit_reset_store_local(ctx, oe_slot);
+            vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+            vm_chunk_emit_u32(ctx->chunk, 4);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)oe_slot);
+            if (strcmp(ast_str(node, "op"), "//") == 0) vm_chunk_emit(ctx->chunk, OP_DEFINED);
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            size_t oe_skip = emit_patch_u16(ctx);
+            vm_chunk_emit(ctx->chunk, OP_DUP);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)oe_slot);
+            vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            patch_u16(ctx, oe_skip, (uint16_t)ctx->chunk->code_len);
+            break;
+        }
         VMConstFold folded;
         if (try_eval_const_ast(node, &folded, 0)) {
             emit_folded_const(ctx, &folded);
@@ -8956,6 +9016,15 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             ret_type != AST_TYPE_ARRAY && ret_type != AST_TYPE_HASH_RET) {
             /* return () from a scalar function: undef (compiled Semantic) */
             val = NULL;
+        } else if (ret_type != AST_TYPE_ARRAY && ret_type != AST_TYPE_HASH_RET && ret_type != 7 && ret_type != 25 /* void, dynamic */
+                   && vm_has_empty_list_branch(rvd)) {
+            /* return C ? X : () from a scalar function: the `()` branch is
+             * undef, as a bare `return ()` is */
+            compile_empty_list_as(ctx, val, 1);
+            emit_scalar_type_coerce(ctx, ret_type);
+            emit_try_unwind_for_return(ctx);
+            vm_chunk_emit(ctx->chunk, OP_RETURN);
+            break;
         } else if (ret_type == AST_TYPE_ARRAY && vm_has_empty_list_branch(rvd)) {
             /* return () / return C ? LIST : () from an array function: `()`
              * is an empty array. As an empty hash the caller could not tell

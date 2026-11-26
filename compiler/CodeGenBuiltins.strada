@@ -9546,6 +9546,8 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
         }
         my int $dyn_ctx = $cg->{"call_context"} + 0;
         $cg->{"call_context"} = 0;
+        # a call that is an item of a list (array_flatten_kind) is in list context
+        if ($expr->{"want_list"}) { $dyn_ctx = 1; }
 
         # Inline constructor optimization: Pkg::new("key", val, "key", val, ...)
         # When all odd-position args are string literals, emit direct hash construction

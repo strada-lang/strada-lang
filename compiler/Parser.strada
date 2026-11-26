@@ -1157,6 +1157,38 @@ func parser_paren_is_key(scalar $parser, int $pos) int {
     return 0;
 }
 
+# True when the hash literal whose first token is at $pos has an item that
+# is not `key => value` and not a parenthesized group: a top-level,
+# comma-separated piece without a top-level `=>`.
+func parser_anon_hash_has_list_item(scalar $parser, int $pos) int {
+    my scalar $toks = $parser->{"tokens"};
+    my int $n = $parser->{"token_count"};
+    my int $depth = 0;
+    my int $i = $pos;
+    my int $arrows = 0;
+    my int $piece_len = 0;
+    my str $piece_first = "";
+    while ($i < $n) {
+        my str $tt = $toks->[$i]->{"type"};
+        if ($tt eq "EOF") { return 0; }
+        if ($depth == 0 && ($tt eq "COMMA" || $tt eq "RBRACE")) {
+            if ($piece_len > 0 && $arrows == 0 && $piece_first ne "LPAREN") { return 1; }
+            if ($tt eq "RBRACE") { return 0; }
+            $arrows = 0;
+            $piece_len = 0;
+            $piece_first = "";
+        } else {
+            if ($piece_len == 0) { $piece_first = $tt; }
+            $piece_len = $piece_len + 1;
+            if ($tt eq "LPAREN" || $tt eq "LBRACE" || $tt eq "LBRACKET") { $depth = $depth + 1; }
+            elsif ($tt eq "RPAREN" || $tt eq "RBRACE" || $tt eq "RBRACKET") { $depth = $depth - 1; }
+            elsif ($tt eq "FAT_ARROW" && $depth == 0) { $arrows = $arrows + 1; }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # One entry of an anonymous hash literal: `key => value`, or a parenthesized
 # group of pairs `(a => 1, b => 2)` whose pairs join the hash (Perl lists).
 func parse_anon_hash_entry(scalar $parser, scalar $anon) void {
@@ -1854,6 +1886,28 @@ func parse_primary(scalar $parser) scalar {
             return $anon;
         }
         
+        # { %base, k => 1 } / { $t ? (k => 1) : (), z => 2 } / { f() }: an item
+        # that is not a pair makes the braces a list of pairs (Perl). Built
+        # as `do { my hash %tmp = (LIST); \%tmp; }`.
+        if (parser_anon_hash_has_list_item($parser, $parser->{"pos"}) == 1) {
+            my scalar $ahl = ast_new_anon_array();
+            $ahl->{"is_list"} = 1;
+            while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
+                ast_add_array_elem($ahl, parse_expression($parser));
+                if (parser_check($parser, "COMMA")) { parser_advance($parser); }
+                elsif (!parser_check($parser, "RBRACE")) { parser_expect($parser, "RBRACE"); }
+            }
+            parser_expect($parser, "RBRACE");
+            $parser->{"ah_seq"} = $parser->{"ah_seq"} + 1;
+            my str $ah_name = "__ahl" . $parser->{"ah_seq"};
+            my scalar $ah_decl = ast_new_var_decl($ah_name, TYPE_HASH(), "%");
+            $ah_decl->{"init"} = $ahl;
+            my scalar $ah_blk = ast_new_block();
+            ast_add_statement($ah_blk, $ah_decl);
+            ast_add_statement($ah_blk, ast_new_expr_stmt(ast_new_ref(ast_new_variable($ah_name, "%"), "%")));
+            return ast_new_do_expr($ah_blk);
+        }
+
         # Parse key => value pairs
         while (1) {
             parse_anon_hash_entry($parser, $anon);
@@ -3687,6 +3741,7 @@ func parse_var_decl(scalar $parser) scalar {
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
         $decl->{"init"} = ast_regex_value(parse_assignment($parser));
+        if ($decl->{"sigil"} eq "$") { $decl->{"init"} = ast_scalar_ctx_value($decl->{"init"}); }
         if (parser_low_word($parser, "and") == 1 || parser_low_word($parser, "or") == 1 || parser_low_word($parser, "xor") == 1) {
             # `my $x = f() or die(...)`: the assignment happens first (Perl);
             # the `or ...` tail is a statement after the declaration
@@ -3787,6 +3842,7 @@ func parse_our_decl(scalar $parser) scalar {
     if (parser_check($parser, "ASSIGN")) {
         parser_advance($parser);
         $decl->{"init"} = ast_regex_value(parse_assignment($parser));
+        if ($decl->{"sigil"} eq "$") { $decl->{"init"} = ast_scalar_ctx_value($decl->{"init"}); }
         if (parser_low_word($parser, "and") == 1 || parser_low_word($parser, "or") == 1 || parser_low_word($parser, "xor") == 1) {
             # `my $x = f() or die(...)`: the assignment happens first (Perl);
             # the `or ...` tail is a statement after the declaration

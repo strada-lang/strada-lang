@@ -56,7 +56,9 @@ func main() int {
     $s1 =~ s/f[o]{2}/bar/;
     my array @c0 = captures();
     $fail = $fail + check($s1 eq "bar foo", "RT-03 no-capture subst result");
-    $fail = $fail + check($1 eq "42", "RT-03 preserve \$1 across no-capture subst");
+    # (Perl: a successful match without groups leaves $1 undef. This check
+    # used to require the previous "42", which is not what Perl does.)
+    $fail = $fail + check(!defined($1), "RT-03 \$1 undef after no-capture subst");
     $fail = $fail + check($c0[0] eq "foo", "RT-03 \$& updated by no-capture subst");
 
     my str $s2 = "pre_KEY=VAL_post";

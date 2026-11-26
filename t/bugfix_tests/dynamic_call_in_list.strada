@@ -1,0 +1,22 @@
+# EXPECT: 2A 2A 3A 3A 2A S 1
+# A `dynamic` function called as an item of a list, or as a branch of a
+# list ?:, is in list context and its array result flattens (Perl). As a
+# list item it was called in scalar context.
+func ctx_p() dynamic {
+    if (core::wanthash()) { my hash %r = ("H" => 1); return %r; }
+    if (core::wantarray()) { my array @a = ("A", "B"); return @a; }
+    return core::wantscalar() ? "S" : "0";
+}
+func un() { return undef; }
+func main() int {
+    my int $t = 1;
+    my array @t1 = (1 ? ctx_p() : ("X"));
+    my array @t2 = $t ? ctx_p() : ();
+    my array @t3 = (0, $t ? ctx_p() : ());
+    my array @t4 = (0, ctx_p());
+    my array @t5 = ctx_p();
+    my scalar $t6 = (1 ? ctx_p() : "X");
+    my array @t7 = $t ? un() : ();
+    say(join(" ", scalar(@t1) . $t1[0], scalar(@t2) . $t2[0], scalar(@t3) . $t3[1], scalar(@t4) . $t4[1], scalar(@t5) . $t5[0], $t6, scalar(@t7)));
+    return 0;
+}

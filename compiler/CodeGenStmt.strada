@@ -847,7 +847,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 } elsif ($init_type == NODE_ANON_ARRAY() && !($init->{"in_parens"} && !$init->{"is_list"})) {
                     # Array literal like [1, 2, 3] - generate directly
                     gen_expression($cg, $init);
-                } elsif ($init_type == NODE_TERNARY() && $init->{"list_tern"}) {
+                } elsif (($init_type == NODE_TERNARY() && $init->{"list_tern"}) || ($init_type == NODE_BINARY_OP() && $init->{"list_or_empty"})) {
                     # C ? LIST : LIST (Semantic sem_tern_as_lists): a new array
                     gen_expression($cg, $init);
                 } elsif (is_scalar_expr($init)) {

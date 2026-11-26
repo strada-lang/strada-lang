@@ -1,21 +1,21 @@
-empty* [-a-b-c-] 1=zz 2=9 amp=
-b* [-a--c-] 1=zz 2=9 amp=
-lit1 [baa] 1=zz 2=9 amp=a
-litg [bbb] 1=zz 2=9 amp=a
-lit-nomatch [aaa] 1=zz 2=9 amp=a
-digits [aNbNcN] 1=zz 2=9 amp=1
+empty* [-a-b-c-] 1=U 2=U amp=
+b* [-a--c-] 1=U 2=U amp=
+lit1 [baa] 1=U 2=U amp=a
+litg [bbb] 1=U 2=U amp=a
+lit-nomatch [aaa] 1=U 2=U amp=a
+digits [aNbNcN] 1=U 2=U amp=1
 groups [Hell0 W0ld] 1=o 2=U amp=o
-ci [AXCaXc] 1=o 2=U amp=B
+ci [AXCaXc] 1=U 2=U amp=B
 multi [L1
 L2
-] 1=o 2=U amp=l
-utf8lit [héllo world] 1=o 2=U amp=ö
-utf8dot [_____] 1=o 2=U amp=h
-escdot [a-b-c] 1=o 2=U amp=.
+] 1=U 2=U amp=l
+utf8lit [héllo world] 1=U 2=U amp=ö
+utf8dot [_____] 1=U 2=U amp=h
+escdot [a-b-c] 1=U 2=U amp=.
 dollar1 [x[y]z] 1=y 2=U amp=y
-bslash [x\z] 1=y 2=U amp=y
-emptysubj [S] 1=y 2=U amp=
-count=3 [bbb] 1=y 2=U amp=a
+bslash [x\z] 1=U 2=U amp=y
+emptysubj [S] 1=U 2=U amp=
+count=3 [bbb] 1=U 2=U amp=a
 named k v key,val
 caps k=v; k2=v2|k|v|k2|v2 4=v2
 unset2=undef n=3

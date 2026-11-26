@@ -1,0 +1,19 @@
+# EXPECT: undef c undef kept:b kv v=k undef aYa
+# After a successful s/// whose pattern has no groups, $1.. are undef
+# (Perl). Both backends kept the previous match's groups. A failed s///
+# leaves them alone.
+func main() int {
+    my str $x = "abcabc";
+    $x =~ /(b)/; $x =~ s/c/Z/;
+    my str $o = (defined($1) ? "kept:" . $1 : "undef") . " " . captures()->[0];
+    $x =~ /(b)/; $x =~ s/a./Y/g;
+    $o .= " " . (defined($1) ? "kept:" . $1 : "undef");
+    "zbz" =~ /(b)/; $x =~ s/nomatch/q/;
+    $o .= " " . (defined($1) ? "kept:" . $1 : "undef");
+    $x = "k=v"; $x =~ s/(\w)=(\w)/$2=$1/;
+    $o .= " " . $1 . $2 . " " . $x;
+    "zbz" =~ /(b)/; $x = "aXa"; $x =~ s/X/uc("y")/e;
+    $o .= " " . (defined($1) ? "kept:" . $1 : "undef") . " " . $x;
+    say($o);
+    return 0;
+}

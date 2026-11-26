@@ -1,0 +1,29 @@
+# EXPECT: 0 0 0 2 0 0 0 1 1 U x,y 0 0|1 0 1 3 0 1 1 1 1 D x,0,y 1 0|1 1 1 3 1 1 1 1 1 D x,s,y 1 0
+# `A // ()` and `A || ()` where a list is wanted give A as one item or
+# nothing (Perl); they gave one element (an empty array) when A failed.
+# In scalar context the `()` side is undef.
+our array @G = ();
+func get(int $n) scalar { if ($n) { return "v" . $n; } return undef; }
+func main() int {
+    my array @OUT = ();
+    my hash %h = (a => 0, b => "x");
+    my $r = [4, 4];
+    my $f = func () { my array @z = get(0) // (); return scalar(@z); };
+    foreach my $u (undef, 0, "s") {
+        my array @a = $u // ();
+        my array @b = $u || ();
+        my array @c; @c = $u // ();
+        my array @d = (1, $u // (), 2);
+        my array @e; push(@e, $u || ());
+        @G = $u // ();
+        my array @i = get(defined($u) ? 1 : 0) // ();
+        my array @j = ($h{"a"} || (), $h{"b"} || (), $h{"zz"} // ());
+        my array @k = $r // ();
+        my $s = $u // ();
+        my str $l = join(",", "x", $u // (), "y");
+        my int $n = 0; foreach my $v ($u // ()) { $n++; }
+        push(@OUT, join(" ", scalar(@a), scalar(@b), scalar(@c), scalar(@d), scalar(@e), scalar(@G), scalar(@i), scalar(@j), scalar(@k), defined($s) ? "D" : "U", $l, $n, $f->()));
+    }
+    say(join("|", @OUT));
+    return 0;
+}

@@ -2769,6 +2769,9 @@ func is_scalar_expr(scalar $expr) int {
     if ($type == NODE_TERNARY() && $expr->{"list_tern"}) {
         return 0;
     }
+    if ($type == NODE_BINARY_OP() && $expr->{"list_or_empty"}) {
+        return 0;
+    }
     # (LIST) x N is a list.
     if ($type == NODE_BINARY_OP() && $expr->{"op"} eq "x" && $expr->{"left"}->{"type"} == NODE_ANON_ARRAY() && $expr->{"left"}->{"is_list"}) {
         return 0;
@@ -2824,8 +2827,10 @@ func is_scalar_expr(scalar $expr) int {
         return 1;
     }
 
-    # Array/hash subscript returns a scalar
-    if ($type == NODE_SUBSCRIPT() || $type == NODE_HASH_ACCESS()) {
+    # Array/hash subscript returns a scalar; so do $r->[i] and $r->{k}
+    # (`my @a = $r->[0]` treated the element as the array: no elements for
+    # a plain value, an alias of the referenced array for a reference).
+    if ($type == NODE_SUBSCRIPT() || $type == NODE_HASH_ACCESS() || $type == NODE_DEREF_ARRAY() || $type == NODE_DEREF_HASH()) {
         return 1;
     }
 
