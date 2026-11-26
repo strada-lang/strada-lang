@@ -674,7 +674,9 @@ func run_file_vm(str $filename, scalar $argv) int {
         core::setenv("STRADA_USE_ARTIFACTS", "0");
     }
 
-    my scalar $tokens = lex_tokenize_file($source, $lex_fn);
+    my array @tokens_list = lex_tokenize_file($source, $lex_fn);
+
+    my scalar $tokens = \@tokens_list;
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
     my array @empty = ();
@@ -689,7 +691,8 @@ func run_file_vm(str $filename, scalar $argv) int {
     # rejects). That pass rewrites the tree it checks, so it runs on a
     # second parse.
     if (defined($program) && vm_program_has_strict($program) == 1) {
-        my scalar $chk_tokens = lex_tokenize_file($source, $lex_fn);
+        my array @chk_tokens_list = lex_tokenize_file($source, $lex_fn);
+        my scalar $chk_tokens = \@chk_tokens_list;
         my scalar $chk_parser = parser_new($chk_tokens);
         parser_set_filename($chk_parser, $filename);
         my scalar $chk_program = parse_program($chk_parser, \@lib_paths, \@empty, \@empty, \@empty);
@@ -739,7 +742,8 @@ func print_usage() void {
 
 func eval_has_entry_func(str $src) int {
     if (length($src) == 0) { return 0; }
-    my scalar $toks = lex_tokenize($src);
+    my array @toks_list = lex_tokenize($src);
+    my scalar $toks = \@toks_list;
     my int $n = size($toks);
     my int $brace_depth = 0;
     my str $cur_pkg = "main";
@@ -825,7 +829,9 @@ func parse_eval_program(str $code) scalar {
         core::setenv("STRADA_USE_ARTIFACTS", "0");
     }
 
-    my scalar $tokens = lex_tokenize($source);
+    my array @tokens_list = lex_tokenize($source);
+
+    my scalar $tokens = \@tokens_list;
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, "<eval>");
     my array @empty = ();

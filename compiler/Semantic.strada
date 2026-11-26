@@ -2506,7 +2506,8 @@ func regex_interp_elem(scalar $ctx, str $pattern, int $i, str $varname, int $lin
         if ($ok == 0) { return 0; }
     }
     my str $src = chr(36) . $varname . substr($pattern, $i, $end - $i + 1);
-    my scalar $toks = lex_tokenize($src);
+    my array @toks_list = lex_tokenize($src);
+    my scalar $toks = \@toks_list;
     my scalar $ep = parser_new($toks);
     my scalar $enode = parse_expression($ep);
     if (!parser_check($ep, "EOF")) { return 0; }
@@ -2628,6 +2629,20 @@ func sem_is_array_value(scalar $ctx, scalar $n) int {
     return 0;
 }
 
+# A call to a function declared to return `array`, used where one value is
+# wanted (`my $n = f()`, `$v = f()`, `$h{k} = f()`): the element count, as
+# for an array variable there (Perl; it stored the array). Functions without
+# a declared `array` return type are not affected.
+func sem_call_returns_array(scalar $ctx, scalar $n) int {
+    if (is_valid_node($n) == 0) { return 0; }
+    if ($n->{"type"} != NODE_CALL()) { return 0; }
+    my scalar $cra_info = sem_call_fn_info($ctx, $n);
+    if ($cra_info && $cra_info->{"is_registered"} == 1 && $cra_info->{"return_type"} == TYPE_ARRAY()) {
+        return 1;
+    }
+    return 0;
+}
+
 # An array value (see sem_is_array_value) or a hash variable (%h, %{...}).
 func sem_is_container_value(scalar $ctx, scalar $n) int {
     if (sem_is_array_value($ctx, $n) == 1) { return 1; }
@@ -2712,6 +2727,7 @@ func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
     my int $hit = sem_is_count_in_scalar_call($ctx, $ini);
     if (($it == NODE_VARIABLE() || $it == NODE_DEREF_SCALAR()) && ("" . $ini->{"sigil"}) eq "@") { $hit = 1; }
     if ($it == NODE_MAP() || $it == NODE_GREP()) { $hit = 1; }
+    if (sem_call_returns_array($ctx, $ini) == 1) { $hit = 1; }
     if ($hit == 1) { $decl->{"init"} = sem_scalar_of($ini); }
 }
 
@@ -3458,6 +3474,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         }
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
+        if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1) {
+            my int $cat = $expr->{"target"}->{"type"};
+            if ((($cat == NODE_VARIABLE() && ("" . $expr->{"target"}->{"sigil"}) eq "$") || $cat == NODE_HASH_ACCESS()
+                 || $cat == NODE_SUBSCRIPT() || $cat == NODE_DEREF_HASH() || $cat == NODE_DEREF_ARRAY())
+                && sem_call_returns_array($ctx, $expr->{"value"}) == 1) {
+                $expr->{"value"} = sem_scalar_of($expr->{"value"});
+            }
+        }
         # `$h{n} = @a` / `$a[0] = @{$r}`: an array assigned to an element is
         # its count (Perl; it stored the array reference)
         if ($expr->{"op"} eq "=" && is_valid_node($expr->{"target"}) == 1 && is_valid_node($expr->{"value"}) == 1) {
@@ -3931,6 +3955,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$") { sem_rev_scalar($stmt->{"init"}); }
         # `my $n = keys %h` / values / split: a count in scalar context (Perl)
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_count_in_scalar_call($ctx, $stmt->{"init"}) == 1) {
+            $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
+        }
+        if ($sigil eq "$" && $stmt->{"init"} && sem_call_returns_array($ctx, $stmt->{"init"}) == 1) {
             $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
         }
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {

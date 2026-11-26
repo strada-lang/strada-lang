@@ -1986,7 +1986,16 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
         my int $is_void = $ret_type == TYPE_VOID();
 
         # Generate wrapper: __wrap_FuncName(self, args) { ... }
-        sb_append($wsb, "static StradaValue* __wrap_" . $func_name . "(StradaValue* self, StradaValue* args) {\n");
+        # A method that takes a list (variadic, or the `@_` form) gets its
+        # array/hash/list arguments spread (Perl): the caller only marks them
+        # (strada_pack_args_spread), and this shim spreads them before the
+        # real wrapper sees the pack. Methods with fixed parameters have no
+        # shim and get such arguments whole.
+        my int $w_listy = 0;
+        if ($m->{"is_variadic"} == 1) { $w_listy = 1; }
+        my str $w_name = "__wrap_" . $func_name;
+        if ($w_listy == 1) { $w_name = "__wrap_" . $func_name . "__b"; }
+        sb_append($wsb, "static StradaValue* " . $w_name . "(StradaValue* self, StradaValue* args) {\n");
 
         if ($param_count <= 1 && $m->{"is_variadic"} == 1) {
             # No-parens variadic function used as method: prepend self to args for @_
@@ -2198,6 +2207,17 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
         }
 
         sb_append($wsb, "}\n\n");
+        if ($w_listy == 1) {
+            sb_append($wsb, "static StradaValue* __wrap_" . $func_name . "(StradaValue* self, StradaValue* args) {\n");
+            sb_append($wsb, "    if (__builtin_expect(!STRADA_ARGS_HAVE_SPREAD(args), 1)) return " . $w_name . "(self, args);\n");
+            sb_append($wsb, "    StradaValue *__sa = strada_args_spread(args);\n");
+            sb_append($wsb, "    if (!__sa) return " . $w_name . "(self, args);\n");
+            sb_append($wsb, "    strada_cleanup_push(__sa);\n");
+            sb_append($wsb, "    StradaValue *__sr = " . $w_name . "(self, __sa);\n");
+            sb_append($wsb, "    strada_cleanup_pop_decref(__sa);\n");
+            sb_append($wsb, "    return __sr;\n");
+            sb_append($wsb, "}\n\n");
+        }
         $i = $i + 1;
     }
 

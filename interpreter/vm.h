@@ -649,6 +649,8 @@ enum {
     BUILTIN_REGEX_GPOS_NEXT,   /* (subject, mstart, mend) -> next /g position (zero-width: +1 char) */
     BUILTIN_STD_HANDLE,        /* (n) -> filehandle for stdin (0) / stdout (1) / stderr (2) */
     BUILTIN_READ_ALL_LINES,    /* (fh) -> array of the remaining lines, newlines removed */
+    BUILTIN_METHOD_ARGS_FLAT,  /* (obj, args, name, mask) -> args with masked arrays/hashes spread when the method takes a list */
+    BUILTIN_DYN_SPREAD_MASK,   /* (mask): the next OP_DYN_METHOD_CALL spreads those arguments when its method takes a list */
 };
 
 /* Heap object type tag */
@@ -1241,6 +1243,7 @@ typedef struct VM {
     int end_ran;
     int refcount;
     uint8_t pending_call_context;
+    uint64_t dyn_spread_mask;   /* set by BUILTIN_DYN_SPREAD_MASK, consumed by the next OP_DYN_METHOD_CALL */
     /* Thread safety + per-VM caches */
     pthread_t owner_thread;
     int is_worker_vm;

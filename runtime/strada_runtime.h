@@ -160,6 +160,7 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 #define STRADA_SVf_CELL_REF     ((uint16_t)(1u << 10)) /* STRADA_REF: closure cell StradaValue** reference */
 /* bits 11-13: cycle-collector colour (BLACK=0 outside a collection); while
  * STRADA_SVf_CC_BUFFERED is set, struct_size holds the value's cc_roots index. */
+#define STRADA_SVf_SPREAD_ARGS  ((uint16_t)(1u << 14)) /* ARRAY: a method-argument pack; a spread mask (tagged int) sits after its last element */
 #define STRADA_SVf_CC_COLOR_SHIFT 11
 #define STRADA_SVf_CC_COLOR_MASK ((uint16_t)(7u << 11))
 #define STRADA_SVf_STR_MASK     ((uint16_t)(STRADA_SVf_ASCII | STRADA_SVf_UTF8))
@@ -1721,6 +1722,10 @@ StradaValue *strada_negate(StradaValue *sv);  /* unary minus (Perl semantics, no
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);        /* Pack args into array */
+StradaValue* strada_pack_args_spread(uint64_t mask, int count, ...);  /* same, noting which args Perl would spread */
+StradaValue* strada_args_spread(StradaValue *args);   /* a new pack with those args spread, or NULL if ARGS has none */
+#define STRADA_ARGS_HAVE_SPREAD(a) ((a) && !STRADA_IS_TAGGED_INT(a) && ((a)->flags & STRADA_SVf_SPREAD_ARGS))
+void strada_args_mark_spread(StradaValue *args, uint64_t mask);  /* flag an argument pack built by hand (SUPER::m) */
 StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...);
 
 /* Memory management */

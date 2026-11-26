@@ -452,7 +452,8 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
         }
         $cli_defs = \%dh;
     }
-    my scalar $tokens = lex_tokenize_file_defs($source, $filename, $cli_defs);
+    my array @tokens_list = lex_tokenize_file_defs($source, $filename, $cli_defs);
+    my scalar $tokens = \@tokens_list;
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Lexer:    " . ($t1 - $t0) . " seconds");

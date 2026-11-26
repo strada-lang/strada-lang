@@ -1,0 +1,47 @@
+# EXPECT: 3 5 0 6 1 2 2 3 2 3 3 4 5,6,7 5:6,7 x:5,6,7 3 3 a,5,6,7,z 103 5,6,7 3 Base3 104 4 auto4
+# $obj->m(@a): an array, hash or list argument is spread into a method that
+# takes a list (variadic, or the `@_` form), as a function call does and as
+# Perl does. It arrived as one argument. A method with an `array` or scalar
+# parameter still gets it whole. Covers inheritance, SUPER::, a `before`
+# modifier, class methods, `@_` forwarding, a dynamic method name and
+# AUTOLOAD (which gets the method name first, so 4).
+package Base;
+func new { my $class = shift; my hash %h = (); return bless(\%h, $class); }
+func count { my $self = shift; return scalar(@_); }
+func joined(scalar $self, scalar ...@rest) str { return join(",", @rest); }
+func first_then(scalar $self, scalar $one, scalar ...@rest) str { return $one . ":" . join(",", @rest); }
+func whole(scalar $self, array @in) int { return scalar(@in); }
+func fwd { my $self = shift; return $self->count(@_); }
+func fwd2 { my $self = shift; return $self->joined("a", @_, "z"); }
+func cls { my $class = shift; return $class . scalar(@_); }
+package Kid;
+extends Base;
+func count { my $self = shift; return 100 + SUPER::count($self, @_); }
+before "joined" func(scalar $self) void { }
+package Auto;
+func new { my hash %h = (); return bless(\%h, "Auto"); }
+func AUTOLOAD { my $self = shift; return "auto" . scalar(@_); }
+package main;
+func two() array { return (8, 9); }
+func mk(str $c) scalar { return $c->new(); }
+func main() int {
+    my array @m = (5, 6, 7);
+    my array @e = ();
+    my hash %h = (k => 1);
+    my $r = [1, 2];
+    my int $t = 0;
+    my $b = Base->new();
+    my $k = mk("Kid");
+    my $known = Base::new("Base");
+    my array @out = ();
+    push(@out, $b->count(@m), $b->count(1, @m, 2), $b->count(@e), $b->count(@m, @m), $b->count($r), $b->count(@$r), $b->count(%h));
+    push(@out, $b->count((1, 2), 3), $b->count(two()), $b->count($t ? @e : @m), $b->count(map { $_ } @m), $b->count(1..4));
+    push(@out, $b->joined(@m), $b->first_then(@m), $b->first_then("x", @m), $b->whole(@m), $b->fwd(@m), $b->fwd2(@m));
+    push(@out, $k->count(@m), $k->joined(@m), $known->count(@m), Base->cls(@m), $k->fwd(1, @m));
+    my str $mn = "count";
+    push(@out, $b->$mn(@m, 1));
+    my $a = Auto::new();
+    push(@out, $a->nothing(@m));
+    say(join(" ", @out));
+    return 0;
+}

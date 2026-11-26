@@ -10,6 +10,25 @@
   argument is still one value. Test:
   `t/bugfix_tests/array_ternary_list_branches.strada`.
 
+### Method calls spread list arguments (2026-11-26)
+- `$obj->m(@a)` spreads `@a` into a method that is variadic or written in
+  the `@_` form, as a function call already did and as Perl does. Before,
+  the array arrived as one argument (`scalar(@_)` was 1). Also hashes, list
+  literals, ranges, `map`/`grep`/`sort`, `SUPER::m($self, @a)`, `Pkg->m(@a)`
+  and `$obj->$name(@a)`.
+- A method with an `array @items` or a scalar parameter still receives the
+  array whole.
+- No cost on other calls: a call without such an argument, and any call to
+  a method with fixed parameters, runs the same code as before.
+- Test: `t/bugfix_tests/method_args_flatten.strada`.
+
+### An `array` function in scalar context is its count (2026-11-26)
+- `my $n = f();`, `$v = f();` and `$h{k} = f();` give the element count
+  when `f` is declared to return `array` (Perl's scalar context). They
+  stored the array. To keep the list use `my @a = f();` or `[f()]`.
+  Functions without a declared `array` return type are unchanged.
+- Test: `t/bugfix_tests/array_call_in_scalar_is_count.strada`.
+
 ### Perl's list and scalar rules (2026-11-26)
 Both backends; each item was different from Perl before.
 - `my $n = $t ? @a : @b;` is a count (it was the array); the same for a

@@ -1297,7 +1297,8 @@ func parse_primary(scalar $parser) scalar {
             if (parser_is_simple_ident($vname) == 1) {
                 $interp_node = ast_new_variable($vname, "$");
             } else {
-                my scalar $itoks = lex_tokenize_file($vname, $parser->{"filename"});
+                my array @itoks_list = lex_tokenize_file($vname, $parser->{"filename"});
+                my scalar $itoks = \@itoks_list;
                 my int $base_line = $tok->{"line"} + 0;
                 # the ${...}'s own line (a heredoc body starts below the token)
                 my scalar $vlines = $tok->{"var_lines"};
@@ -3020,7 +3021,8 @@ func parse_regex_match(scalar $parser) scalar {
             my str $subst_flags = $right_tok->{"flags"};
             if (index($subst_flags, "e") >= 0) {
                 my str $repl_src = $right_tok->{"replacement"};
-                my scalar $repl_tokens = lex_tokenize_file($repl_src, $parser->{"filename"});
+                my array @repl_tokens_list = lex_tokenize_file($repl_src, $parser->{"filename"});
+                my scalar $repl_tokens = \@repl_tokens_list;
                 my int $rbase_line = $right_tok->{"line"} + 0;
                 if ($rbase_line > 1) {
                     my int $rti = 0;
@@ -5751,7 +5753,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     }
 
     # Lex the module with the program's -D defines so its #ifdef work
-    my scalar $tokens = lex_tokenize_file_defs($source, $file_path, $program->{"pp_defines"});
+    my array @tokens_list = lex_tokenize_file_defs($source, $file_path, $program->{"pp_defines"});
+    my scalar $tokens = \@tokens_list;
 
     # Parse the module
     my scalar $mod_parser = parser_new($tokens);

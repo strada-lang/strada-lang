@@ -9022,6 +9022,58 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             }
             break;
         }
+        case BUILTIN_DYN_SPREAD_MASK: {
+            vm->dyn_spread_mask = argc >= 1 ? (uint64_t)vm_to_int(args[0]) : 0;
+            SP_PUSH(VM_UNDEF_VAL);
+            break;
+        }
+        case BUILTIN_METHOD_ARGS_FLAT: {
+            /* $obj->m(@a, ...): when the method the call resolves to takes a
+             * list (variadic, or the `@_` form), the arguments flagged in
+             * the mask are spread (Perl); a method with fixed parameters
+             * gets them whole, as a function call does. */
+            VMValue res = argc >= 2 ? args[1] : VM_UNDEF_VAL;
+            VMArray *in = (argc >= 4 && VM_IS_PTR(args[1]) && VM_PTR_TYPE(args[1]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[1]) : NULL;
+            const char *mname = (argc >= 4 && VM_IS_PTR(args[2]) && VM_PTR_TYPE(args[2]) == VM_OBJ_STR) ? VM_AS_STR(args[2])->data : NULL;
+            if (in && mname) {
+                const char *cls = vm_obj_class_name(args[0]);
+                if (!cls && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_STR) cls = VM_AS_STR(args[0])->data;
+                int mfi = -1;
+                if (argc >= 5 && VM_IS_PTR(args[4]) && VM_PTR_TYPE(args[4]) == VM_OBJ_STR) {
+                    /* SUPER::m: the method the parents of that package give */
+                    const char *spkg = VM_AS_STR(args[4])->data;
+                    mfi = vm_find_super_method(vm->program, spkg, mname, 0);
+                    if (mfi < 0) mfi = vm_find_super_method(vm->program, spkg, "AUTOLOAD", 0);
+                } else if (cls) {
+                    mfi = vm_find_method_cached(vm, cls, mname);
+                    if (mfi < 0) mfi = vm_find_method_cached(vm, cls, "AUTOLOAD");
+                }
+                if (mfi >= 0 && (size_t)mfi < vm->program->func_count && vm->program->funcs[mfi].has_variadic) {
+                    uint64_t mask = (uint64_t)vm_to_int(args[3]);
+                    vm->stack_top = sp;
+                    vm->gc_pause++;
+                    VMArray *out = vm_array_new(in->size > 0 ? in->size * 2 : 4);
+                    for (int i = 0; i < in->size; i++) {
+                        VMValue it = in->items[i];
+                        int spread = (i < 64) && ((mask >> i) & 1);
+                        if (spread && VM_IS_PTR(it) && VM_PTR_TYPE(it) == VM_OBJ_ARRAY && VM_IS_UNDEF(VM_AS_ARRAY(it)->tied_obj)) {
+                            VMArray *ea = VM_AS_ARRAY(it);
+                            for (int j = 0; j < ea->size; j++) vm_array_push(out, vm_val_copy(ea->items[j]));
+                        } else if (spread && VM_IS_PTR(it) && VM_PTR_TYPE(it) == VM_OBJ_HASH && vm_obj_class_name(it) == NULL) {
+                            VMArray *kv = vm_hash_to_flat_kv(vm, VM_AS_HASH(it));
+                            for (int j = 0; kv && j < kv->size; j++) vm_array_push(out, vm_val_copy(kv->items[j]));
+                        } else {
+                            vm_array_push(out, vm_val_copy(it));
+                        }
+                    }
+                    vm->gc_pause--;
+                    stack = vm->stack; RELOAD();
+                    res = VM_MAKE_PTR(out);
+                }
+            }
+            SP_PUSH(res);
+            break;
+        }
         case BUILTIN_LIST_LAST: {
             VMArray *ll = (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
             if (ll) SP_PUSH(ll->size > 0 ? vm_val_copy(vm_array_get(ll, (int64_t)ll->size - 1)) : VM_UNDEF_VAL);
@@ -21398,6 +21450,33 @@ L_resume_frame_ready:;
         mcall_method_cstr = mcall_dyn_buf;
         mcall_is_dyn = 1;
         mcall_allow_field = 0;
+        if (__builtin_expect(vm->dyn_spread_mask != 0, 0)) {
+            /* $obj->$name(@a): spread the flagged arguments when the method
+             * takes a list (as BUILTIN_METHOD_ARGS_FLAT does for a literal name) */
+            uint64_t dmask = vm->dyn_spread_mask;
+            vm->dyn_spread_mask = 0;
+            int dargc = mcall_argc;
+            VMValue dself = stack[sp - dargc - 1];
+            const char *dcls = vm_obj_class_name(dself);
+            if (!dcls && VM_IS_PTR(dself) && VM_PTR_TYPE(dself) == VM_OBJ_STR) dcls = VM_AS_STR(dself)->data;
+            int dfi = dcls ? vm_find_method_cached(vm, dcls, mcall_dyn_buf) : -1;
+            if (dcls && dfi < 0) dfi = vm_find_method_cached(vm, dcls, "AUTOLOAD");
+            if (dargc > 0 && dargc <= 60 && dfi >= 0 && (size_t)dfi < vm->program->func_count && vm->program->funcs[dfi].has_variadic) {
+                VMValue dtmp[60];
+                for (int ai = dargc - 1; ai >= 0; ai--) dtmp[ai] = stack[--sp];
+                int dn = 0;
+                for (int ai = 0; ai < dargc; ai++) {
+                    VMValue it = dtmp[ai];
+                    if (((dmask >> ai) & 1) && VM_IS_PTR(it) && VM_PTR_TYPE(it) == VM_OBJ_ARRAY && VM_IS_UNDEF(VM_AS_ARRAY(it)->tied_obj)) {
+                        VMArray *ea = VM_AS_ARRAY(it);
+                        for (int j = 0; j < ea->size; j++) { SP_PUSH(ea->items[j]); dn++; }
+                    } else {
+                        SP_PUSH(it); dn++;
+                    }
+                }
+                mcall_argc = dn;
+            }
+        }
         goto L_do_op_method_call;
     }
 

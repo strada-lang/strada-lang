@@ -5347,7 +5347,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             emit($cg, "; ");
                             $a = $a + 1;
                         }
-                        emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count);
+                        emit($cg, "StradaValue *__meth_pa = " . method_pack_open($cg, $args, $arg_count));
                         my int $i = 0;
                         while ($i < $arg_count) {
                             emit($cg, ", __meth_arg_" . $i);
@@ -5411,7 +5411,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         if (length($mc_decl) > 0) {
                             emit($cg, "({ " . $mc_decl . $mc_fn);
                             gen_expression($cg, $meth_target);
-                            emit($cg, ", " . c_str_lit($method) . ", strada_pack_args(" . $arg_count);
+                            emit($cg, ", " . c_str_lit($method) . ", " . method_pack_open($cg, $args, $arg_count));
                             my int $i = 0;
                             while ($i < $arg_count) {
                                 emit($cg, ", ");
@@ -5422,7 +5422,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         } else {
                             emit($cg, $mc_fn);
                             gen_expression($cg, $meth_target);
-                            emit($cg, ", " . c_str_lit($method) . ", strada_pack_args(" . $arg_count);
+                            emit($cg, ", " . c_str_lit($method) . ", " . method_pack_open($cg, $args, $arg_count));
                             my int $i = 0;
                             while ($i < $arg_count) {
                                 emit($cg, ", ");
@@ -5471,7 +5471,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                                 emit($cg, "; ");
                                 $i = $i + 1;
                             }
-                            emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count);
+                            emit($cg, "StradaValue *__meth_pa = " . method_pack_open($cg, $args, $arg_count));
                             $i = 0;
                             while ($i < $arg_count) {
                                 emit($cg, ", __meth_arg_" . $i);
@@ -5479,7 +5479,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             }
                             emit($cg, "); ");
                         } else {
-                            emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count);
+                            emit($cg, "StradaValue *__meth_pa = " . method_pack_open($cg, $args, $arg_count));
                             my int $i = 0;
                             while ($i < $arg_count) {
                                 emit($cg, ", ");
@@ -5566,6 +5566,33 @@ func tern_branch_is_list(scalar $cg, scalar $branch) int {
         if ($brt == TYPE_ARRAY() || $brt == TYPE_DYNAMIC()) { return 1; }
     }
     return 0;
+}
+
+# The opening of a method call's argument pack: "strada_pack_args(N", or
+# "strada_pack_args_spread(MASK, N" when an argument is one Perl would spread
+# into the callee's list (an array or hash by sigil, a list, a range/slice,
+# map/grep/sort, a call declared `array`). The method's wrapper decides.
+func method_pack_open(scalar $cg, scalar $pargs, int $pcount) str {
+    my int $mpo_bits = method_spread_mask($cg, $pargs, 0, $pcount);
+    if ($mpo_bits == 0) { return "strada_pack_args(" . $pcount; }
+    return "strada_pack_args_spread(" . $mpo_bits . "ULL, " . $pcount;
+}
+
+# Bit i set: argument $first + i is one Perl would spread. 0 when the call
+# has an explicit ...spread (the positions move) or more than 60 arguments.
+func method_spread_mask(scalar $cg, scalar $pargs, int $first, int $pcount) int {
+    if ($pcount - $first > 60) { return 0; }
+    my int $msm_bits = 0;
+    my int $msm_bit = 1;
+    my int $msm_i = $first;
+    while ($msm_i < $pcount) {
+        my scalar $msm_a = $pargs->[$msm_i];
+        if ($msm_a->{"type"} == NODE_SPREAD()) { return 0; }
+        if (tern_branch_is_list($cg, $msm_a) == 1) { $msm_bits = $msm_bits + $msm_bit; }
+        $msm_bit = $msm_bit * 2;
+        $msm_i = $msm_i + 1;
+    }
+    return $msm_bits;
 }
 
 func array_flatten_kind(scalar $cg, scalar $elem) int {
@@ -7726,7 +7753,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "; ");
                     $dm_a2 = $dm_a2 + 1;
                 }
-                emit($cg, "StradaValue *__dm_pa = strada_pack_args(" . $dm_arg_count);
+                emit($cg, "StradaValue *__dm_pa = " . method_pack_open($cg, $dm_args, $dm_arg_count));
                 my int $dm_i = 0;
                 while ($dm_i < $dm_arg_count) {
                     emit($cg, ", __dm_arg_" . $dm_i);
@@ -7800,6 +7827,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             $si = $si + 1;
         }
+        my int $sp_mask = method_spread_mask($cg, $args, 1, $arg_count);
+        if ($sp_mask != 0) { emit($cg, "strada_args_mark_spread(__super_pa, " . $sp_mask . "ULL); "); }
         if ($sp_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
         emit($cg, "strada_tmps_free(" . $sp_tm . "); __super_res; })");

@@ -1416,7 +1416,8 @@ func eval_string_vm_ex(str $code, str $filename, scalar $extra_libs, int $is_loa
         }
 
         # Parse
-        my scalar $tokens = lex_tokenize($source);
+        my array @tokens_list = lex_tokenize($source);
+        my scalar $tokens = \@tokens_list;
         eval_sb_renumber_tokens(\%sb, $tokens);
         my scalar $parser = parser_new($tokens);
         parser_set_filename($parser, length($filename) > 0 ? $filename : "<eval-vm>");

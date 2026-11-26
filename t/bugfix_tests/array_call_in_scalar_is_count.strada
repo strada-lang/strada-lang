@@ -1,0 +1,27 @@
+# EXPECT: 2 3 2 2 3 2 2 2 R 2 2 12
+# A call to a function declared to return `array`, where one value is
+# wanted, is the element count (Perl's scalar context; it stored the array):
+# `my $n = f()`, `our $n = f()`, `$v = f()`, `$h{k} = f()`, `$a[i] = f()`,
+# `$r->{k} = f()`. `my @a = f()` and `[f()]` keep the elements, and a
+# function without a declared `array` return type still returns its array.
+package Lib;
+func three() array { return (7, 8, 9); }
+package main;
+our $G = two();
+func two() array { return (8, 9); }
+func untyped() { my array @a = (1, 2, 3); return @a; }
+func main() int {
+    my $a = two();
+    my scalar $b = Lib::three();
+    my $c; $c = two();
+    my hash %h = (); $h{"k"} = two();
+    my array @e = (0); $e[0] = Lib::three();
+    my $r = {}; $r->{"k"} = two();
+    my array @keep = two();
+    my $ref = [two()];
+    my $u = untyped();
+    my $t = 1 ? two() : 0;
+    my int $n = two();
+    say(join(" ", $a, $b, $c, $h{"k"}, $e[0], $r->{"k"}, scalar(@keep), scalar(@$ref), ref($u) ? "R" : "A" . scalar(@{$u}), $n, $G, two() + 10));
+    return 0;
+}

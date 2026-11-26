@@ -28646,6 +28646,93 @@ StradaValue* strada_pack_args(int count, ...) {
     return sv;
 }
 
+/* $obj->m(@a, $x): the caller cannot know whether the method takes a list
+ * (variadic, or the `@_` form) or has an `array` parameter, so it packs the
+ * arguments whole and records, in MASK, which ones Perl would spread (bit i =
+ * argument i; at most 60). The mask is kept after the last element, outside
+ * `size`, and the pack is flagged STRADA_SVf_SPREAD_ARGS. Only the wrapper
+ * of a list-taking method looks at it (strada_args_spread); every other
+ * method sees an ordinary pack. */
+StradaValue* strada_pack_args_spread(uint64_t mask, int count, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = strada_array_new_cap((size_t)count + 1);
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
+    va_list args;
+    va_start(args, count);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        StradaValue *arg = va_arg(args, StradaValue*);
+        strada_incref(arg);
+        av->elements[i] = arg;
+    }
+    av->elements[count] = STRADA_MAKE_TAGGED_INT((int64_t)(mask & (((uint64_t)1 << 60) - 1)));
+    av->size = (size_t)count;
+    va_end(args);
+    sv->flags |= STRADA_SVf_SPREAD_ARGS;
+    return sv;
+}
+
+void strada_args_mark_spread(StradaValue *args, uint64_t mask) {
+    if (!args || STRADA_IS_TAGGED_INT(args) || args->type != STRADA_ARRAY || !args->value.av || mask == 0) return;
+    StradaArray *av = args->value.av;
+    strada_array_reserve(av, av->head + av->size + 1);
+    av->elements[av->head + av->size] = STRADA_MAKE_TAGGED_INT((int64_t)(mask & (((uint64_t)1 << 60) - 1)));
+    args->flags |= STRADA_SVf_SPREAD_ARGS;
+}
+
+/* The arguments AUTOLOAD gets: the method name, then the call's arguments.
+ * A spread mask on ARGS moves up one place with them, so a list-taking
+ * AUTOLOAD has them spread and one with fixed parameters gets them whole. */
+static StradaValue *oop_autoload_args(const char *method, StradaValue *args) {
+    StradaValue *new_args = strada_new_array();
+    size_t n = (args && !STRADA_IS_TAGGED_INT(args) && args->type == STRADA_ARRAY && args->value.av) ? args->value.av->size : 0;
+    strada_array_reserve(new_args->value.av, n + 2);
+    strada_array_push_take(new_args->value.av, strada_new_str(method));
+    for (size_t i = 0; i < n; i++) {
+        strada_array_push(new_args->value.av, args->value.av->elements[args->value.av->head + i]);
+    }
+    if (n > 0 && (args->flags & STRADA_SVf_SPREAD_ARGS)) {
+        StradaValue *mv = args->value.av->elements[args->value.av->head + n];
+        if (STRADA_IS_TAGGED_INT(mv)) strada_args_mark_spread(new_args, ((uint64_t)STRADA_TAGGED_INT_VAL(mv)) << 1);
+    }
+    return new_args;
+}
+
+StradaValue* strada_args_spread(StradaValue *args) {
+    if (!args || STRADA_IS_TAGGED_INT(args) || !(args->flags & STRADA_SVf_SPREAD_ARGS)) return NULL;
+    if (args->type != STRADA_ARRAY || !args->value.av) return NULL;
+    StradaArray *av = args->value.av;
+    StradaValue *mv = av->elements[av->head + av->size];
+    uint64_t mask = STRADA_IS_TAGGED_INT(mv) ? (uint64_t)STRADA_TAGGED_INT_VAL(mv) : 0;
+    StradaValue *out = strada_new_array();
+    for (size_t i = 0; i < av->size; i++) {
+        StradaValue *el = av->elements[av->head + i];
+        int spread = (i < 60) && ((mask >> i) & 1);
+        /* an array or hash variable arrives as a reference to its container */
+        StradaValue *ct = el;
+        if (spread && ct && !STRADA_IS_TAGGED_INT(ct) && ct->type == STRADA_REF && !SV_BLESSED(ct) && ct->value.rv)
+            ct = ct->value.rv;
+        int plain = spread && ct && !STRADA_IS_TAGGED_INT(ct) && !SV_BLESSED(ct) && !(ct->meta && ct->meta->is_tied);
+        if (plain && ct->type == STRADA_ARRAY && ct->value.av) {
+            StradaArray *ea = ct->value.av;
+            for (size_t j = 0; j < ea->size; j++) strada_array_push(out->value.av, ea->elements[ea->head + j]);
+        } else if (plain && ct->type == STRADA_HASH) {
+            StradaValue *kv = strada_hash_to_flat_array(ct);
+            if (kv && !STRADA_IS_TAGGED_INT(kv) && kv->type == STRADA_ARRAY && kv->value.av) {
+                StradaArray *ka = kv->value.av;
+                for (size_t j = 0; j < ka->size; j++) strada_array_push(out->value.av, ka->elements[ka->head + j]);
+            }
+            if (kv) strada_decref(kv);
+        } else {
+            strada_array_push(out->value.av, el);
+        }
+    }
+    return out;
+}
+
 StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_ARRAY;
@@ -32242,13 +32329,7 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
         oop_unlock();
         if (autoload) {
             /* Build new args: prepend method name to original args */
-            StradaValue *new_args = strada_new_array();
-            strada_array_push_take(new_args->value.av, strada_new_str(method));
-            if (args && args->type == STRADA_ARRAY && args->value.av) {
-                for (size_t i = 0; i < args->value.av->size; i++) {
-                    strada_array_push(new_args->value.av, args->value.av->elements[args->value.av->head + i]);
-                }
-            }
+            StradaValue *new_args = oop_autoload_args(method, args);
             /* Push new_args so a throwing AUTOLOAD doesn't leak it via
              * longjmp skipping the matching decref below. */
             strada_cleanup_push(new_args);
@@ -32519,13 +32600,7 @@ StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
         }
         oop_unlock();
         if (autoload) {
-            StradaValue *new_args = strada_new_array();
-            strada_array_push_take(new_args->value.av, strada_new_str(method));
-            if (args && !STRADA_IS_TAGGED_INT(args) && args->type == STRADA_ARRAY && args->value.av) {
-                for (size_t i = 0; i < args->value.av->size; i++) {
-                    strada_array_push(new_args->value.av, args->value.av->elements[args->value.av->head + i]);
-                }
-            }
+            StradaValue *new_args = oop_autoload_args(method, args);
             strada_cleanup_push(new_args);
             StradaValue *result = autoload(obj, new_args);
             strada_cleanup_pop();

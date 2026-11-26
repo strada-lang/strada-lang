@@ -3562,6 +3562,40 @@ static void compile_say_arg(CompCtx *ctx, StradaValue *a) {
     }
 }
 
+static void vm_sc_replace(StradaValue *node, const char *key);
+/* A call to a function declared to return `array` (Semantic
+ * sem_call_returns_array): where one value is wanted it is the count. */
+static int vm_call_returns_array(CompCtx *ctx, StradaValue *n) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH || (int)ast_int(n, "type") != NI_CALL) return 0;
+    const char *nm = ast_str(n, "name");
+    if (!nm) return 0;
+    int fidx = resolve_vm_func_idx(ctx, nm);
+    return fidx >= 0 && ctx->prog->funcs[fidx].return_type == AST_TYPE_ARRAY;
+}
+
+/* A method-call argument that Perl would spread: an array or hash by its
+ * sigil, a list literal, a range/slice, map/grep/sort, a list ?:, or a call
+ * declared to return an array (vm_tern_branch_is_list's set). */
+static int vm_tern_branch_is_list(CompCtx *ctx, StradaValue *b);
+static int vm_method_arg_spreads(CompCtx *ctx, StradaValue *a) {
+    return vm_tern_branch_is_list(ctx, a);
+}
+
+/* $v = f() / $h{k} = f() with f declared `array`: the count */
+static void vm_assign_array_call_count(CompCtx *ctx, StradaValue *node) {
+    node = ast_deref(node);
+    if (!node || STRADA_IS_TAGGED_INT(node) || node->type != STRADA_HASH) return;
+    StradaValue *at = ast_deref(ast_get(node, "target"));
+    int att = (at && !STRADA_IS_TAGGED_INT(at)) ? (int)ast_int(at, "type") : 0;
+    const char *aop = ast_str(node, "op");
+    if (aop && strcmp(aop, "=") == 0 &&
+        ((att == NI_VARIABLE && ast_str(at, "sigil")[0] == '$') || att == NI_HASH_ACCESS || att == NI_SUBSCRIPT ||
+         att == NI_DEREF_HASH || att == NI_DEREF_ARRAY) &&
+        vm_call_returns_array(ctx, ast_get(node, "value")))
+        vm_sc_replace(node, "value");
+}
+
 /* A branch of ?: that is certainly a list (the compiled backend's
  * tern_branch_is_list): an array or hash by sigil, a list literal, `()`, a
  * range/slice, map/grep/sort, or a call declared to return an array. A
@@ -4320,8 +4354,25 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             }
         }
 
+        /* $obj->m(@a): an array, hash or list argument is spread when the
+         * method it resolves to takes a list (decided at run time by
+         * BUILTIN_METHOD_ARGS_FLAT; the mask names those arguments). */
+        uint64_t flat_mask = 0;
+        for (int i = 0; i < argc && i < 60; i++) {
+            StradaValue *arg = ast_deref(ast_arr_get(args, i));
+            if (arg && (int)ast_int(arg, "type") != NI_SPREAD && vm_method_arg_spreads(ctx, arg)) flat_mask |= ((uint64_t)1 << i);
+        }
+        /* with an explicit ...spread the positions move: keep the old path */
+        for (int i = 0; i < argc; i++) {
+            StradaValue *arg = ast_deref(ast_arr_get(args, i));
+            if (arg && (int)ast_int(arg, "type") == NI_SPREAD) flat_mask = 0;
+        }
+        if (argc > 60) flat_mask = 0;
+        if (flat_mask != 0) has_spread = 1;
+
         if (has_spread) {
             compile_expr(ctx, base_obj);
+            if (flat_mask != 0) vm_chunk_emit(ctx->chunk, OP_DUP);
             vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
             vm_chunk_emit_u32(ctx->chunk, argc > 0 ? (uint32_t)argc * 2 : 8);
             for (int i = 0; i < argc; i++) {
@@ -4337,6 +4388,15 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 }
             }
             size_t midx = vm_chunk_add_str_const(ctx->chunk, method);
+            if (flat_mask != 0) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)midx);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, (int64_t)flat_mask);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_METHOD_ARGS_FLAT);
+                vm_chunk_emit(ctx->chunk, 4);
+            }
             emit_call_context(ctx, expr_call_ctx);
             vm_chunk_emit(ctx->chunk, OP_METHOD_CALL_SPREAD);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)midx);
@@ -4376,6 +4436,22 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             compile_expr(ctx, ast_arr_get(args, i));
         }
         compile_expr(ctx, method_expr);
+        {
+            /* arguments Perl would spread into a list-taking method */
+            uint64_t dmask = 0;
+            for (int i = 0; i < argc && i < 60; i++) {
+                StradaValue *arg = ast_deref(ast_arr_get(args, i));
+                if (arg && (int)ast_int(arg, "type") != NI_SPREAD && vm_method_arg_spreads(ctx, arg)) dmask |= ((uint64_t)1 << i);
+            }
+            if (dmask != 0 && argc <= 60) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, (int64_t)dmask);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_DYN_SPREAD_MASK);
+                vm_chunk_emit(ctx->chunk, 1);
+                vm_chunk_emit(ctx->chunk, OP_POP);
+            }
+        }
 
         emit_call_context(ctx, expr_call_ctx);
         vm_chunk_emit(ctx->chunk, OP_DYN_METHOD_CALL);
@@ -6537,8 +6613,17 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 StradaValue *sarg = ast_deref(ast_arr_get(args, i));
                 if (sarg && (int)ast_int(sarg, "type") == NI_SPREAD) has_spread = 1;
             }
+            /* SUPER::m($self, @a): spread when the parent's method takes a list */
+            uint64_t sup_mask = 0;
+            if (!has_spread && argc - 1 <= 60) {
+                for (int i = 1; i < argc; i++) {
+                    if (vm_method_arg_spreads(ctx, ast_arr_get(args, i))) sup_mask |= ((uint64_t)1 << (i - 1));
+                }
+            }
+            if (sup_mask != 0) has_spread = 1;
             if (has_spread) {
                 compile_expr(ctx, ast_arr_get(args, 0));
+                if (sup_mask != 0) vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
                 vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
                 vm_chunk_emit_u32(ctx->chunk, argc > 1 ? (uint32_t)(argc - 1) * 2 : 8);
                 for (int i = 1; i < argc; i++) {
@@ -6552,6 +6637,19 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         compile_expr(ctx, sarg);
                         vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
                     }
+                }
+                if (sup_mask != 0) {
+                    size_t sm_idx = vm_chunk_add_str_const(ctx->chunk, method);
+                    size_t sp_idx = vm_chunk_add_str_const(ctx->chunk, def_pkg);
+                    vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)sm_idx);
+                    vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                    vm_chunk_emit_i64(ctx->chunk, (int64_t)sup_mask);
+                    vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)sp_idx);
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_METHOD_ARGS_FLAT);
+                    vm_chunk_emit(ctx->chunk, 5);
                 }
                 call_argc = 255;
             } else {
@@ -6574,6 +6672,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
     case NI_ASSIGN: {
         StradaValue *target = ast_get(node, "target");
+        vm_assign_array_call_count(ctx, node);
         StradaValue *value = ast_get(node, "value");
         /* $struct->field = VALUE (paren-less field on a C-struct value,
          * which the VM keeps as a hash) */
@@ -8329,6 +8428,7 @@ static void compile_void_expr(CompCtx *ctx, StradaValue *expr) {
             compile_stmt(ctx, expr);
             return;
         }
+        if (etype == NI_ASSIGN) vm_assign_array_call_count(ctx, expr);
         if (etype == NI_INCREMENT) {
             StradaValue *operand = ast_deref(ast_get(expr, "operand"));
             if (operand && !STRADA_IS_TAGGED_INT(operand) && (int)ast_int(operand, "type") == NI_VARIABLE) {
@@ -8801,6 +8901,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     case NI_VAR_DECL: {
         const char *name = ast_str(node, "name");
         const char *sigil = ast_str(node, "sigil");
+        /* my $n = f() with f declared `array`: the count (Perl) */
+        if (sigil && sigil[0] == '$' && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
         /* The new variable is in scope only after this statement (Perl):
          * `my $x = $x + 1` reads the outer / previous $x, so the slot is
          * added after the initializer compiles. */
@@ -8864,6 +8966,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         /* our variable — use global registry (package-qualified when non-main) */
         const char *name = ast_str(node, "name");
         const char *sigil = ast_str(node, "sigil");
+        /* my $n = f() with f declared `array`: the count (Perl) */
+        if (sigil && sigil[0] == '$' && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
         const char *pkg = ast_str(node, "package");
         StradaValue *init = ast_get(node, "init");
 

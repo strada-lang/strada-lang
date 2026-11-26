@@ -1651,7 +1651,8 @@ func lex_pp_include(scalar $lexer, str $spec, int $dline) void {
     if (length("" . $defs->{"__STRADA_INCLUDE_DEPTH__"}) > 0) { $depth = $defs->{"__STRADA_INCLUDE_DEPTH__"} + 0; }
     if ($depth >= 64) { lex_error($lexer, "#include nested too deeply (64)", $dline, 1); }
     $defs->{"__STRADA_INCLUDE_DEPTH__"} = "" . ($depth + 1);
-    my scalar $itoks = lex_tokenize_file_defs($content, $path, $defs);
+    my array @itoks_list = lex_tokenize_file_defs($content, $path, $defs);
+    my scalar $itoks = \@itoks_list;
     $defs->{"__STRADA_INCLUDE_DEPTH__"} = "" . $depth;
     my int $nt = size($itoks);
     if ($nt > 0) {
