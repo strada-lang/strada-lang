@@ -18,8 +18,9 @@
   and `$obj->$name(@a)`.
 - A method with an `array @items` or a scalar parameter still receives the
   array whole.
-- No cost on other calls: a call without such an argument, and any call to
-  a method with fixed parameters, runs the same code as before.
+- No cost on other calls: only a call that passes a list argument takes
+  the new dispatch entry; every other call runs the same code as before
+  (measured: identical instruction count on a loop of `@_`-method calls).
 - Test: `t/bugfix_tests/method_args_flatten.strada`.
 
 ### An `array` function in scalar context is its count (2026-11-26)

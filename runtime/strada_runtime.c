@@ -28683,9 +28683,7 @@ void strada_args_mark_spread(StradaValue *args, uint64_t mask) {
     args->flags |= STRADA_SVf_SPREAD_ARGS;
 }
 
-/* The arguments AUTOLOAD gets: the method name, then the call's arguments.
- * A spread mask on ARGS moves up one place with them, so a list-taking
- * AUTOLOAD has them spread and one with fixed parameters gets them whole. */
+/* The arguments AUTOLOAD gets: the method name, then the call's arguments. */
 static StradaValue *oop_autoload_args(const char *method, StradaValue *args) {
     StradaValue *new_args = strada_new_array();
     size_t n = (args && !STRADA_IS_TAGGED_INT(args) && args->type == STRADA_ARRAY && args->value.av) ? args->value.av->size : 0;
@@ -28693,10 +28691,6 @@ static StradaValue *oop_autoload_args(const char *method, StradaValue *args) {
     strada_array_push_take(new_args->value.av, strada_new_str(method));
     for (size_t i = 0; i < n; i++) {
         strada_array_push(new_args->value.av, args->value.av->elements[args->value.av->head + i]);
-    }
-    if (n > 0 && (args->flags & STRADA_SVf_SPREAD_ARGS)) {
-        StradaValue *mv = args->value.av->elements[args->value.av->head + n];
-        if (STRADA_IS_TAGGED_INT(mv)) strada_args_mark_spread(new_args, ((uint64_t)STRADA_TAGGED_INT_VAL(mv)) << 1);
     }
     return new_args;
 }
@@ -32624,6 +32618,90 @@ StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
         strada_decref(args);
     }
     return result;
+}
+
+/* ---- list-taking methods and calls that pass them a list ----
+ * A call such as $obj->m(@a) marks its pack (strada_pack_args_spread) and
+ * comes here instead of the ordinary dispatch. The wrappers of methods that
+ * take a list (variadic, or the `@_` form) are recorded at init
+ * (strada_method_mark_list); when the call resolves to one, the marked
+ * arguments are spread, otherwise the pack goes on whole. Ordinary calls
+ * never reach any of this. */
+static StradaMethod *oop_list_fns = NULL;
+static size_t oop_list_fn_count = 0, oop_list_fn_cap = 0;
+
+void strada_method_mark_list(StradaMethod func) {
+    if (!func) return;
+    oop_lock();
+    for (size_t i = 0; i < oop_list_fn_count; i++) {
+        if (oop_list_fns[i] == func) { oop_unlock(); return; }
+    }
+    if (oop_list_fn_count == oop_list_fn_cap) {
+        oop_list_fn_cap = oop_list_fn_cap ? oop_list_fn_cap * 2 : 64;
+        oop_list_fns = realloc(oop_list_fns, oop_list_fn_cap * sizeof(StradaMethod));
+    }
+    oop_list_fns[oop_list_fn_count++] = func;
+    oop_unlock();
+}
+
+/* caller holds oop_lock */
+static int oop_fn_takes_list(StradaMethod func) {
+    if (!func) return 0;
+    for (size_t i = 0; i < oop_list_fn_count; i++) {
+        if (oop_list_fns[i] == func) return 1;
+    }
+    return 0;
+}
+
+/* Spread ARGS (consumed) when TAKES_LIST, else clear its mark. */
+static StradaValue *oop_resolve_spread(StradaValue *args, int takes_list) {
+    if (!STRADA_ARGS_HAVE_SPREAD(args)) return args;
+    if (takes_list) {
+        StradaValue *sp = strada_args_spread(args);
+        if (sp) { strada_decref(args); return sp; }
+    }
+    args->flags &= (uint16_t)~STRADA_SVf_SPREAD_ARGS;
+    return args;
+}
+
+StradaValue* strada_method_call_spread(StradaValue *obj, const char *method, StradaValue *args) {
+    if (STRADA_ARGS_HAVE_SPREAD(args) && obj && !STRADA_IS_TAGGED_INT(obj) && method) {
+        const char *pkg = SV_BLESSED(obj);
+        char *pkg_owned = NULL;
+        if (!pkg && obj->type == STRADA_STR) { pkg_owned = strada_to_str(obj); pkg = pkg_owned; }   /* Pkg->m(...) */
+        int takes_list = 0;
+        if (pkg) {
+            oop_lock();
+            StradaMethod fn = oop_lookup_method(pkg, method);
+            if (!fn) fn = oop_lookup_method(pkg, "AUTOLOAD");
+            takes_list = oop_fn_takes_list(fn);
+            oop_unlock();
+        }
+        if (pkg_owned) free(pkg_owned);
+        args = oop_resolve_spread(args, takes_list);
+    } else if (STRADA_ARGS_HAVE_SPREAD(args)) {
+        args = oop_resolve_spread(args, 0);
+    }
+    return strada_method_call(obj, method, args);
+}
+
+StradaValue* strada_super_call_spread(StradaValue *obj, const char *from_package,
+                                      const char *method, StradaValue *args) {
+    if (STRADA_ARGS_HAVE_SPREAD(args)) {
+        int takes_list = 0;
+        if (method && from_package) {
+            oop_lock();
+            if (!__atomic_load_n(&oop_initialized, __ATOMIC_ACQUIRE)) strada_oop_init();
+            OopPackage *pkg = oop_find_package(from_package);
+            StradaMethod fn = NULL;
+            for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], method);
+            for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], "AUTOLOAD");
+            takes_list = oop_fn_takes_list(fn);
+            oop_unlock();
+        }
+        args = oop_resolve_spread(args, takes_list);
+    }
+    return strada_super_call(obj, from_package, method, args);
 }
 
 /* Set current method package (for SUPER:: context) */

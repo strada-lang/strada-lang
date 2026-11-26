@@ -4755,6 +4755,15 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                 }
             }
 
+            # A call that passes an array, hash or list goes through the
+            # entry that spreads it when the method takes a list. Every
+            # other call keeps the paths above.
+            if (method_spread_mask($cg, $args, 0, $arg_count) != 0) {
+                $mc_fn = "strada_method_call_spread(";
+                $mc_extra = "";
+                $mc_decl = "";
+            }
+
             # Check if any argument has spread operator
             my int $has_spread = 0;
             for (my int $sa = 0; $sa < $arg_count; $sa = $sa + 1) {
@@ -7722,7 +7731,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
 
             if ($dm_push == 1 && $dm_clean == 1) { emit($cg, "strada_cleanup_pop(); "); }
-            emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+            if ($dm_arg_count > 0 && method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0) {
+                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+            } else {
+                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+            }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         } else {
             # No spread - evaluate arguments strictly LTR after receiver & method expr
@@ -7763,7 +7776,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "StradaValue *__dm_pa = strada_pack_args(0); ");
             }
-            emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+            if ($dm_arg_count > 0 && method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0) {
+                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
+            } else {
+                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+            }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         }
         return;
@@ -7830,7 +7847,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $sp_mask = method_spread_mask($cg, $args, 1, $arg_count);
         if ($sp_mask != 0) { emit($cg, "strada_args_mark_spread(__super_pa, " . $sp_mask . "ULL); "); }
         if ($sp_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
-        emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+        if ($sp_mask != 0) {
+            emit($cg, "StradaValue *__super_res = strada_super_call_spread(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+        } else {
+            emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
+        }
         emit($cg, "strada_tmps_free(" . $sp_tm . "); __super_res; })");
         return;
     }

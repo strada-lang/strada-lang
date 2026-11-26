@@ -1725,7 +1725,10 @@ StradaValue* strada_pack_args(int count, ...);        /* Pack args into array */
 StradaValue* strada_pack_args_spread(uint64_t mask, int count, ...);  /* same, noting which args Perl would spread */
 StradaValue* strada_args_spread(StradaValue *args);   /* a new pack with those args spread, or NULL if ARGS has none */
 #define STRADA_ARGS_HAVE_SPREAD(a) ((a) && !STRADA_IS_TAGGED_INT(a) && ((a)->flags & STRADA_SVf_SPREAD_ARGS))
-void strada_args_mark_spread(StradaValue *args, uint64_t mask);  /* flag an argument pack built by hand (SUPER::m) */
+void strada_args_mark_spread(StradaValue *args, uint64_t mask);
+void strada_method_mark_list(StradaMethod func);   /* this method wrapper takes a list (variadic / @_ form) */
+StradaValue* strada_method_call_spread(StradaValue *obj, const char *method, StradaValue *args);
+StradaValue* strada_super_call_spread(StradaValue *obj, const char *from_package, const char *method, StradaValue *args);  /* flag an argument pack built by hand (SUPER::m) */
 StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...);
 
 /* Memory management */
