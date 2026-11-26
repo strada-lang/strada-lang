@@ -2,6 +2,13 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### VM: one empty-hash element (2026-11-25)
+- `my @a = (Pkg::new())` kept nothing in the VM when the object had no
+  attributes yet, and `my @a = ($ref)` dropped a reference to an empty hash:
+  a single empty hash was taken for the empty list. Compiled code was
+  right. `return ()` from an `array` function is now an empty array in the
+  VM. Test: `t/bugfix_tests/vm_one_empty_hash_element.strada`.
+
 ### Checked types and typed fast paths (2026-11-23/24)
 - **`use strict "types";`** — in a file that says it, type mismatches are
   compile errors: `my`/`our` initializers, assignments, call arguments,

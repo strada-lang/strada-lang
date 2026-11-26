@@ -1,0 +1,36 @@
+# EXPECT: 1 Bare|1 Bare|1 Bare|1 HASH|0 0 0|2|0 2 0
+# The VM took a single list element that was an empty hash for the empty
+# list: `my @a = (Pkg::new())` lost an object without attributes, and
+# `my @a = ($ref)` a reference to an empty hash. `return ()` from an array
+# function relied on that; it is now an empty array, also as a branch of ?:.
+package Bare;
+func new() scalar { my hash %h = (); return bless(\%h, "Bare"); }
+
+package main;
+
+func none() array { return (); }
+func pick(int $t) array { return $t ? (1, 2) : (); }
+func some(int $n) array { if ($n) { return (); } return (1, 2); }
+
+func main() int {
+    my array @a = (Bare::new());
+    my array @b = Bare::new();
+    my $o = Bare::new();
+    my array @c = ($o);
+    my $r = {};
+    my array @d = ($r);
+    my array @e = none();
+    my array @f = (none());
+    my array @g;
+    push(@g, none());
+    my array @h = (none(), some(1), some(0));
+    my array @i = pick(0);
+    my array @k = pick(1);
+    my hash %hh = ();
+    my array @j = %hh;
+    say(scalar(@a) . " " . ref($a[0]) . "|" . scalar(@b) . " " . ref($b[0]) . "|"
+        . scalar(@c) . " " . ref($c[0]) . "|" . scalar(@d) . " " . ref($d[0]) . "|"
+        . scalar(@e) . " " . scalar(@f) . " " . scalar(@g) . "|" . scalar(@h) . "|"
+        . scalar(@i) . " " . scalar(@k) . " " . scalar(@j));
+    return 0;
+}

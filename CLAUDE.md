@@ -863,6 +863,7 @@ depends on `vm.h` (its `__C__` blocks include it). VM stack-value convention: **
 - **Interpreter front end.** `VM error:` goes to stderr. The REPL's `is_balanced` waits for heredoc terminators and continues after a trailing binary operator.
   - Trailing `/`, `<` and `>` do not count as operators (`s/a/b/`, `<$fh>`); `->` and `=>` do.
   - In the REPL and eval, a module's `import()` runs once (`%g_eval_vm_imports_done`), and a redeclaration with an initializer is seeded with the earlier value (`keep_seed`).
+- **One empty-hash element (2026-11-25).** `BUILTIN_ARRAY_SHALLOW_COPY` (array initializer/assignment from one value) no longer treats an empty hash as the empty list: `my @a = (Pkg::new())` lost an attribute-less object. `()` as a value is still an empty hash in the VM, so the places that relied on that case make an empty array themselves (`compile_empty_list_as_array`): `return ()` and `return C ? LIST : ()` in an `array` function, and `my @a = C ? LIST : ()` / `@a = C ? LIST : ()`. Compiled code gets that last form wrong (one element, also for `C ? () : (1, 2)`); not fixed. Test: `t/bugfix_tests/vm_one_empty_hash_element.strada`.
 - `interpreter/test/run_tests.sh` accepts `test_X.stdin`, `test_X.stdout_only` and `repl_X.input`/`.expected` sessions.
 
 **VM performance, tier 1 (2026-11-18)**: the user wants the VM fast before more parity work. Profile with callgrind (perf is blocked on the dev box), using a `-g` copy of `vm.c` linked against the existing `interp_*.o`.

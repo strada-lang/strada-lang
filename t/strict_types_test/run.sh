@@ -819,7 +819,7 @@ func main() int {
     my array<scalar> @any = @dogs;
     my array<Dog> @from_any = @any;
     my array<CeMod::Bird> @birds = (CeMod::Bird::new(name => "tw"));
-    my array<Loose> @loose = (Loose::new("Loose"), Loose::new("Loose"));   # two: the VM gives undef for a one-call list `(f("x"))`
+    my array<Loose> @loose = (Loose::new("Loose"));
     my array<Nowhere> @nw = ();
     push(@nw, make("q"));
     foreach my $d (@dogs) {

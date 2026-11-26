@@ -2291,9 +2291,61 @@ static int64_t vm_decl_capacity(StradaValue *node) {
     return f.iv > (1 << 20) ? (1 << 20) : f.iv;
 }
 
+/* `()` itself, or a ?: with `()` as a branch (nested too). */
+static int vm_is_empty_list_node(StradaValue *n) {
+    n = ast_deref(n);
+    return n && !STRADA_IS_TAGGED_INT(n) && n->type == STRADA_HASH &&
+           (int)ast_int(n, "type") == NI_ANON_HASH && ast_int(n, "is_empty_list") == 1;
+}
+static int vm_has_empty_list_branch(StradaValue *n) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH) return 0;
+    if (vm_is_empty_list_node(n)) return 1;
+    if ((int)ast_int(n, "type") != NI_TERNARY) return 0;
+    return vm_has_empty_list_branch(ast_get(n, "true_expr")) || vm_has_empty_list_branch(ast_get(n, "false_expr"));
+}
+/* The value of such an expression where an array is wanted: `()` is an
+ * empty array, any other branch its ordinary value. */
+static void compile_empty_list_as_array(CompCtx *ctx, StradaValue *n) {
+    StradaValue *d = ast_deref(n);
+    if (vm_is_empty_list_node(d)) {
+        vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+        vm_chunk_emit_u32(ctx->chunk, 4);
+    } else if (vm_has_empty_list_branch(d)) {
+        compile_expr(ctx, ast_get(d, "condition"));
+        vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+        size_t else_patch = emit_patch_u16(ctx);
+        compile_empty_list_as_array(ctx, ast_get(d, "true_expr"));
+        vm_chunk_emit(ctx->chunk, OP_JMP);
+        size_t end_patch = emit_patch_u16(ctx);
+        patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
+        compile_empty_list_as_array(ctx, ast_get(d, "false_expr"));
+        patch_u16(ctx, end_patch, (uint16_t)ctx->chunk->code_len);
+    } else {
+        compile_expr_in_ctx(ctx, n, 1);
+    }
+}
+
 static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue *init, int shallow_copy) {
     int init_type = (init && !STRADA_IS_TAGGED_INT(init)) ? (int)ast_int(init, "type") : 0;
     if (init_type == NI_READLINE && compile_readline_list(ctx, init)) return;
+    if (init_type == NI_TERNARY) {
+        /* C ? LIST : () -- each branch is its own initializer, so `()` is
+         * the empty array (as a value it is an empty hash, which the copy
+         * below keeps as one element). */
+        if (vm_has_empty_list_branch(init)) {
+            compile_expr(ctx, ast_get(init, "condition"));
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            size_t else_patch = emit_patch_u16(ctx);
+            compile_array_init_expr(ctx, NULL, ast_get(init, "true_expr"), shallow_copy);
+            vm_chunk_emit(ctx->chunk, OP_JMP);
+            size_t end_patch = emit_patch_u16(ctx);
+            patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
+            compile_array_init_expr(ctx, NULL, ast_get(init, "false_expr"), shallow_copy);
+            patch_u16(ctx, end_patch, (uint16_t)ctx->chunk->code_len);
+            return;
+        }
+    }
     /* () is parsed as empty ANON_HASH — treat as empty array for @ sigil */
     if (init_type == NI_ANON_HASH && ast_int(init, "is_empty_list") == 1) {
         init_type = 0;
@@ -8815,6 +8867,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             ret_type != AST_TYPE_ARRAY && ret_type != AST_TYPE_HASH_RET) {
             /* return () from a scalar function: undef (compiled Semantic) */
             val = NULL;
+        } else if (ret_type == AST_TYPE_ARRAY && vm_has_empty_list_branch(rvd)) {
+            /* return () / return C ? LIST : () from an array function: `()`
+             * is an empty array. As an empty hash the caller could not tell
+             * it from one hash value. */
+            compile_empty_list_as_array(ctx, val);
+            emit_try_unwind_for_return(ctx);
+            vm_chunk_emit(ctx->chunk, OP_RETURN);
+            break;
         }
         if (val && !STRADA_IS_TAGGED_INT(val) && (val->type == STRADA_HASH || val->type == STRADA_REF)) {
             int can_tc = (!ctx->try_ctx && ctx->local_restore_count == 0 && !g_vm_no_tail_calls);

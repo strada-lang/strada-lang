@@ -11500,10 +11500,11 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                     vm_array_push(cp, vm_val_copy(ev));
                 }
                 SP_PUSH(VM_MAKE_PTR(cp));
-            } else if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH &&
-                       VM_AS_HASH(args[0])->size == 0) {
-                SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
             } else if (argc >= 1 && !VM_IS_UNDEF(args[0])) {
+                /* One value, whatever it is. An empty hash used to count as
+                 * the empty list here, so `my @a = (Pkg::new())` lost an
+                 * object without attributes and `my @a = ($ref_to_empty)`
+                 * its reference; `()` itself never reaches this builtin. */
                 VMArray *cp = vm_array_new(8);
                 vm_array_push(cp, vm_val_copy(args[0]));
                 SP_PUSH(VM_MAKE_PTR(cp));
