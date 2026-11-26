@@ -4454,6 +4454,9 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
 
     # Foreach statement: foreach [my type $var | $var] (@array) { body }
     if ($node_type == NODE_FOREACH_STMT()) {
+        # foreach (C ? LIST : LIST): the chosen branch's elements; a scalar
+        # branch is one item (it iterated zero times).
+        sem_tern_as_lists($stmt->{"array"});
         if (is_valid_node($stmt->{"array"}) == 1) {
             analyze_expression($ctx, $stmt->{"array"});
         }

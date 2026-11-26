@@ -3519,6 +3519,9 @@ static void compile_list_src(CompCtx *ctx, StradaValue *e) {
     StradaValue *d = ast_deref(e);
     if (d && !STRADA_IS_TAGGED_INT(d)) {
         int t = (int)ast_int(d, "type");
+        /* a list ?: is flagged by the question, which some callers ask
+         * only after compiling the source */
+        if (t == NI_TERNARY) (void)vm_array_flatten_kind(ctx, d);
         if (t == NI_VARIABLE || t == NI_DEREF_SCALAR) {
             const char *sig = ast_str(d, "sigil");
             if (sig && sig[0] == '%') {
@@ -3533,10 +3536,83 @@ static void compile_list_src(CompCtx *ctx, StradaValue *e) {
     compile_expr(ctx, e);
 }
 
+/* One argument of a say/print with several: an array-valued one prints its
+ * elements, as it does alone and in compiled code (it printed ARRAY(0x..)). */
+static void compile_say_arg(CompCtx *ctx, StradaValue *a) {
+    int flat = vm_array_flatten_kind(ctx, a) >= 1;   /* before compiling: it flags a list ?: */
+    compile_expr(ctx, a);
+    if (flat) {
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_SAY_ARG);
+        vm_chunk_emit(ctx->chunk, 1);
+    }
+}
+
+/* A branch of ?: that is certainly a list (the compiled backend's
+ * tern_branch_is_list): an array or hash by sigil, a list literal, `()`, a
+ * range/slice, map/grep/sort, or a call declared to return an array. A
+ * runtime builtin that is only checked at run time does not count. */
+static int vm_tern_branch_is_list(CompCtx *ctx, StradaValue *b) {
+    b = ast_deref(b);
+    if (!b || STRADA_IS_TAGGED_INT(b) || b->type != STRADA_HASH) return 0;
+    int t = (int)ast_int(b, "type");
+    if (t == NI_TERNARY) {
+        if (ast_int(b, "list_tern") == 1) return 1;
+        return vm_tern_branch_is_list(ctx, ast_get(b, "true_expr")) ||
+               vm_tern_branch_is_list(ctx, ast_get(b, "false_expr"));
+    }
+    if (t == NI_VARIABLE || t == NI_DEREF_SCALAR) {
+        const char *sig = ast_str(b, "sigil");
+        return sig && (sig[0] == '@' || sig[0] == '%');
+    }
+    if (t == NI_ANON_ARRAY && (int)ast_int(b, "is_list") == 1) return 1;
+    if (vm_is_empty_list_node(b)) return 1;
+    if (t == NI_RANGE || t == NI_ARRAY_SLICE || t == NI_HASH_SLICE) return 1;
+    if (t == NI_MAP || t == NI_GREP || t == NI_SORT) return 1;
+    if (t == NI_CALL) {
+        const char *nm = ast_str(b, "name");
+        if (!nm) return 0;
+        if (strcmp(nm, "reverse") == 0 && (int)ast_int(b, "scalar_ctx") == 1) return 0;
+        if (strcmp(nm, "split") == 0 || strcmp(nm, "keys") == 0 ||
+            strcmp(nm, "values") == 0 || strcmp(nm, "reverse") == 0) return 1;
+        int fidx = resolve_vm_func_idx(ctx, nm);
+        if (fidx >= 0 && ctx->prog->funcs[fidx].return_type == AST_TYPE_ARRAY) return 1;
+    }
+    return 0;
+}
+
+/* One branch of a list ?: as a new array: `()` empty, a list its elements,
+ * anything else one element. */
+static void compile_tern_list_branch(CompCtx *ctx, StradaValue *b) {
+    StradaValue *d = ast_deref(b);
+    if (d && !STRADA_IS_TAGGED_INT(d) && (int)ast_int(d, "type") == NI_TERNARY &&
+        vm_array_flatten_kind(ctx, d) != 0) {
+        compile_expr(ctx, b);            /* a nested list ?: is an array already */
+        return;
+    }
+    vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
+    vm_chunk_emit_u32(ctx->chunk, 4);
+    if (vm_is_empty_list_node(d)) return;
+    vm_chunk_emit(ctx->chunk, OP_DUP);
+    compile_list_src(ctx, b);
+    vm_chunk_emit(ctx->chunk, vm_array_flatten_kind(ctx, b) != 0 ? OP_ARRAY_EXTEND : OP_ARRAY_PUSH);
+}
+
 static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
     elem = ast_deref(elem);
     if (!elem || STRADA_IS_TAGGED_INT(elem)) return 0;
     int t = (int)ast_int(elem, "type");
+    /* C ? LIST : LIST in a list: the chosen branch's elements (Perl). The
+     * node is flagged the first time a list context asks; compile_expr then
+     * makes every branch a new array. */
+    if (t == NI_TERNARY) {
+        if (ast_int(elem, "list_tern") == 1) return 2;
+        if (elem->type == STRADA_HASH && vm_tern_branch_is_list(ctx, elem)) {
+            strada_hash_set(elem->value.hv, "list_tern", STRADA_MAKE_TAGGED_INT(1));
+            return 2;
+        }
+        return 0;
+    }
     /* %h / %$r in list context: its key/value pairs (OP_ARRAY_EXTEND
      * flattens a hash source into pairs) */
     if (t == NI_VARIABLE) {
@@ -3974,6 +4050,19 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_TERNARY: {
+        if (ast_int(node, "list_tern") == 1) {
+            /* flagged by vm_array_flatten_kind: the value is a new array */
+            compile_expr(ctx, ast_get(node, "condition"));
+            vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
+            size_t lt_else = emit_patch_u16(ctx);
+            compile_tern_list_branch(ctx, ast_get(node, "true_expr"));
+            vm_chunk_emit(ctx->chunk, OP_JMP);
+            size_t lt_end = emit_patch_u16(ctx);
+            patch_u16(ctx, lt_else, (uint16_t)ctx->chunk->code_len);
+            compile_tern_list_branch(ctx, ast_get(node, "false_expr"));
+            patch_u16(ctx, lt_end, (uint16_t)ctx->chunk->code_len);
+            break;
+        }
         compile_expr(ctx, ast_get(node, "condition"));
         vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
         size_t else_patch = emit_patch_u16(ctx);
@@ -4559,15 +4648,15 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, is_say ? OP_SAY : OP_PRINT);
             } else if (argc == 2) {
                 /* say($fh, $str) / print($fh, $str) */
-                compile_expr(ctx, ast_arr_get(args, 0));
-                compile_expr(ctx, ast_arr_get(args, 1));
+                compile_say_arg(ctx, ast_arr_get(args, 0));
+                compile_say_arg(ctx, ast_arr_get(args, 1));
                 vm_chunk_emit(ctx->chunk, is_say ? OP_SAY_FH : OP_PRINT_FH);
             } else {
                 for (int ai = 0; ai < argc - 1; ai++) {
-                    compile_expr(ctx, ast_arr_get(args, ai));
+                    compile_say_arg(ctx, ast_arr_get(args, ai));
                     vm_chunk_emit(ctx->chunk, OP_PRINT);
                 }
-                compile_expr(ctx, ast_arr_get(args, argc - 1));
+                compile_say_arg(ctx, ast_arr_get(args, argc - 1));
                 vm_chunk_emit(ctx->chunk, is_say ? OP_SAY : OP_PRINT);
             }
             /* print/say return 1 (Perl, compiled backend) */
@@ -9155,6 +9244,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         int is_lex_var = (var_decl && !STRADA_IS_TAGGED_INT(var_decl) && var_decl->type == STRADA_HASH);
         const char *vname = (var_name && var_name[0]) ? var_name : "_";
         StradaValue *array_expr = ast_get(node, "array");
+        {
+            /* foreach (C ? LIST : LIST): each branch is a list of its own
+             * (a scalar branch iterated zero times) */
+            StradaValue *ft = ast_deref(array_expr);
+            if (ft && !STRADA_IS_TAGGED_INT(ft) && ft->type == STRADA_HASH && (int)ast_int(ft, "type") == NI_TERNARY)
+                strada_hash_set(ft->value.hv, "list_tern", STRADA_MAKE_TAGGED_INT(1));
+        }
 
         /* foreach my $x (A..B) with int-typed bounds (the compiled backend's
          * native-loop rule) counts in a hidden local instead of building the

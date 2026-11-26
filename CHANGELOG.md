@@ -10,6 +10,18 @@
   argument is still one value. Test:
   `t/bugfix_tests/array_ternary_list_branches.strada`.
 
+### `?:` in a list flattens (2026-11-26)
+- A `?:` with a list branch, used as an item of a list, contributes the
+  chosen branch's elements, as in Perl: `(0, $t ? @a : @b)`,
+  `push(@x, $t ? @a : ())`, `join`, `sprintf`, `say`/`print`, `[...]`,
+  map/grep/sort input, slices, `reverse`, variadic calls and `foreach`. It
+  used to be one value (a nested array) in compiled code and the VM. A
+  scalar branch is one item. Code that relied on the nested array should
+  write `[@a]` in the branch.
+- VM: `say`/`print` with several arguments print the elements of an array
+  argument (`say("n: ", @a)` printed `ARRAY(0x..)`).
+- Test: `t/bugfix_tests/ternary_in_list_flattens.strada`.
+
 ### VM: one empty-hash element (2026-11-25)
 - `my @a = (Pkg::new())` kept nothing in the VM when the object had no
   attributes yet, and `my @a = ($ref)` dropped a reference to an empty hash:

@@ -5540,8 +5540,46 @@ func resolve_call_return_type(scalar $cg, str $name) int {
 # `func f() array` flattens exactly like a bare @a (the user-visible goal:
 # arrays flatten like Perl). Explicit `[..]`/`\@a` (is_list==0, or a ref-typed
 # scalar) are kind 0 and never flatten — also Perl.
+# A branch of ?: that is certainly a list: an array or hash by its sigil, a
+# list literal, `()`, a range/slice, map/grep/sort, or a call declared to
+# return an array. Narrower than array_flatten_kind on purpose: a runtime
+# builtin that is only checked at run time (kind 2 there) does not count, so
+# `say($ok ? core::getenv("X") : "none")` stays a plain scalar ?:.
+func tern_branch_is_list(scalar $cg, scalar $branch) int {
+    if (is_valid_node($branch) == 0) { return 0; }
+    my int $bt = $branch->{"type"};
+    if ($bt == NODE_TERNARY()) {
+        if ($branch->{"list_tern"}) { return 1; }
+        if (tern_branch_is_list($cg, $branch->{"true_expr"}) == 1) { return 1; }
+        return tern_branch_is_list($cg, $branch->{"false_expr"});
+    }
+    if (($bt == NODE_VARIABLE() || $bt == NODE_DEREF_SCALAR()) && ($branch->{"sigil"} eq "@" || $branch->{"sigil"} eq "%")) { return 1; }
+    if ($bt == NODE_ANON_ARRAY() && $branch->{"is_list"} == 1) { return 1; }
+    if ($bt == NODE_ANON_HASH() && $branch->{"is_empty_list"}) { return 1; }
+    if ($bt == NODE_RANGE() || $bt == NODE_ARRAY_SLICE() || $bt == NODE_HASH_SLICE()) { return 1; }
+    if ($bt == NODE_MAP() || $bt == NODE_GREP() || $bt == NODE_SORT()) { return 1; }
+    if ($bt == NODE_CALL()) {
+        my str $bnm = "" . $branch->{"name"};
+        if ($bnm eq "reverse" && ($branch->{"scalar_ctx"} + 0) == 1) { return 0; }
+        if ($bnm eq "split" || $bnm eq "keys" || $bnm eq "values" || $bnm eq "reverse") { return 1; }
+        if (resolve_call_return_type($cg, $bnm) == TYPE_ARRAY()) { return 1; }
+    }
+    return 0;
+}
+
 func array_flatten_kind(scalar $cg, scalar $elem) int {
     my int $t = $elem->{"type"};
+    # C ? LIST : LIST in a list: the chosen branch's elements (Perl). The
+    # branches become list literals the first time a list context asks
+    # (sem_tern_as_lists), after which the ?: always yields a new array.
+    if ($t == NODE_TERNARY()) {
+        if ($elem->{"list_tern"}) { return 2; }
+        if (tern_branch_is_list($cg, $elem) == 1) {
+            sem_tern_as_lists($elem);
+            return 2;
+        }
+        return 0;
+    }
     if ($t == NODE_VARIABLE() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_ANON_ARRAY() && $elem->{"is_list"} == 1) { return 2; }
     if ($t == NODE_ANON_HASH() && $elem->{"is_empty_list"}) { return 2; }

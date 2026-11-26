@@ -1,0 +1,41 @@
+# EXPECT: 4 3 6 5,6,7 x,y 3 3 3 0 4 1 1 5-6 3 2 3 3 p567|2 1 2 s x,4,y 1 1 1 2 4 2 2 p-q 1 4 1 1 ps
+# A ?: with a list branch, used as an item of a list, flattens the chosen
+# branch (Perl): list literals, push/unshift, join, sprintf, say/print,
+# foreach, map/grep/sort input, [...], slices, reverse, variadic calls. It
+# was one value (a nested array) in both backends. A scalar branch is one
+# item, also when it holds an array reference.
+func two() array { return (8, 9); }
+func cnt(int ...@v) int { return scalar(@v); }
+
+func row(int $t) str {
+    my array @m = (5, 6, 7);
+    my hash %h = (a => 1);
+    my $r = [4, 4];
+    my array @a = (0, $t ? "s" : @m);
+    my array @b;
+    push(@b, $t ? $r : @m);
+    my array @c;
+    unshift(@c, $t ? "s" : (1, 2));
+    unshift(@c, 9, $t ? () : @m);
+    my str $d = join(",", $t ? "s" : @m);
+    my str $e = join(",", "x", $t ? $r->[0] : (), "y");
+    my int $n = 0;
+    foreach my $v ($t ? "s" : @m) { $n++; }
+    my array @q = map { $_ } ($t ? "s" : @m);
+    my array @z = sort ($t ? "s" : @m);
+    my array @g = grep { 1 } ($t ? two() : ());
+    my $ar = [$t ? "s" : @m, $t ? @m : "s"];
+    my hash %hh = ($t ? %h : (), b => 2);
+    my array @sl = @m[$t ? (0, 1) : 2];
+    my str $sp = sprintf("%s-%s", $t ? ("p", "q") : @m);
+    my array @rv = reverse($t ? "s" : @m);
+    my array @n2 = ($t ? ($t ? @m : ()) : "s", $t ? 1 : 2);
+    return join(" ", scalar(@a), scalar(@b), scalar(@c), $d, $e, $n, scalar(@q), scalar(@z), scalar(@g),
+        scalar(@$ar), scalar(keys(%hh)), scalar(@sl), $sp, scalar(@rv), scalar(@n2),
+        cnt($t ? 1 : @m), cnt(0, $t ? () : (1, 2)), join("", "p", $t ? "s" : @m));
+}
+
+func main() int {
+    say(row(0) . "|" . row(1));
+    return 0;
+}

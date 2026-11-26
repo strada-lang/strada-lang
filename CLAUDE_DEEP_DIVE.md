@@ -3334,3 +3334,13 @@ declaration emits it directly, and `@a = ...` hands it to
 `emit_container_replace` like a list literal. The VM does not run this
 rewrite; it already treated the branches separately.
 
+The same rewrite serves list items (2026-11-26): `array_flatten_kind`
+(CodeGenExpr.strada) calls `sem_tern_as_lists` on a `?:` whose branches
+include a certain list (`tern_branch_is_list`) and returns kind 2, so every
+consumer of a flattening item appends the chosen branch's elements. The
+rewrite happens in the predicate because only a list context should trigger
+it: the same `?:` in scalar context keeps its plain form. Semantic rewrites
+the list of a `foreach` unconditionally. The VM flags the node instead
+(`list_tern` set by `vm_array_flatten_kind`, read by `compile_expr`'s
+NI_TERNARY case, branches built by `compile_tern_list_branch`).
+
