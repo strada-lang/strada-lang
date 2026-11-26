@@ -1181,12 +1181,13 @@ Arrays flatten into a surrounding list, exactly like Perl. Anything that
 my array @middle = (2, 3, 4);
 my array @all = (1, @middle, 5);              # (1, 2, 3, 4, 5)  — array variable
 my array @lit = (1, (2, 3), 4);               # (1, 2, 3, 4)     — parenthesized list
-my array @fr  = (1, two(), 5);                # flattens what `func two() array` returns
+my array @fr  = (1, two(), 5);                # flattens the list two() returns (`return @t;`)
 my array @sp  = ("a", split(",", "b,c"));     # ("a", "b", "c")  — array builtins flatten
 ```
 
 Flattens in list context: `@array` variables, parenthesized lists `(…)`,
-`map`/`grep`/`sort`, calls declared to return `array`, and array-returning
+`map`/`grep`/`sort`, calls that return a list (see "What a call returns"
+below), and array-returning
 builtins (`split`, `keys`, `values`, `reverse`, …).
 
 Does **not** flatten (they are scalar references, as in Perl): an array ref
@@ -1215,35 +1216,66 @@ Where one value is wanted, a list expression follows Perl's scalar rules:
 my $nk = %h;                  # key count
 my $last = (7, 8, 9);         # 9: the comma operator yields its last item
 my $c = $ok ? @good : 0;      # element count of @good, or 0
-my $np = pair();              # count, when pair() is declared `array`
-my scalar $keep = [pair()];   # keep the list: an array reference
 my array @one = $aref;        # ONE element (the reference); copy with @{$aref}
 ```
 
-An untyped function that does `return @list;` still hands back the array when
-assigned to a scalar; only functions declared `array` give a count.
+### What a call returns
 
-A method call in a list gives its elements when the method is declared
-`array`; any other method call is one item, also when it returns an array
-reference:
+What a call yields follows Perl: it depends on the form of the `return` that
+ran and on where the call is used, for functions, methods, closures and code
+references alike, whatever the declared return type.
 
 ```strada
-func parts(scalar $self) array { return ("a", "b", "c"); }
-func aref(scalar $self) scalar { return [1, 2]; }
+func three()   { my array @t = (7, 8, 9); return @t; }   # a list
+func trio()    { return (7, 8, 9); }                      # a comma list
+func ref3()    { return [7, 8, 9]; }                      # ONE value: a reference
+func nothing() { return; }                                # the empty list
+func undef1()  { return undef; }                          # one value: undef
 
-my array @all = (0, $o->parts(), 9);       # 5 elements
-say(join("/", $o->parts()));               # a/b/c
-my array @one = (0, $o->aref(), 9);        # 3 elements: the reference is one item
+my array @all  = (0, three(), 9);   # 5 elements: a returned list flattens
+my array @one  = (0, ref3(), 9);    # 3 elements: a reference is one item
+my array @copy = three();           # 3 elements
+my array @r    = ref3();            # 1 element (the reference); @{ref3()} copies
+my $n     = three();                # 3: a list in scalar context is its count
+my $last  = trio();                 # 9: a comma list gives its last item
+my scalar $keep = [three()];        # keep the list in a scalar
+my array @e = nothing();            # empty
+my array @u = undef1();             # 1 element (undef)
+my ($first, $second) = (three())[0, 1];   # a list slice
 ```
 
-Declare the return type `array` on methods meant to return lists. Such a
-method then behaves like a function declared `array` everywhere:
-`my $n = $o->parts();` is the count (write `[$o->parts()]` to keep the list
-in a scalar), and `$log->add($o->parts())` spreads it into a list-taking
-method.
+A call is in list context as an item of a list, in `push`/`join`/`sprintf`/
+`say`, inside `[...]` and `{ ... }`, when assigned to an array or hash, in
+`foreach`, as the input of `map`/`grep`/`sort`, and as an argument of a
+function, method or closure. Anywhere else it is in scalar context.
 
-Method calls spread list arguments into a method that takes a list (a
-variadic method or the no-parens `@_` form), exactly as function calls do:
+Methods are no different:
+
+```strada
+func items($self)     { return @{$self->{"items"}}; }   # a list
+func items_ref($self) { return $self->{"items"}; }      # one value
+
+my array @it = $o->items();        # the elements (a copy)
+my $cnt = $o->items();             # their count
+my array @ir = $o->items_ref();    # one element: the reference
+say(join("/", $o->items()));       # 1/2/3
+```
+
+To return a list, write `return @list;` or `return (a, b);`. To return one
+value that holds an array, return a reference (`\@list`, `[...]`, `$ref`).
+Declaring the return type `array` documents that a function returns a list
+and lets `use strict "types"` check its elements; it is not what makes the
+result flatten.
+
+Two things differ from Perl. A parameter declared `scalar $x` or `array @a`
+receives a list argument whole (Perl would flatten it into `@_`); only a
+variadic parameter or the `@_` form gets the elements. And a function
+declared `array` that returns a reference still returns that array's
+elements.
+
+Method and closure calls spread list arguments into a callee that takes a
+list (a variadic one, or the no-parens `@_` form), exactly as function calls
+do; an argument that is itself a call counts when it returned a list:
 
 ```strada
 func add { my $self = shift; return scalar(@_); }        # @_ form
@@ -1251,6 +1283,10 @@ func one(scalar $self, array @items) int { return scalar(@items); }
 
 $log->add(@m, "z");   # 3 arguments when @m has 2 elements
 $log->one(@m);        # an `array` parameter receives @m whole
+$log->add($o->items());   # spreads the list items() returned
+
+my scalar $f = func { return scalar(@_); };
+$f->(@m);             # 2: a closure with @_ gets the elements too
 ```
 
 Spreading copies the elements on every call. In a hot loop, pass a reference

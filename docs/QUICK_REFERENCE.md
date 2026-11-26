@@ -534,9 +534,16 @@ my scalar $h2 = { %base, $t ? (k => 1) : () };  # lists inside { }
 # One value wanted (Perl's scalar rules):
 my $nk = %base;                    # key count
 my $lastv = (7, 8, 9);             # 9 (comma operator: last item)
-my $np = pair();                   # count, when pair() is declared `array`; [pair()] keeps the list
+# What a call returns depends on the form of its `return` and on the context (Perl):
+#   return @list;      elements in a list, count in a scalar
+#   return (a, b, c);  elements in a list, the last item in a scalar
+#   return [..]; return \@x; return $ref;   ONE value everywhere
+#   return;            the empty list (undef in a scalar);  return undef; is one item
+my $np = pair();                   # count (or last item); [pair()] keeps the list
+my array @r = get_ref();           # ONE element when get_ref() returns a reference; @{get_ref()} copies
+my ($p, $q) = (pair())[0, 1];      # list slice
 my array @one = $aref;             # ONE element; copy with @{$aref}
-# $obj->m(@a) spreads @a into a variadic or @_-form method (an `array` parameter gets it whole)
+# $obj->m(@a) and $f->(@a) spread @a into a variadic or @_-form callee (an `array` parameter gets it whole)
 
 # Array capacity (performance optimization)
 reserve(@arr, 1000);  # pre-allocate capacity
