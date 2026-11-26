@@ -1199,6 +1199,41 @@ say(size(@nested));                            # 3
 say(ref($nested[1]));                          # ARRAY  (it's a reference)
 ```
 
+A `?:` in a list contributes the chosen branch's elements, and `X // ()` /
+`X || ()` contribute X or nothing (as in Perl):
+
+```strada
+my array @opt = (0, $verbose ? @extra : (), 9);   # @extra's elements, or nothing
+my array @pick = $ok ? @good : ();                # each branch is its own list
+my array @some = ($maybe // (), "x");             # skips an undef $maybe
+my scalar $cfg = { %defaults, $debug ? (level => 9) : () };   # lists inside { }
+```
+
+Where one value is wanted, a list expression follows Perl's scalar rules:
+
+```strada
+my $nk = %h;                  # key count
+my $last = (7, 8, 9);         # 9: the comma operator yields its last item
+my $c = $ok ? @good : 0;      # element count of @good, or 0
+my $np = pair();              # count, when pair() is declared `array`
+my scalar $keep = [pair()];   # keep the list: an array reference
+my array @one = $aref;        # ONE element (the reference); copy with @{$aref}
+```
+
+An untyped function that does `return @list;` still hands back the array when
+assigned to a scalar; only functions declared `array` give a count.
+
+Method calls spread list arguments into a method that takes a list (a
+variadic method or the no-parens `@_` form), exactly as function calls do:
+
+```strada
+func add { my $self = shift; return scalar(@_); }        # @_ form
+func one(scalar $self, array @items) int { return scalar(@items); }
+
+$log->add(@m, "z");   # 3 arguments when @m has 2 elements
+$log->one(@m);        # an `array` parameter receives @m whole
+```
+
 To pass an array's elements as separate *function arguments*, use the spread
 operator `...@array` (see Variadic Functions).
 

@@ -528,6 +528,15 @@ my array @c = (0, (1, 2), 3);      # (0, 1, 2, 3)  — parenthesized list
 my array @d = (0, split(",","1,2"));  # (0, 1, 2)  — array builtins / func array-returns
 my array @e = (0, [1, 2], 3);      # 3 elements: 0, an arrayref, 3 (refs DON'T flatten)
 # (Use ...@array to spread elements as separate FUNCTION ARGUMENTS.)
+my array @f = (0, $t ? @a : (), 3);  # ?: in a list: the chosen branch's elements
+my array @g = ($u // (), "x");     # X // () and X || (): X, or nothing
+my scalar $h2 = { %base, $t ? (k => 1) : () };  # lists inside { }
+# One value wanted (Perl's scalar rules):
+my $nk = %base;                    # key count
+my $lastv = (7, 8, 9);             # 9 (comma operator: last item)
+my $np = pair();                   # count, when pair() is declared `array`; [pair()] keeps the list
+my array @one = $aref;             # ONE element; copy with @{$aref}
+# $obj->m(@a) spreads @a into a variadic or @_-form method (an `array` parameter gets it whole)
 
 # Array capacity (performance optimization)
 reserve(@arr, 1000);  # pre-allocate capacity
