@@ -1,0 +1,48 @@
+# EXPECT: 0 2 3 2|3 3 3 2 2 3 0|3 0 4 0|6 0 3|5 5
+# `my @a = C ? LIST : LIST` and `@a = C ? LIST : LIST` took the whole ?: for
+# one value: the array got one element whichever branch ran (compiled only;
+# the VM was right). Each branch is now a list of its own.
+our array @G = ();
+func two() array { return (8, 9); }
+func pick(int $t, array @in) array {
+    my array @r = $t ? @in : ();
+    return @r;
+}
+
+func main() int {
+    my int $t = 0;
+    my int $u = 1;
+    my array @m = (5, 6, 7);
+    my array @a = $t ? (1, 2) : ();
+    my array @b = $t ? () : (1, 2);
+    my array @c = $t ? () : @m;
+    my array @d;
+    @d = $t ? () : (1, 2);
+    my array @e = $t ? (1) : $u ? (1, 2, 3) : (1, 2);
+    our array @H = $u ? @m : ();
+    @G = $t ? () : @m;
+    my array @f = $t ? @m : two();
+    my array @g = $u ? keys(%{{a => 1, b => 2}}) : ();
+    my array @h = ($t ? () : @m);
+    my array @i = $t ? "one" : ();
+    my $r = [];
+    @{$r} = $u ? (1, 2, 3) : ();
+    my int $n1 = scalar(@$r);
+    @$r = $t ? (1, 2) : ();
+    my int $n2 = scalar(@$r);
+    @$r = $t ? (1, 2) : (@m, 9);
+    my scalar $cl = func () { my array @z = $u ? (@m, @m) : (); return scalar(@z); };
+    my array @j;
+    try {
+        @j = $u ? (die("x"), 1) : ();
+    } catch ($err) {
+        @j = ();
+    }
+    $m[0] = 99;        # the arrays above are copies
+    say(join(" ", scalar(@a), scalar(@b), scalar(@c), scalar(@d)) . "|"
+        . join(" ", scalar(@e), scalar(@H), scalar(@G), scalar(@f), scalar(@g), scalar(@h), scalar(@i)) . "|"
+        . join(" ", $n1, $n2, scalar(@$r), scalar(@j)) . "|"
+        . join(" ", $cl->(), scalar(@{[pick(0, @m)]}), scalar(@{[pick(1, @m)]})) . "|"
+        . $G[0] . " " . $H[0]);
+    return 0;
+}

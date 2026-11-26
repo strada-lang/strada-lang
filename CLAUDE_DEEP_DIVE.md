@@ -3317,3 +3317,20 @@ modifier is never checked; a variable written anywhere in the function
 after a change, stamp `use strict "types";` on copies of examples/, lib/,
 the VM tests and outside projects and diff `--check` errors against the
 previous compiler.
+
+## `?:` as the value of an array (2026-11-26)
+
+`sem_tern_as_lists` (Semantic.strada) runs on the initializer of a `my`/`our`
+`@` declaration and on the value of `=` with an `@var` / `@{...}` target,
+before the value is analyzed. Each branch of the `?:` is replaced by an
+`is_list` NODE_ANON_ARRAY: empty for `()`, the branch itself when it already
+is a list or a bare `[...]` (the Strada idiom `my @a = [1, 2]` copies), a
+one-item list otherwise (so `@m`, `@{$r}` and array-returning calls flatten
+through `array_flatten_kind`, and a scalar is one element). Nested `?:`
+branches are rewritten the same way. The node gets `list_tern` = 1; its value
+is then an owned new array on every path. Codegen: `is_scalar_expr` returns 0
+for it (which sends the `our` paths to their owned-array code), the `my @a`
+declaration emits it directly, and `@a = ...` hands it to
+`emit_container_replace` like a list literal. The VM does not run this
+rewrite; it already treated the branches separately.
+

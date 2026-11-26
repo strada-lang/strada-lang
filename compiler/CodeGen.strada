@@ -2764,6 +2764,11 @@ func check_overload_binary(scalar $cg, scalar $left, scalar $right, str $op) int
 # Used to determine if we need to wrap it when assigning to an array variable
 func is_scalar_expr(scalar $expr) int {
     my int $type = $expr->{"type"};
+    # C ? LIST : LIST as the value of an array (Semantic sem_tern_as_lists)
+    # is a new array, not one value.
+    if ($type == NODE_TERNARY() && $expr->{"list_tern"}) {
+        return 0;
+    }
     # (LIST) x N is a list.
     if ($type == NODE_BINARY_OP() && $expr->{"op"} eq "x" && $expr->{"left"}->{"type"} == NODE_ANON_ARRAY() && $expr->{"left"}->{"is_list"}) {
         return 0;

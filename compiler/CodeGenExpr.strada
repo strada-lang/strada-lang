@@ -2023,7 +2023,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $target);
                         emit($cg, "; })");
                     }
-                } elsif ($val_type == NODE_ANON_ARRAY()) {
+                } elsif ($val_type == NODE_ANON_ARRAY() || ($val_type == NODE_TERNARY() && $val->{"list_tern"})) {
                     emit($cg, "({ StradaValue *__new_a = ");
                     gen_expression($cg, $val);
                     emit($cg, "; ");

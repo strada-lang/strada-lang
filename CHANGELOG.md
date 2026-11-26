@@ -2,6 +2,14 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### `?:` as the value of an array (2026-11-26)
+- `my @a = COND ? LIST : LIST;` (also `our`, `@a = ...` and `@{$r} = ...`)
+  gave a one-element array in compiled code whichever branch ran, including
+  `$t ? @x : @y` and `$t ? (1, 2) : ()`. Each branch is now a list of its
+  own, as in the VM and in Perl. A `?:` inside a longer list or as a `push`
+  argument is still one value. Test:
+  `t/bugfix_tests/array_ternary_list_branches.strada`.
+
 ### VM: one empty-hash element (2026-11-25)
 - `my @a = (Pkg::new())` kept nothing in the VM when the object had no
   attributes yet, and `my @a = ($ref)` dropped a reference to an empty hash:

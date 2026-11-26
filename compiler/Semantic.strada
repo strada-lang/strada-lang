@@ -2637,6 +2637,42 @@ func sem_is_container_value(scalar $ctx, scalar $n) int {
     return 0;
 }
 
+# `my @a = C ? X : Y` / `@a = C ? X : Y`: each branch is a list of its own
+# (Perl). The code generator took the whole ?: for one value, so the array
+# got one element whichever branch ran: `$t ? @m : ()` was an array holding
+# an array. Every branch becomes a list literal (`()` an empty one, a list
+# or a bare `[...]` itself, anything else a one-item list, where an array
+# item flattens as in any list); the node is flagged `list_tern` and its
+# value is then always a new array.
+func sem_tern_branch_list(scalar $branch) scalar {
+    if (is_valid_node($branch) == 0) { return $branch; }
+    my int $bt = $branch->{"type"};
+    if ($bt == NODE_TERNARY()) {
+        sem_tern_as_lists($branch);
+        return $branch;
+    }
+    if ($bt == NODE_ANON_ARRAY() && ($branch->{"is_list"} || !$branch->{"in_parens"})) {
+        return $branch;
+    }
+    my scalar $lst = ast_new_anon_array();
+    $lst->{"is_list"} = 1;
+    $lst->{"line"} = $branch->{"line"};
+    if ($bt == NODE_ANON_HASH() && $branch->{"is_empty_list"}) {
+        return $lst;
+    }
+    ast_add_array_elem($lst, $branch);
+    return $lst;
+}
+
+func sem_tern_as_lists(scalar $tern) void {
+    if (is_valid_node($tern) == 0) { return; }
+    if ($tern->{"type"} != NODE_TERNARY()) { return; }
+    if ($tern->{"list_tern"}) { return; }
+    $tern->{"true_expr"} = sem_tern_branch_list($tern->{"true_expr"});
+    $tern->{"false_expr"} = sem_tern_branch_list($tern->{"false_expr"});
+    $tern->{"list_tern"} = 1;
+}
+
 # scalar(EXPR): the element count of an array value.
 # `our $n = @a` / file-scope `my $n = keys(%h)`: a list value assigned to a
 # scalar declaration is its count (Perl). Function-level `my $n = @a` is
@@ -3389,6 +3425,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 }
             }
         }
+        {
+            my scalar $ltt = $expr->{"target"};
+            if (is_valid_node($ltt) == 1 && ("" . $expr->{"op"}) eq "=" && ("" . $ltt->{"sigil"}) eq "@" &&
+                ($ltt->{"type"} == NODE_VARIABLE() || $ltt->{"type"} == NODE_DEREF_SCALAR())) {
+                sem_tern_as_lists($expr->{"value"});
+            }
+        }
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
         # `$h{n} = @a` / `$a[0] = @{$r}`: an array assigned to an element is
@@ -3841,6 +3884,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             ast_add_array_elem($xl, $stmt->{"init"}->{"left"});
             $stmt->{"init"}->{"left"} = $xl;
         }
+        if ($sigil eq "@") { sem_tern_as_lists($stmt->{"init"}); }
         # `my @a = deref_array($r)` / `my %h = deref_hash($r)` copy like
         # `@{$r}` / `%{$r}` (they used to alias the referenced container).
         if (($sigil eq "@" || $sigil eq "%") && $stmt->{"init"} && $stmt->{"init"}->{"type"} == NODE_CALL()) {
@@ -4037,6 +4081,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
 
         # Analyze initializer if present
         sem_scalar_decl_count($ctx, $stmt);
+        if ($sigil eq "@") { sem_tern_as_lists($stmt->{"init"}); }
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
