@@ -1,0 +1,17 @@
+#!/usr/bin/env strada
+# core::setproctitle() moves the environment to the heap on its first call.
+# That copy must stay reachable at exit, not be reported as lost.
+# Run: valgrind --leak-check=full ./test_setproctitle_leak
+
+func main() int {
+    say("Testing core::setproctitle() for memory leaks...");
+    core::setproctitle("strada leak test");
+    core::setproctitle("strada leak test again");
+    my str $home = core::getenv("PATH");
+    if ($home eq "") {
+        say("  FAIL: environment lost after setproctitle");
+        return 1;
+    }
+    say("PASS");
+    return 0;
+}

@@ -31073,6 +31073,7 @@ StradaValue* strada_setproctitle(StradaValue *title_val) {
      * environment to the heap before overwriting it (it was zeroed: getenv
      * and child processes saw an empty environment afterwards). */
     static int strada_environ_moved = 0;
+    static char **strada_moved_environ __attribute__((used)) = NULL;
     if (!strada_environ_moved) {
         extern char **environ;
         size_t n = 0;
@@ -31085,6 +31086,9 @@ StradaValue* strada_setproctitle(StradaValue *title_val) {
         }
         moved[n] = NULL;
         environ = moved;
+        /* Keep our own reference: valgrind does not count libc's `environ` as
+         * a root at exit, so without this the copy is reported as lost. */
+        strada_moved_environ = moved;
         strada_environ_moved = 1;
     }
 

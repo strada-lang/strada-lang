@@ -82,6 +82,7 @@ TESTS=(
     "test_math"
     "test_oop"
     "test_arrays"
+    "test_setproctitle_leak"
     "test_hashes"
     "test_closures"
     "test_exceptions"
