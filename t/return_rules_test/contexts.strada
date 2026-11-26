@@ -1,0 +1,53 @@
+our array @G = (3, 1, 2);
+func lst() { return @G; }
+func rf() { return [3, 1, 2]; }
+func pairs() { return ("a", 1, "b", 2); }
+func hsh() hash { my hash %h = ("a" => 1, "b" => 2); return %h; }
+func uh() { my hash %h = ("a" => 1); return %h; }
+func none() { return; }
+func und() { return undef; }
+func noret() { my $x = 1; }
+func cmade() { my scalar $r = undef; __C__ { strada_decref(r); r = strada_new_array(); strada_array_push_take(r->value.av, strada_new_int(7)); strada_array_push_take(r->value.av, strada_new_int(8)); } return $r; }
+func take(array @a) int { return scalar(@a); }
+func one(scalar $v) str { return defined($v) ? (length(ref($v)) > 0 ? ref($v) : "" . $v) : "u"; }
+func cnt(scalar ...@r) int { return scalar(@r); }
+func pass() { return lst(); }
+func typed() array { return (7, 8, 9); }
+func tref() array { my scalar $r = [1, 2]; return $r; }
+package O;
+func new() scalar { my hash %s = (); return bless(\%s, "O"); }
+func cnt { my $self = shift; return scalar(@_); }
+func w { my $self = shift; return core::wantarray() ? "L" : "S"; }
+package main;
+func main() int {
+    my scalar $o = O::new();
+    my array @t1 = sort(rf()); say("sort " . join(",", sort(lst())) . " " . scalar(@t1));
+    my array @t2 = grep { $_ > 1 } lst(); say("map " . join(",", map { $_ * 2 } lst()) . " grep " . scalar(@t2));
+    say("rev " . join(",", reverse(lst())));
+    my hash %h = pairs(); say("hash " . join(",", sort(keys(%h))));
+    my hash %h2 = hsh(); say("hash2 " . join(",", sort(keys(%h2))));
+    my scalar $hr = { "z", 0, pairs() }; say("anonh " . join(",", sort(keys(%{$hr}))));
+    my array @hl = (0, hsh(), 9); say("hashitem " . scalar(@hl));
+    my array @ul = (0, uh(), 9); say("uhashitem " . scalar(@ul));
+    say("concat n=" . lst() . " " . pairs());
+    say("arith " . (lst() + 10) . " " . (typed() + 0));
+    my array @t3 = typed(); say("typed " . scalar(@t3) . " " . cnt(typed()) . " " . cnt(tref()));
+    my $ts = typed(); my $trs = tref(); say("typedscalar " . $ts . " " . $trs);
+    say("scalar() " . scalar(lst()));
+    say("defined " . (defined(none()) ? 1 : 0) . (defined(und()) ? 1 : 0) . (defined(lst()) ? 1 : 0));
+    my array @n1 = none(); my array @n2 = und(); my array @n3 = (0, none(), 9); my array @n4 = (0, und(), 9); my array @n5 = noret();
+    say("none " . scalar(@n1) . scalar(@n2) . scalar(@n3) . scalar(@n4) . scalar(@n5));
+    say("cnt " . cnt(none()) . cnt(und()) . cnt(lst()) . cnt(rf()) . " m " . $o->cnt(none()) . $o->cnt(und()) . $o->cnt(lst()) . $o->cnt(rf()));
+    say("take " . take(lst()) . " one " . one(rf()) . " " . one(none()) . " " . one(und()));
+    my array @t4 = pass(); say("pass " . cnt(pass()) . " " . scalar(@t4));
+    my $ps = pass(); say("passS " . $ps);
+    my scalar $cm = cmade(); say("cmade " . ref($cm) . " " . scalar(@{$cm}) . " " . cnt(cmade()));
+    my array @w = ($o->w()); my $ws = $o->w(); my array @w2 = $o->w(); say("want " . $w[0] . $ws . $w2[0] . " " . ($o->w() . ""));
+    my scalar $cl = func { return scalar(@_); };
+    say("clos " . $cl->(lst()) . $cl->(rf()) . $cl->(0, lst(), 9));
+    my $t = lst() ? "T" : "F"; my $u = none() ? "T" : "F"; say("tern " . $t . $u);
+    my ($a, $b) = (lst())[0, 1]; say("slice " . $a . $b);
+    foreach my $e (lst(), rf()) { print(ref($e) eq "" ? $e : "R"); } say("");
+    say("idx " . rf()->[1] . " " . scalar(@{rf()}));
+    return 0;
+}

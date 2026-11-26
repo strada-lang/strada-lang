@@ -1070,6 +1070,18 @@ StradaValue* strada_undef_static(void) {
     return &__strada_undef_static;
 }
 
+/* What a bare `return;` yields (Perl's return rules, see strada_ret_list). */
+static StradaValue __strada_empty_ret = {
+    .type = STRADA_UNDEF,
+    .flags = STRADA_SVf_IMMORTAL,
+    .refcount = 2,
+    .struct_size = 0,
+    .meta = NULL
+};
+/* `return;` / `return ();`: undef to everything that looks at it, and
+ * recognized by address where a list is being built (it adds nothing). */
+StradaValue* strada_empty_ret(void) { return &__strada_empty_ret; }
+
 /* Static empty array/hash singletons for borrowed-reference error paths.
  * Lazily initialized, immortal (STRADA_SVf_IMMORTAL so never freed). */
 static StradaValue *__strada_empty_array_static = NULL;
@@ -28742,6 +28754,7 @@ StradaValue* strada_args_spread(StradaValue *args) {
     for (size_t i = 0; i < av->size; i++) {
         StradaValue *el = av->elements[av->head + i];
         int spread = (i < 60) && ((mask >> i) & 1);
+        if (spread && el == &__strada_empty_ret) continue;   /* a call that returned nothing */
         /* an array or hash variable arrives as a reference to its container */
         StradaValue *ct = el;
         if (spread && ct && !STRADA_IS_TAGGED_INT(ct) && ct->type == STRADA_REF && !SV_BLESSED(ct) && ct->value.rv)
@@ -32741,86 +32754,213 @@ StradaValue* strada_super_call_spread(StradaValue *obj, const char *from_package
     return strada_super_call(obj, from_package, method, args);
 }
 
-/* ---- methods that return a list, called as a list item ----
- * (0, $obj->parts(), 9): the list takes the elements a method declared
- * `array` returns (Perl); the result of any other method is one item, also
- * when it is an array reference. The caller cannot know which method runs,
- * so such a call (only one whose name some `array` function could answer
- * to) arms a slot on its own stack (strada_ret_list_arm), dispatches through
- * strada_method_call_lst / strada_super_call_lst, which look the method up
- * and write the answer into the slot, and passes the result through
- * strada_ret_list_done. A call the compiler resolved without dispatch never
- * writes the slot, so its result is one item. Wrappers of `array` methods
- * are recorded at init (strada_method_mark_ret_list). */
-static StradaMethod *oop_retlist_fns = NULL;
-static size_t oop_retlist_fn_count = 0, oop_retlist_fn_cap = 0;
-static __thread int *strada_ret_list_slot = NULL;
-
-void strada_method_mark_ret_list(StradaMethod func) {
-    if (!func) return;
-    oop_lock();
-    for (size_t i = 0; i < oop_retlist_fn_count; i++) {
-        if (oop_retlist_fns[i] == func) { oop_unlock(); return; }
-    }
-    if (oop_retlist_fn_count == oop_retlist_fn_cap) {
-        oop_retlist_fn_cap = oop_retlist_fn_cap ? oop_retlist_fn_cap * 2 : 64;
-        oop_retlist_fns = realloc(oop_retlist_fns, oop_retlist_fn_cap * sizeof(StradaMethod));
-    }
-    oop_retlist_fns[oop_retlist_fn_count++] = func;
-    oop_unlock();
+/* A method call with an argument that is itself a call: if that argument
+ * turned out to be a list the pack is marked (strada_pack_args_dyn) and the
+ * call goes through the spreading entry; otherwise it is an ordinary call
+ * with its call-site cache. */
+StradaValue* strada_method_call_cs_sp(StradaValue *obj, const char *method, StradaValue *args,
+                                      unsigned int method_hash, StradaCallSite *cs) {
+    if (STRADA_ARGS_HAVE_SPREAD(args)) return strada_method_call_spread(obj, method, args);
+    return strada_method_call_cs(obj, method, args, method_hash, cs);
 }
 
-/* caller holds oop_lock */
-static int oop_fn_returns_list(StradaMethod func) {
-    if (!func) return 0;
-    for (size_t i = 0; i < oop_retlist_fn_count; i++) {
-        if (oop_retlist_fns[i] == func) return 1;
+/* ---- Perl's return rules: what a call to a user function yields ----
+ * It depends on the form of the `return` that ran (the parser's ret_form,
+ * compiler/AST.strada ast_return_form) and on the caller's context, never on
+ * how the value was built. The callee makes its result say which it is:
+ *   a list  (return @x; return (a, b); return map ...)  -> a bare ARRAY
+ *           (a hash: a bare HASH); a comma list carries STRADA_SVf_LIST_LAST
+ *   a value (return $x; return [..]; return \@x)        -> never a bare
+ *           unblessed container: one is put behind a reference
+ *   nothing (return; return ();)                        -> strada_empty_ret
+ * and the caller reads it by its own context: a list takes the elements
+ * (strada_ucall_item, strada_ucall_array, strada_ucall_foreach), a scalar
+ * takes the count, or the last item of a comma list (strada_ucall_scalar).
+ * Builtins and __C__ code keep their own conventions
+ * (strada_sv_is_array_or_aref and friends are unchanged). */
+
+
+static inline int ret_bare_container(StradaValue *v) {
+    return v && !STRADA_IS_TAGGED_INT(v) && (v->type == STRADA_ARRAY || v->type == STRADA_HASH) && !SV_BLESSED(v);
+}
+
+/* A list-form return. v is owned; the result is owned. `return @x` holds a
+ * reference to the array (how array variables and list literals travel):
+ * the array itself goes back, not a copy. */
+StradaValue* strada_ret_list(StradaValue *v, int comma) {
+    if (!v || STRADA_IS_TAGGED_INT(v)) return v;
+    if (v->type == STRADA_REF && !strada_is_slot_ref(v) && !SV_BLESSED(v)) {
+        StradaValue *t = v->value.rv;
+        if (t && !STRADA_IS_TAGGED_INT(t) && (t->type == STRADA_ARRAY || t->type == STRADA_HASH) && !SV_BLESSED(t)) {
+            if (v->refcount == 1 && !v->meta && !(v->flags & STRADA_SVf_IMMORTAL)) {
+                /* the only reference: hand its target over. (Taking a new
+                 * reference and dropping this one would park the array in
+                 * the cycle collector's candidate buffer on every return.) */
+                v->value.rv = NULL;
+                v->type = STRADA_UNDEF;
+                strada_decref(v);
+            } else {
+                strada_incref(t);
+                strada_decref(v);
+            }
+            v = t;
+        }
     }
-    return 0;
+    if (v->type == STRADA_ARRAY && !(v->flags & STRADA_SVf_IMMORTAL)) {
+        if (comma && v->refcount == 1) v->flags |= STRADA_SVf_LIST_LAST;
+        else v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+    }
+    return v;
 }
 
-int* strada_ret_list_arm(int *slot) {
-    int *prev = strada_ret_list_slot;
-    strada_ret_list_slot = slot;
-    return prev;
+/* return (a, b, @c): the list, and for a scalar caller the count of @c
+ * (Perl's comma operator), kept as a tagged integer in the slot after the
+ * last element (STRADA_SVf_LIST_LAST then means "the value is there"; a
+ * negative one says "use the last element"). */
+StradaValue* strada_ret_list_tail(StradaValue *v, StradaValue *tail) {
+    v = strada_ret_list(v, 1);
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_ARRAY && (v->flags & STRADA_SVf_LIST_LAST) && v->value.av) {
+        StradaValue *tv = tail;
+        if (tv && !STRADA_IS_TAGGED_INT(tv) && tv->type == STRADA_REF && !strada_is_slot_ref(tv)) tv = tv->value.rv;
+        int64_t n = (tv && !STRADA_IS_TAGGED_INT(tv) && tv->type == STRADA_ARRAY && tv->value.av) ? (int64_t)tv->value.av->size : 0;
+        StradaArray *av = v->value.av;
+        strada_array_reserve(av, av->head + av->size + 1);
+        av->elements[av->head + av->size] = STRADA_MAKE_TAGGED_INT(n);
+        v->flags |= STRADA_SVf_LIST_TAIL;
+    }
+    return v;
 }
 
-StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev) {
-    strada_ret_list_slot = prev;
-    if (is_list || !r || STRADA_IS_TAGGED_INT(r)) return r;
-    if (!strada_sv_is_array_or_aref(r)) return r;
+/* A one-value return whose value turned out to be a bare container (a
+ * scalar that holds an array made in a __C__ block, an array argument a
+ * scalar parameter received): behind a reference it is one value again. */
+StradaValue* strada_ret_scalar_slow(StradaValue *v) {
+    if (!ret_bare_container(v) || (v->flags & STRADA_SVf_IMMORTAL)) return v;
+    v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+    return strada_ref_create_take(v);
+}
+
+/* A function declared `array`: every return is its list (a reference to an
+ * array too: that is what the declaration says), nothing is an empty one. */
+StradaValue* strada_ret_array(StradaValue *v, int comma) {
+    if (v == &__strada_empty_ret) return strada_new_array();
+    return strada_ret_list(v, comma);
+}
+
+static StradaValue *ucall_one_item(StradaValue *v) {
     StradaValue *one = strada_new_array();
-    strada_array_push_take(one->value.av, r);
+    strada_array_push_take(one->value.av, v);
     return one;
 }
 
-/* The same call where one value is wanted (my $n = $o->parts()): the count
- * of an `array` method's list, as for a function declared `array`. */
-StradaValue* strada_ret_list_count(StradaValue *r, int is_list, int *prev) {
-    strada_ret_list_slot = prev;
-    if (!is_list || !strada_sv_is_array_or_aref(r)) return r;
-    StradaValue *av = r->type == STRADA_REF ? r->value.rv : r;
-    int64_t n = av->value.av ? (int64_t)av->value.av->size : 0;
-    if (av->meta && av->meta->is_tied) {
-        strada_cleanup_push(r);
-        n = strada_tied_array_fetchsize(av);
-        strada_cleanup_pop();
+/* A call that is an item of a list: its elements, or itself as one item.
+ * Every consumer of such an item flattens arrays and array references, so
+ * a reference (one value) is handed over inside a one-item array. */
+StradaValue* strada_ucall_item_slow(StradaValue *v) {
+    if (v == &__strada_empty_ret) return strada_new_array();
+    if (v->type == STRADA_ARRAY) {
+        if (SV_BLESSED(v)) return ucall_one_item(v);
+        if (!(v->flags & STRADA_SVf_IMMORTAL)) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+        return v;
     }
-    strada_decref(r);
-    return strada_new_int(n);
+    if (v->type == STRADA_HASH) {
+        if (SV_BLESSED(v)) return v;
+        strada_cleanup_push(v);
+        StradaValue *flat = strada_hash_to_flat_array(v);
+        strada_cleanup_pop_decref(v);
+        return flat;
+    }
+    if (v->type == STRADA_REF && strada_sv_is_array_or_aref(v)) return ucall_one_item(v);
+    return v;
 }
 
-/* The same call as an argument of another method call: the result goes on
- * as it is, and its bit is set in the outer call's mask when the method is
- * declared `array` (strada_pack_args_dyn reads the mask after every
- * argument has run). */
-StradaValue* strada_ret_list_arg(StradaValue *r, int is_list, int *prev, uint64_t *dyn, uint64_t bit) {
-    strada_ret_list_slot = prev;
-    if (is_list && dyn) *dyn |= bit;
-    return r;
+/* A call where one value is wanted: the count of a list, the last item of
+ * a comma list. A hash stays a hash. */
+StradaValue* strada_ucall_scalar_slow(StradaValue *v) {
+    if (v->type != STRADA_ARRAY || SV_BLESSED(v) || !v->value.av) return v;
+    StradaArray *av = v->value.av;
+    StradaValue *res;
+    if ((v->flags & STRADA_SVf_LIST_LAST) && (v->flags & STRADA_SVf_LIST_TAIL)) {
+        res = av->elements[av->head + av->size];   /* a tagged integer */
+        if (v->refcount > 1) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+    } else if (v->flags & STRADA_SVf_LIST_LAST) {
+        if (av->size > 0) { res = av->elements[av->head + av->size - 1]; strada_incref(res); }
+        else res = strada_new_undef();
+        if (v->refcount > 1) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+    } else if (v->meta && v->meta->is_tied) {
+        strada_cleanup_push(v);
+        res = strada_new_int(strada_tied_array_fetchsize(v));
+        strada_cleanup_pop();
+    } else {
+        res = strada_new_int((int64_t)av->size);
+    }
+    strada_decref(v);
+    return res;
 }
 
-StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...) {
+/* my @a = f() / @a = $o->m(): the call's list as a new array the variable
+ * can own. A value (a reference to an array too, and undef) is one element. */
+StradaValue* strada_ucall_array(StradaValue *v) {
+    if (!v || v == &__strada_empty_ret) return strada_new_array();
+    if (STRADA_IS_TAGGED_INT(v)) return ucall_one_item(v);
+    if (v->type == STRADA_ARRAY && !SV_BLESSED(v)) {
+        if (v->refcount == 1 && !v->meta && !(v->flags & STRADA_SVf_IMMORTAL)) {
+            v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+            return v;
+        }
+        strada_cleanup_push(v);
+        StradaValue *copy = strada_array_copy(v);
+        strada_cleanup_pop_decref(v);
+        return copy;
+    }
+    if (v->type == STRADA_HASH && !SV_BLESSED(v)) {
+        strada_cleanup_push(v);
+        StradaValue *flat = strada_hash_to_flat_array(v);
+        strada_cleanup_pop_decref(v);
+        return flat;
+    }
+    return ucall_one_item(v);
+}
+
+/* my %h = f() / %h = f(): the call's pairs as a new hash the variable can
+ * own. A list of pairs builds one; a hash, or a reference to one (Strada
+ * has always let `my %h = f()` take a hash reference), is copied unless it
+ * is fresh; nothing is an empty hash. */
+StradaValue* strada_ucall_hash(StradaValue *v) {
+    if (!v || STRADA_IS_TAGGED_INT(v) || v == &__strada_empty_ret) return strada_new_hash();
+    if (v->type == STRADA_HASH && v->refcount == 1 && !v->meta && !(v->flags & STRADA_SVf_IMMORTAL)) return v;
+    StradaValue *cv = strada_unwrap_ref_safe(v);
+    int ctype = (cv && !STRADA_IS_TAGGED_INT(cv)) ? (int)cv->type : -1;
+    if (ctype == STRADA_ARRAY) return strada_hash_from_flat_array(v);   /* consumes v */
+    strada_cleanup_push(v);
+    StradaValue *h = (ctype == STRADA_HASH) ? strada_hash_from_borrowed(v, ctype) : strada_new_hash();
+    strada_cleanup_pop_decref(v);
+    return h;
+}
+
+/* foreach (f()): the list to walk (the elements themselves, not copies). */
+StradaValue* strada_ucall_foreach(StradaValue *v) {
+    if (!v || v == &__strada_empty_ret) return strada_new_array();
+    if (!STRADA_IS_TAGGED_INT(v)) {
+        if (v->type == STRADA_ARRAY && !SV_BLESSED(v)) {
+            if (!(v->flags & STRADA_SVf_IMMORTAL)) v->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+            return v;
+        }
+        if (v->type == STRADA_HASH && !SV_BLESSED(v)) {
+            strada_cleanup_push(v);
+            StradaValue *flat = strada_hash_to_flat_array(v);
+            strada_cleanup_pop_decref(v);
+            return flat;
+        }
+    }
+    return ucall_one_item(v);
+}
+
+/* The argument pack of a method call. Bits of `cand` are arguments that are
+ * themselves calls: each is spread when it turned out to be a list (a bare
+ * array or hash; nothing, for the empty return). `mask` are the arguments
+ * known to be lists when compiled. */
+StradaValue* strada_pack_args_cand(uint64_t cand, uint64_t mask, int count, ...) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_ARRAY;
     sv->refcount = 1;
@@ -32832,12 +32972,18 @@ StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...) 
     StradaArray *av = sv->value.av;
     for (int i = 0; i < count; i++) {
         StradaValue *arg = va_arg(args, StradaValue*);
+        if (i < 60 && ((cand >> i) & 1)) {
+            if (arg == &__strada_empty_ret) mask |= ((uint64_t)1 << i);
+            else if (ret_bare_container(arg)) {
+                mask |= ((uint64_t)1 << i);
+                if (!(arg->flags & STRADA_SVf_IMMORTAL)) arg->flags &= (uint16_t)~(STRADA_SVf_LIST_LAST | STRADA_SVf_LIST_TAIL);
+            }
+        }
         strada_incref(arg);
         av->elements[i] = arg;
     }
     va_end(args);
     av->size = (size_t)count;
-    if (dyn) mask |= *dyn;
     if (mask != 0) {
         av->elements[count] = STRADA_MAKE_TAGGED_INT((int64_t)(mask & (((uint64_t)1 << 60) - 1)));
         sv->flags |= STRADA_SVf_SPREAD_ARGS;
@@ -32845,58 +32991,76 @@ StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...) 
     return sv;
 }
 
-StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, StradaListSite *ls) {
-    /* taken at entry: nothing the method runs may see this call's slot */
-    int *slot = strada_ret_list_slot;
-    strada_ret_list_slot = NULL;
-    int is_list = 0;
-    if (slot && obj && !STRADA_IS_TAGGED_INT(obj) && method) {
-        const char *bp = SV_BLESSED(obj);
-        if (bp && ls && !strada_threading_active && ls->gen == mc_cache_gen && ls->pkg == bp) {
-            is_list = ls->is_list;
-        } else {
-            const char *pkg = bp;
-            char *pkg_owned = NULL;
-            if (!pkg && obj->type == STRADA_STR) { pkg_owned = strada_to_str(obj); pkg = pkg_owned; }   /* Pkg->m(...) */
-            if (pkg) {
-                oop_lock();
-                StradaMethod fn = oop_lookup_method(pkg, method);
-                if (!fn) fn = oop_lookup_method(pkg, "AUTOLOAD");
-                is_list = oop_fn_returns_list(fn);
-                oop_unlock();
-            }
-            if (pkg_owned) free(pkg_owned);
-            if (bp && ls && !strada_threading_active) {
-                ls->pkg = bp;
-                ls->is_list = (int8_t)is_list;
-                ls->gen = mc_cache_gen;
-            }
+/* $f->(@a, g()): a closure that takes a list (variadic, or the `@_` form)
+ * gets the arguments flagged in `mask`, and those in `cand` that turned out
+ * to be lists, spread; any other closure gets every argument whole. */
+StradaValue* strada_closure_call_lists(StradaValue *closure, StradaValue *args_sv, uint64_t mask, uint64_t cand) {
+    if (closure && !STRADA_IS_TAGGED_INT(closure) && closure->type == STRADA_CLOSURE && closure->value.ptr
+        && ((StradaClosure *)closure->value.ptr)->is_variadic) {
+        strada_args_mark_dyn(args_sv, cand, mask);
+        StradaValue *sp = strada_args_spread(args_sv);
+        if (sp) {
+            strada_cleanup_push(sp);
+            StradaValue *r = strada_closure_call_array(closure, sp);
+            strada_cleanup_pop_decref(sp);
+            return r;
         }
     }
-    StradaValue *r = STRADA_ARGS_HAVE_SPREAD(args) ? strada_method_call_spread(obj, method, args)
-                                                   : strada_method_call(obj, method, args);
-    if (slot) *slot = is_list;
-    return r;
+    return strada_closure_call_array(closure, args_sv);
 }
 
+/* Entry points that objects built by the compilers of 2026-11-26 (commits
+ * 70b665c..ae9f7ba) refer to. Those compilers asked the dispatch whether a
+ * method was declared `array`; the rule is now carried by the value. Kept
+ * so such objects still link: they behave as plain calls. */
+void strada_method_mark_ret_list(StradaMethod func) { (void)func; }
+int* strada_ret_list_arm(int *slot) { (void)slot; return NULL; }
+StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev) { (void)is_list; (void)prev; return r; }
+StradaValue* strada_ret_list_count(StradaValue *r, int is_list, int *prev) { (void)is_list; (void)prev; return r; }
+StradaValue* strada_ret_list_arg(StradaValue *r, int is_list, int *prev, uint64_t *dyn, uint64_t bit) {
+    (void)is_list; (void)prev; (void)dyn; (void)bit; return r;
+}
+StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, void *ls) {
+    (void)ls;
+    return STRADA_ARGS_HAVE_SPREAD(args) ? strada_method_call_spread(obj, method, args) : strada_method_call(obj, method, args);
+}
 StradaValue* strada_super_call_lst(StradaValue *obj, const char *from_package, const char *method, StradaValue *args) {
-    int *slot = strada_ret_list_slot;
-    strada_ret_list_slot = NULL;
-    int is_list = 0;
-    if (slot && method && from_package) {
-        oop_lock();
-        if (!__atomic_load_n(&oop_initialized, __ATOMIC_ACQUIRE)) strada_oop_init();
-        OopPackage *pkg = oop_find_package(from_package);
-        StradaMethod fn = NULL;
-        for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], method);
-        for (int i = 0; pkg && i < pkg->parent_count && !fn; i++) fn = oop_lookup_method(pkg->parents[i], "AUTOLOAD");
-        is_list = oop_fn_returns_list(fn);
-        oop_unlock();
+    return STRADA_ARGS_HAVE_SPREAD(args) ? strada_super_call_spread(obj, from_package, method, args)
+                                         : strada_super_call(obj, from_package, method, args);
+}
+StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = strada_array_new_cap((size_t)count + 1);
+    va_list args;
+    va_start(args, count);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        StradaValue *arg = va_arg(args, StradaValue*);
+        strada_incref(arg);
+        av->elements[i] = arg;
     }
-    StradaValue *r = STRADA_ARGS_HAVE_SPREAD(args) ? strada_super_call_spread(obj, from_package, method, args)
-                                                   : strada_super_call(obj, from_package, method, args);
-    if (slot) *slot = is_list;
-    return r;
+    va_end(args);
+    av->size = (size_t)count;
+    (void)dyn;
+    if (mask != 0) {
+        av->elements[count] = STRADA_MAKE_TAGGED_INT((int64_t)(mask & (((uint64_t)1 << 60) - 1)));
+        sv->flags |= STRADA_SVf_SPREAD_ARGS;
+    }
+    return sv;
+}
+
+/* The same for a pack built by hand (SUPER::m). */
+void strada_args_mark_dyn(StradaValue *args, uint64_t cand, uint64_t mask) {
+    if (!args || STRADA_IS_TAGGED_INT(args) || args->type != STRADA_ARRAY || !args->value.av) return;
+    StradaArray *av = args->value.av;
+    for (size_t i = 0; i < av->size && i < 60; i++) {
+        if (!((cand >> i) & 1)) continue;
+        StradaValue *arg = av->elements[av->head + i];
+        if (arg == &__strada_empty_ret || ret_bare_container(arg)) mask |= ((uint64_t)1 << i);
+    }
+    strada_args_mark_spread(args, mask);
 }
 
 /* Set current method package (for SUPER:: context) */
@@ -41233,7 +41397,11 @@ void strada_print_list(StradaValue *first, StradaValue *rest, int newline) {
         }
         return;
     }
-    if (first) strada_print(first);
+    if (first && !STRADA_IS_TAGGED_INT(first) && first->type == STRADA_ARRAY && !SV_BLESSED(first) && first->value.av) {
+        /* a call that returned a list (strada_ucall_item): its elements */
+        StradaArray *fa = first->value.av;
+        for (size_t i = 0; i < fa->size; i++) strada_print(fa->elements[fa->head + i]);
+    } else if (first) strada_print(first);
     for (size_t i = 0; i < n; i++) strada_print(av->elements[av->head + i]);
     if (newline) strada_say(NULL);
 }

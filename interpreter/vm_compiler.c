@@ -549,6 +549,7 @@ typedef struct {
     int may_box_locals;
     const char *local_struct[256]; /* C struct type of a local (borrowed AST string) or NULL */
     size_t tail_call_end;
+    size_t ucall_end;         /* code_len right after the last direct user-function call was emitted */
     const char *func_name;
     const char *cur_package;  /* enclosing package for unqualified-call fallback */
     int errors;
@@ -1655,6 +1656,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node);
 static void compile_list_src(CompCtx *ctx, StradaValue *e);
 static int vm_is_hash_sigil_node(StradaValue *e);
 static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem);
+static int vm_ucall_kind(CompCtx *ctx, StradaValue *n);
+static int compile_ucall_as_list(CompCtx *ctx, StradaValue *expr);
+static void compile_expr_in_ctx(CompCtx *ctx, StradaValue *expr, int call_ctx);
 static void compile_block(CompCtx *ctx, StradaValue *block);
 static void compile_map_expr(CompCtx *ctx, StradaValue *node);
 static void compile_grep_expr(CompCtx *ctx, StradaValue *node);
@@ -2231,6 +2235,14 @@ static void compile_tie_target(CompCtx *ctx, StradaValue *arg0) {
 }
 
 static void compile_expr_in_ctx(CompCtx *ctx, StradaValue *expr, int call_ctx) {
+    /* a list is wanted from a call nobody has claimed yet: its list as an
+     * array (map/grep/sort input, ...) */
+    if (call_ctx == 1) {
+        StradaValue *xd = ast_deref(expr);
+        if (xd && !STRADA_IS_TAGGED_INT(xd) && xd->type == STRADA_HASH && ast_int(xd, "uc_ctx") == 0 &&
+            ast_int(xd, "uc_arg") == 0 && vm_ucall_kind(ctx, xd) != 0 && compile_ucall_as_list(ctx, expr) != 0)
+            return;
+    }
     int saved_cc = ctx->call_context;
     ctx->call_context = call_ctx;
     compile_expr(ctx, expr);
@@ -2408,7 +2420,8 @@ static void compile_array_init_expr(CompCtx *ctx, StradaValue *node, StradaValue
         }
     }
     if (init_type != 0) {
-        compile_expr_in_ctx(ctx, init, 1);
+        /* my @a = f(): the call's list, or its one value as one item */
+        if (compile_ucall_as_list(ctx, init) == 0) compile_expr_in_ctx(ctx, init, 1);
         if (shallow_copy && init_type != NI_ANON_ARRAY) {
             vm_chunk_emit(ctx->chunk, OP_BUILTIN);
             vm_chunk_emit_u16(ctx->chunk, BUILTIN_ARRAY_SHALLOW_COPY);
@@ -2529,8 +2542,11 @@ static void compile_hash_init_expr(CompCtx *ctx, StradaValue *node, StradaValue 
                 }
             }
         } else {
+            /* my %h = f(): the call's pairs (or its hash) as a new hash */
+            int hinit_uc = init->type == STRADA_HASH && vm_ucall_kind(ctx, init) != 0;
+            if (hinit_uc) strada_hash_set(init->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
             compile_expr_in_ctx(ctx, init, 2);
-            if (shallow_copy) {
+            if (shallow_copy || hinit_uc) {
                 vm_chunk_emit(ctx->chunk, OP_BUILTIN);
                 vm_chunk_emit_u16(ctx->chunk, BUILTIN_HASH_SHALLOW_COPY);
                 vm_chunk_emit(ctx->chunk, 1);
@@ -3582,29 +3598,12 @@ static int vm_method_arg_spreads(CompCtx *ctx, StradaValue *a) {
     return vm_tern_branch_is_list(ctx, a);
 }
 
-/* One value wanted from a method call (my $n = $o->parts(), $h{k} = ...):
- * the count when the method that runs is declared `array`
- * (BUILTIN_RET_LIST_COUNT), for names an `array` function could answer to. */
-static int vm_array_method_name(CompCtx *ctx, const char *mn);
-static void vm_method_scalar_want(CompCtx *ctx, StradaValue *n) {
-    n = ast_deref(n);
-    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH) return;
-    int t = (int)ast_int(n, "type");
-    if (t != NI_METHOD_CALL && t != NI_DYN_METHOD_CALL && t != NI_SUPER_CALL) return;
-    if (ast_int(n, "ret_list_fix") != 0) return;
-    const char *mn = t == NI_DYN_METHOD_CALL ? NULL : ast_str(n, "method");
-    if (mn && (strcmp(mn, "isa") == 0 || strcmp(mn, "can") == 0)) return;
-    if (!vm_array_method_name(ctx, mn)) return;
-    strada_hash_set(n->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
-    strada_hash_set(n->value.hv, "ret_list_count", STRADA_MAKE_TAGGED_INT(1));
-}
-
-/* Arguments of a method call that are themselves method calls an `array`
- * function could answer to: whether one is spread is known when it has
- * run. They are flagged; each adds its bit to a hidden local (zeroed here,
- * before anything of the call is compiled) when its method turned out to
- * be declared `array` (BUILTIN_RET_LIST_IS). Returns that local's slot, or
- * -1. VM_DYN_MASK_BIT in the static mask keeps the spread path chosen. */
+/* Arguments of a method call that are themselves calls: whether one is
+ * spread is known when it has run. They are flagged (uc_ctx 2, uc_list:
+ * called in list context); each adds its bit to a hidden local (zeroed
+ * here, before anything of the call is compiled) when it handed back a list
+ * (BUILTIN_UCALL_IS). Returns that local's slot, or -1. VM_DYN_MASK_BIT in
+ * the static mask keeps the spread path chosen. */
 #define VM_DYN_MASK_BIT ((uint64_t)1 << 61)
 static int vm_method_dyn_args(CompCtx *ctx, StradaValue *args, int first, int argc) {
     if (argc - first > 60 || argc <= first) return -1;
@@ -3617,12 +3616,14 @@ static int vm_method_dyn_args(CompCtx *ctx, StradaValue *args, int first, int ar
     for (int i = first; i < argc; i++) {
         StradaValue *a = ast_deref(ast_arr_get(args, i));
         if (!a || STRADA_IS_TAGGED_INT(a) || a->type != STRADA_HASH) continue;
-        int t = (int)ast_int(a, "type");
-        if (t != NI_METHOD_CALL && t != NI_DYN_METHOD_CALL && t != NI_SUPER_CALL) continue;
-        if (ast_int(a, "ret_list_fix") != 0) continue;
-        const char *mn = t == NI_DYN_METHOD_CALL ? NULL : ast_str(a, "method");
-        if (mn && (strcmp(mn, "isa") == 0 || strcmp(mn, "can") == 0)) continue;
-        if (!vm_array_method_name(ctx, mn)) continue;
+        if (vm_ucall_kind(ctx, a) == 2 && ast_int(a, "uc_ctx") == 0) {
+            /* a function declared `array`: its list (the static mask spreads it) */
+            strada_hash_set(a->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+            strada_hash_set(a->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
+            continue;
+        }
+        if (vm_ucall_kind(ctx, a) != 1) continue;
+        if (ast_int(a, "uc_ctx") != 0 || ast_int(a, "uc_arg") != 0) continue;
         if (slot < 0) {
             char nm[48];
             snprintf(nm, sizeof(nm), "__mdm%d", mdm_serial++);
@@ -3632,7 +3633,8 @@ static int vm_method_dyn_args(CompCtx *ctx, StradaValue *args, int first, int ar
             vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
         }
-        strada_hash_set(a->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
+        strada_hash_set(a->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+        strada_hash_set(a->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
         strada_hash_set_take(a->value.hv, "rla_slot", strada_new_int(slot + 1));
         strada_hash_set_take(a->value.hv, "rla_bit", strada_new_int((int64_t)((uint64_t)1 << (i - first))));
     }
@@ -3658,10 +3660,9 @@ static void vm_assign_array_call_count(CompCtx *ctx, StradaValue *node) {
     const char *aop = ast_str(node, "op");
     if (aop && strcmp(aop, "=") == 0 &&
         ((att == NI_VARIABLE && ast_str(at, "sigil")[0] == '$') || att == NI_HASH_ACCESS || att == NI_SUBSCRIPT ||
-         att == NI_DEREF_HASH || att == NI_DEREF_ARRAY)) {
-        if (vm_call_returns_array(ctx, ast_get(node, "value"))) vm_sc_replace(node, "value");
-        else vm_method_scalar_want(ctx, ast_get(node, "value"));
-    }
+         att == NI_DEREF_HASH || att == NI_DEREF_ARRAY) &&
+        vm_call_returns_array(ctx, ast_get(node, "value")))
+        vm_sc_replace(node, "value");
 }
 
 /* A branch of ?: that is certainly a list (the compiled backend's
@@ -3699,36 +3700,85 @@ static int vm_tern_branch_is_list(CompCtx *ctx, StradaValue *b) {
 
 /* One branch of a list ?: as a new array: `()` empty, a list its elements,
  * anything else one element. */
-/* Could a method call named `mn` (NULL: any name) reach a function declared
- * `array`? Only such calls get the run-time list check. The names are
- * recorded when the functions are registered (vm_array_method_note), where
- * the package is known; an AUTOLOAD declared `array` answers to any name. */
-static char **g_array_methods = NULL;
-static size_t g_array_method_count = 0, g_array_method_cap = 0;
-static int g_array_method_any = 0;
-static void vm_array_methods_reset(void) {
-    for (size_t i = 0; i < g_array_method_count; i++) free(g_array_methods[i]);
-    g_array_method_count = 0;
-    g_array_method_any = 0;
-}
-static void vm_array_method_note(const char *bare) {
-    if (!bare || !bare[0]) return;
-    if (strcmp(bare, "AUTOLOAD") == 0) g_array_method_any = 1;
-    for (size_t i = 0; i < g_array_method_count; i++)
-        if (strcmp(g_array_methods[i], bare) == 0) return;
-    if (g_array_method_count == g_array_method_cap) {
-        g_array_method_cap = g_array_method_cap ? g_array_method_cap * 2 : 32;
-        g_array_methods = realloc(g_array_methods, g_array_method_cap * sizeof(char *));
+/* How the result of a call node is read (compiled cg_ucall_kind): 0 not a
+ * user call or one that cannot return a list, 1 a method, a closure call or
+ * a function declared scalar/dynamic/hash, 2 a function declared `array`. */
+static int vm_ucall_kind(CompCtx *ctx, StradaValue *n) {
+    n = ast_deref(n);
+    if (!n || STRADA_IS_TAGGED_INT(n) || n->type != STRADA_HASH) return 0;
+    int t = (int)ast_int(n, "type");
+    if (t == NI_METHOD_CALL) {
+        const char *mn = ast_str(n, "method");
+        if (mn && (strcmp(mn, "isa") == 0 || strcmp(mn, "can") == 0)) return 0;
+        return 1;
     }
-    g_array_methods[g_array_method_count++] = strdup(bare);
-}
-static int vm_array_method_name(CompCtx *ctx, const char *mn) {
-    (void)ctx;
-    if (g_array_method_count == 0) return 0;
-    if (!mn || g_array_method_any) return 1;
-    for (size_t i = 0; i < g_array_method_count; i++)
-        if (strcmp(g_array_methods[i], mn) == 0) return 1;
+    if (t == NI_DYN_METHOD_CALL || t == NI_SUPER_CALL || t == NI_CLOSURE_CALL) return 1;
+    if (t == NI_CALL) {
+        const char *nm = ast_str(n, "name");
+        if (!nm || !ctx->prog) return 0;
+        int fidx = resolve_vm_func_idx(ctx, nm);
+        if (fidx < 0) return 0;
+        int rt = ctx->prog->funcs[fidx].return_type;
+        if (rt == AST_TYPE_ARRAY) return 2;
+        if (rt == 6 /* scalar */ || rt == 25 /* dynamic */ || rt == AST_TYPE_HASH_RET) return 1;
+    }
     return 0;
+}
+
+/* Arguments of a user call are a list (Perl): an argument that is itself a
+ * call is made in list context and passed as it came back. A variadic
+ * callee flattens it (vm_array_flatten_kind takes over), a fixed parameter
+ * receives it whole (BUILTIN_UCALL_ARG). Method arguments are handled by
+ * vm_method_dyn_args. */
+static void vm_ucall_args_mark(CompCtx *ctx, StradaValue *node) {
+    int t = (int)ast_int(node, "type");
+    if (t != NI_CALL) return;   /* closure and method arguments: vm_method_dyn_args */
+    StradaValue *args = ast_get(node, "args");
+    int argc = (int)ast_int(node, "arg_count");
+    for (int i = 0; i < argc; i++) {
+        StradaValue *a = ast_deref(ast_arr_get(args, i));
+        if (!a || STRADA_IS_TAGGED_INT(a) || a->type != STRADA_HASH) continue;
+        if ((int)ast_int(a, "type") == NI_SPREAD) {
+            a = ast_deref(ast_get(a, "target"));
+            if (!a || STRADA_IS_TAGGED_INT(a) || a->type != STRADA_HASH) continue;
+            if (vm_ucall_kind(ctx, a) != 0 && ast_int(a, "uc_ctx") == 0) {
+                strada_hash_set(a->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+                strada_hash_set(a->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
+            }
+            continue;
+        }
+        if (vm_ucall_kind(ctx, a) != 0 && ast_int(a, "uc_ctx") == 0 && ast_int(a, "uc_arg") == 0)
+            strada_hash_set(a->value.hv, "uc_arg", STRADA_MAKE_TAGGED_INT(1));
+    }
+}
+
+/* A list consumer that reads a call's raw result itself (my @a = f(),
+ * foreach (f()), my ($x, $y) = f()): compile the call in list context and
+ * turn what came back into the list (BUILTIN_UCALL_ARRAY). Returns 0 when
+ * the expression is not a user call (nothing is emitted). */
+static int compile_ucall_as_list(CompCtx *ctx, StradaValue *expr) {
+    StradaValue *d = ast_deref(expr);
+    if (!d || STRADA_IS_TAGGED_INT(d) || d->type != STRADA_HASH || vm_ucall_kind(ctx, d) == 0) return 0;
+    strada_hash_set(d->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+    strada_hash_set(d->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
+    ctx->ucall_end = (size_t)-1;
+    compile_expr_in_ctx(ctx, expr, 1);
+    if ((int)ast_int(d, "type") != NI_CALL || ctx->ucall_end == ctx->chunk->code_len) {
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_UCALL_ARRAY);
+        vm_chunk_emit(ctx->chunk, 1);
+        return 1;
+    }
+    return 2;   /* compiled as a builtin */
+}
+
+/* A function declared `array`: every return is its list, read by the
+ * caller's context (BUILTIN_RET_LIST). */
+static void emit_array_fn_ret(CompCtx *ctx, int rform) {
+    emit_push_int(ctx->chunk, rform == 2 ? 2 : 1);
+    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+    vm_chunk_emit_u16(ctx->chunk, BUILTIN_RET_LIST);
+    vm_chunk_emit(ctx->chunk, 2);
 }
 
 /* ast_is_plain_value (compiler/AST.strada): a literal, or arithmetic /
@@ -3809,16 +3859,17 @@ static int vm_array_flatten_kind(CompCtx *ctx, StradaValue *elem) {
     }
     if (t == NI_ANON_ARRAY && (int)ast_int(elem, "is_list") == 1) return 2;
     if (t == NI_MAP || t == NI_GREP || t == NI_SORT) return 2;
-    /* A method call as a list item: the elements a method declared `array`
-     * returns, one item from any other (compiled array_flatten_kind). */
-    if ((t == NI_METHOD_CALL || t == NI_DYN_METHOD_CALL || t == NI_SUPER_CALL) && elem->type == STRADA_HASH) {
-        if (ast_int(elem, "ret_list_count") == 1) return 0;
-        if (ast_int(elem, "ret_list_fix") != 0) return 2;
-        const char *mn = t == NI_DYN_METHOD_CALL ? NULL : ast_str(elem, "method");
-        if (mn && (strcmp(mn, "isa") == 0 || strcmp(mn, "can") == 0)) return 0;
-        if (!vm_array_method_name(ctx, mn)) return 0;
-        strada_hash_set(elem->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
-        return 2;
+    /* A call to a user function, method or closure as a list item: its
+     * elements when it returned a list, itself as one item otherwise
+     * (compiled array_flatten_kind / cg_ucall_kind). */
+    if ((t == NI_METHOD_CALL || t == NI_DYN_METHOD_CALL || t == NI_SUPER_CALL || t == NI_CLOSURE_CALL || t == NI_CALL) &&
+        elem->type == STRADA_HASH) {
+        int uk = vm_ucall_kind(ctx, elem);
+        if (uk != 0 && !(t == NI_CALL && ast_int(elem, "scalar_ctx") == 1)) {
+            strada_hash_set(elem->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(1));
+            return 2;
+        }
+        if (t != NI_CALL) return 0;
     }
     /* as compiled array_flatten_kind: ranges, slices and @{...} derefs */
     if (t == NI_RANGE || t == NI_ARRAY_SLICE || t == NI_HASH_SLICE) return 2;
@@ -3889,80 +3940,57 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         return;
     }
 
-    /* A method call that is a list item (vm_array_flatten_kind set the
-     * flag): the list of a method declared `array`, or one item. Which
-     * method ran is known from the receiver, so it is evaluated into a
-     * hidden local first and the call is compiled on that local;
-     * BUILTIN_RET_LIST_FIX looks the method up when the result is an array. */
-    if (node->type == STRADA_HASH && ast_int(node, "ret_list_fix") == 1) {
-        int rl_type = (int)ast_int(node, "type");
-        char rl_nm[64];
-        static int rl_serial = 0;
-        int rl_id = rl_serial++;
-        int obj_slot = -1, name_slot = -1;
-        strada_hash_set(node->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(2));
-        StradaValue *saved_obj = NULL, *saved_mexpr = NULL;
-        if (rl_type != NI_SUPER_CALL) {
-            snprintf(rl_nm, sizeof(rl_nm), "__rl_obj%d", rl_id);
-            obj_slot = ctx_get_or_add_local(ctx, rl_nm, '$');
-            saved_obj = ast_get(node, "base_object");
-            if (saved_obj) strada_incref(saved_obj);
-            compile_expr(ctx, saved_obj);
-            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)obj_slot);
-            strada_hash_set_take(node->value.hv, "base_object", rx_mk_var(rl_nm, strlen(rl_nm), "$"));
-            if (rl_type == NI_DYN_METHOD_CALL) {
-                snprintf(rl_nm, sizeof(rl_nm), "__rl_name%d", rl_id);
-                name_slot = ctx_get_or_add_local(ctx, rl_nm, '$');
-                saved_mexpr = ast_get(node, "method_expr");
-                if (saved_mexpr) strada_incref(saved_mexpr);
-                compile_expr(ctx, saved_mexpr);
-                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)name_slot);
-                strada_hash_set_take(node->value.hv, "method_expr", rx_mk_var(rl_nm, strlen(rl_nm), "$"));
-            }
-        }
-        compile_expr(ctx, node);
-        if (ast_int(node, "rla_slot") > 0) vm_chunk_emit(ctx->chunk, OP_DUP);   /* the result stays */
-        if (rl_type == NI_SUPER_CALL) {
-            const char *spkg = (ctx->cur_package && ctx->cur_package[0]) ? ctx->cur_package : "";
-            vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
-            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, ast_str(node, "method")));
-            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, spkg));
-        } else {
-            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)obj_slot);
-            if (rl_type == NI_DYN_METHOD_CALL) {
+    /* The result of a call to a user function, method or closure is read by
+     * the caller's context (Perl's return rules; BUILTIN_RET_LIST in vm.c).
+     * The callee decides by the context its frame was called in, so a call
+     * in a list position says so (OP_SET_CALL_CTX 1) and reads the result
+     * with the BUILTIN_UCALL_* that fits: uc_ctx 1 an item of a list, 2 the
+     * consumer reads it itself (uc_list: as a list; uc_arg: an argument;
+     * uc_pass: `return f()`, the caller's own context). Anything else is a
+     * scalar call and needs nothing. */
+    if (node->type == STRADA_HASH && ast_int(node, "uc_busy") == 0) {
+        int uk = vm_ucall_kind(ctx, node);
+        if (uk != 0) {
+            int ucx = (int)ast_int(node, "uc_ctx");
+            int as_list = (ucx == 1) || ast_int(node, "uc_list") == 1 || ast_int(node, "uc_arg") == 1;
+            int saved_cc = ctx->call_context;
+            vm_ucall_args_mark(ctx, node);
+            if (ast_int(node, "uc_pass") == 1) ctx->call_context = 255;
+            else if (as_list) ctx->call_context = 1;
+            strada_hash_set(node->value.hv, "uc_busy", STRADA_MAKE_TAGGED_INT(1));
+            ctx->ucall_end = (size_t)-1;
+            compile_expr(ctx, node);
+            strada_hash_set(node->value.hv, "uc_busy", STRADA_MAKE_TAGGED_INT(0));
+            ctx->call_context = saved_cc;
+            /* a name that resolved to a function but compiled as a builtin
+             * (a package's own `sort`, ...) is not a user call */
+            if ((int)ast_int(node, "type") == NI_CALL && ctx->ucall_end != ctx->chunk->code_len) return;
+            int consumer = -1;
+            if (ucx == 1 && uk == 1) consumer = BUILTIN_UCALL_ITEM;
+            else if (ast_int(node, "uc_arg") == 1) consumer = BUILTIN_UCALL_ARG;
+            int rla_slot = (int)ast_int(node, "rla_slot") - 1;
+            if (rla_slot >= 0) {
+                /* an argument of a method call: it stays as it is, and its
+                 * bit joins that call's spread mask when it is a list */
+                vm_chunk_emit(ctx->chunk, OP_DUP);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_UCALL_IS);
+                vm_chunk_emit(ctx->chunk, 1);
+                vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(ctx->chunk, ast_int(node, "rla_bit"));
+                vm_chunk_emit(ctx->chunk, OP_MUL);
                 vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)name_slot);
-            } else {
-                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)vm_chunk_add_str_const(ctx->chunk, ast_str(node, "method")));
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)rla_slot);
+                vm_chunk_emit(ctx->chunk, OP_ADD);
+                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)rla_slot);
+            } else if (consumer >= 0) {
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)consumer);
+                vm_chunk_emit(ctx->chunk, 1);
             }
+            return;
         }
-        int rla_slot = (int)ast_int(node, "rla_slot") - 1;
-        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-        vm_chunk_emit_u16(ctx->chunk, rla_slot >= 0 ? BUILTIN_RET_LIST_IS
-                                      : ast_int(node, "ret_list_count") == 1 ? BUILTIN_RET_LIST_COUNT : BUILTIN_RET_LIST_FIX);
-        vm_chunk_emit(ctx->chunk, rl_type == NI_SUPER_CALL ? 4 : 3);
-        if (rla_slot >= 0) {
-            /* an argument of another method call: it stays as it is, and
-             * its bit joins that call's spread mask when it is a list */
-            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
-            vm_chunk_emit_i64(ctx->chunk, ast_int(node, "rla_bit"));
-            vm_chunk_emit(ctx->chunk, OP_MUL);
-            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)rla_slot);
-            vm_chunk_emit(ctx->chunk, OP_ADD);
-            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)rla_slot);
-        }
-        if (saved_obj) strada_hash_set_take(node->value.hv, "base_object", saved_obj);
-        if (saved_mexpr) strada_hash_set_take(node->value.hv, "method_expr", saved_mexpr);
-        strada_hash_set(node->value.hv, "ret_list_fix", STRADA_MAKE_TAGGED_INT(1));
-        return;
     }
 
     int expr_call_ctx = ctx->call_context;
@@ -4676,6 +4704,18 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 break;
             }
         }
+        /* $f->(@a) / $f->(g()): spread into a closure that takes a list
+         * (decided at run time by BUILTIN_CLOSURE_ARGS_FLAT) */
+        uint64_t cl_mask = 0;
+        int cl_dyn = -1;
+        if (!has_spread && argc > 0 && argc <= 60) {
+            for (int i = 0; i < argc; i++) {
+                if (vm_method_arg_spreads(ctx, ast_arr_get(args, i))) cl_mask |= ((uint64_t)1 << i);
+            }
+            cl_dyn = vm_method_dyn_args(ctx, args, 0, argc);
+            if (cl_dyn >= 0) cl_mask |= VM_DYN_MASK_BIT;
+            if (cl_mask != 0) has_spread = 1;
+        }
         if (has_spread) {
             vm_chunk_emit(ctx->chunk, OP_NEW_ARRAY);
             vm_chunk_emit_u32(ctx->chunk, argc > 0 ? (uint32_t)argc * 2 : 8);
@@ -4691,7 +4731,25 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
                 }
             }
-            compile_expr(ctx, callee);
+            if (cl_mask != 0) {
+                static int clf_serial = 0;
+                char clf_nm[48];
+                snprintf(clf_nm, sizeof(clf_nm), "__clf%d", clf_serial++);
+                int clf_slot = ctx_get_or_add_local(ctx, clf_nm, '$');
+                compile_expr(ctx, callee);
+                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)clf_slot);
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)clf_slot);
+                vm_emit_spread_mask(ctx, cl_mask, cl_dyn);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_CLOSURE_ARGS_FLAT);
+                vm_chunk_emit(ctx->chunk, 3);
+                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)clf_slot);
+            } else {
+                compile_expr(ctx, callee);
+            }
             emit_call_context(ctx, expr_call_ctx);
             vm_chunk_emit(ctx->chunk, OP_CALL_CLOSURE_SPREAD);
             break;
@@ -5168,7 +5226,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
         if (strcmp(name, "reverse") == 0 && argc == 1 && !vm_is_hash_sigil_node(ast_arr_get(args, 0))) {
             StradaValue *ra0 = ast_arr_get(args, 0);
-            if (vm_array_flatten_kind(ctx, ra0) != 0) {
+            if (vm_ucall_kind(ctx, ra0) != 0) {
+                compile_expr_in_ctx(ctx, ra0, 1);    /* reverse(f()): f's list */
+            } else if (vm_array_flatten_kind(ctx, ra0) != 0) {
                 compile_mutable_array_target(ctx, ra0);
             } else {
                 compile_expr(ctx, ra0);
@@ -5199,6 +5259,15 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             if (strcmp(name, "scalar") == 0 && sc0 && !STRADA_IS_TAGGED_INT(sc0) && (int)ast_int(sc0, "type") == NI_CALL &&
                 ast_str(sc0, "name") && strcmp(ast_str(sc0, "name"), "reverse") == 0 && (int)ast_int(sc0, "scalar_ctx") == 1) {
                 compile_expr(ctx, sc0);    /* scalar(reverse(...)): the reversed string */
+                break;
+            }
+            if (strcmp(name, "scalar") == 0 && vm_ucall_kind(ctx, sc0) != 0) {
+                /* scalar(f()): f in scalar context; a reference it returns
+                 * as one value is counted as scalar($ref) always was */
+                compile_expr(ctx, sc0);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_SCALAR_OF);
+                vm_chunk_emit(ctx->chunk, 1);
                 break;
             }
             compile_expr(ctx, ast_arr_get(args, 0));
@@ -5487,7 +5556,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
         /* Built-in: sort(@arr) — default alpha sort, no block */
         if (strcmp(name, "sort") == 0 && argc == 1) {
-            compile_expr(ctx, ast_arr_get(args, 0));
+            if (vm_ucall_kind(ctx, ast_arr_get(args, 0)) != 0) compile_expr_in_ctx(ctx, ast_arr_get(args, 0), 1);
+            else compile_expr(ctx, ast_arr_get(args, 0));
             vm_chunk_emit(ctx->chunk, OP_BUILTIN);
             vm_chunk_emit_u16(ctx->chunk, BUILTIN_SORT_DEFAULT);
             vm_chunk_emit(ctx->chunk, 1);
@@ -6707,6 +6777,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         VMChunk *callee = &ctx->prog->funcs[fidx];
+        vm_ucall_args_mark(ctx, node);   /* arguments that are calls: list context */
         if (callee->is_async) {
             /* calling an async func returns a future: the call runs on the
              * runtime pool (BUILTIN_ASYNC_OP 8: closure + argument list) */
@@ -6772,6 +6843,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             emit_call_context(ctx, expr_call_ctx);
             vm_chunk_emit(ctx->chunk, OP_CALL_SPREAD);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)fidx);
+            ctx->ucall_end = ctx->chunk->code_len;
             break;
         }
 
@@ -6791,6 +6863,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)fidx);
         vm_chunk_emit(ctx->chunk, (uint8_t)argc);
         ctx->tail_call_end = ctx->chunk->code_len;
+        ctx->ucall_end = ctx->chunk->code_len;
         break;
     }
 
@@ -9117,8 +9190,17 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *name = ast_str(node, "name");
         const char *sigil = ast_str(node, "sigil");
         /* my $n = f() with f declared `array`: the count (Perl) */
-        if (sigil && sigil[0] == '$' && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
-        else if (sigil && sigil[0] == '$') vm_method_scalar_want(ctx, ast_get(node, "init"));
+        {
+            /* my array $v = f(): declared an array, so f's list (called in
+             * list context), though the variable is written with `$` */
+            StradaValue *adi = ast_deref(ast_get(node, "init"));
+            if (sigil && sigil[0] == '$' && (int)ast_int(node, "var_type") == AST_TYPE_ARRAY && adi && !STRADA_IS_TAGGED_INT(adi) &&
+                adi->type == STRADA_HASH && vm_ucall_kind(ctx, adi) != 0 && ast_int(adi, "uc_ctx") == 0) {
+                strada_hash_set(adi->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+                strada_hash_set(adi->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
+            }
+        }
+        if (sigil && sigil[0] == '$' && (int)ast_int(node, "var_type") != AST_TYPE_ARRAY && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
         /* The new variable is in scope only after this statement (Perl):
          * `my $x = $x + 1` reads the outer / previous $x, so the slot is
          * added after the initializer compiles. */
@@ -9183,8 +9265,17 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *name = ast_str(node, "name");
         const char *sigil = ast_str(node, "sigil");
         /* my $n = f() with f declared `array`: the count (Perl) */
-        if (sigil && sigil[0] == '$' && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
-        else if (sigil && sigil[0] == '$') vm_method_scalar_want(ctx, ast_get(node, "init"));
+        {
+            /* my array $v = f(): declared an array, so f's list (called in
+             * list context), though the variable is written with `$` */
+            StradaValue *adi = ast_deref(ast_get(node, "init"));
+            if (sigil && sigil[0] == '$' && (int)ast_int(node, "var_type") == AST_TYPE_ARRAY && adi && !STRADA_IS_TAGGED_INT(adi) &&
+                adi->type == STRADA_HASH && vm_ucall_kind(ctx, adi) != 0 && ast_int(adi, "uc_ctx") == 0) {
+                strada_hash_set(adi->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+                strada_hash_set(adi->value.hv, "uc_list", STRADA_MAKE_TAGGED_INT(1));
+            }
+        }
+        if (sigil && sigil[0] == '$' && (int)ast_int(node, "var_type") != AST_TYPE_ARRAY && vm_call_returns_array(ctx, ast_get(node, "init"))) vm_sc_replace(node, "init");
         const char *pkg = ast_str(node, "package");
         StradaValue *init = ast_get(node, "init");
 
@@ -9332,6 +9423,52 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *val = ast_get(node, "value");
         int ret_type = ctx->chunk ? ctx->chunk->return_type : 0;
         StradaValue *rvd = ast_deref(val);
+        int rform = (int)ast_int(node, "ret_form");
+        if (ret_type == 6 /* scalar, the default */ || ret_type == 25 /* dynamic */) {
+            /* Perl's return rules (ast_return_form): a list-form return is
+             * read by the caller's context (BUILTIN_RET_LIST); a one-value
+             * return needs nothing; `return f()` passes f's result on,
+             * called in this function's own context. */
+            int has_val = rvd && !STRADA_IS_TAGGED_INT(rvd) && rvd->type == STRADA_HASH;
+            if (!has_val || rform == 8) {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+                emit_push_int(ctx->chunk, 8);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_RET_LIST);
+                vm_chunk_emit(ctx->chunk, 2);
+                emit_try_unwind_for_return(ctx);
+                vm_chunk_emit(ctx->chunk, OP_RETURN);
+                break;
+            }
+            if (rform == 1 || rform == 2 || rform == 3) {
+                int rl_argc = 2;
+                if (rform == 3) compile_expr(ctx, val);
+                else compile_expr_in_ctx(ctx, val, 1);
+                emit_push_int(ctx->chunk, rform);
+                if (rform == 2) {
+                    /* (a, b, @c): a scalar caller gets scalar(@c) */
+                    StradaValue *els = ast_get(rvd, "elements");
+                    int en = (int)ast_int(rvd, "element_count");
+                    StradaValue *last = en > 0 ? ast_deref(ast_arr_get(els, en - 1)) : NULL;
+                    if (last && !STRADA_IS_TAGGED_INT(last) && last->type == STRADA_HASH &&
+                        (int)ast_int(last, "type") == NI_VARIABLE && ast_str(last, "sigil")[0] == '@') {
+                        compile_expr(ctx, last);
+                        vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE);
+                        rl_argc = 3;
+                    }
+                }
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_RET_LIST);
+                vm_chunk_emit(ctx->chunk, (uint8_t)rl_argc);
+                emit_try_unwind_for_return(ctx);
+                vm_chunk_emit(ctx->chunk, OP_RETURN);
+                break;
+            }
+            if (rform == 4 && vm_ucall_kind(ctx, rvd) != 0) {
+                strada_hash_set(rvd->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+                strada_hash_set(rvd->value.hv, "uc_pass", STRADA_MAKE_TAGGED_INT(1));
+            }
+        }
         if (rvd && !STRADA_IS_TAGGED_INT(rvd) && rvd->type == STRADA_HASH &&
             (int)ast_int(rvd, "type") == NI_ANON_HASH && ast_int(rvd, "is_empty_list") == 1 &&
             ret_type != AST_TYPE_ARRAY && ret_type != AST_TYPE_HASH_RET) {
@@ -9351,6 +9488,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
              * is an empty array. As an empty hash the caller could not tell
              * it from one hash value. */
             compile_empty_list_as_array(ctx, val);
+            emit_array_fn_ret(ctx, rform);
             emit_try_unwind_for_return(ctx);
             vm_chunk_emit(ctx->chunk, OP_RETURN);
             break;
@@ -9362,12 +9500,19 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_DUP);
             compile_expr(ctx, val);
             vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            emit_array_fn_ret(ctx, 2);
             emit_try_unwind_for_return(ctx);
             vm_chunk_emit(ctx->chunk, OP_RETURN);
             break;
         }
         if (val && !STRADA_IS_TAGGED_INT(val) && (val->type == STRADA_HASH || val->type == STRADA_REF)) {
             int can_tc = (!ctx->try_ctx && ctx->local_restore_count == 0 && !g_vm_no_tail_calls);
+            if (ret_type == AST_TYPE_ARRAY && rvd && !STRADA_IS_TAGGED_INT(rvd) && rvd->type == STRADA_HASH && vm_ucall_kind(ctx, rvd) != 0) {
+                /* return f() from an array function: f in this function's
+                 * own context; what comes back is this function's list */
+                strada_hash_set(rvd->value.hv, "uc_ctx", STRADA_MAKE_TAGGED_INT(2));
+                strada_hash_set(rvd->value.hv, "uc_pass", STRADA_MAKE_TAGGED_INT(1));
+            }
             StradaValue *vn = can_tc ? ast_deref(val) : NULL;
             int is_direct_call = (vn && !STRADA_IS_TAGGED_INT(vn) && (int)ast_int(vn, "type") == NI_CALL);
             ctx->tail_call_end = (size_t)-1;
@@ -9383,6 +9528,14 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 }
             }
             emit_scalar_type_coerce(ctx, ret_type);
+            if (ret_type == AST_TYPE_ARRAY) emit_array_fn_ret(ctx, rform);
+            if (ret_type == AST_TYPE_HASH_RET) {
+                /* a `hash` function called as a list item gives its pairs */
+                emit_push_int(ctx->chunk, 3);
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, BUILTIN_RET_LIST);
+                vm_chunk_emit(ctx->chunk, 2);
+            }
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
@@ -9673,8 +9826,12 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         }
 
         /* Compile array */
-        if (!fe_range) compile_expr_in_ctx(ctx, array_expr, 1);
+        int fe_ucall = 0;
         if (!fe_range) {
+            fe_ucall = compile_ucall_as_list(ctx, array_expr);
+            if (fe_ucall == 0) compile_expr_in_ctx(ctx, array_expr, 1);
+        }
+        if (!fe_range && fe_ucall != 1) {
             /* a call returning a plain scalar is a one-element list (Perl) */
             StradaValue *fe_ae = ast_deref(array_expr);
             int fe_aet = (fe_ae && !STRADA_IS_TAGGED_INT(fe_ae)) ? (int)ast_int(fe_ae, "type") : 0;
@@ -10255,7 +10412,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *source = ast_get(node, "init");
 
         /* Compile source expression (a regex match is in list context) */
-        if (!compile_regex_list(ctx, source)) compile_expr_in_ctx(ctx, source, 1);
+        if (!compile_regex_list(ctx, source) && !compile_ucall_as_list(ctx, source)) compile_expr_in_ctx(ctx, source, 1);
         int src_slot = ctx_add_local(ctx, "__destr_src", '$');
         vm_chunk_emit(ctx->chunk, OP_RESET_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)src_slot);
@@ -11381,7 +11538,6 @@ static int vm_ast_uses_introspect(StradaValue *v, int depth) {
 }
 
 VMProgram *vm_compile_program(StradaValue *ast) {
-    vm_array_methods_reset();
     g_vm_structs = ast_get(ast, "structs");
     g_vm_src_file = ast_str(ast, "source_file");
     g_vm_no_tail_calls = vm_ast_uses_introspect(ast_get(ast, "functions"), 0);
@@ -11494,24 +11650,6 @@ VMProgram *vm_compile_program(StradaValue *ast) {
             }
         }
         fc->return_type = (int)ast_int(func, "return_type");
-        if (fc->return_type == AST_TYPE_ARRAY && fpkg && fpkg[0] && strcmp(fpkg, "main") != 0 && fname) {
-            /* a method declared `array`: its bare name (vm_array_method_name) */
-            const char *fbare = ast_str(func, "bare_name");
-            size_t plen = strlen(fpkg);
-            if (fbare && fbare[0] && strcmp(fbare, fname) != 0) vm_array_method_note(fbare);
-            else if (strlen(fname) > plen + 2 && strncmp(fname, fpkg, plen) == 0 && fname[plen] == ':' && fname[plen + 1] == ':')
-                vm_array_method_note(fname + plen + 2);
-            else {
-                /* Pkg_name with the package's `::` as `_` */
-                size_t fl = strlen(fname), pi = 0, fi = 0;
-                while (fi < fl && fpkg[pi]) {
-                    if (fpkg[pi] == ':' && fpkg[pi + 1] == ':') { if (fname[fi] != '_') break; pi += 2; fi++; }
-                    else { if (fname[fi] != fpkg[pi]) break; pi++; fi++; }
-                }
-                if (!fpkg[pi] && fi < fl && fname[fi] == '_' && fi + 1 < fl) vm_array_method_note(fname + fi + 1);
-                else vm_array_method_note(fname);
-            }
-        }
         fc->is_async = ((int)ast_int(func, "type") == NI_ASYNC_FUNC);
         int is_synth = (int)ast_int(func, "is_synthesized");
         StradaValue *fparams = ast_get(func, "params");

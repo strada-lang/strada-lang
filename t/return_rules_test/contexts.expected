@@ -1,0 +1,26 @@
+sort 1,2,3 1
+map 6,2,4 grep 2
+rev 2,1,3
+hash a,b
+hash2 a,b
+anonh a,b,z
+hashitem 6
+uhashitem 4
+concat n=3 2
+arith 13 9
+typed 3 3 2
+typedscalar 9 2
+scalar() 3
+defined 001
+none 01231
+cnt 0131 m 0131
+take 3 one ARRAY u u
+pass 3 3
+passS 3
+cmade ARRAY 2 1
+want LSL S
+clos 315
+tern TF
+slice 31
+312R
+idx 1 3

@@ -1,12 +1,12 @@
-# EXPECT: 3 ARRAY ARRAY 3 3 3 3 3 k3 | 3 1 1 5 6 | arr3 arr2 s:n 3 2 | 3 2 104 3
-# Two more places a method declared `array` now behaves like a function
-# declared `array`:
+# EXPECT: c ARRAY ARRAY c c c c c kc | 3 1 1 5 6 | arr3 arr2 s:n 3 2 | 3 2 104 3
+# A method that returns a list, read two more ways (Perl):
 # - where one value is wanted (my $n = $o->parts(), $h{k} = ..., $a[i] = ...)
-#   it is the count; it stored the array.
+#   it is the last item of `return (a, b, c)` (the count of `return @list`);
+#   it stored the array.
 # - as an argument of another method call it is spread into a method that
 #   takes a list ($out->cnt($in->parts())); it arrived as one argument. A
 #   method with a scalar or `array @p` parameter still gets it whole, and a
-#   method that is not declared `array` is one argument whatever it returns.
+#   method that returns a reference passes one argument.
 package In;
 func new() scalar { my hash %s = (); return bless(\%s, "In"); }
 func parts(scalar $self) array { return ("a", "b", "c"); }

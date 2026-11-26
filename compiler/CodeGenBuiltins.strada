@@ -51,6 +51,10 @@ func gen_print_list(scalar $cg, scalar $args, int $argc, int $nl) void {
     my scalar $f0 = $args->[0];
     my int $first_is_item = 1;
     if (list_arg_flattens($cg, $f0) == 1) { $first_is_item = 0; }
+    # A call as the first argument may hand back the filehandle to print to
+    # (say($obj->fh(), "text")): it stays the first argument, and
+    # strada_print_list prints a list it returned element by element.
+    if ($first_is_item == 0 && cg_ucall_kind($cg, $f0) == 1) { $first_is_item = 1; }
     my int $fc = 0;
     if ($first_is_item == 1 && $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $f0) == 1 && expr_is_always_tagged_int($cg, $f0) == 0) { $fc = 1; }
     emit($cg, "({ StradaValue *__pl_first = ");
@@ -5758,7 +5762,13 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             # A plain scalar (variable, literal, expression, scalar-returning
             # call) is its own scalar value; only array values give a count.
             my int $sc_is_value = 0;
-            if (array_flatten_kind($cg, $arg) == 0) {
+            # scalar(f()): f in scalar context (the count of its list, the
+            # last item of a comma list); a reference it returns as one
+            # value is counted as scalar($ref) always was.
+            if (cg_ucall_kind($cg, $arg) != 0) {
+                $arg->{"uc_ctx"} = 0;
+                $sc_is_value = 1;
+            } elsif (array_flatten_kind($cg, $arg) == 0) {
                 if ($sc_t == NODE_CALL()) {
                     my int $sc_rt = resolve_call_return_type($cg, $arg->{"name"});
                     if ($sc_rt == TYPE_SCALAR() || $sc_rt == TYPE_INT() || $sc_rt == TYPE_NUM() || $sc_rt == TYPE_STR()) { $sc_is_value = 1; }

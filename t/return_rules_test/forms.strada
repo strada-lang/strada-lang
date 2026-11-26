@@ -1,0 +1,436 @@
+our array @G = (1, 2, 3);
+our scalar $R = [4, 5];
+our array @A2 = (1, 2);
+our array @B2 = (3);
+our hash %H = ();
+our int $T = 1;
+our int $F = 0;
+func desc(scalar $v) str {
+    if (!defined($v)) { return "u"; }
+    if (length(ref($v)) > 0) { return ref($v); }
+    return "" . $v;
+}
+func cnt(scalar ...@r) int { return scalar(@r); }
+package Box;
+func new() scalar { my hash %s = ("items" => [1, 2, 3]); return bless(\%s, "Box"); }
+func cnt { my $self = shift; return scalar(@_); }
+func m_local(scalar $self) scalar { my array @p = (1, 2, 3); return @p; }
+func m_aref(scalar $self) scalar { return [1, 2, 3]; }
+func m_items(scalar $self) scalar { return $self->{"items"}; }
+func m_all(scalar $self) scalar { return @{$self->{"items"}}; }
+func m_arr(scalar $self) array { return (1, 2, 3); }
+func a_local { my $self = shift; my array @p = (1, 2, 3); return @p; }
+func a_aref { my $self = shift; return [1, 2, 3]; }
+func w_ctx { my $self = shift; return core::wantarray() ? "list" : "scalar"; }
+func hooked(scalar $self) scalar { return (1, 2, 3); }
+around "hooked" func(scalar $orig, scalar $self) scalar { return $orig->($self); }
+func AUTOLOAD(scalar $self, str $m, scalar ...@r) scalar { if ($m eq "au_list") { return (1, 2, 3); } return [1, 2, 3]; }
+package main;
+func f_local() { my array @p = (1, 2, 3); return @p; }
+func f_our() { return @G; }
+func f_deref() { return @{$R}; }
+func f_comma() { return (7, 8, 9); }
+func f_two() { return (@A2, @B2); }
+func f_empty() { return (); }
+func f_bare() { return; }
+func f_aref() { return [1, 2, 3]; }
+func f_refto() { return \@G; }
+func f_sref() { my scalar $r = [1, 2, 3]; return $r; }
+func f_elem() { return $H{"k"}; }
+func f_elemv() { return $H{"v"}; }
+func f_href() { return {"a" => 1}; }
+func f_map() { return map { $_ * 2 } @G; }
+func f_ternL() { return $T ? @G : [9]; }
+func f_ternS() { return $F ? @G : [9]; }
+func f_call() { return f_local(); }
+func f_callS() { return f_aref(); }
+func f_scal() { return 5; }
+func f_str() { return "s"; }
+func main() int {
+    my scalar $B = Box::new();
+    $H{"k"} = [1, 2];
+    push(@{$H{"v"}}, 1); push(@{$H{"v"}}, 2);
+    foreach my int $round (1 .. 2) {
+    my scalar $CL = func () { my array @p = (1, 2, 3); return @p; };
+    my scalar $CS = func () { return [1, 2, 3]; };
+    my scalar $CR = \&f_local;
+    my str $MN = "m_local";
+    { my array @x = (0, f_local(), 9); say("f_local item " . scalar(@x)); }
+    { my array @x = f_local(); say("f_local arr " . scalar(@x)); }
+    { my ($x, $y) = f_local(); say("f_local destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_local()) { $c++; } say("f_local foreach " . $c); }
+    say("f_local variadic " . cnt(f_local()));
+    say("f_local marg " . $B->cnt(f_local()));
+    { my scalar $ar = [f_local()]; say("f_local anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_local()); say("f_local push " . scalar(@x)); }
+    { my $n = f_local(); say("f_local scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_local(); say("f_local store " . desc($hh{"n"})); }
+    if (f_local()) { say("f_local if T"); } else { say("f_local if F"); }
+    { my array @x = (0, f_our(), 9); say("f_our item " . scalar(@x)); }
+    { my array @x = f_our(); say("f_our arr " . scalar(@x)); }
+    { my ($x, $y) = f_our(); say("f_our destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_our()) { $c++; } say("f_our foreach " . $c); }
+    say("f_our variadic " . cnt(f_our()));
+    say("f_our marg " . $B->cnt(f_our()));
+    { my scalar $ar = [f_our()]; say("f_our anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_our()); say("f_our push " . scalar(@x)); }
+    { my $n = f_our(); say("f_our scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_our(); say("f_our store " . desc($hh{"n"})); }
+    if (f_our()) { say("f_our if T"); } else { say("f_our if F"); }
+    { my array @x = (0, f_deref(), 9); say("f_deref item " . scalar(@x)); }
+    { my array @x = f_deref(); say("f_deref arr " . scalar(@x)); }
+    { my ($x, $y) = f_deref(); say("f_deref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_deref()) { $c++; } say("f_deref foreach " . $c); }
+    say("f_deref variadic " . cnt(f_deref()));
+    say("f_deref marg " . $B->cnt(f_deref()));
+    { my scalar $ar = [f_deref()]; say("f_deref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_deref()); say("f_deref push " . scalar(@x)); }
+    { my $n = f_deref(); say("f_deref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_deref(); say("f_deref store " . desc($hh{"n"})); }
+    if (f_deref()) { say("f_deref if T"); } else { say("f_deref if F"); }
+    { my array @x = (0, f_comma(), 9); say("f_comma item " . scalar(@x)); }
+    { my array @x = f_comma(); say("f_comma arr " . scalar(@x)); }
+    { my ($x, $y) = f_comma(); say("f_comma destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_comma()) { $c++; } say("f_comma foreach " . $c); }
+    say("f_comma variadic " . cnt(f_comma()));
+    say("f_comma marg " . $B->cnt(f_comma()));
+    { my scalar $ar = [f_comma()]; say("f_comma anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_comma()); say("f_comma push " . scalar(@x)); }
+    { my $n = f_comma(); say("f_comma scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_comma(); say("f_comma store " . desc($hh{"n"})); }
+    if (f_comma()) { say("f_comma if T"); } else { say("f_comma if F"); }
+    { my array @x = (0, f_two(), 9); say("f_two item " . scalar(@x)); }
+    { my array @x = f_two(); say("f_two arr " . scalar(@x)); }
+    { my ($x, $y) = f_two(); say("f_two destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_two()) { $c++; } say("f_two foreach " . $c); }
+    say("f_two variadic " . cnt(f_two()));
+    say("f_two marg " . $B->cnt(f_two()));
+    { my scalar $ar = [f_two()]; say("f_two anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_two()); say("f_two push " . scalar(@x)); }
+    { my $n = f_two(); say("f_two scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_two(); say("f_two store " . desc($hh{"n"})); }
+    if (f_two()) { say("f_two if T"); } else { say("f_two if F"); }
+    { my array @x = (0, f_empty(), 9); say("f_empty item " . scalar(@x)); }
+    { my array @x = f_empty(); say("f_empty arr " . scalar(@x)); }
+    { my ($x, $y) = f_empty(); say("f_empty destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_empty()) { $c++; } say("f_empty foreach " . $c); }
+    say("f_empty variadic " . cnt(f_empty()));
+    say("f_empty marg " . $B->cnt(f_empty()));
+    { my scalar $ar = [f_empty()]; say("f_empty anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_empty()); say("f_empty push " . scalar(@x)); }
+    { my $n = f_empty(); say("f_empty scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_empty(); say("f_empty store " . desc($hh{"n"})); }
+    if (f_empty()) { say("f_empty if T"); } else { say("f_empty if F"); }
+    { my array @x = (0, f_bare(), 9); say("f_bare item " . scalar(@x)); }
+    { my array @x = f_bare(); say("f_bare arr " . scalar(@x)); }
+    { my ($x, $y) = f_bare(); say("f_bare destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_bare()) { $c++; } say("f_bare foreach " . $c); }
+    say("f_bare variadic " . cnt(f_bare()));
+    say("f_bare marg " . $B->cnt(f_bare()));
+    { my scalar $ar = [f_bare()]; say("f_bare anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_bare()); say("f_bare push " . scalar(@x)); }
+    { my $n = f_bare(); say("f_bare scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_bare(); say("f_bare store " . desc($hh{"n"})); }
+    if (f_bare()) { say("f_bare if T"); } else { say("f_bare if F"); }
+    { my array @x = (0, f_aref(), 9); say("f_aref item " . scalar(@x)); }
+    { my array @x = f_aref(); say("f_aref arr " . scalar(@x)); }
+    { my ($x, $y) = f_aref(); say("f_aref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_aref()) { $c++; } say("f_aref foreach " . $c); }
+    say("f_aref variadic " . cnt(f_aref()));
+    say("f_aref marg " . $B->cnt(f_aref()));
+    { my scalar $ar = [f_aref()]; say("f_aref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_aref()); say("f_aref push " . scalar(@x)); }
+    { my $n = f_aref(); say("f_aref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_aref(); say("f_aref store " . desc($hh{"n"})); }
+    if (f_aref()) { say("f_aref if T"); } else { say("f_aref if F"); }
+    { my array @x = (0, f_refto(), 9); say("f_refto item " . scalar(@x)); }
+    { my array @x = f_refto(); say("f_refto arr " . scalar(@x)); }
+    { my ($x, $y) = f_refto(); say("f_refto destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_refto()) { $c++; } say("f_refto foreach " . $c); }
+    say("f_refto variadic " . cnt(f_refto()));
+    say("f_refto marg " . $B->cnt(f_refto()));
+    { my scalar $ar = [f_refto()]; say("f_refto anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_refto()); say("f_refto push " . scalar(@x)); }
+    { my $n = f_refto(); say("f_refto scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_refto(); say("f_refto store " . desc($hh{"n"})); }
+    if (f_refto()) { say("f_refto if T"); } else { say("f_refto if F"); }
+    { my array @x = (0, f_sref(), 9); say("f_sref item " . scalar(@x)); }
+    { my array @x = f_sref(); say("f_sref arr " . scalar(@x)); }
+    { my ($x, $y) = f_sref(); say("f_sref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_sref()) { $c++; } say("f_sref foreach " . $c); }
+    say("f_sref variadic " . cnt(f_sref()));
+    say("f_sref marg " . $B->cnt(f_sref()));
+    { my scalar $ar = [f_sref()]; say("f_sref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_sref()); say("f_sref push " . scalar(@x)); }
+    { my $n = f_sref(); say("f_sref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_sref(); say("f_sref store " . desc($hh{"n"})); }
+    if (f_sref()) { say("f_sref if T"); } else { say("f_sref if F"); }
+    { my array @x = (0, f_elem(), 9); say("f_elem item " . scalar(@x)); }
+    { my array @x = f_elem(); say("f_elem arr " . scalar(@x)); }
+    { my ($x, $y) = f_elem(); say("f_elem destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_elem()) { $c++; } say("f_elem foreach " . $c); }
+    say("f_elem variadic " . cnt(f_elem()));
+    say("f_elem marg " . $B->cnt(f_elem()));
+    { my scalar $ar = [f_elem()]; say("f_elem anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_elem()); say("f_elem push " . scalar(@x)); }
+    { my $n = f_elem(); say("f_elem scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_elem(); say("f_elem store " . desc($hh{"n"})); }
+    if (f_elem()) { say("f_elem if T"); } else { say("f_elem if F"); }
+    { my array @x = (0, f_elemv(), 9); say("f_elemv item " . scalar(@x)); }
+    { my array @x = f_elemv(); say("f_elemv arr " . scalar(@x)); }
+    { my ($x, $y) = f_elemv(); say("f_elemv destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_elemv()) { $c++; } say("f_elemv foreach " . $c); }
+    say("f_elemv variadic " . cnt(f_elemv()));
+    say("f_elemv marg " . $B->cnt(f_elemv()));
+    { my scalar $ar = [f_elemv()]; say("f_elemv anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_elemv()); say("f_elemv push " . scalar(@x)); }
+    { my $n = f_elemv(); say("f_elemv scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_elemv(); say("f_elemv store " . desc($hh{"n"})); }
+    if (f_elemv()) { say("f_elemv if T"); } else { say("f_elemv if F"); }
+    { my array @x = (0, f_href(), 9); say("f_href item " . scalar(@x)); }
+    { my array @x = f_href(); say("f_href arr " . scalar(@x)); }
+    { my ($x, $y) = f_href(); say("f_href destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_href()) { $c++; } say("f_href foreach " . $c); }
+    say("f_href variadic " . cnt(f_href()));
+    say("f_href marg " . $B->cnt(f_href()));
+    { my scalar $ar = [f_href()]; say("f_href anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_href()); say("f_href push " . scalar(@x)); }
+    { my $n = f_href(); say("f_href scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_href(); say("f_href store " . desc($hh{"n"})); }
+    if (f_href()) { say("f_href if T"); } else { say("f_href if F"); }
+    { my array @x = (0, f_map(), 9); say("f_map item " . scalar(@x)); }
+    { my array @x = f_map(); say("f_map arr " . scalar(@x)); }
+    { my ($x, $y) = f_map(); say("f_map destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_map()) { $c++; } say("f_map foreach " . $c); }
+    say("f_map variadic " . cnt(f_map()));
+    say("f_map marg " . $B->cnt(f_map()));
+    { my scalar $ar = [f_map()]; say("f_map anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_map()); say("f_map push " . scalar(@x)); }
+    { my $n = f_map(); say("f_map scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_map(); say("f_map store " . desc($hh{"n"})); }
+    if (f_map()) { say("f_map if T"); } else { say("f_map if F"); }
+    { my array @x = (0, f_ternL(), 9); say("f_ternL item " . scalar(@x)); }
+    { my array @x = f_ternL(); say("f_ternL arr " . scalar(@x)); }
+    { my ($x, $y) = f_ternL(); say("f_ternL destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_ternL()) { $c++; } say("f_ternL foreach " . $c); }
+    say("f_ternL variadic " . cnt(f_ternL()));
+    say("f_ternL marg " . $B->cnt(f_ternL()));
+    { my scalar $ar = [f_ternL()]; say("f_ternL anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_ternL()); say("f_ternL push " . scalar(@x)); }
+    { my $n = f_ternL(); say("f_ternL scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_ternL(); say("f_ternL store " . desc($hh{"n"})); }
+    if (f_ternL()) { say("f_ternL if T"); } else { say("f_ternL if F"); }
+    { my array @x = (0, f_ternS(), 9); say("f_ternS item " . scalar(@x)); }
+    { my array @x = f_ternS(); say("f_ternS arr " . scalar(@x)); }
+    { my ($x, $y) = f_ternS(); say("f_ternS destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_ternS()) { $c++; } say("f_ternS foreach " . $c); }
+    say("f_ternS variadic " . cnt(f_ternS()));
+    say("f_ternS marg " . $B->cnt(f_ternS()));
+    { my scalar $ar = [f_ternS()]; say("f_ternS anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_ternS()); say("f_ternS push " . scalar(@x)); }
+    { my $n = f_ternS(); say("f_ternS scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_ternS(); say("f_ternS store " . desc($hh{"n"})); }
+    if (f_ternS()) { say("f_ternS if T"); } else { say("f_ternS if F"); }
+    { my array @x = (0, f_call(), 9); say("f_call item " . scalar(@x)); }
+    { my array @x = f_call(); say("f_call arr " . scalar(@x)); }
+    { my ($x, $y) = f_call(); say("f_call destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_call()) { $c++; } say("f_call foreach " . $c); }
+    say("f_call variadic " . cnt(f_call()));
+    say("f_call marg " . $B->cnt(f_call()));
+    { my scalar $ar = [f_call()]; say("f_call anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_call()); say("f_call push " . scalar(@x)); }
+    { my $n = f_call(); say("f_call scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_call(); say("f_call store " . desc($hh{"n"})); }
+    if (f_call()) { say("f_call if T"); } else { say("f_call if F"); }
+    { my array @x = (0, f_callS(), 9); say("f_callS item " . scalar(@x)); }
+    { my array @x = f_callS(); say("f_callS arr " . scalar(@x)); }
+    { my ($x, $y) = f_callS(); say("f_callS destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_callS()) { $c++; } say("f_callS foreach " . $c); }
+    say("f_callS variadic " . cnt(f_callS()));
+    say("f_callS marg " . $B->cnt(f_callS()));
+    { my scalar $ar = [f_callS()]; say("f_callS anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_callS()); say("f_callS push " . scalar(@x)); }
+    { my $n = f_callS(); say("f_callS scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_callS(); say("f_callS store " . desc($hh{"n"})); }
+    if (f_callS()) { say("f_callS if T"); } else { say("f_callS if F"); }
+    { my array @x = (0, f_scal(), 9); say("f_scal item " . scalar(@x)); }
+    { my array @x = f_scal(); say("f_scal arr " . scalar(@x)); }
+    { my ($x, $y) = f_scal(); say("f_scal destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_scal()) { $c++; } say("f_scal foreach " . $c); }
+    say("f_scal variadic " . cnt(f_scal()));
+    say("f_scal marg " . $B->cnt(f_scal()));
+    { my scalar $ar = [f_scal()]; say("f_scal anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_scal()); say("f_scal push " . scalar(@x)); }
+    { my $n = f_scal(); say("f_scal scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_scal(); say("f_scal store " . desc($hh{"n"})); }
+    if (f_scal()) { say("f_scal if T"); } else { say("f_scal if F"); }
+    { my array @x = (0, f_str(), 9); say("f_str item " . scalar(@x)); }
+    { my array @x = f_str(); say("f_str arr " . scalar(@x)); }
+    { my ($x, $y) = f_str(); say("f_str destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e (f_str()) { $c++; } say("f_str foreach " . $c); }
+    say("f_str variadic " . cnt(f_str()));
+    say("f_str marg " . $B->cnt(f_str()));
+    { my scalar $ar = [f_str()]; say("f_str anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, f_str()); say("f_str push " . scalar(@x)); }
+    { my $n = f_str(); say("f_str scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = f_str(); say("f_str store " . desc($hh{"n"})); }
+    if (f_str()) { say("f_str if T"); } else { say("f_str if F"); }
+    { my array @x = (0, $B->m_local(), 9); say("m_local item " . scalar(@x)); }
+    { my array @x = $B->m_local(); say("m_local arr " . scalar(@x)); }
+    { my ($x, $y) = $B->m_local(); say("m_local destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->m_local()) { $c++; } say("m_local foreach " . $c); }
+    say("m_local variadic " . cnt($B->m_local()));
+    say("m_local marg " . $B->cnt($B->m_local()));
+    { my scalar $ar = [$B->m_local()]; say("m_local anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->m_local()); say("m_local push " . scalar(@x)); }
+    { my $n = $B->m_local(); say("m_local scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->m_local(); say("m_local store " . desc($hh{"n"})); }
+    if ($B->m_local()) { say("m_local if T"); } else { say("m_local if F"); }
+    { my array @x = (0, $B->m_aref(), 9); say("m_aref item " . scalar(@x)); }
+    { my array @x = $B->m_aref(); say("m_aref arr " . scalar(@x)); }
+    { my ($x, $y) = $B->m_aref(); say("m_aref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->m_aref()) { $c++; } say("m_aref foreach " . $c); }
+    say("m_aref variadic " . cnt($B->m_aref()));
+    say("m_aref marg " . $B->cnt($B->m_aref()));
+    { my scalar $ar = [$B->m_aref()]; say("m_aref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->m_aref()); say("m_aref push " . scalar(@x)); }
+    { my $n = $B->m_aref(); say("m_aref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->m_aref(); say("m_aref store " . desc($hh{"n"})); }
+    if ($B->m_aref()) { say("m_aref if T"); } else { say("m_aref if F"); }
+    { my array @x = (0, $B->m_items(), 9); say("m_items item " . scalar(@x)); }
+    { my array @x = $B->m_items(); say("m_items arr " . scalar(@x)); }
+    { my ($x, $y) = $B->m_items(); say("m_items destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->m_items()) { $c++; } say("m_items foreach " . $c); }
+    say("m_items variadic " . cnt($B->m_items()));
+    say("m_items marg " . $B->cnt($B->m_items()));
+    { my scalar $ar = [$B->m_items()]; say("m_items anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->m_items()); say("m_items push " . scalar(@x)); }
+    { my $n = $B->m_items(); say("m_items scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->m_items(); say("m_items store " . desc($hh{"n"})); }
+    if ($B->m_items()) { say("m_items if T"); } else { say("m_items if F"); }
+    { my array @x = (0, $B->m_all(), 9); say("m_all item " . scalar(@x)); }
+    { my array @x = $B->m_all(); say("m_all arr " . scalar(@x)); }
+    { my ($x, $y) = $B->m_all(); say("m_all destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->m_all()) { $c++; } say("m_all foreach " . $c); }
+    say("m_all variadic " . cnt($B->m_all()));
+    say("m_all marg " . $B->cnt($B->m_all()));
+    { my scalar $ar = [$B->m_all()]; say("m_all anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->m_all()); say("m_all push " . scalar(@x)); }
+    { my $n = $B->m_all(); say("m_all scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->m_all(); say("m_all store " . desc($hh{"n"})); }
+    if ($B->m_all()) { say("m_all if T"); } else { say("m_all if F"); }
+    { my array @x = (0, $B->m_arr(), 9); say("m_arr item " . scalar(@x)); }
+    { my array @x = $B->m_arr(); say("m_arr arr " . scalar(@x)); }
+    { my ($x, $y) = $B->m_arr(); say("m_arr destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->m_arr()) { $c++; } say("m_arr foreach " . $c); }
+    say("m_arr variadic " . cnt($B->m_arr()));
+    say("m_arr marg " . $B->cnt($B->m_arr()));
+    { my scalar $ar = [$B->m_arr()]; say("m_arr anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->m_arr()); say("m_arr push " . scalar(@x)); }
+    { my $n = $B->m_arr(); say("m_arr scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->m_arr(); say("m_arr store " . desc($hh{"n"})); }
+    if ($B->m_arr()) { say("m_arr if T"); } else { say("m_arr if F"); }
+    { my array @x = (0, $B->a_local(), 9); say("a_local item " . scalar(@x)); }
+    { my array @x = $B->a_local(); say("a_local arr " . scalar(@x)); }
+    { my ($x, $y) = $B->a_local(); say("a_local destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->a_local()) { $c++; } say("a_local foreach " . $c); }
+    say("a_local variadic " . cnt($B->a_local()));
+    say("a_local marg " . $B->cnt($B->a_local()));
+    { my scalar $ar = [$B->a_local()]; say("a_local anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->a_local()); say("a_local push " . scalar(@x)); }
+    { my $n = $B->a_local(); say("a_local scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->a_local(); say("a_local store " . desc($hh{"n"})); }
+    if ($B->a_local()) { say("a_local if T"); } else { say("a_local if F"); }
+    { my array @x = (0, $B->a_aref(), 9); say("a_aref item " . scalar(@x)); }
+    { my array @x = $B->a_aref(); say("a_aref arr " . scalar(@x)); }
+    { my ($x, $y) = $B->a_aref(); say("a_aref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->a_aref()) { $c++; } say("a_aref foreach " . $c); }
+    say("a_aref variadic " . cnt($B->a_aref()));
+    say("a_aref marg " . $B->cnt($B->a_aref()));
+    { my scalar $ar = [$B->a_aref()]; say("a_aref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->a_aref()); say("a_aref push " . scalar(@x)); }
+    { my $n = $B->a_aref(); say("a_aref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->a_aref(); say("a_aref store " . desc($hh{"n"})); }
+    if ($B->a_aref()) { say("a_aref if T"); } else { say("a_aref if F"); }
+    { my array @x = (0, $B->hooked(), 9); say("hooked item " . scalar(@x)); }
+    { my array @x = $B->hooked(); say("hooked arr " . scalar(@x)); }
+    { my ($x, $y) = $B->hooked(); say("hooked destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->hooked()) { $c++; } say("hooked foreach " . $c); }
+    say("hooked variadic " . cnt($B->hooked()));
+    say("hooked marg " . $B->cnt($B->hooked()));
+    { my scalar $ar = [$B->hooked()]; say("hooked anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->hooked()); say("hooked push " . scalar(@x)); }
+    { my $n = $B->hooked(); say("hooked scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->hooked(); say("hooked store " . desc($hh{"n"})); }
+    if ($B->hooked()) { say("hooked if T"); } else { say("hooked if F"); }
+    { my array @x = (0, $B->au_list(), 9); say("au_list item " . scalar(@x)); }
+    { my array @x = $B->au_list(); say("au_list arr " . scalar(@x)); }
+    { my ($x, $y) = $B->au_list(); say("au_list destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->au_list()) { $c++; } say("au_list foreach " . $c); }
+    say("au_list variadic " . cnt($B->au_list()));
+    say("au_list marg " . $B->cnt($B->au_list()));
+    { my scalar $ar = [$B->au_list()]; say("au_list anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->au_list()); say("au_list push " . scalar(@x)); }
+    { my $n = $B->au_list(); say("au_list scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->au_list(); say("au_list store " . desc($hh{"n"})); }
+    if ($B->au_list()) { say("au_list if T"); } else { say("au_list if F"); }
+    { my array @x = (0, $B->au_ref(), 9); say("au_ref item " . scalar(@x)); }
+    { my array @x = $B->au_ref(); say("au_ref arr " . scalar(@x)); }
+    { my ($x, $y) = $B->au_ref(); say("au_ref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->au_ref()) { $c++; } say("au_ref foreach " . $c); }
+    say("au_ref variadic " . cnt($B->au_ref()));
+    say("au_ref marg " . $B->cnt($B->au_ref()));
+    { my scalar $ar = [$B->au_ref()]; say("au_ref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->au_ref()); say("au_ref push " . scalar(@x)); }
+    { my $n = $B->au_ref(); say("au_ref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->au_ref(); say("au_ref store " . desc($hh{"n"})); }
+    if ($B->au_ref()) { say("au_ref if T"); } else { say("au_ref if F"); }
+    { my array @x = (0, $CL->(), 9); say("closL item " . scalar(@x)); }
+    { my array @x = $CL->(); say("closL arr " . scalar(@x)); }
+    { my ($x, $y) = $CL->(); say("closL destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($CL->()) { $c++; } say("closL foreach " . $c); }
+    say("closL variadic " . cnt($CL->()));
+    say("closL marg " . $B->cnt($CL->()));
+    { my scalar $ar = [$CL->()]; say("closL anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $CL->()); say("closL push " . scalar(@x)); }
+    { my $n = $CL->(); say("closL scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $CL->(); say("closL store " . desc($hh{"n"})); }
+    if ($CL->()) { say("closL if T"); } else { say("closL if F"); }
+    { my array @x = (0, $CS->(), 9); say("closS item " . scalar(@x)); }
+    { my array @x = $CS->(); say("closS arr " . scalar(@x)); }
+    { my ($x, $y) = $CS->(); say("closS destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($CS->()) { $c++; } say("closS foreach " . $c); }
+    say("closS variadic " . cnt($CS->()));
+    say("closS marg " . $B->cnt($CS->()));
+    { my scalar $ar = [$CS->()]; say("closS anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $CS->()); say("closS push " . scalar(@x)); }
+    { my $n = $CS->(); say("closS scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $CS->(); say("closS store " . desc($hh{"n"})); }
+    if ($CS->()) { say("closS if T"); } else { say("closS if F"); }
+    { my array @x = (0, $CR->(), 9); say("cref item " . scalar(@x)); }
+    { my array @x = $CR->(); say("cref arr " . scalar(@x)); }
+    { my ($x, $y) = $CR->(); say("cref destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($CR->()) { $c++; } say("cref foreach " . $c); }
+    say("cref variadic " . cnt($CR->()));
+    say("cref marg " . $B->cnt($CR->()));
+    { my scalar $ar = [$CR->()]; say("cref anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $CR->()); say("cref push " . scalar(@x)); }
+    { my $n = $CR->(); say("cref scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $CR->(); say("cref store " . desc($hh{"n"})); }
+    if ($CR->()) { say("cref if T"); } else { say("cref if F"); }
+    { my array @x = (0, $B->$MN(), 9); say("dyn item " . scalar(@x)); }
+    { my array @x = $B->$MN(); say("dyn arr " . scalar(@x)); }
+    { my ($x, $y) = $B->$MN(); say("dyn destr " . desc($x) . "," . desc($y)); }
+    { my int $c = 0; foreach my $e ($B->$MN()) { $c++; } say("dyn foreach " . $c); }
+    say("dyn variadic " . cnt($B->$MN()));
+    say("dyn marg " . $B->cnt($B->$MN()));
+    { my scalar $ar = [$B->$MN()]; say("dyn anon " . scalar(@{$ar})); }
+    { my array @x = (5); push(@x, $B->$MN()); say("dyn push " . scalar(@x)); }
+    { my $n = $B->$MN(); say("dyn scalar " . desc($n)); }
+    { my hash %hh = (); $hh{"n"} = $B->$MN(); say("dyn store " . desc($hh{"n"})); }
+    if ($B->$MN()) { say("dyn if T"); } else { say("dyn if F"); }
+    { my array @w = ($B->w_ctx()); my $ws = $B->w_ctx(); say("want " . $w[0] . " " . $ws); }
+    say("G " . scalar(@G) . " items " . scalar(@{$B->{"items"}}));
+    }
+    return 0;
+}

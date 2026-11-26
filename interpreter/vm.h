@@ -651,9 +651,13 @@ enum {
     BUILTIN_READ_ALL_LINES,    /* (fh) -> array of the remaining lines, newlines removed */
     BUILTIN_METHOD_ARGS_FLAT,  /* (obj, args, name, mask) -> args with masked arrays/hashes spread when the method takes a list */
     BUILTIN_DYN_SPREAD_MASK,   /* (mask): the next OP_DYN_METHOD_CALL spreads those arguments when its method takes a list */
-    BUILTIN_RET_LIST_FIX,      /* (r, obj, name[, SUPER pkg]): a method call as a list item: r as it is when the method is declared `array`, else an array (or undef) r as one item */
-    BUILTIN_RET_LIST_COUNT,    /* (r, obj, name[, SUPER pkg]): one value wanted: the count when the method is declared `array`, else r */
-    BUILTIN_RET_LIST_IS,       /* (r, obj, name[, SUPER pkg]): 1 when r is the list of a method declared `array` (an argument of another method call) */
+    BUILTIN_RET_LIST,          /* (v, kind[, tail]): a list-form `return` (kind 1 list, 2 comma list, 3 hash, 8 nothing): to a list caller the list, noted in VM.list_ret; to a scalar caller its count / last item / undef */
+    BUILTIN_UCALL_ITEM,        /* (r): a call that is a list item: the noted list as it is, any other array (or undef) as one item */
+    BUILTIN_UCALL_ARRAY,       /* (r): my @a = f(): the noted list, or r as a one-item array */
+    BUILTIN_UCALL_ARG,         /* (r): a call that is an argument of a function: as it came back (nothing is undef) */
+    BUILTIN_UCALL_IS,          /* (r): 1 when r is the noted list (an argument of a method call: joins the spread mask) */
+    BUILTIN_SCALAR_OF,         /* (v): scalar(f()): an array's count, a hash's key count, anything else itself */
+    BUILTIN_CLOSURE_ARGS_FLAT, /* (args, closure, mask): the arguments flagged in mask spread when the closure takes a list */
 };
 
 /* Heap object type tag */
@@ -1247,6 +1251,8 @@ typedef struct VM {
     int refcount;
     uint8_t pending_call_context;
     uint64_t dyn_spread_mask;   /* set by BUILTIN_DYN_SPREAD_MASK, consumed by the next OP_DYN_METHOD_CALL */
+    VMValue list_ret;           /* the list the last list-form `return` handed to a list caller (BUILTIN_RET_LIST); read and cleared by the BUILTIN_UCALL_* that follows the call */
+    uint8_t list_ret_set;       /* 1 a list, 2 nothing (`return;`) */
     /* Thread safety + per-VM caches */
     pthread_t owner_thread;
     int is_worker_vm;

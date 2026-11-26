@@ -1652,3 +1652,74 @@ func ast_is_plain_value(scalar $n) int {
     }
     return 0;
 }
+
+# ---- the form of a `return` value (Perl's return rules) ----
+# What a call yields depends on the form of the `return` that ran and on the
+# caller's context, never on how the value was built. The parser classifies
+# each return once (parser_make_return stamps `ret_form` on the node) and
+# both backends read it:
+#   1  a list: @x, @{...}, a range or slice, map/grep/sort, keys/values/
+#      split/reverse/sort: the caller's list takes the elements, a scalar
+#      gets the count
+#   2  a comma list (a, b, c): the elements; a scalar gets the last item
+#   3  a hash: %h, %{...}: the pairs
+#   4  a call (function, method, closure, builtin): whatever it yields, in
+#      the caller's own context
+#   5  ?: with a list branch that could not be split into if/else
+#   6  one value that may hold a container ($x, $h{k}, ...)
+#   7  one value that certainly is not a bare container (a literal,
+#      arithmetic, [...], {...}, \X)
+#   8  nothing: `return;` / `return ();`: an empty list, undef to a scalar
+# Only functions whose return type is scalar (the default) or dynamic use it.
+func ast_return_form(scalar $v) int {
+    if (!$v) { return 8; }
+    my int $rf_t = $v->{"type"};
+    if ($rf_t == NODE_ANON_HASH()) {
+        if ($v->{"is_empty_list"}) { return 8; }
+        return 7;
+    }
+    if ($rf_t == NODE_VARIABLE() || $rf_t == NODE_DEREF_SCALAR()) {
+        my str $rf_sig = "" . $v->{"sigil"};
+        if ($rf_sig eq "@") { return 1; }
+        if ($rf_sig eq "%") { return 3; }
+        return 6;
+    }
+    if ($rf_t == NODE_ANON_ARRAY()) {
+        if ($v->{"is_list"}) { return 2; }
+        return 7;
+    }
+    if ($rf_t == NODE_RANGE() || $rf_t == NODE_ARRAY_SLICE() || $rf_t == NODE_HASH_SLICE()) { return 1; }
+    if ($rf_t == NODE_MAP() || $rf_t == NODE_GREP() || $rf_t == NODE_SORT()) { return 1; }
+    if ($rf_t == NODE_CALL()) {
+        my str $rf_nm = "" . $v->{"name"};
+        if ($rf_nm eq "split" || $rf_nm eq "keys" || $rf_nm eq "values" || $rf_nm eq "reverse"
+            || $rf_nm eq "sort" || $rf_nm eq "nsort" || $rf_nm eq "core::split" || $rf_nm eq "sys::split") {
+            if ($v->{"scalar_ctx"}) { return 7; }
+            return 1;
+        }
+        return 4;
+    }
+    if ($rf_t == NODE_METHOD_CALL() || $rf_t == NODE_DYN_METHOD_CALL() || $rf_t == NODE_SUPER_CALL() || $rf_t == NODE_CLOSURE_CALL()) { return 4; }
+    if ($rf_t == NODE_TERNARY()) {
+        my int $rf_a = ast_return_form($v->{"true_expr"});
+        my int $rf_b = ast_return_form($v->{"false_expr"});
+        if ($rf_a >= 6 && $rf_a <= 7 && $rf_b >= 6 && $rf_b <= 7) {
+            if ($rf_a == 7 && $rf_b == 7) { return 7; }
+            return 6;
+        }
+        return 5;
+    }
+    if ($rf_t == NODE_INT_LITERAL() || $rf_t == NODE_NUM_LITERAL() || $rf_t == NODE_STR_LITERAL()) { return 7; }
+    if ($rf_t == NODE_REF() || $rf_t == NODE_UNDEF()) { return 7; }
+    if ($rf_t == NODE_BINARY_OP()) {
+        my str $rf_op = "" . $v->{"op"};
+        if ($rf_op eq "x") {
+            my scalar $rf_l = $v->{"left"};
+            if ($rf_l && $rf_l->{"type"} == NODE_ANON_ARRAY() && $rf_l->{"is_list"}) { return 1; }
+            return 7;
+        }
+        if ($rf_op eq "||" || $rf_op eq "&&" || $rf_op eq "//") { return 6; }
+        return 7;
+    }
+    return 6;
+}

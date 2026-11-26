@@ -161,6 +161,8 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 /* bits 11-13: cycle-collector colour (BLACK=0 outside a collection); while
  * STRADA_SVf_CC_BUFFERED is set, struct_size holds the value's cc_roots index. */
 #define STRADA_SVf_SPREAD_ARGS  ((uint16_t)(1u << 14)) /* ARRAY: a method-argument pack; a spread mask (tagged int) sits after its last element */
+#define STRADA_SVf_LIST_LAST    ((uint16_t)(1u << 15)) /* ARRAY: the result of `return (a, b, c)`: a scalar caller takes its last item (strada_ucall_scalar) */
+#define STRADA_SVf_LIST_TAIL    ((uint16_t)(1u << 5))  /* ARRAY (shares the bit of the INT-only STRADA_SVf_UV): with LIST_LAST, the scalar value is the tagged integer in the slot after the last element */
 #define STRADA_SVf_CC_COLOR_SHIFT 11
 #define STRADA_SVf_CC_COLOR_MASK ((uint16_t)(7u << 11))
 #define STRADA_SVf_STR_MASK     ((uint16_t)(STRADA_SVf_ASCII | STRADA_SVf_UTF8))
@@ -1741,22 +1743,21 @@ StradaValue* strada_pack_args_spread(uint64_t mask, int count, ...);  /* same, n
 StradaValue* strada_args_spread(StradaValue *args);   /* a new pack with those args spread, or NULL if ARGS has none */
 #define STRADA_ARGS_HAVE_SPREAD(a) ((a) && !STRADA_IS_TAGGED_INT(a) && ((a)->flags & STRADA_SVf_SPREAD_ARGS))
 void strada_args_mark_spread(StradaValue *args, uint64_t mask);
-/* A method call that is a list item (see strada_method_call_lst). One
- * static per call site: whether the method the receiver's class resolves
- * the name to is declared `array`. */
-typedef struct StradaListSite {
-    const char *pkg;   /* blessed-package pointer last looked up (identity) */
-    uint32_t gen;      /* strada_mc_cache_gen stamp; 0 = never filled */
-    int8_t is_list;
-} StradaListSite;
-void strada_method_mark_ret_list(StradaMethod func);   /* this method wrapper's function is declared `array` */
-int* strada_ret_list_arm(int *slot);
-StradaValue* strada_ret_list_done(StradaValue *r, int is_list, int *prev);
-StradaValue* strada_ret_list_count(StradaValue *r, int is_list, int *prev);
-StradaValue* strada_ret_list_arg(StradaValue *r, int is_list, int *prev, uint64_t *dyn, uint64_t bit);
-StradaValue* strada_pack_args_dyn(uint64_t *dyn, uint64_t mask, int count, ...);
-StradaValue* strada_method_call_lst(StradaValue *obj, const char *method, StradaValue *args, StradaListSite *ls);
-StradaValue* strada_super_call_lst(StradaValue *obj, const char *from_package, const char *method, StradaValue *args);
+/* Perl's return rules (see "what a call to a user function yields" in
+ * strada_runtime.c). */
+StradaValue* strada_method_call_cs_sp(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash, StradaCallSite *cs);
+StradaValue* strada_empty_ret(void);
+StradaValue* strada_ret_list(StradaValue *v, int comma);
+StradaValue* strada_ret_array(StradaValue *v, int comma);
+StradaValue* strada_ret_list_tail(StradaValue *v, StradaValue *tail);
+StradaValue* strada_ret_scalar_slow(StradaValue *v);
+StradaValue* strada_ucall_item_slow(StradaValue *v);
+StradaValue* strada_ucall_scalar_slow(StradaValue *v);
+StradaValue* strada_ucall_array(StradaValue *v);
+StradaValue* strada_ucall_foreach(StradaValue *v);
+StradaValue* strada_ucall_hash(StradaValue *v);
+StradaValue* strada_pack_args_cand(uint64_t cand, uint64_t mask, int count, ...);
+void strada_args_mark_dyn(StradaValue *args, uint64_t cand, uint64_t mask);
 void strada_method_mark_list(StradaMethod func);   /* this method wrapper takes a list (variadic / @_ form) */
 StradaValue* strada_method_call_spread(StradaValue *obj, const char *method, StradaValue *args);
 StradaValue* strada_super_call_spread(StradaValue *obj, const char *from_package, const char *method, StradaValue *args);  /* flag an argument pack built by hand (SUPER::m) */
@@ -1815,6 +1816,7 @@ StradaValue* strada_closure_call2_pin(StradaValue *closure, StradaValue *a0, Str
 StradaValue* strada_closure_call3_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2);
 StradaValue* strada_closure_call4_pin(StradaValue *closure, StradaValue *a0, StradaValue *a1, StradaValue *a2, StradaValue *a3);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
+StradaValue* strada_closure_call_lists(StradaValue *closure, StradaValue *args_sv, uint64_t mask, uint64_t cand);
 StradaValue* strada_closure_set_variadic(StradaValue *closure, int fixed_params);
 StradaValue* strada_foreach_list_take(StradaValue *v);
 StradaValue* strada_reverse_list1(StradaValue *sv);
@@ -2676,6 +2678,23 @@ static inline int strada_sv_is_array_or_aref(StradaValue *sv) {
         return 1;
     }
     return 0;
+}
+/* The fast halves of the return rules: most values are not containers. */
+static inline StradaValue* strada_ret_scalar(StradaValue *v) {
+    if (__builtin_expect(v != NULL && !STRADA_IS_TAGGED_INT(v) && (v->type == STRADA_ARRAY || v->type == STRADA_HASH), 0))
+        return strada_ret_scalar_slow(v);
+    return v;
+}
+static inline StradaValue* strada_ucall_scalar(StradaValue *v) {
+    if (__builtin_expect(v != NULL && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_ARRAY, 0))
+        return strada_ucall_scalar_slow(v);
+    return v;
+}
+static inline StradaValue* strada_ucall_item(StradaValue *v) {
+    if (v == NULL || STRADA_IS_TAGGED_INT(v)) return v;
+    if (v->type == STRADA_ARRAY || v->type == STRADA_HASH || v->type == STRADA_REF || v->type == STRADA_UNDEF)
+        return strada_ucall_item_slow(v);
+    return v;
 }
 /* my @a = CALL: the call's list, owned by the caller. A fresh list (one
  * reference to an array nothing else holds) is taken as it is; everything

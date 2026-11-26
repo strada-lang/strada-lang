@@ -963,7 +963,14 @@ func parse_anon_func_args(scalar $parser, int $line) scalar {
     $nup->{"is_variadic"} = 1;
     $na->{"is_variadic"} = 1;
     ast_add_param($na, $nup);
+    my int $na_outer_dyn = $parser->{"fn_ret_dyn"} + 0;
+    my int $na_outer_cret = $parser->{"c_ret_seen"} + 0;
+    $parser->{"c_ret_seen"} = 0;
+    $parser->{"fn_ret_dyn"} = 1;
     $na->{"body"} = parse_block($parser);
+    $parser->{"fn_ret_dyn"} = $na_outer_dyn;
+    if ($parser->{"c_ret_seen"}) { $na->{"c_block_returns"} = 1; }
+    $parser->{"c_ret_seen"} = $na_outer_cret;
     ast_set_line($na, $line);
     return $na;
 }
@@ -1056,7 +1063,15 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     }
 
     # Parse body
+    my int $anon_outer_cret = $parser->{"c_ret_seen"} + 0;
+    $parser->{"c_ret_seen"} = 0;
+    my int $anon_outer_dyn = $parser->{"fn_ret_dyn"} + 0;
+    $parser->{"fn_ret_dyn"} = 2;
+    if ($anon->{"return_type"} == TYPE_SCALAR() || $anon->{"return_type"} == TYPE_DYNAMIC()) { $parser->{"fn_ret_dyn"} = 1; }
     $anon->{"body"} = parse_block($parser);
+    $parser->{"fn_ret_dyn"} = $anon_outer_dyn;
+    if ($parser->{"c_ret_seen"}) { $anon->{"c_block_returns"} = 1; }
+    $parser->{"c_ret_seen"} = $anon_outer_cret;
 
     ast_set_line($anon, $line);
     return $anon;
@@ -2852,6 +2867,26 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
             if ($left->{"type"} == NODE_DEREF_SCALAR() && $left->{"sigil"} eq "@") {
                 $is_array_slice = 1;
             }
+            # A list slice, (LIST)[i, j] / (f())[0]: a slice of the list as
+            # a new array, @{[LIST]}[i, j]. (It was a parse error for more
+            # than one index, and indexed into the value for one.)
+            if ($is_array_slice == 0 && (($left->{"type"} == NODE_ANON_ARRAY() && $left->{"is_list"}) || $left->{"in_parens"})) {
+                my scalar $ls_ref = ast_new_anon_array();
+                if ($left->{"type"} == NODE_ANON_ARRAY() && $left->{"is_list"}) {
+                    my scalar $ls_elems = $left->{"elements"};
+                    my int $ls_n = $left->{"element_count"} + 0;
+                    my int $ls_i = 0;
+                    while ($ls_i < $ls_n) {
+                        ast_add_array_elem($ls_ref, $ls_elems->[$ls_i]);
+                        $ls_i = $ls_i + 1;
+                    }
+                } else {
+                    $left->{"in_parens"} = 0;
+                    ast_add_array_elem($ls_ref, $left);
+                }
+                $left = ast_new_deref_scalar($ls_ref, "@");
+                $is_array_slice = 1;
+            }
             if ($is_array_slice == 1) {
                 parser_advance($parser);
                 my array @indices = ();
@@ -4318,8 +4353,7 @@ func parse_return_stmt(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $ret_node = ast_new_return_stmt($value);
-        ast_set_line($ret_node, $ret_line);
+        my scalar $ret_node = parser_make_return($parser, $value, $ret_line);
         my scalar $mod_block = ast_new_block();
         $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $ret_node);
@@ -4331,8 +4365,7 @@ func parse_return_stmt(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        my scalar $ret_node = ast_new_return_stmt($value);
-        ast_set_line($ret_node, $ret_line);
+        my scalar $ret_node = parser_make_return($parser, $value, $ret_line);
         my scalar $mod_block = ast_new_block();
         $mod_block->{"is_modifier_block"} = 1;
         ast_add_statement($mod_block, $ret_node);
@@ -4343,9 +4376,31 @@ func parse_return_stmt(scalar $parser) scalar {
     }
 
     parser_expect($parser, "SEMI");
-    my scalar $ret_stmt = ast_new_return_stmt($value);
-    ast_set_line($ret_stmt, $ret_line);
-    return $ret_stmt;
+    return parser_make_return($parser, $value, $ret_line);
+}
+
+# The return statement for $value, stamped with the form of the value
+# (ast_return_form). In a function whose return type is scalar or dynamic,
+# `return C ? A : B;` with a list branch becomes
+# `if (C) { return A; } else { return B; }`, so each branch is returned in
+# its own form (Perl: the branch that runs is evaluated in the caller's
+# context).
+func parser_make_return(scalar $parser, scalar $value, int $ret_line) scalar {
+    my int $mr_form = ast_return_form($value);
+    if ($mr_form == 5 && ($parser->{"fn_ret_dyn"} + 0) == 1) {
+        my scalar $mr_then = ast_new_block();
+        ast_add_statement($mr_then, parser_make_return($parser, $value->{"true_expr"}, $ret_line));
+        my scalar $mr_else = ast_new_block();
+        ast_add_statement($mr_else, parser_make_return($parser, $value->{"false_expr"}, $ret_line));
+        my scalar $mr_if = ast_new_if_stmt($value->{"condition"}, $mr_then);
+        $mr_if->{"else_block"} = $mr_else;
+        ast_set_line($mr_if, $ret_line);
+        return $mr_if;
+    }
+    my scalar $mr_stmt = ast_new_return_stmt($value);
+    ast_set_line($mr_stmt, $ret_line);
+    $mr_stmt->{"ret_form"} = $mr_form;
+    return $mr_stmt;
 }
 
 func parse_statement(scalar $parser) scalar {
@@ -5189,7 +5244,11 @@ func parse_function(scalar $parser) scalar {
     # Parse body
     my int $outer_c_ret = $parser->{"c_ret_seen"} + 0;
     $parser->{"c_ret_seen"} = 0;
+    my int $outer_ret_dyn = $parser->{"fn_ret_dyn"} + 0;
+    $parser->{"fn_ret_dyn"} = 2;
+    if ($ret_type == TYPE_SCALAR() || $ret_type == TYPE_DYNAMIC()) { $parser->{"fn_ret_dyn"} = 1; }
     $fn->{"body"} = parse_block($parser);
+    $parser->{"fn_ret_dyn"} = $outer_ret_dyn;
     if ($parser->{"c_ret_seen"}) { $fn->{"c_block_returns"} = 1; }
     $parser->{"c_ret_seen"} = $outer_c_ret;
     

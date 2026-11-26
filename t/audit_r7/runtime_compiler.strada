@@ -541,7 +541,7 @@ func test_compiler_bugs_15_to_20() void {
     my array @wslot = ret_slot_helper(0, \$vslot);
     check(size(@wslot) == 1 && ${$wslot[0]} == 77, "Bug #18 my array @w = ret_slot() keeps scalar ref as element");
     my array @warr = ret_slot_helper(1, \$vslot);
-    check(size(@warr) == 2 && $warr[1] eq "q", "Bug #18 my array @w = ret_arr() unpacks array ref");
+    check(size(@warr) == 1 && $warr[0]->[1] eq "q", "Bug #18 my array @w = ret_arr() keeps the array ref as one element (Perl)");
 
     # Bug #19: _Hidden pkg, Child with overload-only, 0-param modifier
     my scalar $hd = _R7Hidden::new(88);

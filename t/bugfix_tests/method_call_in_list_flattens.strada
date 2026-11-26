@@ -1,9 +1,10 @@
-# EXPECT: a/b/c h/a/b/c a-b-c 5 5 6 3 3 3 2 3 k/a/b/c w1/w2 nosuch/auto a/b/c a/b/c 3 3 2 a,c,p 5 a/b/c
-# A method call as a list item gives the elements a method declared `array`
-# returns (Perl): list literals, push, join, sprintf, [...], { ... },
-# variadic calls. It was one item (ARRAY(0x...) in join). Any other method
-# is one item, also when it returns an array reference or an untyped
-# `return @list`. Dynamic names, Pkg->m, SUPER::m, around and AUTOLOAD too.
+# EXPECT: a/b/c h/a/b/c a-b-c 5 5 6 4 3 3 2 3 k/a/b/c w1/w2 nosuch/auto a/b/c a/b/c 3 3 2 a,c,p 5 a/b/c
+# A method call as a list item gives the elements of the list the method
+# returned (Perl): list literals, push, join, sprintf, [...], { ... },
+# variadic calls. It was one item (ARRAY(0x...) in join). What counts is
+# the form of the `return`, not the declared type: `return @list` is a list
+# from an untyped method too, and `return [..]` / `return undef` are one
+# item. Dynamic names, Pkg->m, SUPER::m, around and AUTOLOAD too.
 package Base;
 func new() scalar { my hash %s = (); return bless(\%s, "Base"); }
 func parts(scalar $self) array { my array @p = ("a", "b", "c"); return @p; }

@@ -6670,6 +6670,7 @@ static VMArray *vm_tied_array_splice(VM *vm, VMArray *arr, int argc, VMValue *ar
         extra[0] = VM_MAKE_INT(offset);
         extra[1] = VM_MAKE_INT(length);
         for (int i = 0; i < repl_count; i++) extra[2 + i] = repl_items[i];
+        vm->pending_call_context = 1;   /* SPLICE returns the removed list */
         VMValue res = vm_tied_array_call(vm, arr->tied_obj, sfidx, extra, total_extra);
         if (extra != ebuf) free(extra);
         if (snap && snap != snap_buf) free(snap);
@@ -9022,52 +9023,115 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
             }
             break;
         }
-        case BUILTIN_RET_LIST_FIX:
-        case BUILTIN_RET_LIST_IS:
-        case BUILTIN_RET_LIST_COUNT: {
-            /* The result of a method call that is a list item (FIX) or
-             * where one value is wanted (COUNT). Only an array (or, for a
-             * list item, undef) needs the question asked: is the method the
-             * call resolved to declared `array`? Then a list takes its
-             * elements and a scalar its count; otherwise the result is one
-             * value. */
+        case BUILTIN_RET_LIST: {
+            /* Perl's return rules (compiler/AST.strada ast_return_form): a
+             * list-form return is read by the caller's context. A scalar
+             * caller gets the count (the last item of a comma list, undef
+             * for nothing); a list caller gets the list, and VM.list_ret
+             * says so: an array a `return $ref` hands back looks the same. */
             VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
-            int want_count = (bid == BUILTIN_RET_LIST_COUNT);
-            int want_is = (bid == BUILTIN_RET_LIST_IS);
+            int kind = argc >= 2 ? (int)vm_to_int(args[1]) : 1;
+            int want_list = (frame->call_context != 0);
             int is_arr = VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL;
-            if (want_is && !is_arr) { SP_PUSH(VM_MAKE_INT(0)); break; }
-            if (!is_arr && !(VM_IS_UNDEF(rv) && !want_count)) { SP_PUSH(vm_val_copy(rv)); break; }
-            const char *mname = (argc >= 3 && VM_IS_PTR(args[2]) && VM_PTR_TYPE(args[2]) == VM_OBJ_STR) ? VM_AS_STR(args[2])->data : NULL;
-            int is_list = 0;
-            if (mname) {
-                int mfi = -1;
-                if (argc >= 4 && VM_IS_PTR(args[3]) && VM_PTR_TYPE(args[3]) == VM_OBJ_STR) {
-                    const char *spkg = VM_AS_STR(args[3])->data;
-                    mfi = vm_find_super_method(vm->program, spkg, mname, 0);
-                    if (mfi < 0) mfi = vm_find_super_method(vm->program, spkg, "AUTOLOAD", 0);
+            int is_hash = VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_HASH && vm_obj_class_name(rv) == NULL;
+            if (kind == 8) {
+                if (want_list) {
+                    VMArray *none = vm_array_new(1);
+                    vm->list_ret = VM_MAKE_PTR(none);
+                    vm->list_ret_set = 2;
+                    SP_PUSH(VM_MAKE_PTR(none));
                 } else {
-                    const char *cls = vm_obj_class_name(args[1]);
-                    if (!cls && VM_IS_PTR(args[1]) && VM_PTR_TYPE(args[1]) == VM_OBJ_STR) cls = VM_AS_STR(args[1])->data;
-                    if (cls) {
-                        mfi = vm_find_method_cached(vm, cls, mname);
-                        if (mfi < 0) mfi = vm_find_method_cached(vm, cls, "AUTOLOAD");
+                    SP_PUSH(VM_UNDEF_VAL);
+                }
+                break;
+            }
+            if (want_list) {
+                if (kind == 3 && is_hash && frame->call_context == 1) {
+                    vm->stack_top = sp;
+                    vm->gc_pause++;
+                    VMArray *kv = vm_hash_to_flat_kv(vm, VM_AS_HASH(rv));
+                    vm->gc_pause--;
+                    stack = vm->stack; RELOAD();
+                    rv = kv ? VM_MAKE_PTR(kv) : VM_MAKE_PTR(vm_array_new(1));
+                    is_arr = 1;
+                }
+                if (is_arr) { vm->list_ret = rv; vm->list_ret_set = 1; }
+                SP_PUSH(vm_val_copy(rv));
+                break;
+            }
+            if (is_arr) {
+                VMArray *ra = VM_AS_ARRAY(rv);
+                if (kind == 2 && argc >= 3 && !VM_IS_UNDEF(args[2])) SP_PUSH(vm_val_copy(args[2]));   /* (a, @b): scalar(@b) */
+                else if (kind == 2) SP_PUSH(ra->size > 0 ? vm_val_copy(ra->items[ra->size - 1]) : VM_UNDEF_VAL);
+                else SP_PUSH(VM_MAKE_INT(ra->size));
+            } else {
+                SP_PUSH(vm_val_copy(rv));
+            }
+            break;
+        }
+        case BUILTIN_SCALAR_OF: {
+            VMValue sv0 = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            if (VM_IS_PTR(sv0) && VM_PTR_TYPE(sv0) == VM_OBJ_ARRAY && vm_obj_class_name(sv0) == NULL) SP_PUSH(VM_MAKE_INT(VM_AS_ARRAY(sv0)->size));
+            else if (VM_IS_PTR(sv0) && VM_PTR_TYPE(sv0) == VM_OBJ_HASH && vm_obj_class_name(sv0) == NULL) SP_PUSH(VM_MAKE_INT(VM_AS_HASH(sv0)->size));
+            else SP_PUSH(vm_val_copy(sv0));
+            break;
+        }
+        case BUILTIN_CLOSURE_ARGS_FLAT: {
+            /* $f->(@a, g()): a closure that takes a list (variadic, or the
+             * `@_` form) gets the flagged arguments spread; any other
+             * closure gets them whole (compiled strada_closure_call_lists). */
+            VMValue res = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            VMArray *in = (argc >= 3 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) ? VM_AS_ARRAY(args[0]) : NULL;
+            int takes_list = 0;
+            if (in && VM_IS_PTR(args[1]) && VM_PTR_TYPE(args[1]) == VM_OBJ_CLOSURE) {
+                int cfi = VM_AS_CLOSURE(args[1])->func_idx;
+                if (cfi >= 0 && (size_t)cfi < vm->program->func_count && vm->program->funcs[cfi].has_variadic) takes_list = 1;
+            }
+            if (takes_list) {
+                uint64_t mask = (uint64_t)vm_to_int(args[2]);
+                vm->stack_top = sp;
+                vm->gc_pause++;
+                VMArray *out = vm_array_new(in->size > 0 ? in->size * 2 : 4);
+                for (int i = 0; i < in->size; i++) {
+                    VMValue it = in->items[i];
+                    int spread = (i < 60) && ((mask >> i) & 1);
+                    if (spread && VM_IS_PTR(it) && VM_PTR_TYPE(it) == VM_OBJ_ARRAY && VM_IS_UNDEF(VM_AS_ARRAY(it)->tied_obj)) {
+                        VMArray *ea = VM_AS_ARRAY(it);
+                        for (int j = 0; j < ea->size; j++) vm_array_push(out, vm_val_copy(ea->items[j]));
+                    } else if (spread && VM_IS_PTR(it) && VM_PTR_TYPE(it) == VM_OBJ_HASH && vm_obj_class_name(it) == NULL) {
+                        VMArray *kv = vm_hash_to_flat_kv(vm, VM_AS_HASH(it));
+                        for (int j = 0; kv && j < kv->size; j++) vm_array_push(out, vm_val_copy(kv->items[j]));
+                    } else {
+                        vm_array_push(out, vm_val_copy(it));
                     }
                 }
-                if (mfi >= 0 && (size_t)mfi < vm->program->func_count &&
-                    vm->program->funcs[mfi].return_type == 4 /* AST_TYPE_ARRAY */) is_list = 1;
+                vm->gc_pause--;
+                stack = vm->stack; RELOAD();
+                res = VM_MAKE_PTR(out);
             }
-            if (want_is) {
-                SP_PUSH(VM_MAKE_INT(is_list));
-            } else if (want_count) {
-                if (is_list) SP_PUSH(VM_MAKE_INT(VM_AS_ARRAY(rv)->size));
-                else SP_PUSH(vm_val_copy(rv));
-            } else if (is_list) {
-                SP_PUSH(vm_val_copy(rv));
-            } else {
-                VMArray *one = vm_array_new(1);
-                vm_array_push(one, vm_val_copy(rv));
-                SP_PUSH(VM_MAKE_PTR(one));
-            }
+            SP_PUSH(res);
+            break;
+        }
+        case BUILTIN_UCALL_ITEM:
+        case BUILTIN_UCALL_ARRAY:
+        case BUILTIN_UCALL_ARG:
+        case BUILTIN_UCALL_IS: {
+            /* The result of a call to a user function, read where a list
+             * is being built. The noted list goes on as it is; anything
+             * else is one value. */
+            VMValue rv = argc >= 1 ? args[0] : VM_UNDEF_VAL;
+            int noted = vm->list_ret_set != 0 && vm->list_ret == rv;
+            int nothing = noted && vm->list_ret_set == 2;
+            vm->list_ret_set = 0;
+            vm->list_ret = VM_UNDEF_VAL;
+            if (bid == BUILTIN_UCALL_IS) { SP_PUSH(VM_MAKE_INT(noted ? 1 : 0)); break; }
+            if (bid == BUILTIN_UCALL_ARG) { SP_PUSH(nothing ? VM_UNDEF_VAL : vm_val_copy(rv)); break; }
+            if (noted) { SP_PUSH(vm_val_copy(rv)); break; }
+            int is_arr = VM_IS_PTR(rv) && VM_PTR_TYPE(rv) == VM_OBJ_ARRAY && vm_obj_class_name(rv) == NULL;
+            if (bid == BUILTIN_UCALL_ITEM && !is_arr && !VM_IS_UNDEF(rv)) { SP_PUSH(vm_val_copy(rv)); break; }
+            VMArray *one = vm_array_new(1);
+            vm_array_push(one, vm_val_copy(rv));
+            SP_PUSH(VM_MAKE_PTR(one));
             break;
         }
         case BUILTIN_DYN_SPREAD_MASK: {

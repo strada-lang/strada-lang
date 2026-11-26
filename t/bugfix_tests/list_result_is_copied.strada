@@ -1,22 +1,23 @@
 # EXPECT: 2 3 334 2 3
-# `my @a = $o->items()` / `@a = f()` where the call returns a reference to an
-# array something else still holds (an object's stored array, an `our`
-# array): compiled code took the array itself, so push(@a, ...) grew the
-# original. The VM copied. A fresh list (`return @local`) is still taken
-# without copying.
+# `my @a = $o->items()` / `@a = f()` where the call returns a list that
+# something else still holds (an object's stored array, an `our` array):
+# the variable gets a copy, so push(@a, ...) does not grow the original.
+# (Compiled code once took the array itself.) A fresh list
+# (`return @local`) is taken without copying.
 package O;
 func new() scalar { my hash %s = ("items" => [1, 2]); return bless(\%s, "O"); }
-func items(scalar $self) scalar { return $self->{"items"}; }
+func items(scalar $self) scalar { return @{$self->{"items"}}; }
 package main;
 our array @G = (1, 2, 3);
-func gref() scalar { return \@G; }
+func glist() scalar { return @G; }
 func fresh() array { my array @p = (1, 2); return @p; }
 func main() int {
     my scalar $o = O::new();
     my array @b = $o->items(); push(@b, 9);
-    my array @c = gref(); push(@c, 9); pop(@c);
+    my array @c = glist(); push(@c, 9); pop(@c);
     my array @d = (); @d = $o->items(); push(@d, 7); push(@d, 8);
     my array @f = fresh(); push(@f, 3);
-    say(scalar(@{$o->{"items"}}) . " " . scalar(@G) . " " . scalar(@b) . scalar(@c) . scalar(@d) . " " . scalar(@{$o->items()}) . " " . scalar(@f));
+    my array @again = $o->items();
+    say(scalar(@{$o->{"items"}}) . " " . scalar(@G) . " " . scalar(@b) . scalar(@c) . scalar(@d) . " " . scalar(@again) . " " . scalar(@f));
     return 0;
 }

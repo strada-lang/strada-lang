@@ -2,6 +2,40 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### What a call returns now follows Perl (2026-11-26)
+This replaces the two entries below about methods declared `array`.
+- What a call yields depends on the form of the `return` and on the caller's
+  context, for functions, methods, closures and code references, whatever
+  the declared return type:
+  - `return @list;` (also `map`, `sort`, ranges, ...) gives its elements to
+    a list and its count to a scalar.
+  - `return (a, b, c);` gives its elements to a list and its last item to a
+    scalar.
+  - `return [..];`, `return \@x;`, `return $ref;` are one value everywhere.
+  - `return;` is the empty list (undef to a scalar); `return undef;` is one
+    item.
+- Changes you may notice:
+  - `my @a = f()` where f returns an array REFERENCE is one element (it
+    used to take the referenced elements). Write `@{f()}` to copy them.
+  - `my @a = f()` where f does `return undef;` is one element (it was
+    empty). A bare `return;` still gives an empty array.
+  - An untyped function that does `return @list;` now flattens in a list
+    and counts in a scalar (`my $n = f()`); it used to hand back the array.
+    Write `[f()]` or return `\@list` to keep one value.
+  - `my $n = f()` for `return (7, 8, 9)` is 9 (it was 3 for functions
+    declared `array`).
+  - `foreach (f())` over a function that returns an array reference runs
+    once.
+- Also new: `$f->(@a)` spreads the array into a closure that takes a list
+  (`func { ... }` with `@_`, or a variadic one); a function declared `hash`
+  gives its pairs in a list; `wantarray` works in methods in compiled code;
+  list slices `(LIST)[i, j]`.
+- Still not Perl: a fixed parameter (`scalar $x`, `array @a`) receives a
+  list argument whole; a function declared `array` that returns a reference
+  still returns that array's elements.
+- Libraries built with an older compiler must be rebuilt.
+- Test: `t/return_rules_test/run.sh` (778 cases checked against Perl 5.38).
+
 ### Methods declared `array`: scalar context and arguments (2026-11-26)
 - `my $n = $obj->parts()` (also `$h{k} = ...`, `$a[i] = ...`) is the count
   when the method is declared `array`, as for a function declared `array`.

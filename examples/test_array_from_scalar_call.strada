@@ -1,5 +1,6 @@
-# my array @a = (f()) / ($o->m()) where the call returns a plain scalar is a
-# one-element list; arrays still pass through; undef gives an empty list.
+# my array @a = f() / ($o->m()) reads the call as Perl does: a returned list
+# gives its elements; one value (a number, a hash or array REFERENCE, undef)
+# is one element; a bare `return;` is the empty list.
 package Rec;
 func new_rec(int $id) scalar { my hash %h = ("id" => $id); return bless(\%h, "Rec"); }
 func id(scalar $self) int { return $self->{"id"}; }
@@ -7,6 +8,7 @@ func tags(scalar $self) array { my array @t = ("a", "b"); return @t; }
 package main;
 func five() int { return 5; }
 func nothing() scalar { return undef; }
+func none() scalar { return; }
 func pair() array { my array @p = (1, 2); return @p; }
 func a_hashref() scalar { return {"id" => "t1"}; }
 func an_arrayref() scalar { my array @x = (7, 8, 9); return \@x; }
@@ -22,7 +24,9 @@ func main() int {
     my array @d = $r->tags();
     if (scalar(@d) != 2) { say("FAIL array method"); $fail = 1; }
     my array @e = nothing();
-    if (scalar(@e) != 0) { say("FAIL undef"); $fail = 1; }
+    if (scalar(@e) != 1 || defined($e[0])) { say("FAIL undef is one element"); $fail = 1; }
+    my array @e0 = none();
+    if (scalar(@e0) != 0) { say("FAIL bare return is the empty list"); $fail = 1; }
     my str $nm = "Wile";
     my array @f = (lc($nm));
     if (scalar(@f) != 1 || $f[0] ne "wile") { say("FAIL builtin scalar"); $fail = 1; }
@@ -41,12 +45,14 @@ func main() int {
     @i = pair();
     if (scalar(@i) != 2) { say("FAIL assign array call"); $fail = 1; }
     @i = nothing();
-    if (scalar(@i) != 0) { say("FAIL assign undef"); $fail = 1; }
+    if (scalar(@i) != 1) { say("FAIL assign undef is one element"); $fail = 1; }
+    @i = none();
+    if (scalar(@i) != 0) { say("FAIL assign bare return"); $fail = 1; }
     my array @hr = (a_hashref());
     push(@hr, {"id" => "t2"});
     if (scalar(@hr) != 2 || $hr[0]->{"id"} ne "t1") { say("FAIL hash ref result is one element"); $fail = 1; }
     my array @ar = an_arrayref();
-    if (scalar(@ar) != 3) { say("FAIL array ref result is the list"); $fail = 1; }
+    if (scalar(@ar) != 1 || scalar(@{$ar[0]}) != 3) { say("FAIL array ref result is one element"); $fail = 1; }
     @hr = (a_hashref());
     if (scalar(@hr) != 1) { say("FAIL assign hash ref result"); $fail = 1; }
     if ($fail == 0) { say("all array from scalar call tests passed"); }

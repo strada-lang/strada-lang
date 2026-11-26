@@ -2322,6 +2322,8 @@ func stage0_types_compatible(int $expected, int $actual) int {
 func stage0_expr_type(scalar $ctx, scalar $expr) int {
     if (is_valid_node($expr) == 0) { return TYPE_SCALAR(); }
     my int $t = $expr->{"type"};
+    # a list-returning call read as one value (sem_scalar_of)
+    if ($expr->{"sc_count"}) { return TYPE_SCALAR(); }
     if ($t == NODE_INT_LITERAL()) { return TYPE_INT(); }
     if ($t == NODE_NUM_LITERAL()) { return TYPE_NUM(); }
     if ($t == NODE_STR_LITERAL()) {
@@ -2350,6 +2352,9 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
             my str $mt_fk = sem_method_target($ctx, $mt_cls, $ctx->{"recv_exact"} + 0, $mt_name, 0);
             if (length($mt_fk) > 0) {
                 my int $mt_rt = $ctx->{"functions"}->{$mt_fk}->{"return_type"};
+                # a list is read by context (its count or last item where
+                # one value is wanted): not a type mismatch
+                if ($mt_rt == TYPE_ARRAY() || $mt_rt == TYPE_HASH()) { return TYPE_SCALAR(); }
                 if ($mt_rt != TYPE_VOID() && $mt_rt > 0) { return $mt_rt; }
             }
         }
@@ -2633,20 +2638,6 @@ func sem_is_array_value(scalar $ctx, scalar $n) int {
 # wanted (`my $n = f()`, `$v = f()`, `$h{k} = f()`): the element count, as
 # for an array variable there (Perl; it stored the array). Functions without
 # a declared `array` return type are not affected.
-# A method call where one value is wanted (`my $n = $o->parts()`,
-# `$h{k} = $o->parts()`): the count when the method that runs is declared
-# `array`, as for a function (sem_call_returns_array). Which method runs is
-# known at run time, so the node is only flagged; the code generator asks
-# the dispatch (strada_ret_list_count) when some `array` function could
-# answer to the name.
-func sem_method_scalar_want(scalar $n) void {
-    if (is_valid_node($n) == 0) { return; }
-    my int $msw_t = $n->{"type"};
-    if ($msw_t == NODE_METHOD_CALL() || $msw_t == NODE_DYN_METHOD_CALL() || $msw_t == NODE_SUPER_CALL()) {
-        $n->{"scalar_want"} = 1;
-    }
-}
-
 func sem_call_returns_array(scalar $ctx, scalar $n) int {
     if (is_valid_node($n) == 0) { return 0; }
     if ($n->{"type"} != NODE_CALL()) { return 0; }
@@ -2743,7 +2734,6 @@ func sem_scalar_decl_count(scalar $ctx, scalar $decl) void {
     if ($it == NODE_MAP() || $it == NODE_GREP()) { $hit = 1; }
     if (sem_call_returns_array($ctx, $ini) == 1) { $hit = 1; }
     if ($hit == 1) { $decl->{"init"} = sem_scalar_of($ini); }
-    else { sem_method_scalar_want($ini); }
 }
 
 # A reverse(...) call evaluated in scalar context: the list joined and the
@@ -2767,6 +2757,13 @@ func sem_is_count_in_scalar_call(scalar $ctx, scalar $n) int {
 }
 
 func sem_scalar_of(scalar $n) scalar {
+    # A call is read in scalar context by the code generator itself (the
+    # count of the list it returns, or the last item of a comma list):
+    # scalar(f()) would always count.
+    if (is_valid_node($n) == 1 && $n->{"type"} == NODE_CALL() && length("" . $n->{"sem_fn_key"}) > 0) {
+        $n->{"sc_count"} = 1;
+        return $n;
+    }
     my scalar $c = ast_new_call("scalar");
     ast_add_arg($c, $n);
     ast_set_line($c, ast_get_line($n));
@@ -3495,9 +3492,6 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                  || $cat == NODE_SUBSCRIPT() || $cat == NODE_DEREF_HASH() || $cat == NODE_DEREF_ARRAY())
                 && sem_call_returns_array($ctx, $expr->{"value"}) == 1) {
                 $expr->{"value"} = sem_scalar_of($expr->{"value"});
-            } elsif (($cat == NODE_VARIABLE() && ("" . $expr->{"target"}->{"sigil"}) eq "$") || $cat == NODE_HASH_ACCESS()
-                 || $cat == NODE_SUBSCRIPT() || $cat == NODE_DEREF_HASH() || $cat == NODE_DEREF_ARRAY()) {
-                sem_method_scalar_want($expr->{"value"});
             }
         }
         # `$h{n} = @a` / `$a[0] = @{$r}`: an array assigned to an element is
@@ -3978,7 +3972,6 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if ($sigil eq "$" && $stmt->{"init"} && sem_call_returns_array($ctx, $stmt->{"init"}) == 1) {
             $stmt->{"init"} = sem_scalar_of($stmt->{"init"});
         }
-        if ($sigil eq "$" && $stmt->{"init"}) { sem_method_scalar_want($stmt->{"init"}); }
         if ($sigil eq "$" && $stmt->{"init"} && sem_is_array_value($ctx, $stmt->{"init"}) == 1) {
             my int $iit = $stmt->{"init"}->{"type"};
             # `my $n = @{$r}` / `@$r`: the count, like `my $n = @a` (it

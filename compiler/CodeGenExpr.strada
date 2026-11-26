@@ -1478,6 +1478,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
         my str $op = $expr->{"op"};
         my scalar $target = $expr->{"target"};
         my int $target_type = $target->{"type"};
+        if ($op eq "=") { ucall_mark_list_source($cg, $target, $expr->{"value"}); }
 
         if ($target_type == NODE_VARIABLE()) {
             my scalar $kt_a = $cg->{"known_types"};
@@ -2064,6 +2065,14 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             emit($cg, "({ StradaValue *__lw = strada_new_array(); strada_array_push_take(__lw->value.av, ");
                             gen_expression($cg, $val);
                             emit($cg, "); __lw; })");
+                        } elsif (cg_ucall_kind($cg, $val) != 0) {
+                            # @a = f(): the call's list (strada_ucall_array)
+                            if ($val_type2 == NODE_CALL()) { $cg->{"call_context"} = 1; }
+                            $val->{"uc_ctx"} = 2;
+                            $val->{"uc_list"} = 1;
+                            emit($cg, "strada_ucall_array(");
+                            gen_expression($cg, $val);
+                            emit($cg, ")");
                         } elsif ($val_type2 == NODE_CALL() || $val_type2 == NODE_METHOD_CALL()) {
                             if ($val_type2 == NODE_CALL()) { $cg->{"call_context"} = 1; }
                             emit($cg, "({ StradaValue *__lr = ");
@@ -4758,20 +4767,21 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
             # A call that passes an array, hash or list goes through the
             # entry that spreads it when the method takes a list. Every
             # other call keeps the paths above.
-            if (method_spread_mask($cg, $args, 0, $arg_count) != 0 || length(method_dyn_var($args, 0, $arg_count)) > 0) {
+            if (method_spread_mask($cg, $args, 0, $arg_count) != 0) {
                 $mc_fn = "strada_method_call_spread(";
                 $mc_extra = "";
                 $mc_decl = "";
-            }
-            # A call that is a list item, whose name some `array` function
-            # could answer to: the entry that also says whether the method
-            # it resolved to is one (it spreads list arguments too).
-            if ($expr->{"ret_list_fix"}) {
-                my int $ml_id = $cg->{"tmp_counter"} + 0;
-                $cg->{"tmp_counter"} = $ml_id + 1;
-                $mc_decl = "static StradaListSite __mls_" . $ml_id . "; ";
-                $mc_fn = "strada_method_call_lst(";
-                $mc_extra = ", &__mls_" . $ml_id;
+            } elsif (method_cand_mask($cg, $args, 0, $arg_count) != 0) {
+                # an argument that is itself a call may turn out to be a
+                # list: the entry that checks the pack and otherwise
+                # dispatches as usual (keeps the call-site cache)
+                if ($mc_fn eq "strada_method_call_cs_il(") {
+                    $mc_fn = "strada_method_call_cs_sp(";
+                } else {
+                    $mc_fn = "strada_method_call_spread(";
+                    $mc_extra = "";
+                    $mc_decl = "";
+                }
             }
 
             # Check if any argument has spread operator
@@ -4847,12 +4857,6 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
 
                     # Skip devirtualization for methods with before/after/around hooks
                     if (length($resolved_fn) > 0 && has_method_modifier($cg, $method) == 1) {
-                        $resolved_fn = "";
-                    }
-                    # A list item whose method is declared `array` goes
-                    # through the dispatch wrapper, which records the list
-                    # it returns (strada_ret_list_mark).
-                    if (length($resolved_fn) > 0 && $expr->{"ret_list_fix"} && $resolved_ret_type == TYPE_ARRAY()) {
                         $resolved_fn = "";
                     }
                     my scalar $rf_i = 0;
@@ -5599,54 +5603,32 @@ func tern_branch_is_list(scalar $cg, scalar $branch) int {
 # map/grep/sort, a call declared `array`). The method's wrapper decides.
 func method_pack_open(scalar $cg, scalar $pargs, int $pcount) str {
     my int $mpo_bits = method_spread_mask($cg, $pargs, 0, $pcount);
-    my str $mpo_dyn = method_dyn_var($pargs, 0, $pcount);
-    if (length($mpo_dyn) > 0) { return "strada_pack_args_dyn(&" . $mpo_dyn . ", " . $mpo_bits . "ULL, " . $pcount; }
+    my int $mpo_cand = method_cand_mask($cg, $pargs, 0, $pcount);
+    if ($mpo_cand != 0) { return "strada_pack_args_cand(" . $mpo_cand . "ULL, " . $mpo_bits . "ULL, " . $pcount; }
     if ($mpo_bits == 0) { return "strada_pack_args(" . $pcount; }
     return "strada_pack_args_spread(" . $mpo_bits . "ULL, " . $pcount;
 }
 
-# An argument that is itself a method call some `array` function could
-# answer to: whether it is spread is known only when it has run. Such
-# arguments are flagged here (once per call node, from gen_expression, which
-# declares the C variable $dyn_var around the whole call); each writes its
-# bit into that variable when its method turned out to be declared `array`
-# (strada_ret_list_arg), and the pack reads it (strada_pack_args_dyn).
-# Returns 1 when any argument was flagged.
-func method_dyn_args_mark(scalar $cg, scalar $pargs, int $first, int $pcount, str $dyn_var) int {
+# Bit i set: argument $first + i is itself a call whose result may be a
+# list (cg_ucall_kind 1): whether it is spread is known when it has run
+# (strada_pack_args_dyn looks at the value). Such an argument is generated
+# raw: uc_ctx 2. 0 with an explicit ...spread or more than 60 arguments.
+func method_cand_mask(scalar $cg, scalar $pargs, int $first, int $pcount) int {
     if ($pcount - $first > 60) { return 0; }
-    my int $mda_i = $first;
-    while ($mda_i < $pcount) {
-        if ($pargs->[$mda_i]->{"type"} == NODE_SPREAD()) { return 0; }
-        $mda_i = $mda_i + 1;
-    }
-    my int $mda_any = 0;
-    my int $mda_bit = 1;
-    $mda_i = $first;
-    while ($mda_i < $pcount) {
-        my scalar $mda_a = $pargs->[$mda_i];
-        my int $mda_t = $mda_a->{"type"};
-        if (($mda_t == NODE_METHOD_CALL() || $mda_t == NODE_DYN_METHOD_CALL() || $mda_t == NODE_SUPER_CALL())
-            && !$mda_a->{"ret_list_fix"} && method_may_return_list($cg, $mda_a) == 1) {
-            $mda_a->{"ret_list_fix"} = 1;
-            $mda_a->{"rla_var"} = $dyn_var;
-            $mda_a->{"rla_bit"} = $mda_bit;
-            $mda_any = 1;
+    my int $mcm_bits = 0;
+    my int $mcm_bit = 1;
+    my int $mcm_i = $first;
+    while ($mcm_i < $pcount) {
+        my scalar $mcm_a = $pargs->[$mcm_i];
+        if ($mcm_a->{"type"} == NODE_SPREAD()) { return 0; }
+        if (cg_ucall_kind($cg, $mcm_a) == 1) {
+            $mcm_a->{"uc_ctx"} = 2;
+            $mcm_bits = $mcm_bits + $mcm_bit;
         }
-        $mda_bit = $mda_bit * 2;
-        $mda_i = $mda_i + 1;
+        $mcm_bit = $mcm_bit * 2;
+        $mcm_i = $mcm_i + 1;
     }
-    return $mda_any;
-}
-
-# The variable method_dyn_args_mark gave this call's arguments, or "".
-func method_dyn_var(scalar $pargs, int $first, int $pcount) str {
-    my int $mdv_i = $first;
-    while ($mdv_i < $pcount) {
-        my str $mdv_v = "" . $pargs->[$mdv_i]->{"rla_var"};
-        if (length($mdv_v) > 0) { return $mdv_v; }
-        $mdv_i = $mdv_i + 1;
-    }
-    return "";
+    return $mcm_bits;
 }
 
 # Bit i set: argument $first + i is one Perl would spread. 0 when the call
@@ -5666,19 +5648,47 @@ func method_spread_mask(scalar $cg, scalar $pargs, int $first, int $pcount) int 
     return $msm_bits;
 }
 
-# 1 when some function declared `array` could answer to this method call's
-# name (array_method_names; a dynamic name: when there is any).
-func method_may_return_list(scalar $cg, scalar $mcall) int {
-    my scalar $mrl_set = $cg->{"array_method_names"};
-    if (!$mrl_set) { return 0; }
-    if ($mcall->{"type"} == NODE_DYN_METHOD_CALL()) {
-        if (size(%{$mrl_set}) == 0) { return 0; }
+# `@a = f()`, `our @a = f()`, `@{$r} = f()`, `%h = f()`: a list assignment
+# reads the call's list. An array target gets it as a new array (uc_ctx 3:
+# strada_ucall_array), a hash target as a new hash (uc_ctx 4:
+# strada_ucall_hash).
+func ucall_mark_list_source(scalar $cg, scalar $target, scalar $value) void {
+    if (!$target || !$value) { return; }
+    my int $ml_t = $target->{"type"};
+    if ($ml_t != NODE_VARIABLE() && $ml_t != NODE_DEREF_SCALAR()) { return; }
+    my str $ml_sig = "" . $target->{"sigil"};
+    if ($ml_sig ne "@" && $ml_sig ne "%") { return; }
+    if ($value->{"uc_ctx"}) { return; }
+    if (cg_ucall_kind($cg, $value) == 0) { return; }
+    $value->{"uc_list"} = 1;
+    if ($ml_sig eq "@") { $value->{"uc_ctx"} = 3; }
+    else { $value->{"uc_ctx"} = 4; }
+}
+
+# How the result of a call node is read (Perl's return rules, see
+# strada_ret_list in the runtime):
+#   0  not a user call, or one that cannot return a list (a builtin, a
+#      function declared int/num/str/void, isa/can): no check
+#   1  a method, a closure call, or a function declared scalar (the
+#      default), dynamic or hash: known only when it has run
+#   2  a function declared `array`: always a list
+func cg_ucall_kind(scalar $cg, scalar $n) int {
+    my int $uk_t = $n->{"type"};
+    if ($uk_t == NODE_METHOD_CALL()) {
+        my str $uk_m = "" . $n->{"method"};
+        if ($uk_m eq "isa" || $uk_m eq "can") { return 0; }
         return 1;
     }
-    my str $mrl_name = "" . $mcall->{"method"};
-    if ($mrl_name eq "isa" || $mrl_name eq "can") { return 0; }
-    if (!$mrl_set->{$mrl_name} && !$mrl_set->{"*"}) { return 0; }
-    return 1;
+    if ($uk_t == NODE_DYN_METHOD_CALL() || $uk_t == NODE_SUPER_CALL() || $uk_t == NODE_CLOSURE_CALL()) { return 1; }
+    if ($uk_t == NODE_CALL()) {
+        # a user function (the analyzer records which); a builtin of the
+        # same name as some package's function is not one
+        if (length("" . $n->{"sem_fn_key"}) == 0) { return 0; }
+        my int $uk_rt = resolve_call_return_type($cg, $n->{"name"});
+        if ($uk_rt == TYPE_SCALAR() || $uk_rt == TYPE_DYNAMIC() || $uk_rt == TYPE_HASH()) { return 1; }
+        if ($uk_rt == TYPE_ARRAY()) { return 2; }
+    }
+    return 0;
 }
 
 func array_flatten_kind(scalar $cg, scalar $elem) int {
@@ -5710,15 +5720,12 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
     if ($t == NODE_RANGE() || $t == NODE_ARRAY_SLICE() || $t == NODE_HASH_SLICE()) { return 2; }
     if ($t == NODE_DEREF_SCALAR() && $elem->{"sigil"} eq "@") { return 1; }
     if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) { return 2; }
-    # A method call as a list item gives the elements a method declared
-    # `array` returns (Perl); from any other method it is one item, also
-    # when that is an array reference. Which method runs is known only at
-    # run time: see strada_ret_list_fix.
-    if ($t == NODE_METHOD_CALL() || $t == NODE_DYN_METHOD_CALL() || $t == NODE_SUPER_CALL()) {
-        if ($elem->{"ret_list_count"}) { return 0; }
-        if ($elem->{"ret_list_fix"}) { return 2; }
-        if (method_may_return_list($cg, $elem) == 0) { return 0; }
-        $elem->{"ret_list_fix"} = 1;
+    # A call to a user function, method or closure as a list item: its
+    # elements when it returned a list, itself as one item otherwise. Known
+    # only when it has run (gen_expression wraps it in strada_ucall_item).
+    if ($t == NODE_METHOD_CALL() || $t == NODE_DYN_METHOD_CALL() || $t == NODE_SUPER_CALL() || $t == NODE_CLOSURE_CALL()) {
+        if (cg_ucall_kind($cg, $elem) == 0) { return 0; }
+        $elem->{"uc_ctx"} = 1;
         return 2;
     }
     if ($t == NODE_CALL()) {
@@ -5731,12 +5738,16 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
             return 2;
         }
         my int $crt = resolve_call_return_type($cg, $elem->{"name"});
-        if ($crt == TYPE_ARRAY()) { return 2; }
+        if ($crt == TYPE_ARRAY()) { $elem->{"uc_ctx"} = 2; return 2; }
+        # a function declared scalar (the default) or hash: a list when its
+        # `return` was one (strada_ucall_item)
+        if (($crt == TYPE_SCALAR() || $crt == TYPE_HASH()) && length("" . $elem->{"sem_fn_key"}) > 0) { $elem->{"uc_ctx"} = 1; return 2; }
         # A `dynamic` function as a list item is called in list context
         # (Perl) and flattens when it returns an array; it was called in
         # scalar context there.
         if ($crt == TYPE_DYNAMIC()) {
             $elem->{"want_list"} = 1;
+            $elem->{"uc_ctx"} = 1;
             return 2;
         }
         # A runtime builtin (core::unpack, core::readdir, re::captures, ...)
@@ -5758,6 +5769,88 @@ func array_flatten_kind(scalar $cg, scalar $elem) int {
 func gen_expression(scalar $cg, scalar $expr) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
+
+    # The list a builtin works on (map/grep/sort input, sort(...),
+    # reverse(...)) may be a call: it is read as a list, as a new array.
+    if ($type == NODE_MAP() || $type == NODE_GREP() || $type == NODE_SORT()) {
+        my scalar $li_src = $expr->{"array"};
+        if ($li_src && !$li_src->{"uc_ctx"} && cg_ucall_kind($cg, $li_src) != 0) {
+            $li_src->{"uc_ctx"} = 3;
+            $li_src->{"uc_list"} = 1;
+        }
+    }
+    if ($type == NODE_CALL() && length("" . $expr->{"sem_fn_key"}) == 0 && !$expr->{"uc_lb"}) {
+        $expr->{"uc_lb"} = 1;
+        my str $lb_nm = "" . $expr->{"name"};
+        if ($lb_nm eq "sort" || $lb_nm eq "nsort" || ($lb_nm eq "reverse" && ($expr->{"scalar_ctx"} + 0) != 1)) {
+            my scalar $lb_args = $expr->{"args"};
+            my int $lb_n = $expr->{"arg_count"} + 0;
+            my int $lb_i = 0;
+            while ($lb_args && $lb_i < $lb_n) {
+                my scalar $lb_a = $lb_args->[$lb_i];
+                if ($lb_a && !$lb_a->{"uc_ctx"} && cg_ucall_kind($cg, $lb_a) != 0) {
+                    $lb_a->{"uc_ctx"} = 3;
+                    $lb_a->{"uc_list"} = 1;
+                }
+                $lb_i = $lb_i + 1;
+            }
+        }
+    }
+
+    # The result of a call to a user function, method or closure is read by
+    # the caller's context (Perl; see strada_ret_list in the runtime). A
+    # list consumer sets uc_ctx on the node before generating it: 1 an item
+    # of a list, 2 it reads the raw result itself (array initializers,
+    # foreach, arguments, `return f()`, a statement). Anything else wants
+    # one value: the count of a list, the last item of a comma list.
+    if (($type == NODE_CALL() || $type == NODE_METHOD_CALL() || $type == NODE_DYN_METHOD_CALL()
+         || $type == NODE_SUPER_CALL() || $type == NODE_CLOSURE_CALL()) && !$in_extern && !$expr->{"uc_busy"}) {
+        # Arguments of a user call are a list (Perl): an argument that is
+        # itself a call is passed as it came back, not reduced to one value
+        # (a variadic or list-taking callee spreads it, an `array` or scalar
+        # parameter receives it whole).
+        if ($type != NODE_CALL() || length("" . $expr->{"sem_fn_key"}) > 0) {
+            my scalar $uc_args = $expr->{"args"};
+            my int $uc_argc = $expr->{"arg_count"} + 0;
+            my int $uc_ai = 0;
+            while ($uc_args && $uc_ai < $uc_argc) {
+                my scalar $uc_a = $uc_args->[$uc_ai];
+                # ...f(): the spread reads the call's list itself
+                if ($uc_a && $uc_a->{"type"} == NODE_SPREAD()) { $uc_a = $uc_a->{"target"}; }
+                if ($uc_a && !$uc_a->{"uc_ctx"} && cg_ucall_kind($cg, $uc_a) != 0) { $uc_a->{"uc_ctx"} = 2; }
+                $uc_ai = $uc_ai + 1;
+            }
+        }
+        my int $uc_want = $expr->{"uc_ctx"} + 0;
+        # In a program with a wantarray-using method, a method or closure
+        # call states its context (the callee is not known here).
+        if (($cg->{"ctx_methods"} + 0) == 1 && $type != NODE_CALL() && !$expr->{"uc_pass"} && !$expr->{"uc_ctxset"}) {
+            my int $uc_c = 0;
+            if ($uc_want == 1 || $expr->{"uc_list"}) { $uc_c = 1; }
+            $expr->{"uc_ctxset"} = 1;
+            emit($cg, "({ int __ucc = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0); strada_set_call_context(" . $uc_c . "); StradaValue *__ucr = ");
+            gen_expression($cg, $expr);
+            emit($cg, "; strada_set_call_context(__ucc); __ucr; })");
+            $expr->{"uc_ctxset"} = 0;
+            return;
+        }
+        if ($uc_want != 2) {
+            my int $uc_kind = cg_ucall_kind($cg, $expr);
+            my str $uc_fn = "";
+            if ($uc_kind == 1 && $uc_want == 1) { $uc_fn = "strada_ucall_item("; }
+            if ($uc_want == 3) { $uc_fn = "strada_ucall_array("; }
+            if ($uc_want == 4) { $uc_fn = "strada_ucall_hash("; }
+            if ($uc_kind != 0 && $uc_want == 0) { $uc_fn = "strada_ucall_scalar("; }
+            if (length($uc_fn) > 0) {
+                $expr->{"uc_busy"} = 1;
+                emit($cg, $uc_fn);
+                gen_expression($cg, $expr);
+                emit($cg, ")");
+                $expr->{"uc_busy"} = 0;
+                return;
+            }
+        }
+    }
 
     # Integer literal
     if ($type == NODE_INT_LITERAL()) {
@@ -7720,62 +7813,6 @@ func gen_expression(scalar $cg, scalar $expr) void {
     # A method call that is a list item (array_flatten_kind set the flag):
     # the list of a method declared `array`, or one item. The slot is this
     # call's; strada_method_call_lst / strada_super_call_lst fill it.
-    # Arguments that are method calls which may return a list: the variable
-    # they report into is declared around the whole call.
-    if (($type == NODE_METHOD_CALL() || $type == NODE_DYN_METHOD_CALL() || $type == NODE_SUPER_CALL()) && !$expr->{"mdm_done"} && !$in_extern) {
-        $expr->{"mdm_done"} = 1;
-        my int $mdm_first = 0;
-        if ($type == NODE_SUPER_CALL()) { $mdm_first = 1; }
-        my int $mdm_argc = $expr->{"arg_count"} + 0;
-        my str $mdm_var = "";
-        if ($mdm_argc > $mdm_first) {
-            # (a node generated twice keeps the variable its arguments name)
-            $mdm_var = method_dyn_var($expr->{"args"}, $mdm_first, $mdm_argc);
-            if (length($mdm_var) == 0) {
-                my int $mdm_id = $cg->{"tmp_counter"} + 0;
-                if (method_dyn_args_mark($cg, $expr->{"args"}, $mdm_first, $mdm_argc, "__mdm" . $mdm_id) == 1) {
-                    $cg->{"tmp_counter"} = $mdm_id + 1;
-                    $mdm_var = "__mdm" . $mdm_id;
-                }
-            }
-        }
-        if (length($mdm_var) > 0) {
-            emit($cg, "({ uint64_t " . $mdm_var . " = 0; StradaValue *" . $mdm_var . "r = ");
-            gen_expression($cg, $expr);
-            emit($cg, "; " . $mdm_var . "r; })");
-            $expr->{"mdm_done"} = 0;
-            return;
-        }
-        $expr->{"mdm_done"} = 0;
-    }
-    # One value wanted from a method call (Semantic's scalar_want): the
-    # count when the method is declared `array`.
-    if (($type == NODE_METHOD_CALL() || $type == NODE_DYN_METHOD_CALL() || $type == NODE_SUPER_CALL()) && $expr->{"scalar_want"} && !$expr->{"ret_list_fix"} && !$in_extern) {
-        if (method_may_return_list($cg, $expr) == 1) {
-            $expr->{"ret_list_fix"} = 1;
-            $expr->{"ret_list_count"} = 1;
-        } else {
-            $expr->{"scalar_want"} = 0;
-        }
-    }
-    if (($type == NODE_METHOD_CALL() || $type == NODE_DYN_METHOD_CALL() || $type == NODE_SUPER_CALL()) && ($expr->{"ret_list_fix"} + 0) == 1 && !$in_extern) {
-        my int $rl_id = $cg->{"tmp_counter"} + 0;
-        $cg->{"tmp_counter"} = $rl_id + 1;
-        my str $rl_s = "__rl" . $rl_id;
-        $expr->{"ret_list_fix"} = 2;
-        emit($cg, "({ int " . $rl_s . " = 0; int *" . $rl_s . "p = strada_ret_list_arm(&" . $rl_s . "); StradaValue *" . $rl_s . "r = ");
-        gen_expression($cg, $expr);
-        my str $rl_end = "strada_ret_list_done(";
-        if ($expr->{"ret_list_count"}) { $rl_end = "strada_ret_list_count("; }
-        if (length("" . $expr->{"rla_var"}) > 0) {
-            # an argument of another method call: reports, stays as it is
-            emit($cg, "; strada_ret_list_arg(" . $rl_s . "r, " . $rl_s . ", " . $rl_s . "p, &" . $expr->{"rla_var"} . ", " . $expr->{"rla_bit"} . "ULL); })");
-        } else {
-            emit($cg, "; " . $rl_end . $rl_s . "r, " . $rl_s . ", " . $rl_s . "p); })");
-        }
-        $expr->{"ret_list_fix"} = 1;
-        return;
-    }
     if ($type == NODE_METHOD_CALL()) { gen_method_call_node($cg, $expr); return; }
 
     # Dynamic method call: $obj->$method(args)
@@ -7878,18 +7915,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
 
             if ($dm_push == 1 && $dm_clean == 1) { emit($cg, "strada_cleanup_pop(); "); }
-            if ($dm_arg_count > 0 && (method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0 || length(method_dyn_var($dm_args, 0, $dm_arg_count)) > 0)) {
-                if ($expr->{"ret_list_fix"}) {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
-                } else {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
-                }
+            if ($dm_arg_count > 0 && (method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0 || method_cand_mask($cg, $dm_args, 0, $dm_arg_count) != 0)) {
+                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
             } else {
-                if ($expr->{"ret_list_fix"}) {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
-                } else {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
-                }
+                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
             }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         } else {
@@ -7931,18 +7960,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "StradaValue *__dm_pa = strada_pack_args(0); ");
             }
-            if ($dm_arg_count > 0 && (method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0 || length(method_dyn_var($dm_args, 0, $dm_arg_count)) > 0)) {
-                if ($expr->{"ret_list_fix"}) {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
-                } else {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
-                }
+            if ($dm_arg_count > 0 && (method_spread_mask($cg, $dm_args, 0, $dm_arg_count) != 0 || method_cand_mask($cg, $dm_args, 0, $dm_arg_count) != 0)) {
+                emit($cg, "StradaValue *__dm_res = strada_method_call_spread(__dm_obj, __dm_mname, __dm_pa); ");
             } else {
-                if ($expr->{"ret_list_fix"}) {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call_lst(__dm_obj, __dm_mname, __dm_pa, NULL); ");
-                } else {
-                    emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
-                }
+                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
             }
             emit($cg, "strada_tmps_free(" . $dm_tm . "); __dm_res; })");
         }
@@ -8008,24 +8029,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
             $si = $si + 1;
         }
         my int $sp_mask = method_spread_mask($cg, $args, 1, $arg_count);
-        my str $sp_dyn = method_dyn_var($args, 1, $arg_count);
-        if (length($sp_dyn) > 0) {
-            emit($cg, "strada_args_mark_spread(__super_pa, " . $sp_mask . "ULL | " . $sp_dyn . "); ");
+        my int $sp_cand = method_cand_mask($cg, $args, 1, $arg_count);
+        if ($sp_cand != 0) {
+            emit($cg, "strada_args_mark_dyn(__super_pa, " . $sp_cand . "ULL, " . $sp_mask . "ULL); ");
             $sp_mask = 1;
         } elsif ($sp_mask != 0) { emit($cg, "strada_args_mark_spread(__super_pa, " . $sp_mask . "ULL); "); }
         if ($sp_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         if ($sp_mask != 0) {
-            if ($expr->{"ret_list_fix"}) {
-                emit($cg, "StradaValue *__super_res = strada_super_call_lst(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
-            } else {
-                emit($cg, "StradaValue *__super_res = strada_super_call_spread(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
-            }
+            emit($cg, "StradaValue *__super_res = strada_super_call_spread(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
         } else {
-            if ($expr->{"ret_list_fix"}) {
-                emit($cg, "StradaValue *__super_res = strada_super_call_lst(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
-            } else {
-                emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
-            }
+            emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
         }
         emit($cg, "strada_tmps_free(" . $sp_tm . "); __super_res; })");
         return;
@@ -9202,6 +9215,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_capture_str = $cg->{"anon_capture_str"};
         my int $saved_capture_count = $cg->{"anon_capture_count"};
         my int $saved_ret_is_int = $cg->{"ret_is_int"};
+        my int $saved_ret_norm_kind = $cg->{"ret_norm_kind"} + 0;
+        # a C `return` in one of the closure's __C__ blocks (NODE_C_BLOCK)
+        my str $saved_c_ret_mark = "" . $cg->{"c_ret_mark"};
+        $cg->{"c_ret_mark"} = "";
+        if ($expr->{"c_block_returns"}) { $cg->{"c_ret_mark"} = "__fn_cmark"; }
         my int $saved_ret_is_num = $cg->{"ret_is_num"};
 
         # Set up capture context for this closure
@@ -9211,6 +9229,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_capture_count"} = 0;
         # The closure body's returns coerce by ITS return type, not the
         # enclosing function's (see gen_return_value)
+        $cg->{"ret_norm_kind"} = ret_norm_kind_of($expr->{"return_type"} + 0);
         $cg->{"ret_is_int"} = 0;
         if ($expr->{"return_type"} == TYPE_INT()) {
             $cg->{"ret_is_int"} = 1;
@@ -9494,6 +9513,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         } elsif ($cg->{"func_tracks_depth"} == 2) {
             $def = $def . "    strada_depth_push_il(\"<anon>\", " . c_str_lit($cg->{"filename"}) . ");\n";
         }
+        if ($expr->{"c_block_returns"}) {
+            $def = $def . "    int __fn_cmark = strada_cleanup_mark(); (void)__fn_cmark;\n";
+        }
         if ($cg->{"fn_has_tmps_mark"} == 1) {
             $def = $def . "    size_t __fn_tmps_mark = strada_tmps_mark();\n    (void)__fn_tmps_mark;\n";
         }
@@ -9560,6 +9582,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_capture_str"} = $saved_capture_str;
         $cg->{"anon_capture_count"} = $saved_capture_count;
         $cg->{"ret_is_int"} = $saved_ret_is_int;
+        $cg->{"ret_norm_kind"} = $saved_ret_norm_kind;
+        $cg->{"c_ret_mark"} = $saved_c_ret_mark;
         $cg->{"ret_is_num"} = $saved_ret_is_num;
 
         $cg->{"func_has_try"} = $saved_func_has_try;
@@ -9696,7 +9720,18 @@ func gen_expression(scalar $cg, scalar $expr) void {
             $cl_any_imp = 1;
         }
 
-        if ($expr->{"has_spread"} == 1 || $arg_count > 16) {
+        # $f->(@a) / $f->(g()): an array, list or list-returning call is
+        # spread into a closure that takes a list (variadic, or the `@_`
+        # form), as into a method (Perl); a closure with fixed parameters
+        # gets it whole. The closure is known only when it is called
+        # (strada_closure_call_lists).
+        my int $cl_mask = 0;
+        my int $cl_cand = 0;
+        if ($expr->{"has_spread"} != 1 && $arg_count > 0 && $arg_count <= 60) {
+            $cl_mask = method_spread_mask($cg, $args, 0, $arg_count);
+            $cl_cand = method_cand_mask($cg, $args, 0, $arg_count);
+        }
+        if ($expr->{"has_spread"} == 1 || $arg_count > 16 || $cl_mask != 0 || $cl_cand != 0) {
             my str $cl_tm = next_tmps_var($cg);
             my int $cl_fn2_copy = 0;
             if ($callee_cleanup == 0 && $cg->{"cleanup_enabled"} == 1 && $cl_args_imp == 1 && expr_is_always_tagged_int($cg, $expr->{"closure"}) == 0) {
@@ -9733,7 +9768,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
                 $si = $si + 1;
             }
-            emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
+            if ($cl_mask != 0 || $cl_cand != 0) {
+                emit($cg, "StradaValue *__cl_res2 = strada_closure_call_lists(__cl_fn2, __cl_arr, " . $cl_mask . "ULL, " . $cl_cand . "ULL); ");
+            } else {
+                emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
+            }
             emit($cg, "strada_tmps_free(" . $cl_tm . "); __cl_res2; })");
         } elsif ($needs_arg_cleanup == 1 || $callee_cleanup == 1 || ($cg->{"cleanup_enabled"} == 1 && $arg_count > 0 && $cl_any_imp == 1)) {
             # Perl evaluates the arguments before the callee, so an argument

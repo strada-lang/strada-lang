@@ -1,9 +1,10 @@
-# EXPECT: caught boom ok
+# EXPECT: caught boom ok caught boom ok
 # VM-SKIP: the hazard is the compiled function epilogue
 # A C `return` inside a __C__ block skipped the function's epilogue and left
 # the slot of `$z` on the pending-cleanup stack, pointing into the dead C
 # frame. A later throw released through it: a crash at -O0. The block's
-# `return` now restores the cleanup depth and the call frame first.
+# `return` now restores the cleanup depth and the call frame first, in
+# named functions and in closures.
 func make_nan() num {
     my str $z = "hello" . "x";
     __C__ {
@@ -26,6 +27,14 @@ func main() int {
     } catch ($e) {
         $out = "caught " . $e;
     }
-    say($out . " ok");
+    my scalar $f = func () num { my str $y = "hello" . "y"; __C__ { return strada_new_num(1.5); } return 1.0; };
+    my str $out2 = "";
+    try {
+        my num $m = $f->();
+        clobber();
+    } catch ($e) {
+        $out2 = "caught " . $e;
+    }
+    say($out . " ok " . $out2 . " ok");
     return 0;
 }

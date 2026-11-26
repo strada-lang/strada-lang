@@ -7,6 +7,11 @@
 # to be made here. Mirrors the non-`our` global path's special case.
 func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) void {
     my int $it = $init->{"type"};
+    # our @a = f() / our %h = f(): the call's list
+    if (($sigil eq "@" || $sigil eq "%") && !$init->{"uc_ctx"} && cg_ucall_kind($cg, $init) != 0) {
+        $init->{"uc_list"} = 1;
+        if ($sigil eq "@") { $init->{"uc_ctx"} = 3; } else { $init->{"uc_ctx"} = 4; }
+    }
     my int $is_hash_target = 0;
     if ($sigil eq "%" || $var_type == TYPE_HASH()) { $is_hash_target = 1; }
     my int $is_array_target = 0;
@@ -595,7 +600,83 @@ func gen_block(scalar $cg, scalar $block) void {
 # function previously returned the shared string pointer. Returns 1 when
 # the value was coerced — the result is then a fresh OWNED value and the
 # caller must skip its return_needs_incref logic.
+# How a function's returns are made to say what they are (return_norm_call):
+# 1 return type scalar (the default) or dynamic: by the form of each return;
+# 2 `array`; 3 `hash`; 0 anything else (never a list).
+func ret_norm_kind_of(int $rt) int {
+    if ($rt == TYPE_SCALAR() || $rt == TYPE_DYNAMIC()) { return 1; }
+    if ($rt == TYPE_ARRAY()) { return 2; }
+    if ($rt == TYPE_HASH()) { return 3; }
+    return 0;
+}
+
+# Perl's return rules: the C expression that makes the returned value
+# ($rv, owned) say whether it is a list or one value, or "" when
+# nothing is needed. By the function's return type and the form the parser
+# stamped on the return (ast_return_form).
+func return_norm_call(scalar $cg, scalar $ret_stmt, str $rv) str {
+    my int $rn_kind = $cg->{"ret_norm_kind"} + 0;
+    if ($rn_kind == 0) { return ""; }
+    my scalar $rn_val = $ret_stmt->{"value"};
+    my int $rn_form = $ret_stmt->{"ret_form"} + 0;
+    my int $rn_comma = 0;
+    if ($rn_form == 2) { $rn_comma = 1; }
+    if ($rn_kind == 2) {
+        # (a one-value return was made a one-item list: a scalar caller gets
+        # that value, as from any comma list)
+        if (is_valid_node($rn_val) == 1 && $rn_val->{"type"} == NODE_ANON_ARRAY() && $rn_val->{"is_list"}) { $rn_comma = 1; }
+        # declared `array`: every return is its list
+        return "strada_ret_array(" . $rv . ", " . $rn_comma . ")";
+    }
+    if ($rn_kind == 3) {
+        # declared `hash`
+        return "strada_ret_list(" . $rv . ", 0)";
+    }
+    # scalar (the default) or dynamic: by the form of the return
+    if ($rn_form == 8) { return "(strada_decref(" . $rv . "), strada_empty_ret())"; }
+    if ($rn_form == 2 && is_valid_node($rn_val) == 1) {
+        # (a, b, @c): a scalar caller gets scalar(@c), not the last element
+        my scalar $rn_elems = $rn_val->{"elements"};
+        my int $rn_n = $rn_val->{"element_count"} + 0;
+        if ($rn_elems && $rn_n > 0) {
+            my scalar $rn_last = $rn_elems->[$rn_n - 1];
+            if (is_valid_node($rn_last) == 1 && $rn_last->{"type"} == NODE_VARIABLE() && ("" . $rn_last->{"sigil"}) eq "@") {
+                my scalar $rn_saved_sb = $cg->{"output_sb"};
+                $cg->{"output_sb"} = sb_new();
+                gen_expression($cg, $rn_last);
+                my str $rn_last_c = sb_to_string($cg->{"output_sb"});
+                $cg->{"output_sb"} = $rn_saved_sb;
+                if (needs_temp_cleanup($cg, $rn_last) == 1) {
+                    return "({ StradaValue *__rtl = " . $rn_last_c . "; StradaValue *__rtr = strada_ret_list_tail(" . $rv . ", __rtl); strada_decref(__rtl); __rtr; })";
+                }
+                return "strada_ret_list_tail(" . $rv . ", " . $rn_last_c . ")";
+            }
+        }
+    }
+    if ($rn_form == 1 || $rn_form == 2 || $rn_form == 3) { return "strada_ret_list(" . $rv . ", " . $rn_comma . ")"; }
+    if ($rn_form == 4 || $rn_form == 5 || $rn_form == 7) { return ""; }
+    # one value: a literal, a number or a string cannot be a container
+    if (is_valid_node($rn_val) == 1) {
+        my int $rn_t = $rn_val->{"type"};
+        if ($rn_t == NODE_INT_LITERAL() || $rn_t == NODE_NUM_LITERAL() || $rn_t == NODE_STR_LITERAL()) { return ""; }
+        if (expr_is_int_typed($cg, $rn_val) == 1 || expr_is_num_typed($cg, $rn_val) == 1) { return ""; }
+    }
+    return "strada_ret_scalar(" . $rv . ")";
+}
+
+# What a bare `return;` yields: nothing, in a function that can return a
+# list (an empty list to a list, undef to a scalar); undef elsewhere.
+func bare_return_value(scalar $cg) str {
+    if (($cg->{"ret_norm_kind"} + 0) == 1) { return "strada_empty_ret()"; }
+    return "strada_new_undef()";
+}
+
 func gen_return_value(scalar $cg, scalar $value) int {
+    # `return f();`: whatever f yields, read by this function's own caller
+    if (($cg->{"ret_norm_kind"} + 0) != 0 && cg_ucall_kind($cg, $value) != 0) {
+        $value->{"uc_ctx"} = 2;
+        $value->{"uc_pass"} = 1;
+    }
     # A hash-returning function returning a list (k, v, ...), map, @array,
     # reverse(%h), ...: build the hash (it used to return the array, so
     # `my %h = f()` came out empty).
@@ -702,6 +783,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         my str $sigil = $stmt->{"sigil"};
         my int $var_type = $stmt->{"var_type"};
+        # my %h = f(): the call's pairs as a new hash (strada_ucall_hash)
+        if ($sigil eq "%" && $stmt->{"init"} && !$stmt->{"init"}->{"uc_ctx"} && cg_ucall_kind($cg, $stmt->{"init"}) != 0) {
+            $stmt->{"init"}->{"uc_ctx"} = 4;
+            $stmt->{"init"}->{"uc_list"} = 1;
+        }
         # Escape C keywords in variable names (e.g., $for -> v_for)
         my str $c_name = escape_c_keyword($stmt->{"name"});
 
@@ -888,6 +974,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                             gen_expression($cg, $init);
                             emit($cg, ")");
                         }
+                    } elsif (cg_ucall_kind($cg, $init) != 0) {
+                        # my @a = f(): the call's list (strada_ucall_array)
+                        if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 1; }
+                        $init->{"uc_ctx"} = 2;
+                        $init->{"uc_list"} = 1;
+                        emit($cg, "strada_ucall_array(");
+                        gen_expression($cg, $init);
+                        emit($cg, ")");
+                        if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 0; }
                     } elsif ($init_type == NODE_METHOD_CALL() || $init_type == NODE_CALL()) {
                         # A function, builtin (lc, trim, ...) or method may return a plain scalar:
                         # `my array @a = ($o->id())` is then a one-element list
@@ -1383,7 +1478,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # so `my ($a, $b) = ($b, $a)` reads the outer variables first.
         emit_indent($cg);
         emit($cg, "StradaValue *" . $ds_src . " = ");
-        gen_expression($cg, $init);
+        if (cg_ucall_kind($cg, $init) != 0) {
+            # my ($a, $b) = f(): the call's list (a reference is one item)
+            $init->{"uc_ctx"} = 2;
+            $init->{"uc_list"} = 1;
+            emit($cg, "strada_ucall_array(");
+            gen_expression($cg, $init);
+            emit($cg, ")");
+        } else {
+            gen_expression($cg, $init);
+        }
         emit($cg, ";\n");
         if (needs_temp_cleanup($cg, $init) == 0) {
             emit_indent($cg);
@@ -2519,9 +2623,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $fe_listify = 0;
         my int $fe_at = $array_expr->{"type"} + 0;
         if (($fe_at == NODE_CALL() || $fe_at == NODE_METHOD_CALL() || $fe_at == NODE_CLOSURE_CALL() ||
-             $fe_at == NODE_DYN_METHOD_CALL()) && $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1) {
+             $fe_at == NODE_DYN_METHOD_CALL() || $fe_at == NODE_SUPER_CALL()) && $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1) {
             $fe_listify = 1;
-            emit($cg, "strada_foreach_list_take(");
+            if (cg_ucall_kind($cg, $array_expr) != 0) {
+                # foreach (f()): the call's list, or its one value once
+                $array_expr->{"uc_ctx"} = 2;
+                $array_expr->{"uc_list"} = 1;
+                emit($cg, "strada_ucall_foreach(");
+            } else {
+                emit($cg, "strada_foreach_list_take(");
+            }
         }
         gen_expression($cg, $array_expr);
         if ($fe_listify == 1) { emit($cg, ")"); }
@@ -2988,6 +3099,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 gen_return_value($cg, $stmt->{"value"});
                 emit($cg, ";\n");
                 indent($cg);
+                my str $ret_norm0 = return_norm_call($cg, $stmt, "__retval");
+                if (length($ret_norm0) > 0) {
+                    emit_indent($cg);
+                    emit($cg, "__retval = " . $ret_norm0 . ";\n");
+                }
                 emit_try_unwind_to($cg, 0);
                 if ($cg->{"has_local"} == 1) {
                     emit_indent($cg);
@@ -3030,7 +3146,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_stack_pop($cg);
                 emit_indent($cg);
                 if ($cg->{"c_ret_is_sv"} == 1) {
-                    emit($cg, "return strada_new_undef();\n");
+                    emit($cg, "return " . bare_return_value($cg) . ";\n");
                 } else {
                     emit($cg, "return;\n");
                 }
@@ -3049,6 +3165,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($ret_coerced == 0 && return_needs_incref($cg, $stmt->{"value"}) == 1) {
                 emit_indent($cg);
                 emit($cg, $ret_var . " = strada_copy_scalar_il(" . $ret_var . ");\n");
+            }
+            my str $ret_norm = return_norm_call($cg, $stmt, $ret_var);
+            if (length($ret_norm) > 0) {
+                emit_indent($cg);
+                emit($cg, $ret_var . " = " . $ret_norm . ";\n");
             }
             if ($cg->{"try_depth"} > 0) {
                 my int $ret_pushed = 0;
@@ -3131,7 +3252,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit_stack_pop($cg);
             emit_indent($cg);
             if ($cg->{"c_ret_is_sv"} == 1) {
-                emit($cg, "return strada_new_undef();\n");
+                emit($cg, "return " . bare_return_value($cg) . ";\n");
             } else {
                 emit($cg, "return;\n");
             }
@@ -3149,6 +3270,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         emit_indent($cg);
         my scalar $expr = $stmt->{"expr"};
+        # a call whose result is dropped: no context to read it by
+        if (cg_ucall_kind($cg, $expr) != 0) { $expr->{"uc_ctx"} = 2; }
         if ($expr->{"type"} == NODE_ASSIGN()) {
             $expr->{"is_void_stmt"} = 1;
         } elsif ($expr->{"type"} == NODE_INCREMENT() && is_unboxed_var_node($cg, $expr->{"operand"}) == 1) {
@@ -4051,7 +4174,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # through them (a crash). The locals' values are not released: the
         # block may be returning one of them.
         my int $c_guard = 0;
-        if (length("" . $cg->{"c_ret_mark"}) > 0 && $cg->{"in_anon_func"} != 1 && index($code, "return") >= 0) { $c_guard = 1; }
+        if (length("" . $cg->{"c_ret_mark"}) > 0 && index($code, "return") >= 0) { $c_guard = 1; }
         if ($c_guard == 1) {
             emit($cg, "\n#define return for (strada_cblock_leave(" . $cg->{"c_ret_mark"} . ", " . ($cg->{"func_tracks_depth"} + 0) . ");;) return\n");
         }
@@ -4686,6 +4809,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         if ($ret_type_id == TYPE_HASH()) {
             $cg->{"ret_is_hash"} = 1;
         }
+        $cg->{"ret_norm_kind"} = ret_norm_kind_of($ret_type_id);
         $cg->{"c_ret_is_sv"} = 0;
         if ($ret_type eq "StradaValue*") {
             $cg->{"c_ret_is_sv"} = 1;
@@ -4901,6 +5025,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"ret_is_int"} = 0;
         $cg->{"ret_is_num"} = 0;
         $cg->{"ret_is_hash"} = 0;
+        $cg->{"ret_norm_kind"} = 0;
         $cg->{"c_ret_is_sv"} = 0;
         $cg->{"current_fn_package"} = "";
         $cg->{"func_tracks_depth"} = 0;
@@ -5069,6 +5194,7 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"ret_is_int"} = 0;
     $cg->{"ret_is_num"} = 0;
     $cg->{"ret_is_hash"} = 0;
+    $cg->{"ret_norm_kind"} = 0;
     $cg->{"current_fn_package"} = $fn->{"package"};
     $cg->{"current_func_name"} = $name;
     $cg->{"loop_break_depth"} = 0;
@@ -5542,34 +5668,21 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"lib_modified_methods"} = \%lib_modified_methods;
     $cg->{"all_func_names"} = \%all_func_names;
 
-    # Method names that some function declared `array` could answer to: a
-    # method call with such a name, used as a list item, checks at run time
-    # whether it got that method's list (array_flatten_kind,
-    # strada_ret_list_fix). Every other method call is compiled as before.
-    # "*" means any name (an AUTOLOAD declared `array`).
-    my hash %array_method_names;
+    # Does any function outside package main ask for its call context
+    # (wantarray)? A method call cannot know its callee, so in such a
+    # program every method and closure call states its context.
+    my int $any_ctx_method = 0;
     $fni = 0;
     while ($fni < $program->{"function_count"}) {
-        my scalar $amn_fn = $funcs->[$fni];
-        if ($amn_fn->{"return_type"} == TYPE_ARRAY() && $amn_fn->{"type"} != NODE_EXTERN_FUNC()) {
-            # Pkg_method minus the package prefix, as codegen_track_method
-            # names it; a function of package main is not a method.
-            my str $amn_pkg = "" . $amn_fn->{"package"};
-            my str $amn_c = sanitize_name($amn_fn->{"name"});
-            my str $amn_pre = sanitize_name($amn_pkg) . "_";
-            if (length($amn_pkg) > 0 && $amn_pkg ne "main" && length($amn_c) > length($amn_pre)
-                && substr($amn_c, 0, length($amn_pre)) eq $amn_pre) {
-                my str $amn_m = substr($amn_c, length($amn_pre), length($amn_c) - length($amn_pre));
-                $array_method_names{$amn_m} = 1;
-                if ($amn_m eq "AUTOLOAD") { $array_method_names{"*"} = 1; }
-            }
+        my scalar $wm_fn = $funcs->[$fni];
+        if (($wm_fn->{"uses_wantarray"} + 0) == 1 || $wm_fn->{"return_type"} == TYPE_DYNAMIC()) {
+            my str $wm_pkg = "" . $wm_fn->{"package"};
+            if (length($wm_pkg) > 0 && $wm_pkg ne "main") { $any_ctx_method = 1; }
         }
         $fni = $fni + 1;
     }
-    array_method_names_from($program->{"import_libs"}, $program->{"import_lib_count"} + 0, \%array_method_names);
-    array_method_names_from($program->{"import_objects"}, $program->{"import_object_count"} + 0, \%array_method_names);
-    array_method_names_from($program->{"import_archives"}, $program->{"import_archive_count"} + 0, \%array_method_names);
-    $cg->{"array_method_names"} = \%array_method_names;
+    $cg->{"ctx_methods"} = $any_ctx_method;
+
 
     # Header
     emit($cg, "/* Generated by Strada Self-Hosting Compiler */\n");
@@ -8152,44 +8265,3 @@ func marker_path_encode(str $p) str {
     return $out;
 }
 
-func array_method_names_add(scalar $set, str $c_name) void {
-    $set->{$c_name} = 1;
-    my int $amn_len = length($c_name);
-    my int $amn_i = 0;
-    while ($amn_i < $amn_len) {
-        if (substr($c_name, $amn_i, 1) eq "_" && $amn_i + 1 < $amn_len) {
-            my str $amn_tail = substr($c_name, $amn_i + 1, $amn_len - $amn_i - 1);
-            $set->{$amn_tail} = 1;
-            if ($amn_tail eq "AUTOLOAD") { $set->{"*"} = 1; }
-        }
-        $amn_i = $amn_i + 1;
-    }
-    if ($c_name eq "AUTOLOAD") { $set->{"*"} = 1; }
-}
-
-func array_method_names_from(scalar $libs, int $lib_count, scalar $set) void {
-    if (!$libs) { return; }
-    my int $amf_i = 0;
-    while ($amf_i < $lib_count) {
-        my scalar $amf_lib = $libs->[$amf_i];
-        my scalar $amf_funcs = $amf_lib->{"functions"};
-        my int $amf_fc = $amf_lib->{"function_count"} + 0;
-        my int $amf_j = 0;
-        while ($amf_funcs && $amf_j < $amf_fc) {
-            my scalar $amf_fn = $amf_funcs->[$amf_j];
-            if ($amf_fn->{"return_type"} == TYPE_ARRAY()) {
-                my str $amf_m = "" . $amf_fn->{"orig_method"};
-                if (length($amf_m) > 0) {
-                    $set->{$amf_m} = 1;
-                    if ($amf_m eq "AUTOLOAD") { $set->{"*"} = 1; }
-                } else {
-                    # older metadata: the C name does not say where the
-                    # package ends, so every `_` suffix counts
-                    array_method_names_add($set, sanitize_name("" . $amf_fn->{"name"}));
-                }
-            }
-            $amf_j = $amf_j + 1;
-        }
-        $amf_i = $amf_i + 1;
-    }
-}

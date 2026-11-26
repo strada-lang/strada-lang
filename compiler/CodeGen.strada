@@ -2214,11 +2214,6 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
         if ($m->{"is_variadic"} == 1) {
             sb_append($sb, "    strada_method_mark_list(__wrap_" . $func_name . ");\n");
         }
-        # A method declared `array`: a call to it that is a list item gives
-        # its elements (strada_method_call_lst).
-        if ($m->{"return_type"} == TYPE_ARRAY()) {
-            sb_append($sb, "    strada_method_mark_ret_list(__wrap_" . $func_name . ");\n");
-        }
         $i = $i + 1;
     }
 
