@@ -1,0 +1,47 @@
+# Instruction counts for t/bench_gate.sh. Regenerate with: t/bench_gate.sh --update
+# commit: c4425a5
+# host: x86_64, gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, ldd (Ubuntu GLIBC 2.39-0ubuntu8.12) 2.39
+# c: = compiled at -O2, full benchmark.  v: = VM, scaled copy.  A VM line
+# ending in FAIL is a benchmark the VM cannot run under callgrind: not gated.
+c:bench_array_hash 1385612742
+c:bench_binary 1598812923
+c:bench_binary_trees 4055575653
+c:bench_closures 1230512693
+c:bench_compute 9035014701
+c:bench_data 3654582793
+c:bench_exceptions 1638712297
+c:bench_functions 37954496
+c:bench_gc 7265248686
+c:bench_hotpaths 8463529367
+c:bench_interp 9505558740
+c:bench_json 2140903005
+c:bench_oop 566059327
+c:bench_pipeline 2859865864
+c:bench_regex 9684672454
+c:bench_round5 11866628283
+c:bench_sort 5330339433
+c:bench_sprintf 8586183717
+c:bench_startup 504641
+c:bench_strings 972659840
+c:bench_utf8 3091804962
+v:bench_array_hash 247194418
+v:bench_binary 391388619
+v:bench_binary_trees 3570866242
+v:bench_closures 265833809
+v:bench_compute 8437814001
+v:bench_data 650371898
+v:bench_exceptions 338484684
+v:bench_functions 419564105
+v:bench_gc 3284542175
+v:bench_hotpaths 3496396930
+v:bench_interp 23627552955
+v:bench_json 4484589547
+v:bench_oop 675083271
+v:bench_pipeline 2225323639
+v:bench_regex 1032079851
+v:bench_round5 22548027489
+v:bench_sort 966183008
+v:bench_sprintf 1339460959
+v:bench_startup 2505905
+v:bench_strings 202355755
+v:bench_utf8 566704718

@@ -365,6 +365,29 @@ Note: the automatic **cycle collector** (default on, see Memory Management below
 6. Add example in `examples/` to test
 7. Rebuild with `make` and test with `make run PROG=your_example`
 
+### Performance gate (`t/bench_gate.sh`, 2026-11-27)
+
+Part of the gate before every commit that touches `compiler/`, `runtime/` or
+`interpreter/` (the user's instruction, after a change that doubled
+bench_binary_trees reached `main` on 2026-11-26 with every test green).
+
+```bash
+t/bench_gate.sh            # compare with benchmarks/gate_baseline.txt; exit 1 on a regression
+t/bench_gate.sh --update   # rewrite the baseline from this build
+```
+
+It counts instructions (callgrind) for every `benchmarks/bench_*.strada`,
+compiled at `-O2` and in the VM (the VM on scaled copies: literals >= 10000
+divided by 10), and fails when any needs more than 1% more than the baseline.
+Counts do not depend on machine load; two identical runs differ by under
+0.1%. About 25 minutes on two cores; needs a full `make` and
+`make interpreter` first (optimized builds, not `QUICK`/`DEV`). Left out:
+bench_async (thread timing) and bench_oop_so (companion library). For an
+intended cost, run `--update` and commit the baseline with the change, with
+the reason in the commit message; tell the user about any increase. The
+baseline belongs to the machine that wrote it (compiler and libc are in its
+header).
+
 ### Testing Changes
 
 ```bash
