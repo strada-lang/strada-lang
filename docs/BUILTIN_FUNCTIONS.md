@@ -826,8 +826,9 @@ for binary data.
 | `getpid()` | Current PID. |
 | `__PACKAGE__`, `__FILE__`, `__LINE__` | Compile-time constants. |
 | `$0` | Program name (as in Perl). |
-| `dumper($v)` | Pretty-print value (returns string). |
-| `dumper_str($v)` | Variant: shorter format. |
+| `dumper($v)` | Returns a readable dump of any value as a string; it prints nothing, so write `say(dumper($v))`. There is no `Data::Dumper` module. |
+| `dumper_str($v)` | Same as `dumper($v)`. |
+| `dump($v)` | Prints the same dump to stdout. |
 | `clone($v)` | Deep clone (Storable::dclone equivalent). |
 | `goto LABEL` | Jump within sub. |
 | `last`, `next`, `redo` | Loop control. |
