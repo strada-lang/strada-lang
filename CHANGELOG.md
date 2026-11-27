@@ -34,6 +34,7 @@ This replaces the two entries below about methods declared `array`.
   list argument whole; a function declared `array` that returns a reference
   still returns that array's elements.
 - Libraries built with an older compiler must be rebuilt.
+- Speed: as first pushed, a call returning a reference into a list (`[ build(), build() ]`) made a temporary array per call: such code ran up to 2.3x slower compiled and 4x slower in the VM. Fixed the same day (`fcca36e`); compiled benchmarks are within 0.3% of before, except closures (+2.6%) and OOP (+1.5%).
 - Test: `t/return_rules_test/run.sh` (778 cases checked against Perl 5.38).
 
 ### Methods declared `array`: scalar context and arguments (2026-11-26)

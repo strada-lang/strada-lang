@@ -3344,23 +3344,43 @@ the list of a `foreach` unconditionally. The VM flags the node instead
 (`list_tern` set by `vm_array_flatten_kind`, read by `compile_expr`'s
 NI_TERNARY case, branches built by `compile_tern_list_branch`).
 
-## Method calls as list items (2026-11-26)
+## What a call returns (2026-11-26)
 
-`(0, $o->parts(), 9)` takes the elements when the method that runs is
-declared `array`. Pieces:
+Replaces the name-based "method calls as list items" design of the same day
+(`array_method_names`, `strada_ret_list_arm`, `strada_method_call_lst`; those
+runtime entry points remain only as stubs for old objects). The rule and the
+kept exceptions are in CLAUDE.md under "What a call yields follows Perl".
 
 | Piece | Where |
 |-------|-------|
-| `array_method_names` (which names are affected) | CodeGenStmt.strada, next to `all_func_names` |
-| `ret_list_fix` node flag, kind 2 | `array_flatten_kind` (CodeGenExpr.strada) |
-| slot on the caller's stack, wrap | `gen_expression`: `strada_ret_list_arm` / `strada_ret_list_done` |
-| dispatch + answer | `strada_method_call_lst`, `strada_super_call_lst` (runtime), `StradaListSite` |
-| which wrappers are `array` methods | `strada_method_mark_ret_list(__wrap_F)` in the package's OOP init |
-| VM | `vm_array_method_name`, `compile_expr` top (hidden locals), `BUILTIN_RET_LIST_FIX` |
+| form of each `return` (1 list, 2 comma list, 3 hash, 4 call, 5 `?:`, 6 one value maybe a container, 7 one value certainly not, 8 nothing) | `ast_return_form` (AST.strada), stamped as `ret_form` by `parser_make_return` |
+| `return C ? A : B` with a list branch becomes if/else | `parser_make_return`, in scalar/dynamic functions |
+| function can never return a list (`ret_never_list`) | `parse_function`: scalar-typed, every return form 6/7; function info field; `VMChunk.ret_never_list` (set at registration AND at body compile) |
+| compiled callee normalizes the value | `return_norm_call` / `ret_norm_kind_of` (CodeGenStmt): `strada_ret_list`, `strada_ret_list_tail`, `strada_ret_scalar`, `strada_ret_array`, `strada_empty_ret()` |
+| flags on a returned list | `STRADA_SVf_LIST_LAST` (comma list), `STRADA_SVf_LIST_TAIL` (count of a trailing array kept after the last element) |
+| what kind of call this is | `cg_ucall_kind` (0 none, 1 dynamic, 2 `array` function, 3 never-list); VM `vm_ucall_kind` |
+| what the consumer wants | node `uc_ctx` (1 item, 2 raw, 3 array target, 4 hash target, unset scalar), read by the hook at the top of `gen_expression` |
+| compiled readers | `strada_ucall_scalar`, `strada_ucall_item`, `strada_ucall_array`, `strada_ucall_hash`, `strada_ucall_foreach`; `flat_pred_name` picks `strada_ucall_is_list` for call items |
+| arguments | `method_cand_mask` + `strada_pack_args_cand`, `strada_method_call_cs_sp`, `strada_closure_call_lists` |
+| VM callee | `BUILTIN_RET_LIST(v, kind[, tail])` by the frame's call context; `VM.list_ret` |
+| VM readers | hook at the top of `compile_expr` (`uc_ctx`/`uc_list`/`uc_arg`/`uc_pass`), `BUILTIN_UCALL_ITEM/ARRAY/ARG/IS`, `compile_ucall_as_list` |
+| VM append fusion | `vm_chunk_emit` peephole: `UCALL_ITEM` + `OP_ARRAY_EXTEND` -> `BUILTIN_UCALL_APPEND` + `OP_POP` |
 
-The slot pointer is per thread and taken by the dispatch entry on entry, so
-nothing the method runs sees it; a nested list-item call in the arguments
-arms its own slot and restores the outer one in `strada_ret_list_done`. The
-answer is written into the caller's stack, so a destructor that runs between
-the call and the read cannot change it. After a throw the pointer may be
-stale, but it is only ever read by an entry whose caller has just armed it.
+Why the compiled value carries the answer while the VM callee decides: a
+compiled callee does not know its caller's context without a per-call store,
+so it returns a bare ARRAY/HASH for a list and a reference or plain value for
+one item, and the caller reads the type. The VM already keeps a call context
+per frame.
+
+Performance rules learned the hard way (b942d9b doubled bench_binary_trees):
+- A list-item call that returns a reference or plain value must pass through
+  with no allocation. `strada_ucall_item` returns it untouched and the
+  appending code tests `strada_ucall_is_list`; never wrap it in a one-item
+  array.
+- Kind 3 callers emit nothing at all. Anything that adds a `return` form to a
+  function must keep `ret_never_list` honest (a `__C__` block with `return`
+  clears it).
+- `strada_ret_list` steals the array when the reference holding it has
+  refcount 1, so the cycle collector never sees a candidate.
+- Measure with instruction counts against a baseline worktree before pushing
+  (`benchmarks/`, all of them; the regression showed in one of 22).
