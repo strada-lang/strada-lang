@@ -78,3 +78,14 @@ if [ "$out" != "OK" ]; then
     exit 1
 fi
 echo "PASS --tcc --shared constructor shim (globals + OOP init at dlopen)"
+
+# strada_runtime.h must compile under tcc with HAVE_PCRE2 (PCRE2_SIZE is a
+# pcre2.h macro, and that header is not included in tcc mode), with and
+# without a caller-supplied -DPCRE2_SIZE.
+printf '#include "strada_runtime.h"\nint x;\n' > "$WORK/hdr.c"
+for extra in "" "-DPCRE2_SIZE=size_t"; do
+    if ! tcc -w -c "$WORK/hdr.c" -o "$WORK/hdr.o" -I"$REPO_DIR/runtime" -DSTRADA_NO_TLS -DHAVE_PCRE2 $extra > "$WORK/hdr.log" 2>&1; then
+        echo "FAIL: strada_runtime.h does not compile under tcc with -DHAVE_PCRE2 $extra"; cat "$WORK/hdr.log"; exit 1
+    fi
+done
+echo "PASS strada_runtime.h under tcc with HAVE_PCRE2"

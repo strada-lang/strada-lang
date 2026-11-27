@@ -1,0 +1,39 @@
+# EXPECT: 16 self a h z 4|1 self
+# VM-SKIP: StradaStackArgs1 is a C-level calling helper of the compiled runtime
+# StradaStackArgs1 (a one-element argument array on the C stack, used by code
+# generators for zero-argument method calls): when the callee grows it with
+# push/splice/unshift the elements move to the heap. The runtime used to call
+# realloc() on the stack buffer.
+func grow {
+    push(@_, "a", "b", "c", "d", "e", "f", "g", "h");
+    splice(@_, 1, 0, "x", "y", "z");
+    unshift(@_, 1, 2, 3, 4);
+    return scalar(@_) . " " . $_[4] . " " . $_[8] . " " . $_[15] . " " . $_[7] . " " . $_[3];
+}
+func keep { return scalar(@_) . " " . $_[0]; }
+
+func call_stack1(int $which) str {
+    my str $r = "";
+    my str $self = "self";
+    __C__ {
+        StradaStackArgs1 sa;
+        strada_stack_args1_init(&sa, self);
+        StradaValue *res = strada_to_int(which) ? grow(&sa.sv) : keep(&sa.sv);
+        for (size_t i = 0; i < sa.av.size; i++) {
+            StradaValue *e = sa.av.elements[sa.av.head + i];
+            if (e) strada_decref(e);
+        }
+        strada_stack_args1_done(&sa);
+        strada_decref(r);
+        r = res;
+    }
+    return $r;
+}
+
+func main() int {
+    my $i = 0;
+    my str $g = "";
+    while ($i < 200) { $g = call_stack1(1); $i++; }
+    say($g . "|" . call_stack1(0));
+    return 0;
+}

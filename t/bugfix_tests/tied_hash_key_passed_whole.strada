@@ -1,0 +1,37 @@
+# EXPECT: SCALAR 1|ARRAY 1| 0|str:k| 1|store ARRAY|exists HASH|delete SCALAR
+# A tied hash's FETCH/STORE/EXISTS/DELETE receive the key the caller wrote
+# (a reference stays a reference, undef stays undef), as in Perl. It used to
+# arrive as its string form.
+package T;
+our @log = ();
+func TIEHASH(str $c) scalar { my %h = (); return bless(\%h, "T"); }
+func FETCH(scalar $self, scalar $k) scalar {
+    if (!defined($k)) { return " 0"; }
+    if (ref($k) eq "") { return "str:" . $k; }
+    return ref($k) . " 1";
+}
+func STORE(scalar $self, scalar $k, scalar $v) void { push(@log, "store " . ref($k)); }
+func EXISTS(scalar $self, scalar $k) int { push(@log, "exists " . ref($k)); return 1; }
+func DELETE(scalar $self, scalar $k) scalar { push(@log, "delete " . ref($k)); return undef; }
+func log_text() str { return join("|", @log); }
+
+package main;
+func main() int {
+    my %h;
+    tie(%h, "T");
+    my $s = "foo";
+    my @a = (1);
+    my $u;
+    my @out = ();
+    push(@out, $h{\$s});
+    push(@out, $h{\@a});
+    push(@out, $h{$u});
+    push(@out, $h{"k"});
+    push(@out, $h{7} eq "str:7" ? " 1" : " no");
+    $h{[1]} = 1;
+    my %hk = ();
+    my $e = exists($h{\%hk});
+    delete($h{\$s});
+    say(join("|", @out) . "|" . T::log_text());
+    return 0;
+}

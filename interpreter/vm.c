@@ -4927,6 +4927,36 @@ static VMValue vm_capture_c_exception(void) {
     return vexc;
 }
 
+/* The runtime's pack/unpack under a try frame (they throw: negative BER
+ * value, unterminated BER value, repeat count overflow). NULL if it threw,
+ * with the exception in *out_exc. A separate function so vm_exec_builtin
+ * has no setjmp. */
+__attribute__((noinline))
+static StradaValue *vm_pack_guarded(int is_unpack, const char *fmt, StradaValue *arg, VMValue *out_exc) {
+    /* pack/unpack throw only for `w`, a group, or a repeat count of ten or
+     * more digits: any other template needs no try frame (bench_binary). */
+    {
+        int need = 0, run = 0;
+        for (const char *q = fmt; *q; q++) {
+            if (*q == 'w' || *q == '(') { need = 1; break; }
+            if (*q >= '0' && *q <= '9') { if (++run >= 9) { need = 1; break; } } else run = 0;
+        }
+        if (!need) return is_unpack ? strada_unpack(fmt, arg) : strada_pack(fmt, arg);
+    }
+    StradaValue * volatile res = NULL;
+    int cm = strada_cleanup_mark();
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        res = is_unpack ? strada_unpack(fmt, arg) : strada_pack(fmt, arg);
+        STRADA_TRY_POP();
+    } else {
+        STRADA_TRY_POP();
+        strada_cleanup_drain_to(cm);
+        *out_exc = vm_capture_c_exception();
+        res = NULL;
+    }
+    return res;
+}
+
 __attribute__((noinline))
 static int vm_c_call_method(VM *vm, StradaValue *self_sv, const char *method, StradaValue *packed_args, StradaValue **out_res, VMValue *out_exc) {
     int cm = strada_cleanup_mark();
@@ -8594,9 +8624,10 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 const char *fmt = vm_to_cstr(la->items[0], fbuf, sizeof(fbuf));
                 StradaValue *pk_arr = strada_new_array();
                 for (int i = 1; i < la->size; i++) strada_array_push_take(pk_arr->value.av, vm_to_sv(la->items[i]));
-                StradaValue *packed = strada_pack(fmt, pk_arr);
-                VMValue vm_res = sv_to_vm(packed);
+                StradaValue *packed = vm_pack_guarded(0, fmt, pk_arr, &throw_exc);
                 strada_decref(pk_arr);
+                if (!packed) goto L_builtin_throw_exc;
+                VMValue vm_res = sv_to_vm(packed);
                 strada_decref(packed);
                 SP_PUSH(vm_res);
             }
@@ -10465,9 +10496,10 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 for (int i = 1; i < argc; i++) {
                     strada_array_push_take(pk_arr->value.av, vm_to_sv(args[i]));
                 }
-                StradaValue *packed = strada_pack(fmt, pk_arr);
-                VMValue vm_res = sv_to_vm(packed);
+                StradaValue *packed = vm_pack_guarded(0, fmt, pk_arr, &throw_exc);
                 strada_decref(pk_arr);
+                if (!packed) goto L_builtin_throw_exc;
+                VMValue vm_res = sv_to_vm(packed);
                 strada_decref(packed);
                 SP_PUSH(vm_res);
             } else SP_PUSH(vm_str(""));
@@ -10478,9 +10510,10 @@ StradaValue *sa[4] = { NULL, NULL, NULL, NULL };
                 char fbuf[256];
                 const char *fmt = vm_to_cstr(args[0], fbuf, sizeof(fbuf));
                 StradaValue *data_sv = vm_to_sv(args[1]);
-                StradaValue *unpacked = strada_unpack(fmt, data_sv);
-                VMValue vm_res = sv_to_vm(unpacked);
+                StradaValue *unpacked = vm_pack_guarded(1, fmt, data_sv, &throw_exc);
                 strada_decref(data_sv);
+                if (!unpacked) goto L_builtin_throw_exc;
+                VMValue vm_res = sv_to_vm(unpacked);
                 strada_decref(unpacked);
                 SP_PUSH(vm_res);
             } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));

@@ -1,0 +1,37 @@
+# EXPECT: 3 90,233,256|10 31 16 0|neg:Cannot compress negative numbers in pack|unterm:Unterminated compressed integer in unpack|18446744073709551615|23728385234614992549757750638446|caefe8e1eeeea0c2e1e3e8ede1ee6e|007f8100822ca08080808000|01|1,2
+# pack/unpack: W is a character (as U), a %N checksum over a B/b bit string
+# counts its 1 bits, and w (BER compressed integer) takes unsigned integers of
+# any size, rejects negative numbers and reports an unterminated value.
+# Expected values are Perl 5.38's.
+func hex(str $s) str {
+    my @h = core::unpack("H*", $s);
+    return $h[0];
+}
+
+func main() int {
+    my @out = ();
+    my str $w = core::pack("W*", 90, 233, 256);
+    push(@out, length($w) . " " . join(",", core::unpack("W*", $w)));
+
+    my @c1 = core::unpack("%32B*", "abc");
+    my @c2 = core::unpack("%32b69", "abcdefghijkl");
+    my str $ff = core::byte(255) . core::byte(255);
+    my @c3 = core::unpack("%8B*", $ff);
+    my @c4 = core::unpack("%3B*", $ff);
+    push(@out, $c1[0] . " " . $c2[0] . " " . $c3[0] . " " . $c4[0]);
+
+    try { my str $x = core::pack("w", -1); push(@out, "neg:none"); }
+    catch ($e) { push(@out, "neg:" . $e); }
+    try { my @x = core::unpack("w", $ff); push(@out, "unterm:none"); }
+    catch ($e) { push(@out, "unterm:" . $e); }
+
+    push(@out, join(",", core::unpack("w", core::pack("w", "18446744073709551615"))));
+    my str $big = core::pack("w", "23728385234614992549757750638446");
+    push(@out, join(",", core::unpack("w", $big)));
+    push(@out, hex($big));
+    push(@out, hex(core::pack("w*", 0, 127, 128, 300, 1099511627776)));
+    push(@out, hex(core::pack("w", 1.5)));
+    push(@out, join(",", core::unpack("w2", core::byte(1) . core::byte(2) . core::byte(3))));
+    say(join("|", @out));
+    return 0;
+}

@@ -17606,7 +17606,8 @@ void strada_free_value(StradaValue *sv) {
     int has_ext_destroy = (sv->meta && sv->meta->ext_destroy != NULL);
     char *bp = (sv->meta
                 && (sv->type == STRADA_REF || sv->type == STRADA_HASH || sv->type == STRADA_ARRAY
-                    || sv->type == STRADA_CLOSURE || sv->type == STRADA_FILEHANDLE))
+                    || sv->type == STRADA_CLOSURE || sv->type == STRADA_FILEHANDLE
+                    || sv->type == STRADA_STR))
                ? sv->meta->blessed_package : NULL;
     if ((bp || has_ext_destroy) && !skip_destroy && !did_forget_weak) {
         if (bp) {
@@ -17619,7 +17620,8 @@ void strada_free_value(StradaValue *sv) {
             }
 
             if (sv->type != STRADA_REF && sv->type != STRADA_HASH && sv->type != STRADA_ARRAY
-                && sv->type != STRADA_CLOSURE && sv->type != STRADA_FILEHANDLE) {
+                && sv->type != STRADA_CLOSURE && sv->type != STRADA_FILEHANDLE
+                && sv->type != STRADA_STR) {
                 fprintf(stderr, "ERROR: Unexpected type %d has blessed_package set! This indicates memory corruption.\n", sv->type);
                 sv->meta->blessed_package = NULL;  /* Clear to prevent crash */
                 bp = NULL;
@@ -24575,6 +24577,59 @@ static const char *pack_next_str(StradaArray *av, int *arg_idx, int arg_count,
     return strada_sv_raw_bytes(el, tbuf, tbuf_sz, outlen, owned_out);
 }
 
+/* BER compressed integers (pack/unpack 'w') of any size, as decimal digits.
+ * ber_from_decimal: `dig` holds n ASCII digits; writes the 7-bit groups, most
+ * significant first, continuation bit set on all but the last. Returns the
+ * byte count; *out is malloc'd. */
+static size_t ber_from_decimal(const char *dig, size_t n, unsigned char **out) {
+    unsigned char *d = (unsigned char *)sr_xmalloc(n + 1);
+    for (size_t i = 0; i < n; i++) d[i] = (unsigned char)(dig[i] - '0');
+    size_t cap = n + 2, len = 0;          /* one base-128 digit per decimal digit is enough */
+    unsigned char *rev = (unsigned char *)sr_xmalloc(cap);
+    size_t start = 0;
+    while (start < n && d[start] == 0) start++;
+    if (start == n) rev[len++] = 0;
+    while (start < n) {
+        unsigned rem = 0;
+        for (size_t i = start; i < n; i++) {
+            unsigned cur = rem * 10 + d[i];
+            d[i] = (unsigned char)(cur >> 7);
+            rem = cur & 0x7F;
+        }
+        rev[len++] = (unsigned char)rem;
+        while (start < n && d[start] == 0) start++;
+    }
+    free(d);
+    unsigned char *res = (unsigned char *)sr_xmalloc(len);
+    for (size_t i = 0; i < len; i++) res[i] = (unsigned char)(rev[len - 1 - i] | (i + 1 < len ? 0x80 : 0));
+    free(rev);
+    *out = res;
+    return len;
+}
+
+/* ber_to_decimal: `g` holds n bytes of one compressed integer (their low 7
+ * bits are the groups, most significant first). Returns a malloc'd decimal
+ * string. */
+static char *ber_to_decimal(const unsigned char *g, size_t n) {
+    size_t cap = n * 3 + 2, len = 1;      /* 128 < 10^3 */
+    unsigned char *d = (unsigned char *)sr_xmalloc(cap);   /* least significant digit first */
+    d[0] = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned carry = g[i] & 0x7F;
+        for (size_t j = 0; j < len; j++) {
+            unsigned cur = (unsigned)d[j] * 128 + carry;
+            d[j] = (unsigned char)(cur % 10);
+            carry = cur / 10;
+        }
+        while (carry) { d[len++] = (unsigned char)(carry % 10); carry /= 10; }
+    }
+    char *res = (char *)sr_xmalloc(len + 1);
+    for (size_t i = 0; i < len; i++) res[i] = (char)('0' + d[len - 1 - i]);
+    res[len] = 0;
+    free(d);
+    return res;
+}
+
 /* Pack values into binary string - Perl-like pack() */
 /* pack/unpack byte order for f/d with an explicit < or > modifier */
 #define STRADA_PACK_SWAP(endian) ((endian) == 1 ? (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
@@ -24711,7 +24766,7 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
         int bang = 0;  /* `!` modifier: x!N / X!N alignment, signed n!/v!/N!/V! */
         char c = *p++;
         /* j/J are the native IV/UV (8 bytes here), F the native NV */
-        if (c == 'j') c = 'q'; else if (c == 'J') c = 'Q'; else if (c == 'F') c = 'd';
+        if (c == 'j') c = 'q'; else if (c == 'J') c = 'Q'; else if (c == 'F') c = 'd'; else if (c == 'W') c = 'U';
 
         /* Modifiers after the type letter: `>` big, `<` little, `!` */
         while (*p == '>' || *p == '<' || *p == '!') {
@@ -25160,21 +25215,35 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
 
             case 'w': {  /* BER compressed integer (7-bit groups, MSB set on continuation) */
                 for (int i = 0; i < count; i++) {
-                    int64_t v = GET_ARG_INT();
-                    if (v < 0) v = 0; /* BER is unsigned; perl errors but match perl's
-                                       * silent treatment for our small surface */
-                    uint64_t u = (uint64_t)v;
-                    /* Encode in reverse (LSB-first into a small buf), then write
-                     * in MSB-first byte order with continuation bit on all but last. */
-                    unsigned char tmp[16];
-                    int n = 0;
-                    do {
-                        tmp[n++] = (unsigned char)(u & 0x7F);
-                        u >>= 7;
-                    } while (u && n < 16);
-                    ENSURE_SPACE((size_t)n);
-                    for (int b = n - 1; b > 0; b--) buf[buf_pos++] = (char)(tmp[b] | 0x80);
-                    buf[buf_pos++] = (char)tmp[0]; /* final byte: high bit clear */
+                    StradaValue *wv = (arg_idx < arg_count) ? strada_array_get(av, arg_idx++) : NULL;
+                    /* An unsigned integer of any size: a string of digits is
+                     * taken digit by digit; anything else through its number. */
+                    char *ws = wv ? strada_to_str(wv) : NULL;
+                    const char *wd = ws ? ws : "0";
+                    while (*wd == ' ' || *wd == '\t' || *wd == '\n') wd++;
+                    if (*wd == '+') wd++;
+                    size_t wn = 0;
+                    while (wd[wn] >= '0' && wd[wn] <= '9') wn++;
+                    char wnum[352];
+                    if (wn == 0 || wd[wn] != 0) {
+                        double dv = wv ? strada_to_num(wv) : 0.0;
+                        if (dv < 0) {
+                            free(ws);
+                            strada_cleanup_drain_to(cm);
+                            strada_throw("Cannot compress negative numbers in pack");
+                        }
+                        if (!(dv == dv) || dv > 1.7e308) dv = 0;   /* NaN, Inf */
+                        snprintf(wnum, sizeof(wnum), "%.0f", floor(dv));
+                        wd = wnum;
+                        wn = strlen(wnum);
+                    }
+                    unsigned char *wb = NULL;
+                    size_t wlen = ber_from_decimal(wd, wn, &wb);
+                    free(ws);
+                    ENSURE_SPACE(wlen);
+                    memcpy(buf + buf_pos, wb, wlen);
+                    buf_pos += wlen;
+                    free(wb);
                 }
                 break;
             }
@@ -25368,7 +25437,7 @@ StradaValue* strada_unpack(const char *fmt, StradaValue *data_sv) {
         int endian = 0;  /* 0=native, 1=big (>), 2=little (<) */
         int bang = 0;    /* `!`: signed n/v/N/V, x!N / X!N alignment */
         char c = *p++;
-        if (c == 'j') c = 'q'; else if (c == 'J') c = 'Q'; else if (c == 'F') c = 'd';
+        if (c == 'j') c = 'q'; else if (c == 'J') c = 'Q'; else if (c == 'F') c = 'd'; else if (c == 'W') c = 'U';
 
         /* Modifiers after the type letter */
         while (*p == '>' || *p == '<' || *p == '!') {
@@ -25800,13 +25869,30 @@ StradaValue* strada_unpack(const char *fmt, StradaValue *data_sv) {
             case 'w': {  /* BER compressed integer */
                 int n = (count < 0) ? 0x7fffffff : count;
                 while (n-- > 0 && pos < data_len) {
-                    uint64_t v = 0;
+                    size_t gstart = pos;
+                    int terminated = 0;
                     while (pos < data_len) {
                         uint8_t b = (uint8_t)data[pos++];
-                        v = (v << 7) | (b & 0x7F);
-                        if (!(b & 0x80)) break;
+                        if (!(b & 0x80)) { terminated = 1; break; }
                     }
-                    strada_array_push_take(result->value.av, strada_new_num((double)v));
+                    if (!terminated) {
+                        free(owned);
+                        strada_decref(result);
+                        strada_throw("Unterminated compressed integer in unpack");
+                    }
+                    /* Leading zero groups carry no value. */
+                    const unsigned char *g = (const unsigned char *)data + gstart;
+                    size_t gn = pos - gstart;
+                    while (gn > 1 && (g[0] & 0x7F) == 0) { g++; gn--; }
+                    if (gn <= 9 || (gn == 10 && (g[0] & 0x7F) <= 1)) {   /* fits 64 bits */
+                        uint64_t v = 0;
+                        for (size_t gi = 0; gi < gn; gi++) v = (v << 7) | (g[gi] & 0x7F);
+                        strada_array_push_take(result->value.av, strada_new_uint(v));
+                    } else {
+                        char *dec = ber_to_decimal(g, gn);
+                        strada_array_push_take(result->value.av, strada_new_str(dec));
+                        free(dec);
+                    }
                 }
                 break;
             }
@@ -25901,11 +25987,17 @@ StradaValue* strada_unpack(const char *fmt, StradaValue *data_sv) {
         if (cksum_bits > 0) {
             StradaArray *rav = result->value.av;
             int is_float = (c == 'f' || c == 'd');
+            int is_bits = (c == 'B' || c == 'b');
             uint64_t isum = 0;
             double fsum = 0.0;
             while (rav->size > cksum_mark) {
                 StradaValue *v = strada_array_pop(rav);
                 if (is_float) fsum += strada_to_num(v);
+                else if (is_bits) {   /* the number of 1 bits */
+                    char *bs = strada_to_str(v);
+                    for (const char *bp = bs; bp && *bp; bp++) if (*bp == '1') isum++;
+                    free(bs);
+                }
                 else isum += (uint64_t)strada_to_int(v);
                 strada_decref(v);
             }
@@ -33101,7 +33193,8 @@ static int cc_sv_may_have_destroy(StradaValue *sv) {
     const char *bp = sv->meta->blessed_package;
     if (!bp) return 0;
     if (sv->type != STRADA_REF && sv->type != STRADA_HASH && sv->type != STRADA_ARRAY
-        && sv->type != STRADA_CLOSURE && sv->type != STRADA_FILEHANDLE) {
+        && sv->type != STRADA_CLOSURE && sv->type != STRADA_FILEHANDLE
+        && sv->type != STRADA_STR) {
         return 0;
     }
     if (strada_destroy_hook) return 1;
@@ -38407,6 +38500,15 @@ static StradaValue* strada_tied_method_call(StradaValue *tied_obj, const char *m
     return result;
 }
 
+/* The key a tied hash's method receives: the caller's own value (a reference
+ * stays a reference, undef stays undef), as in Perl. Returns a new reference,
+ * which the _ksv helpers release. */
+static inline StradaValue *tied_key_arg(StradaValue *key) {
+    if (!key) return strada_new_undef();
+    strada_incref(key);
+    return key;
+}
+
 static StradaValue* tied_hash_fetch_ksv(StradaValue *sv, StradaValue *key_sv) {
     strada_cleanup_push(key_sv);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "FETCH", 1, key_sv);
@@ -38458,7 +38560,7 @@ StradaValue* strada_tied_hash_fetch_len(StradaValue *sv, const char *key, uint32
 
 StradaValue* strada_tied_hash_fetch_sv(StradaValue *sv, StradaValue *key) {
     if (!sv || !SV_TIED_OBJ(sv)) return strada_new_undef();
-    return tied_hash_fetch_ksv(sv, strada_to_str_sv(key));
+    return tied_hash_fetch_ksv(sv, tied_key_arg(key));
 }
 
 /* Dispatch FETCH on a tied scalar. Caller decrefs the returned value.
@@ -38675,7 +38777,7 @@ void strada_tied_hash_store_len(StradaValue *sv, const char *key, uint32_t key_l
 
 void strada_tied_hash_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val) {
     if (!sv || !SV_TIED_OBJ(sv)) return;
-    tied_hash_store_ksv(sv, strada_to_str_sv(key), val);
+    tied_hash_store_ksv(sv, tied_key_arg(key), val);
 }
 
 int strada_tied_hash_exists(StradaValue *sv, const char *key) {
@@ -38690,7 +38792,7 @@ int strada_tied_hash_exists_len(StradaValue *sv, const char *key, uint32_t key_l
 
 int strada_tied_hash_exists_sv(StradaValue *sv, StradaValue *key) {
     if (!sv || !SV_TIED_OBJ(sv)) return 0;
-    return tied_hash_exists_ksv(sv, strada_to_str_sv(key));
+    return tied_hash_exists_ksv(sv, tied_key_arg(key));
 }
 
 void strada_tied_hash_delete(StradaValue *sv, const char *key) {
@@ -38705,12 +38807,12 @@ void strada_tied_hash_delete_len(StradaValue *sv, const char *key, uint32_t key_
 
 void strada_tied_hash_delete_sv(StradaValue *sv, StradaValue *key) {
     if (!sv || !SV_TIED_OBJ(sv)) return;
-    tied_hash_delete_ksv(sv, strada_to_str_sv(key));
+    tied_hash_delete_ksv(sv, tied_key_arg(key));
 }
 
 StradaValue* strada_tied_hash_delete_take_sv(StradaValue *sv, StradaValue *key) {
     if (!sv || !SV_TIED_OBJ(sv)) return strada_new_undef();
-    return tied_hash_delete_take_ksv(sv, strada_to_str_sv(key));
+    return tied_hash_delete_take_ksv(sv, tied_key_arg(key));
 }
 
 /* Dispatch SCALAR on a tied hash. Perl semantics: scalar(%h) on a
@@ -38735,7 +38837,7 @@ StradaValue* strada_tied_hash_firstkey(StradaValue *sv) {
 
 StradaValue* strada_tied_hash_nextkey_sv(StradaValue *sv, StradaValue *lastkey) {
     if (!sv || !SV_TIED_OBJ(sv)) return strada_new_undef();
-    StradaValue *key_sv = lastkey ? strada_to_str_sv(lastkey) : strada_new_str("");
+    StradaValue *key_sv = lastkey ? tied_key_arg(lastkey) : strada_new_str("");
     strada_cleanup_push(key_sv);
     StradaValue *result = strada_tied_method_call(sv->meta->tied_obj, "NEXTKEY", 1, key_sv);
     strada_cleanup_pop_decref(key_sv);

@@ -1,0 +1,26 @@
+# EXPECT: made|after 1 Rx
+# VM-SKIP: blesses a string value itself from C; the VM has no such value
+# A blessed string value (not a reference to one), which C code and other
+# front ends can create, runs DESTROY when its last reference goes. The free
+# path used to consider only blessed references, containers, closures and
+# filehandles.
+package Rx;
+our $n = 0;
+our $cls = "";
+func DESTROY(scalar $self) void { $n = $n + 1; $cls = ref($self); }
+func seen() str { return $n . " " . $cls; }
+
+package main;
+func make() void {
+    __C__ {
+        StradaValue *s = strada_new_str("pattern");
+        strada_bless(s, "Rx");
+        strada_decref(s);
+    }
+}
+
+func main() int {
+    make();
+    say("made|after " . Rx::seen());
+    return 0;
+}

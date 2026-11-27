@@ -532,9 +532,11 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `H` / `h` | Hex string, high / low nibble first. |
 | `B` / `b` | Bit string, high / low bit first. |
 | `x` / `X` | Insert a NUL byte / back up one byte. |
-| `w` | BER-compressed integer (7-bit groups, MSB continuation). |
+| `w` | BER-compressed unsigned integer (7-bit groups, MSB continuation). Any size: a string of digits packs exactly, and `unpack` returns a value above 2^64 as a decimal string. A negative number throws "Cannot compress negative numbers in pack"; a value cut off in the data throws "Unterminated compressed integer in unpack". |
 | `u` | uuencoded string (45-byte lines). |
 | `U` | Unicode codepoint → UTF-8 bytes (sets the UTF-8 flag). |
+| `W` | Same as `U`: one character per code point. |
+| `%N` prefix | `unpack` only: the sum of the item's values modulo 2^N (default 16). Over `B`/`b` it is the number of 1 bits. |
 
 ### Errors / introspection
 

@@ -68,6 +68,9 @@
 #endif
 typedef void regex_t;
 typedef void pcre2_code;
+#ifndef PCRE2_SIZE
+#define PCRE2_SIZE size_t   /* as pcre2.h, which is not included here */
+#endif
 #ifndef __FILE_defined
 # define __FILE_defined 1
 struct _IO_FILE;
@@ -916,9 +919,13 @@ static inline __attribute__((always_inline)) StradaValue* strada_sv_mul(StradaVa
  * Usage: STRADA_STACK_ARGS1(args, self_val);
  *        method_func(&args.sv);
  * Avoids heap allocation for the common $self->method() pattern. */
+/* `elems` must directly follow `av`: that is how the runtime recognizes an
+ * element buffer it may not realloc() or free() (array_elems_inline). When the
+ * callee grows the array (push/unshift/splice on @_), the elements move to the
+ * heap; strada_stack_args1_done() frees that buffer. */
 typedef struct {
-    StradaValue *elems[1];
     StradaArray av;
+    StradaValue *elems[1];
     StradaValue sv;
 } StradaStackArgs1;
 
@@ -936,6 +943,18 @@ static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *el
     sa->sv.meta = NULL;
     sa->sv.struct_size = 0;
     strada_incref(elem);
+}
+
+/* Call when the frame holding `sa` ends, after releasing the elements: frees
+ * the element buffer if the callee grew the array onto the heap. */
+static inline void strada_stack_args1_done(StradaStackArgs1 *sa) {
+    if (sa->av.elements != sa->elems) {
+        free(sa->av.elements);
+        sa->av.elements = sa->elems;
+        sa->av.size = 0;
+        sa->av.capacity = 1;
+        sa->av.head = 0;
+    }
 }
 char* strada_to_str(StradaValue *sv);    /* Returns strdup'd char* — free with free() (backward compat) */
 char* strada_to_str_ss(StradaValue *sv); /* Returns StradaString-backed char* — free with strada_cstr_free() */
