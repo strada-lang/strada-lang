@@ -386,6 +386,67 @@ gcc -shared -fPIC -rdynamic -o libmylib.so mylib.c \
     runtime/strada_runtime.c -Iruntime -ldl -lm
 ```
 
+### A hand-written wrapper in a `__C__` block
+
+`extern func` covers `int`, `num`, `str` and `StradaValue*`. When the C side
+needs a signature it cannot express (a struct pointer, a callback with a
+`void *` context, an `int32` result), write the wrapper yourself in a
+top-level `__C__` block of the library. Any function there that is not
+`static` is an exported C symbol. It calls the Strada function by its C name
+(package and function name joined with `_`; in package `main` just the
+function name), with `StradaValue*` for every parameter and the result. The
+result is a new reference.
+
+```strada
+# pointlib.strada
+package Geo::Point;
+
+__C__ {
+typedef struct { double x, y; } point_t;
+
+StradaValue *Geo_Point_describe(StradaValue *x, StradaValue *y);   /* the Strada function below */
+
+/* Exported: not static. */
+char *point_describe(const point_t *p) {
+    StradaValue *x = strada_new_num(p->x);
+    StradaValue *y = strada_new_num(p->y);
+    StradaValue *r = Geo_Point_describe(x, y);
+    char *out = strada_to_str(r);     /* malloc'd copy: the caller frees it */
+    strada_decref(r);
+    strada_decref(x);
+    strada_decref(y);
+    return out;
+}
+}
+
+func describe(num $x, num $y) str {
+    return "(" . $x . ", " . $y . ") is " . math::sqrt($x * $x + $y * $y) . " from the origin";
+}
+```
+
+Build it with `strada --shared pointlib.strada` and call `point_describe`
+from C as in the `extern func` example (`dlsym`, program linked with
+`$(strada --embed-ldflags)`). Passing `{3, 4}` prints
+`(3, 4) is 5 from the origin`.
+
+What you take on compared with `extern func`:
+
+- Conversion and reference counting are yours: release every value you create
+  and every result you receive, and free every `strada_to_str` copy.
+- The declaration depends on the build. In a `--shared`, `--object` or
+  `--static-lib` build Strada functions are global, as declared above. In a
+  plain executable they are `static inline`, so the declaration must be
+  `static inline StradaValue *describe(StradaValue *x, StradaValue *y);`, and
+  an optimized executable may drop a C function that nothing in the program
+  calls.
+- Your function shares one namespace with the C library, the runtime and
+  every Strada function's C name.
+- The C function is not part of the module's Strada interface. Strada code
+  keeps calling `Geo::Point::describe()`.
+- The C-to-Strada call is compiled-only. Under `strada-interp` a Strada
+  function is not a C symbol, so a block that calls one by name fails to
+  load. C functions that only do C work run in the interpreter as usual.
+
 ---
 
 ## C Callbacks (`c::callback`)
