@@ -3378,8 +3378,9 @@ Performance rules learned the hard way (b942d9b doubled bench_binary_trees):
   appending code tests `strada_ucall_is_list`; never wrap it in a one-item
   array.
 - Kind 3 callers emit nothing at all. Anything that adds a `return` form to a
-  function must keep `ret_never_list` honest (a `__C__` block with `return`
-  clears it).
+  function must keep `ret_never_list` honest (`fn_ret_list` in the parser).
+  A C `return` inside a `__C__` block is not counted: what it returns reaches
+  the caller as it is, as before these rules.
 - `strada_ret_list` steals the array when the reference holding it has
   refcount 1, so the cycle collector never sees a candidate.
 - Measure with instruction counts against a baseline worktree before pushing
